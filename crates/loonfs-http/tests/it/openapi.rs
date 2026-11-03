@@ -2250,6 +2250,11 @@ fn actor_headers_are_global_and_only_attributed_operations_require_them() {
     }
     assert_eq!(
         required,
-        BTreeSet::from(["create_commit", "create_namespace", "fork_namespace"])
+        BTreeSet::from([
+            "create_commit",
+            "create_namespace",
+            "fork_namespace",
+            "merge_fork"
+        ])
     );
 }

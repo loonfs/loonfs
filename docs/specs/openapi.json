@@ -1459,6 +1459,16 @@
             "$ref": "#/components/schemas/ChangeSeq",
             "description": "The sequence that `commit_id` was already committed at. The server includes it when a\ndurable commit receipt records that commit."
           },
+          "conflict": {
+            "$ref": "#/components/schemas/MergeConflict",
+            "description": "The first inode whose change a refused merge can't apply."
+          },
+          "conflict_count": {
+            "description": "The number of inodes whose change a refused merge can't apply.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
           "expected_access_revision_no": {
             "$ref": "#/components/schemas/AccessRevisionNo",
             "description": "The access revision that the request expected to be current."
@@ -1507,6 +1517,10 @@
             "$ref": "#/components/schemas/InodeId",
             "description": "The inode that the failed precondition or operation targeted."
           },
+          "merge_bound": {
+            "$ref": "#/components/schemas/MergeBound",
+            "description": "The bound that a merge's size exceeded."
+          },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
             "description": "The deleted namespace that caused the operation to fail."
@@ -1536,6 +1550,10 @@
           "source_namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
             "description": "The fork whose merge didn't continue the previous merge from that fork."
+          },
+          "split_at_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "The fork sequence that a shorter merge can end at, for a merge that\nexceeded a bound."
           }
         },
         "type": "object"
@@ -3317,6 +3335,106 @@
           "source_namespace_id",
           "source_after_seq",
           "source_through_seq"
+        ],
+        "type": "object"
+      },
+      "MergeBound": {
+        "description": "The bound that a merge's size exceeded, which the details of a `merge_too_large` error report.\n\nA newer server can return a bound that isn't listed here.",
+        "enum": [
+          "wal_object",
+          "merge_allowance",
+          "touched_inodes"
+        ],
+        "type": "string"
+      },
+      "MergeConflict": {
+        "description": "One inode whose change a merge can't apply, because the namespace being merged into changed\nthe inode after the fork point, hides it, or has the name that the change needs.",
+        "properties": {
+          "base": {
+            "$ref": "#/components/schemas/MergeConflictVersion",
+            "description": "The version that the fork started from, which is the merged-into namespace's version at\nthe fork point. It's absent for an inode that the fork created."
+          },
+          "inode_id": {
+            "$ref": "#/components/schemas/InodeId",
+            "description": "The inode. It has the same ID in the fork and in the namespace being merged into."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/MergeConflictKind",
+            "description": "Which check failed."
+          },
+          "ours": {
+            "$ref": "#/components/schemas/MergeConflictVersion",
+            "description": "The fork's version at the end of the merge's range. It's absent for an inode that the fork\ndeleted."
+          },
+          "theirs": {
+            "$ref": "#/components/schemas/MergeConflictVersion",
+            "description": "The merged-into namespace's current version. It's absent when that namespace deleted or\nhides the inode. For a `name` conflict, it's the inode that has the name there."
+          }
+        },
+        "required": [
+          "inode_id",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "MergeConflictKind": {
+        "description": "Which check of the conflict rule a merge's change failed.\n\nA newer server can return a kind that isn't listed here.",
+        "enum": [
+          "content",
+          "binding",
+          "attributes",
+          "access",
+          "visibility",
+          "name",
+          "subtree"
+        ],
+        "type": "string"
+      },
+      "MergeConflictVersion": {
+        "description": "One version of an inode in a merge conflict.",
+        "properties": {
+          "content_ref": {
+            "$ref": "#/components/schemas/ContentRef",
+            "description": "The file's content in that version. This field is present exactly when `revision_no` is\npresent."
+          },
+          "path": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "The inode's path in that version, built from the stored display names."
+          },
+          "revision_no": {
+            "$ref": "#/components/schemas/RevisionNo",
+            "description": "The file's revision number in that version. A directory has none."
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "MergeForkRequest": {
+        "additionalProperties": false,
+        "description": "A request to merge a fork's commits into a namespace.",
+        "properties": {
+          "commit_id": {
+            "$ref": "#/components/schemas/CommitId",
+            "description": "The caller's idempotency key for the merge."
+          },
+          "message": {
+            "description": "An annotation from the caller. The message is part of the merge's identity.",
+            "type": "string"
+          },
+          "source_namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "The fork whose commits the merge applies. It has to be a fork of the namespace that the\nrequest merges into."
+          },
+          "through_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "The fork sequence that the merge applies the fork's commits through. Without it, the merge\napplies them through the fork's head."
+          }
+        },
+        "required": [
+          "source_namespace_id",
+          "commit_id"
         ],
         "type": "object"
       },
@@ -8761,6 +8879,138 @@
         ],
         "x-fern-sdk-method-name": "createRevisionDownload",
         "x-loonfs-retry": "idempotent"
+      }
+    },
+    "/v0/namespaces/{namespace_id}/merges": {
+      "post": {
+        "description": "Merges a fork's commits into the namespace as one commit. The merge applies the fork's net change since its previous merge, or since the fork point, through `through_seq` or the fork's head. A change that conflicts with the namespace returns `merge_conflict`, and nothing is committed. The commit ID makes retries idempotent. After the commit, the server folds the namespace's WAL tail through it, unless the merge has already run for half of the request deadline, in which case the next maintenance pass folds the tail.",
+        "operationId": "merge_fork",
+        "parameters": [
+          {
+            "description": "The namespace that the merge commits into.",
+            "in": "path",
+            "name": "namespace_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MergeForkRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Commit"
+                }
+              }
+            },
+            "description": "Fork merged"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid request, or the namespace isn't a fork of this namespace"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Namespace not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Merge conflict, range conflict, or history below a retention floor"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Namespace deleted"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The merge is too large, or the JSON body exceeds the 2 MiB limit"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Merges are disabled"
+          },
+          "503": {
+            "$ref": "#/components/responses/UnavailableResponse"
+          }
+        },
+        "summary": "Merge a fork",
+        "tags": [
+          "namespaces"
+        ],
+        "x-fern-sdk-group-name": [
+          "namespaces"
+        ],
+        "x-fern-sdk-method-name": "merge",
+        "x-loonfs-actor": "required",
+        "x-loonfs-retry": "replayable"
       }
     },
     "/v0/namespaces/{namespace_id}/snapshots": {

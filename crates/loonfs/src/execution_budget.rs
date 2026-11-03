@@ -165,7 +165,7 @@ impl ExecutionBudget {
 
     /// Returns the merge allowance, the estimated peak memory that publishing
     /// one merge may have, which is zero when merges are off.
-    pub(crate) fn max_merge_bytes(&self) -> usize {
+    pub fn max_merge_bytes(&self) -> usize {
         self.inner.admission.max_merge_bytes
     }
 

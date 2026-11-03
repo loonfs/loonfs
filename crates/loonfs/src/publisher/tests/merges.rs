@@ -18,7 +18,8 @@ fn merge(commit_id: &str, name: &str) -> CommitCandidate {
 /// `through_seq`, from a fork made at 3, which creates `/{name}` under an
 /// inode ID that the fork's commit after `after_seq` made.
 fn merge_through(commit_id: &str, name: &str, after_seq: u64, through_seq: u64) -> CommitCandidate {
-    CommitCandidate::new(create_directory_request(commit_id, name)).with_merge(
+    loonfs_core::test_support::merge_candidate(
+        CommitCandidate::new(create_directory_request(commit_id, name)),
         MergeRecord {
             source_namespace_id: NamespaceId::parse("fork").expect("namespace"),
             source_after_seq: ChangeSeq(after_seq),
@@ -174,7 +175,46 @@ async fn a_merge_is_held_to_the_merge_allowance_and_admitted_one_at_a_time() {
     let smaller = publisher_with_allowance(merge_peak - 1);
     assert_matches!(
         try_admit_candidate(&smaller, &namespace_id, merge("merge", "merged")),
-        Err(CoreError::MergeTooLarge { estimated_bytes, max_bytes })
-            if estimated_bytes == merge_peak && max_bytes == merge_peak - 1
+        Err(CoreError::MergeTooLarge {
+            bound: loonfs_core::MergeBound::MergeAllowance,
+            estimated_bytes,
+            max_bytes,
+            split_at_seq: None,
+        }) if estimated_bytes == merge_peak && max_bytes == merge_peak - 1
     );
+}
+
+/// Checks that a retry of a merge whose commit is still in flight gets
+/// `commit_queue_full`, as a different merge does, because the budget admits
+/// one merge at a time, and that a retry after the merge commits returns the
+/// merge.
+#[tokio::test]
+async fn a_retry_of_a_merge_in_flight_finds_the_slot_taken() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("main").expect("namespace");
+    let store: SharedStore = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let runtime = test_runtime(store);
+    create_namespace(&runtime, &namespace_id).await;
+    let publisher = standalone_publisher_with(&namespace_id, &runtime, TestCore::unpaced());
+
+    let mut first = Box::pin(publisher.submit(merge("merge", "merged")));
+    assert!(
+        futures::poll!(first.as_mut()).is_pending(),
+        "the merge is admitted"
+    );
+    for candidate in [merge("merge", "merged"), merge("other", "merged")] {
+        assert_matches!(
+            publisher.submit(candidate).await,
+            Err(crate::Error::Core(CoreError::CommitQueueFull))
+        );
+    }
+
+    let first = first.await.expect("the merge");
+    publisher.wait_for_worker().await;
+    let retry = publisher
+        .submit(merge("merge", "merged"))
+        .await
+        .expect("the retry");
+    assert_eq!(retry, first);
+    publisher.wait_for_worker().await;
 }

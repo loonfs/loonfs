@@ -34,7 +34,8 @@ pub struct CommitCandidate {
 }
 
 /// A merge's record, the fork point that the merge's range is checked
-/// against, and the IDs that the inodes it creates have in the fork.
+/// against, the IDs that the inodes it creates have in the fork, and the
+/// moves that a temporary name splits in two.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MergeIntent {
     /// The fork and the range of its commits that the merge applies.
@@ -47,6 +48,28 @@ pub(crate) struct MergeIntent {
     /// operation's index. A merge creates each inode under its ID in the
     /// fork, so an inode has one ID in both namespaces.
     pub(crate) created_inode_ids: BTreeMap<usize, InodeId>,
+    /// The legs of each move that the merge makes through a temporary name,
+    /// by operation index.
+    pub(crate) temporary_moves: BTreeMap<usize, TemporaryMove>,
+}
+
+/// One leg of a merge's move that a temporary name splits in two. The
+/// temporary binding doesn't survive the commit, so the writer checks the
+/// subject's rights against the inode's move from its directory before the
+/// first leg to its directory after the second, and not against the
+/// temporary directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TemporaryMove {
+    /// The move to the temporary name. The writer checks the remove right on
+    /// the inode's directory, and not the temporary directory's create right
+    /// or the change of the inode's rights.
+    Away,
+    /// The move from the temporary name to the inode's place. The writer
+    /// checks the create right on the inode's new directory, and the change
+    /// of the inode's rights from `from_parent`, the directory that the
+    /// inode left in the first leg, and not the temporary directory's remove
+    /// right.
+    Back { from_parent: InodeId },
 }
 
 /// What a candidate commits, and whose authority it commits under.
@@ -162,9 +185,9 @@ impl CommitCandidate {
     /// Makes the candidate a merge of `record`, from a fork made at
     /// `fork_point_seq`, whose create operations make the inodes that
     /// `created_inode_ids` lists by operation index. A commit request has no
-    /// merge record, so a merge can't arrive from a request body.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn with_merge(
+    /// merge record, so a merge can't arrive from a request body, and only
+    /// the merge planner builds one.
+    pub(crate) fn with_merge(
         mut self,
         record: MergeRecord,
         fork_point_seq: ChangeSeq,
@@ -174,7 +197,20 @@ impl CommitCandidate {
             record,
             fork_point_seq,
             created_inode_ids,
+            temporary_moves: BTreeMap::new(),
         });
+        self
+    }
+
+    /// Marks the legs of the merge's moves that go through a temporary name,
+    /// by operation index. A candidate that isn't a merge doesn't change.
+    pub(crate) fn with_temporary_moves(
+        mut self,
+        temporary_moves: BTreeMap<usize, TemporaryMove>,
+    ) -> Self {
+        if let Some(merge) = &mut self.merge {
+            merge.temporary_moves = temporary_moves;
+        }
         self
     }
 
@@ -195,8 +231,10 @@ impl CommitCandidate {
     pub fn too_large_error(&self, estimated_bytes: usize, max_bytes: usize) -> CoreError {
         if self.is_merge() {
             CoreError::MergeTooLarge {
+                bound: crate::error::MergeBound::WalObject,
                 estimated_bytes,
                 max_bytes,
+                split_at_seq: None,
             }
         } else {
             CoreError::CommitTooLarge {
@@ -664,8 +702,11 @@ impl CommitCandidate {
         Ok(())
     }
 
+    /// Refuses a commit with no operations, except a merge, whose record
+    /// advances the merge index when the fork's net change over its range is
+    /// empty.
     pub(crate) fn validate_request_has_operations(&self) -> Result<()> {
-        if self.intent().operations.is_empty() {
+        if self.intent().operations.is_empty() && self.merge.is_none() {
             return Err(CoreError::InvalidCommitRequest(
                 "mutation request carries no operations".to_owned(),
             ));

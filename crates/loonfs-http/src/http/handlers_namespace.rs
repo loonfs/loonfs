@@ -6,16 +6,16 @@ use super::extractors::{ActorHeader, SubjectHeaders};
 use super::{AppJson, AppQuery, BindingState, NamespaceIdPath, NoQuery};
 use axum::extract::State;
 use axum::Json;
-use loonfs::{CreateNamespaceOptions, DeleteNamespaceOptions};
+use loonfs::{CreateNamespaceOptions, DeleteNamespaceOptions, MergeForkOptions};
 use loonfs_types::ChangeSeq;
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
 use loonfs_types::{
-    CapabilityDocument, CreateNamespaceRequest, ForkNamespaceRequest, API_GROUP_FILESYSTEM_V0,
-    API_GROUP_MAINTENANCE_V0, API_GROUP_QUERY_V0, FEATURE_DOWNLOADS_DIRECT_GET,
-    FEATURE_MAINTENANCE_GREP_INDEX, FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_MULTIPART,
-    FEATURE_UPLOADS_DIRECT_PUT, LIMIT_COMMIT_MAX_REQUEST_BODY_BYTES,
-    LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS,
+    CapabilityDocument, Commit, CreateNamespaceRequest, ForkNamespaceRequest, MergeForkRequest,
+    API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0, API_GROUP_QUERY_V0,
+    FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_MAINTENANCE_GREP_INDEX, FEATURE_MERGES,
+    FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
+    LIMIT_COMMIT_MAX_REQUEST_BODY_BYTES, LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS,
     LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES,
     LIMIT_QUERY_GREP_TAIL_BUDGET_FILES, LIMIT_UPLOAD_COMPLETE_MAX_REQUEST_BODY_BYTES,
     LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
@@ -366,4 +366,80 @@ pub(super) async fn fork_namespace(
         .await
         .map_err(ApiResponseError::runtime)?;
     Ok(Json(namespace))
+}
+
+/// Merges a fork into the namespace. The server stores the `Loonfs-Actor`
+/// header, and the shared token doesn't verify the header. A runtime whose
+/// merge allowance is zero returns `not_supported` for `filesystem.merges`
+/// before it opens the namespace.
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        post,
+        operation_id = "merge_fork",
+        extensions(
+            ("x-loonfs-actor" = json!("required")),
+            ("x-loonfs-retry" = json!("replayable")),
+        ),
+        path = "/v0/namespaces/{namespace_id}/merges",
+        tag = "namespaces",
+        summary = "Merge a fork",
+        description = "Merges a fork's commits into the namespace as one commit. The merge applies the fork's net change since its previous merge, or since the fork point, through `through_seq` or the fork's head. A change that conflicts with the namespace returns `merge_conflict`, and nothing is committed. The commit ID makes retries idempotent. After the commit, the server folds the namespace's WAL tail through it, unless the merge has already run for half of the request deadline, in which case the next maintenance pass folds the tail.",
+        params(("namespace_id" = String, Path, description = "The namespace that the merge commits into.")),
+        request_body = MergeForkRequest,
+        responses(
+            (status = 200, description = "Fork merged", body = Commit),
+            (status = 400, description = "Invalid request, or the namespace isn't a fork of this namespace", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 403, description = "Forbidden", body = ErrorResponse),
+            (status = 404, description = "Namespace not found", body = ErrorResponse),
+            (status = 409, description = "Merge conflict, range conflict, or history below a retention floor", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted", body = ErrorResponse),
+            (status = 413, description = "The merge is too large, or the JSON body exceeds the 2 MiB limit", body = ErrorResponse),
+            (status = 501, description = "Merges are disabled", body = ErrorResponse),
+            crate::http::openapi::UnavailableResponses
+        )
+    )
+)]
+pub(super) async fn merge_fork(
+    State(state): State<Arc<BindingState>>,
+    ActorHeader(actor_id): ActorHeader,
+    SubjectHeaders(subject): SubjectHeaders,
+    NamespaceIdPath(namespace_id): NamespaceIdPath,
+    AppQuery(_): AppQuery<NoQuery>,
+    AppJson(request): AppJson<MergeForkRequest>,
+) -> Result<Json<Commit>, ApiResponseError> {
+    let MergeForkRequest {
+        source_namespace_id,
+        through_seq,
+        commit_id,
+        message,
+    } = request;
+    if state.runtime.execution_budget().max_merge_bytes() == 0 {
+        return Err(
+            ApiResponseError::not_supported(FEATURE_MERGES, "merges are disabled")
+                .with_commit_id(&commit_id),
+        );
+    }
+    let namespace = state
+        .open_writer(&namespace_id, subject)
+        .await
+        .map_err(|error| error.with_commit_id(&commit_id))?;
+    let options = MergeForkOptions {
+        commit_id: Some(commit_id.clone()),
+        message,
+        through_seq,
+    };
+    let response = namespace
+        .merge_fork_with_options(&source_namespace_id, &actor_id, &options)
+        .await
+        .map_err(|error| {
+            ApiResponseError::runtime_for_namespace_writer(
+                state.namespaces.as_ref(),
+                &namespace_id,
+                error,
+            )
+            .with_commit_id(&commit_id)
+        })?;
+    Ok(Json(response))
 }

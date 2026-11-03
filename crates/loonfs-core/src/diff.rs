@@ -553,7 +553,7 @@ impl State {
 /// unbind, the inode of a revision, attribute, access, or creation delta,
 /// and the root of a deletion or undelete. A bind's parent isn't touched,
 /// because a child's binding doesn't change the parent's own state.
-fn touched_inodes(deltas: &[WalCommitDelta]) -> BTreeSet<InodeId> {
+pub(crate) fn touched_inodes(deltas: &[WalCommitDelta]) -> BTreeSet<InodeId> {
     deltas
         .iter()
         .map(|delta| match &delta.delta {

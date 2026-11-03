@@ -77,6 +77,7 @@ pub(crate) const GET_SNAPSHOT: Operation = Operation::retry(Method::GET);
 pub(crate) const EXTEND_SNAPSHOT: Operation = Operation::retry(Method::POST);
 pub(crate) const DELETE_SNAPSHOT: Operation = Operation::retry(Method::DELETE);
 pub(crate) const FORK_NAMESPACE: Operation = Operation::once(Method::POST);
+pub(crate) const MERGE_FORK: Operation = Operation::retry(Method::POST);
 pub(crate) const DELETE_NAMESPACE: Operation = Operation::once(Method::DELETE);
 pub(crate) const GET_NAMESPACE_DIAGNOSTICS: Operation = Operation::retry(Method::GET);
 pub(crate) const LIST_CHECKPOINTS: Operation = Operation::retry(Method::GET);
@@ -134,6 +135,7 @@ mod tests {
         ("extend_snapshot", EXTEND_SNAPSHOT),
         ("delete_snapshot", DELETE_SNAPSHOT),
         ("fork_namespace", FORK_NAMESPACE),
+        ("merge_fork", MERGE_FORK),
         ("delete_namespace", DELETE_NAMESPACE),
         ("get_namespace_diagnostics", GET_NAMESPACE_DIAGNOSTICS),
         ("list_checkpoints", LIST_CHECKPOINTS),

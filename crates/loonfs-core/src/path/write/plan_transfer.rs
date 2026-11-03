@@ -9,6 +9,7 @@ use super::publish_path_planning::{
     ResolvedDestination, Target,
 };
 use crate::authorize::Replacement;
+use crate::commit::engine::TemporaryMove;
 use crate::commit::{CommitOperation, CommitValidationError};
 use crate::error::{CoreError, Result};
 use crate::metadata::ResolvedVisiblePath;
@@ -36,23 +37,36 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
         destination.ensure_mutation()?;
         let remove = AccessRights::from(AccessRight::Remove);
         let source = self.view.resolve_target(source, remove).await?;
-        self.view
-            .authorize(source.parent_inode_id()?, remove, source.absence())
-            .await?;
+        // The second leg of a merge's move through a temporary name leaves
+        // the temporary directory, which the subject needs no right on,
+        // because the temporary binding doesn't survive the commit. The first
+        // leg checked the remove right on the inode's directory.
+        let parent_inode_id = source.parent_inode_id()?;
+        if !matches!(self.temporary_move, Some(TemporaryMove::Back { .. })) {
+            self.view
+                .authorize(parent_inode_id, remove, source.absence())
+                .await?;
+        }
         // Replace compiles to an atomic delete-plus-rename: the destination
         // file's delete and the source's rebind are written in one commit, and the
         // rename's target-name check observes the in-commit unbind. Mirrors
         // put: only a file destination can be replaced, and a path never
         // replaces itself.
         let destination = self.view.resolve_destination(destination).await?;
-        self.view
-            .authorize_destination(
-                &destination,
-                precondition.behavior,
-                source.inode_id(),
-                Replacement::RemovesEntry,
-            )
-            .await?;
+        // The first leg of a merge's move through a temporary name enters
+        // the temporary directory, which needs no create right for the same
+        // reason. The second leg checks the create right on the inode's new
+        // directory.
+        if self.temporary_move != Some(TemporaryMove::Away) {
+            self.view
+                .authorize_destination(
+                    &destination,
+                    precondition.behavior,
+                    source.inode_id(),
+                    Replacement::RemovesEntry,
+                )
+                .await?;
+        }
         if let Some(expected) = expected_binding_version {
             self.view
                 .ensure_binding_version(&source.resolved, expected)?;
@@ -84,13 +98,19 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
             classify_replace_destination(occupant, precondition.behavior, source.inode_id, &path)?;
         let mut ops = Vec::new();
         let current_source_binding = self.view.source_binding(source).await?;
-        self.view
-            .authorize_relocation(
-                source.inode_id,
-                current_source_binding.parent_inode_id,
-                parent_inode_id,
-            )
-            .await?;
+        // A merge's move through a temporary name changes the inode's rights
+        // once, from the directory that it leaves in the first leg to the
+        // directory that it enters in the second.
+        let relocated_from = match self.temporary_move {
+            None => Some(current_source_binding.parent_inode_id),
+            Some(TemporaryMove::Away) => None,
+            Some(TemporaryMove::Back { from_parent }) => Some(from_parent),
+        };
+        if let Some(from_parent) = relocated_from {
+            self.view
+                .authorize_relocation(source.inode_id, from_parent, parent_inode_id)
+                .await?;
+        }
         match &replaced {
             ReplaceDestination::Replaced(existing) => {
                 ensure_expected_inode(

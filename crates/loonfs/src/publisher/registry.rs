@@ -1,7 +1,7 @@
 //! The table of live writer sessions, and the changes that mutations outside
 //! the publisher make to a namespace.
 
-use super::admission::PublicationAdmission;
+use super::admission::{AdmissionPermit, PublicationAdmission};
 use super::{lock_state, FoldTrigger, NamespacePublisher, PublisherContext};
 use crate::publish::CommitCandidate;
 use crate::runtime_core::{HeadPositions, ReadPositionSlot, RuntimeCore};
@@ -122,6 +122,11 @@ pub(crate) struct NamespaceSession {
     pub(super) publisher: NamespacePublisher,
 }
 
+/// The merge slot that a merge keeps from before its plan until its commit
+/// settles, so the merge allowance covers the merge's planning and its
+/// publication.
+pub(crate) struct MergeSlot(Arc<AdmissionPermit>);
+
 impl Drop for NamespaceSession {
     fn drop(&mut self) {
         self.publisher.forget_if_ended();
@@ -137,6 +142,36 @@ impl NamespaceSession {
     /// the caller is cancelled.
     pub(crate) async fn submit_candidate(&self, candidate: CommitCandidate) -> Result<Commit> {
         self.publisher.submit_candidate(candidate).await
+    }
+
+    /// Refuses a merge that wouldn't fit one WAL object or the merge
+    /// allowance, with `merge_too_large`, and charges nothing.
+    pub(crate) fn validate_merge(&self, candidate: &CommitCandidate) -> Result<()> {
+        self.publisher.validate_merge(candidate)
+    }
+
+    /// Takes the merge slot for a merge, before the merge is planned.
+    /// Another merge, into any namespace that shares the execution budget,
+    /// including a retry of this merge, gets `commit_queue_full` until the
+    /// slot is dropped.
+    pub(crate) fn acquire_merge_slot(&self) -> Result<MergeSlot> {
+        Ok(MergeSlot(self.publisher.acquire_merge_slot()?))
+    }
+
+    /// Submits a merge under `slot`. Admitted work continues if the caller is
+    /// cancelled.
+    pub(crate) async fn submit_merge(
+        &self,
+        candidate: CommitCandidate,
+        slot: &MergeSlot,
+    ) -> Result<Commit> {
+        self.publisher.submit_merge(candidate, &slot.0).await
+    }
+
+    /// Returns the merge allowance that admission checks a merge against,
+    /// which the merge planner checks as it plans.
+    pub(crate) fn merge_allowance(&self) -> loonfs_core::MergeAllowance {
+        self.publisher.merge_allowance()
     }
 
     /// Submits a namespace deletion, sequenced as a barrier: mutations

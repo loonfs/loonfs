@@ -3,8 +3,10 @@
 
 use super::queue::PreparedCandidate;
 use crate::execution_budget::{AdmissionChange, AdmissionCharge, BudgetPermit};
+use crate::publish::CommitCandidate;
 use crate::CoreError;
 use crate::{ExecutionBudget, PublicationPolicy};
+use loonfs_core::MergeAllowance;
 use loonfs_types::format::wal::{MAX_WAL_OBJECT_BYTES, WAL_OBJECT_OVERHEAD_BYTES};
 use loonfs_types::NamespaceId;
 use std::collections::HashMap;
@@ -84,8 +86,8 @@ impl PublicationAdmission {
         candidate: &PreparedCandidate,
     ) -> Result<Arc<AdmissionPermit>, CoreError> {
         if candidate.candidate.is_merge() {
-            self.validate_merge(candidate)?;
-            return self.charge(namespace_id, AdmissionCharge::Merge);
+            self.validate_merge(&candidate.candidate, candidate.wal_record_bytes_upper_bound)?;
+            return self.acquire_merge(namespace_id);
         }
         Self::validate_candidate(candidate)?;
         let estimated_bytes =
@@ -93,37 +95,58 @@ impl PublicationAdmission {
         self.charge(namespace_id, AdmissionCharge::Request { estimated_bytes })
     }
 
-    /// Refuses a merge that wouldn't fit one WAL object, or whose estimated
-    /// peak exceeds the merge allowance, with `merge_too_large`. The
-    /// estimate is [`MERGE_PEAK_PER_PLANNED_BYTE`] times the merge's planned
-    /// WAL bytes. Such a merge would be refused on every retry, so its caller
-    /// merges a smaller range of the fork's commits instead. An allowance of
-    /// zero, which turns merges off, refuses every merge before it takes the
-    /// merge slot.
-    pub(super) fn validate_merge(&self, candidate: &PreparedCandidate) -> Result<(), CoreError> {
-        Self::validate_candidate(candidate)?;
-        let estimated_bytes = candidate
-            .wal_record_bytes_upper_bound
-            .saturating_mul(MERGE_PEAK_PER_PLANNED_BYTE);
-        let max_bytes = self.budget.max_merge_bytes();
-        if max_bytes == 0 || estimated_bytes > max_bytes {
-            return Err(CoreError::MergeTooLarge {
-                estimated_bytes,
-                max_bytes,
-            });
+    /// Takes the merge slot for a merge into `namespace_id`. The budget
+    /// admits one merge at a time, so another merge gets `commit_queue_full`
+    /// until the permit is dropped. An allowance of zero, which turns merges
+    /// off, refuses the merge with `merge_too_large` instead, so no merge
+    /// takes the slot.
+    pub(super) fn acquire_merge(
+        self: &Arc<Self>,
+        namespace_id: &NamespaceId,
+    ) -> Result<Arc<AdmissionPermit>, CoreError> {
+        // A merge that plans no bytes fits every allowance but zero.
+        self.merge_allowance().check(0)?;
+        self.charge(namespace_id, AdmissionCharge::Merge)
+    }
+
+    /// Refuses a merge whose planned WAL bytes, `planned_bytes`, wouldn't fit
+    /// one WAL object, or whose estimated peak exceeds the merge allowance,
+    /// with `merge_too_large`. The estimate is [`MERGE_PEAK_PER_PLANNED_BYTE`]
+    /// times the planned bytes. Such a merge would be refused on every retry,
+    /// so its caller merges a smaller range of the fork's commits instead.
+    pub(super) fn validate_merge(
+        &self,
+        candidate: &CommitCandidate,
+        planned_bytes: usize,
+    ) -> Result<(), CoreError> {
+        Self::validate_wal_object(candidate, planned_bytes)?;
+        self.merge_allowance().check(planned_bytes)
+    }
+
+    /// Returns the merge allowance, with the multiple of a merge's planned
+    /// WAL bytes that estimates the merge's peak, which the merge planner
+    /// checks too.
+    pub(super) fn merge_allowance(&self) -> MergeAllowance {
+        MergeAllowance {
+            max_bytes: self.budget.max_merge_bytes(),
+            peak_per_planned_byte: MERGE_PEAK_PER_PLANNED_BYTE,
         }
-        Ok(())
     }
 
     pub(super) fn validate_candidate(candidate: &PreparedCandidate) -> Result<(), CoreError> {
-        candidate.candidate.validate_appended_content()?;
-        let document_bytes = candidate
-            .wal_record_bytes_upper_bound
-            .saturating_add(WAL_OBJECT_OVERHEAD_BYTES);
+        Self::validate_wal_object(&candidate.candidate, candidate.wal_record_bytes_upper_bound)
+    }
+
+    /// Refuses a commit whose WAL record, bounded by `wal_record_bytes`,
+    /// wouldn't fit one WAL object.
+    fn validate_wal_object(
+        candidate: &CommitCandidate,
+        wal_record_bytes: usize,
+    ) -> Result<(), CoreError> {
+        candidate.validate_appended_content()?;
+        let document_bytes = wal_record_bytes.saturating_add(WAL_OBJECT_OVERHEAD_BYTES);
         if document_bytes > MAX_WAL_OBJECT_BYTES {
-            return Err(candidate
-                .candidate
-                .too_large_error(document_bytes, MAX_WAL_OBJECT_BYTES));
+            return Err(candidate.too_large_error(document_bytes, MAX_WAL_OBJECT_BYTES));
         }
         Ok(())
     }
@@ -351,26 +374,24 @@ mod tests {
     /// `planned_bytes`, so the merge allowance is charged three times those
     /// bytes.
     fn merge(planned_bytes: usize) -> PreparedCandidate {
-        let mut candidate = PreparedCandidate::new(
+        let mut candidate = PreparedCandidate::new(loonfs_core::test_support::merge_candidate(
             CommitCandidate::new(super::super::tests::create_directory_request(
                 "merge", "merge",
-            ))
-            .with_merge(
-                loonfs_types::format::wal::MergeRecord {
-                    source_namespace_id: NamespaceId::parse("fork").expect("namespace"),
-                    source_after_seq: loonfs_types::ChangeSeq(3),
-                    source_through_seq: loonfs_types::ChangeSeq(7),
-                },
-                loonfs_types::ChangeSeq(3),
-                std::collections::BTreeMap::from([(
-                    0,
-                    loonfs_types::InodeId::generate(
-                        loonfs_types::ChangeSeq(4),
-                        std::num::NonZeroU32::MIN,
-                    ),
-                )]),
-            ),
-        )
+            )),
+            loonfs_types::format::wal::MergeRecord {
+                source_namespace_id: NamespaceId::parse("fork").expect("namespace"),
+                source_after_seq: loonfs_types::ChangeSeq(3),
+                source_through_seq: loonfs_types::ChangeSeq(7),
+            },
+            loonfs_types::ChangeSeq(3),
+            std::collections::BTreeMap::from([(
+                0,
+                loonfs_types::InodeId::generate(
+                    loonfs_types::ChangeSeq(4),
+                    std::num::NonZeroU32::MIN,
+                ),
+            )]),
+        ))
         .expect("prepare");
         candidate.wal_record_bytes_upper_bound = planned_bytes;
         candidate
@@ -389,12 +410,11 @@ mod tests {
 
     /// Checks that a merge whose estimated peak is above its namespace's byte
     /// allowance and above the budget's byte total is admitted when the peak
-    /// fits the merge allowance,
-    /// while the namespace allowance still refuses an ordinary request above
-    /// it. The merge counts as one request, and no byte limit is charged for
-    /// it, so an ordinary request still fits the byte total beside it. The
-    /// merge's permit keeps the inline reservation calls working, and it
-    /// refunds exactly what it charged.
+    /// fits the merge allowance, while the namespace allowance still refuses
+    /// an ordinary request above it. The merge counts as one request, and no
+    /// byte limit is charged for it, so an ordinary request still fits the
+    /// byte total beside it. The merge's permit keeps the inline reservation
+    /// calls working, and it refunds exactly what it charged.
     #[test]
     fn a_merge_is_held_to_the_merge_allowance_and_to_no_byte_limit() {
         let namespace_id = NamespaceId::parse("main").expect("namespace");
@@ -469,8 +489,12 @@ mod tests {
         assert_eq!(error.code(), loonfs_types::ErrorCode::MergeTooLarge);
         assert_matches!(
             error,
-            CoreError::MergeTooLarge { estimated_bytes, max_bytes }
-                if estimated_bytes == 3075 && max_bytes == 3072
+            CoreError::MergeTooLarge {
+                bound: loonfs_core::MergeBound::MergeAllowance,
+                estimated_bytes,
+                max_bytes,
+                split_at_seq: None,
+            } if estimated_bytes == 3075 && max_bytes == 3072
         );
         assert_eq!(budget.stats(), ExecutionBudgetStats::default());
 
@@ -508,13 +532,18 @@ mod tests {
     }
 
     /// Checks that a budget whose merge allowance is zero, which turns
-    /// merges off, admits no merge, even one that plans no bytes, and
-    /// charges nothing.
+    /// merges off, refuses the merge slot and every merge, even one that
+    /// plans no bytes, with `merge_too_large`, and charges nothing.
     #[test]
     fn a_zero_allowance_admits_no_merge() {
         let namespace_id = NamespaceId::parse("main").expect("namespace");
         let budget = ExecutionBudget::builder().max_merge_bytes(0).build();
         let admission = runtime_admission(PublicationPolicy::default(), &budget);
+        let error = admission
+            .acquire_merge(&namespace_id)
+            .err()
+            .expect("no merge slot");
+        assert_matches!(error, CoreError::MergeTooLarge { max_bytes: 0, .. });
         for planned_bytes in [0, 1] {
             let error = admission
                 .acquire_candidate(&namespace_id, &merge(planned_bytes))

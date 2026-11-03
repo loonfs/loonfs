@@ -15,7 +15,8 @@ use crate::wal::WalPublishError;
 use crate::wal::{WalObjectError, WalTailLoadError};
 use loonfs_objectstore::ObjectStoreError;
 use loonfs_types::format::control::WriterBlock;
-use loonfs_types::{ActiveWriter, CommittedReceipt};
+pub use loonfs_types::MergeBound;
+use loonfs_types::{ActiveWriter, CommittedReceipt, MergeConflict};
 use loonfs_types::{
     BindingVersion, ChangeSeq, CommitId, ErrorDetails, InodeId, InodeKind, NamespaceId, PathError,
     PrincipalScope, RevisionNo, UploadId, WriterEpoch,
@@ -78,13 +79,20 @@ pub enum CoreError {
         estimated_bytes: usize,
         max_bytes: usize,
     },
-    /// A merge's estimated bytes exceed the WAL object's size or the
-    /// publisher's merge allowance, so no retry can admit it. The caller
-    /// merges the fork's commits in smaller ranges.
-    #[error("merge is too large: estimated {estimated_bytes} bytes exceeds the limit of {max_bytes} bytes")]
+    /// A merge's estimated bytes exceed one WAL object or the publisher's
+    /// merge allowance, so no retry can admit it. The caller merges the
+    /// fork's commits in smaller ranges.
+    #[error(
+        "merge is too large for {}: estimated {estimated_bytes} bytes exceeds the limit of {max_bytes} bytes",
+        .bound.describe()
+    )]
     MergeTooLarge {
+        bound: MergeBound,
         estimated_bytes: usize,
         max_bytes: usize,
+        /// The fork sequence that a shorter range can end at, when the
+        /// caller can narrow the range.
+        split_at_seq: Option<ChangeSeq>,
     },
     #[error("an append carries {size_bytes} bytes; one append carries at most {max_bytes}")]
     AppendTooLarge { size_bytes: u64, max_bytes: u64 },
@@ -161,6 +169,26 @@ pub enum CoreError {
         expected_after_seq: ChangeSeq,
         actual_after_seq: ChangeSeq,
     },
+    /// A fork's change conflicts with the namespace being merged into, under
+    /// the conflict rule. `conflict` is the conflicting inode with the
+    /// smallest ID.
+    #[error(
+        "merge conflicts with this namespace on {conflict_count} inodes, the first `{}` ({:?})",
+        conflict.inode_id,
+        conflict.kind
+    )]
+    MergeConflict {
+        conflict_count: u64,
+        conflict: Box<MergeConflict>,
+    },
+    /// A merge request identifies a source that isn't a fork of the namespace
+    /// being merged into, or a sequence to merge through that is outside the
+    /// fork's history. `param` identifies the request field.
+    #[error("invalid merge `{param}`: {message}")]
+    InvalidMerge {
+        param: &'static str,
+        message: String,
+    },
     #[error(transparent)]
     ContentPreparation(#[from] ContentPreparationError),
     #[error("commit queue is full; slow down and retry")]
@@ -234,15 +262,15 @@ pub enum CoreError {
         from_seq: ChangeSeq,
         retention_floor_seq: ChangeSeq,
     },
-    /// A merge's fork point is below the retention floor, so a base
-    /// compaction might have removed the fork's previous merge from the merge
-    /// index. The error has the change feed's code, and its details include
-    /// `fork_point_seq` in place of the change feed's `after_seq`.
-    #[error(
-        "fork point `{fork_point_seq}` is older than retention floor `{retention_floor_seq}`, so the fork can't be merged"
-    )]
+    /// History that a merge needs is below a retention floor. Either the
+    /// fork point is below this namespace's floor, so a base compaction might
+    /// have removed the fork's previous merge from the merge index, or the
+    /// range's start is below the fork's own floor, so the fork's change over
+    /// the range can't be computed. The error has the change feed's code, and
+    /// its details say which floor.
+    #[error("{below} is older than retention floor `{retention_floor_seq}`, so the fork can't be merged")]
     MergeRebootstrapRequired {
-        fork_point_seq: ChangeSeq,
+        below: MergeHistory,
         retention_floor_seq: ChangeSeq,
     },
     /// A diff's `from_seq`, `to_seq`, or `after_seq` is out of order with the
@@ -478,6 +506,7 @@ impl CoreError {
             | CoreError::InvalidCursor(_)
             | CoreError::InvalidEventIndex(_)
             | CoreError::InvalidDiffRange { .. }
+            | CoreError::InvalidMerge { .. }
             | CoreError::BatchTooLarge { .. }
             | CoreError::ResumeOffsetOutOfRange { .. }
             | CoreError::ResumePrefixIncomplete { .. }
@@ -504,6 +533,7 @@ impl CoreError {
             CoreError::BindingVersionMismatch { .. } => ErrorCode::BindingVersionMismatch,
             CoreError::CommitIdReuseConflict { .. } => ErrorCode::CommitIdReuseConflict,
             CoreError::MergeRangeConflict { .. } => ErrorCode::MergeRangeConflict,
+            CoreError::MergeConflict { .. } => ErrorCode::MergeConflict,
             CoreError::ContentPreparation(_) => ErrorCode::ContentNotPrepared,
             CoreError::CommitQueueFull => ErrorCode::CommitQueueFull,
             CoreError::WriterSessionClosed { .. } => ErrorCode::WriterSessionClosed,
@@ -611,6 +641,8 @@ impl CoreError {
             | CoreError::BindingVersionMismatch { .. }
             | CoreError::CommitIdReuseConflict { .. }
             | CoreError::MergeRangeConflict { .. }
+            | CoreError::MergeConflict { .. }
+            | CoreError::InvalidMerge { .. }
             | CoreError::ContentPreparation(_)
             | CoreError::CommitQueueFull
             | CoreError::WriterSessionClosed { .. }
@@ -707,11 +739,27 @@ impl CoreError {
                 ..ErrorDetails::default()
             }),
             CoreError::MergeRebootstrapRequired {
-                fork_point_seq,
+                below,
                 retention_floor_seq,
             } => Some(ErrorDetails {
-                fork_point_seq: Some(*fork_point_seq),
                 retention_floor_seq: Some(*retention_floor_seq),
+                ..below.details()
+            }),
+            CoreError::MergeTooLarge {
+                bound,
+                split_at_seq,
+                ..
+            } => Some(ErrorDetails {
+                merge_bound: Some(*bound),
+                split_at_seq: *split_at_seq,
+                ..ErrorDetails::default()
+            }),
+            CoreError::MergeConflict {
+                conflict_count,
+                conflict,
+            } => Some(ErrorDetails {
+                conflict_count: Some(*conflict_count),
+                conflict: Some(conflict.as_ref().clone()),
                 ..ErrorDetails::default()
             }),
             CoreError::StaleHeadPrecondition { expected, actual } => Some(ErrorDetails {
@@ -745,6 +793,56 @@ impl CoreError {
                 ..error.details().unwrap_or_default()
             }),
             _ => None,
+        }
+    }
+}
+
+/// The history that a merge needs below a retention floor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MergeHistory {
+    /// The fork point is below the floor of the namespace being merged into.
+    ForkPoint { fork_point_seq: ChangeSeq },
+    /// The start of the fork's range is below the fork's own floor.
+    RangeStart {
+        source_namespace_id: NamespaceId,
+        source_after_seq: ChangeSeq,
+    },
+}
+
+impl MergeHistory {
+    /// Returns the error details that identify the sequence and, for the
+    /// fork's own floor, the fork.
+    fn details(&self) -> ErrorDetails {
+        match self {
+            Self::ForkPoint { fork_point_seq } => ErrorDetails {
+                fork_point_seq: Some(*fork_point_seq),
+                ..ErrorDetails::default()
+            },
+            Self::RangeStart {
+                source_namespace_id,
+                source_after_seq,
+            } => ErrorDetails {
+                source_namespace_id: Some(source_namespace_id.clone()),
+                actual_after_seq: Some(*source_after_seq),
+                ..ErrorDetails::default()
+            },
+        }
+    }
+}
+
+impl std::fmt::Display for MergeHistory {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ForkPoint { fork_point_seq } => {
+                write!(formatter, "fork point `{fork_point_seq}`")
+            }
+            Self::RangeStart {
+                source_namespace_id,
+                source_after_seq,
+            } => write!(
+                formatter,
+                "the merge range's start `{source_after_seq}` in fork `{source_namespace_id}`"
+            ),
         }
     }
 }

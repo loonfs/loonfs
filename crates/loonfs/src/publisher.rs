@@ -29,6 +29,8 @@ mod queue;
 mod registry;
 mod session_tasks;
 mod worker;
+
+pub(crate) use worker::sleep_ms;
 mod write_stop;
 
 use crate::runtime_core::{ReadPositionSlot, RuntimeCore};
@@ -41,7 +43,7 @@ use loonfs_core::MetadataCompactionCancellation;
 use loonfs_types::{ChangeSeq, CommitId, ManifestNo, NamespaceId};
 use queue::{InFlightRequest, WorkItem};
 pub use registry::{CloseNamespaceReport, NamespaceSessionStatus};
-pub(crate) use registry::{NamespaceChange, NamespaceSession, PublisherRegistry};
+pub(crate) use registry::{MergeSlot, NamespaceChange, NamespaceSession, PublisherRegistry};
 use registry::{PositionChange, RegistryShared};
 use session_tasks::{SessionTask, WorkerHandle};
 use std::collections::{HashMap, VecDeque};

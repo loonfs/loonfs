@@ -9,6 +9,7 @@ mod downloads;
 mod errors;
 mod gc;
 mod maintenance;
+mod merges;
 mod namespaces;
 mod operations;
 mod preconditions;
@@ -36,6 +37,10 @@ pub use maintenance::{
     MetadataMaintenanceRequest, MetadataMaintenanceResponse, RecoverAdministratorRequest,
     RecoverAdministratorResponse, RunMaintenanceRequest, RunMaintenanceResponse,
     SetRetentionWindowRequest, SetRetentionWindowResponse,
+};
+pub use merges::{
+    MergeBound, MergeConflict, MergeConflictKind, MergeConflictRevision, MergeConflictVersion,
+    MergeForkRequest,
 };
 pub use namespaces::{
     CreateNamespaceRequest, DeleteNamespaceResponse, ForkNamespaceRequest, NamespaceAccessMode,
