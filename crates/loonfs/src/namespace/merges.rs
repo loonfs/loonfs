@@ -71,9 +71,9 @@ impl Namespace<Writable> {
     /// the fork's previous merge, or since the fork point, and refuses a
     /// change that conflicts with this namespace with `merge_conflict`. A
     /// retry with the commit ID of a merge that committed returns that
-    /// merge. When the commit fails because this namespace changed after
-    /// the plan, the merge plans again, up to three times, and then returns
-    /// the commit's error. A later plan reports a changed row that isn't the
+    /// merge, and folds neither namespace. When the commit fails because
+    /// this namespace changed after the plan, the merge plans again, up to
+    /// three times, and then returns the commit's error. A later plan reports a changed row that isn't the
     /// fork's own as `merge_conflict`. After the
     /// commit, the merge folds this namespace's WAL tail through it, unless
     /// the merge has already run for the runtime's
@@ -104,13 +104,18 @@ impl Namespace<Writable> {
                     message: options.message.clone(),
                 };
                 let planned = self.plan_merge(&request, None).await?;
-                let (MergeOutcome::Found(commit) | MergeOutcome::Committed { commit, .. }) = self
+                let outcome = self
                     .commit_merge(&request, planned, |request, slot| {
                         Box::pin(async move { self.plan_merge(&request, Some(slot)).await })
                     })
                     .await?;
-                self.fold_after_merge(started_at_ms).await;
-                Ok(commit)
+                match outcome {
+                    MergeOutcome::Found(commit) => Ok(commit),
+                    MergeOutcome::Committed { commit, .. } => {
+                        self.fold_after_merge(started_at_ms).await;
+                        Ok(commit)
+                    }
+                }
             },
         )
         .await

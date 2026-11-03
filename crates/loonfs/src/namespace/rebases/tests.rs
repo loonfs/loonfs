@@ -1,15 +1,97 @@
-//! Replay commits that race another writer of the rebase's new fork.
+//! Replay commits that race another writer of the rebase's new fork, and
+//! retries of a replay commit that committed.
 
 use super::super::merges::{PlannedCommit, PlannedMerge};
-use crate::{ActorId, CommitId, DeleteOptions, ErrorCode, LoonFs};
+use crate::{
+    ActorId, CommitId, DeleteOptions, ErrorCode, LoonFs, Maintenance, MergeForkOptions, NamespaceId,
+};
 use loonfs_core::MergeRequest;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{namespace_id, writer_id};
-use loonfs_types::{DeleteDirectoryBehavior, MergeConflictKind};
+use loonfs_types::{DeleteDirectoryBehavior, ManifestNo, MergeConflictKind};
 use std::sync::Arc;
 
 fn actor() -> ActorId {
     loonfs_test_support::test_actor()
+}
+
+/// Checks that a retry of a replay commit that committed returns the new
+/// fork without a conflict report and folds neither the fork nor the new
+/// fork. Each has a later commit in its WAL tail when the retry runs, and
+/// neither publishes a manifest.
+#[tokio::test]
+async fn a_retry_of_a_committed_replay_folds_nothing() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+    let runtime = LoonFs::builder_with_store(store)
+        .writer_id(writer_id("rebase-writer"))
+        .build()
+        .await
+        .expect("runtime");
+    let [main_id, fork_id, rebase_id] = ["main", "main-fork", "main-rebase"].map(namespace_id);
+    runtime
+        .create_namespace(&main_id, &actor())
+        .await
+        .expect("main");
+    let main = runtime.open_namespace(&main_id).expect("open main");
+    main.put_file("/a.txt", b"a", &actor()).await.expect("seed");
+    runtime
+        .fork_namespace(&main_id, &fork_id, &actor())
+        .await
+        .expect("fork");
+    let fork = runtime.open_namespace(&fork_id).expect("open the fork");
+    fork.put_file("/b.txt", b"b", &actor())
+        .await
+        .expect("write in the fork");
+    runtime
+        .fork_namespace_for_rebase(&main_id, &fork_id, &rebase_id, &actor())
+        .await
+        .expect("the rebase's new fork");
+    let rebase = runtime
+        .open_namespace(&rebase_id)
+        .expect("open the new fork");
+    let options = MergeForkOptions {
+        commit_id: Some(CommitId::parse("replay").expect("commit id")),
+        ..MergeForkOptions::default()
+    };
+    let replayed = rebase
+        .replay_fork_with_options(&fork_id, &actor(), &options)
+        .await
+        .expect("the replay");
+    assert_eq!(replayed.conflicts, Some(Vec::new()));
+    for namespace in [&fork, &rebase] {
+        namespace
+            .put_file("/later.txt", b"later", &actor())
+            .await
+            .expect("a later commit");
+    }
+    let maintenance = rebase.maintenance();
+    let before = manifest_nos(&maintenance, [&fork_id, &rebase_id]).await;
+    let retried = rebase
+        .replay_fork_with_options(&fork_id, &actor(), &options)
+        .await
+        .expect("the retry");
+    assert_eq!(retried.conflicts, None);
+    assert_eq!(
+        manifest_nos(&maintenance, [&fork_id, &rebase_id]).await,
+        before
+    );
+}
+
+/// Returns the current manifest number of each namespace.
+async fn manifest_nos(
+    maintenance: &Maintenance,
+    namespace_ids: [&NamespaceId; 2],
+) -> Vec<Option<ManifestNo>> {
+    let mut numbers = Vec::new();
+    for namespace_id in namespace_ids {
+        let diagnostics = maintenance
+            .diagnostics(namespace_id)
+            .await
+            .expect("diagnostics");
+        numbers.push(diagnostics.current_manifest_no);
+    }
+    numbers
 }
 
 /// Checks that a replay commit that deletes a directory expects the new
