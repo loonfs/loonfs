@@ -40,7 +40,8 @@ pub(crate) use self::rows::{
 };
 pub(crate) use self::view::MetadataView;
 pub(crate) use self::view_session::{
-    LeafRevisionPreload, MetadataViewSession, METADATA_VIEW_SESSION_COUNTER_FIELDS,
+    preload_inode_groups, LeafRevisionPreload, MetadataViewSession,
+    METADATA_VIEW_SESSION_COUNTER_FIELDS,
 };
 pub(crate) use loonfs_types::format::manifest::ActiveDeletionRecord;
 
