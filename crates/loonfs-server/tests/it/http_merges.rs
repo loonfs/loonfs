@@ -8,6 +8,7 @@ use loonfs_client::{ClientError, MergeForkOptions, NamespacePath};
 use loonfs_test_support::ids::namespace_id;
 use loonfs_types::{
     ActorId, ChangeSeq, Commit, CommitId, ErrorDetails, MergeConflictKind, NamespaceId,
+    FEATURE_MERGES,
 };
 use tempfile::{tempdir, TempDir};
 
@@ -30,8 +31,16 @@ fn path(namespace: &NamespaceId, path: &str) -> NamespacePath {
 
 impl Family {
     async fn new(name: &str) -> Self {
+        Self::with_merge_allowance(name, None).await
+    }
+
+    /// Starts the server with `max_merge_bytes` set to `allowance`, or to
+    /// its default when `allowance` is `None`.
+    async fn with_merge_allowance(name: &str, allowance: Option<usize>) -> Self {
         let directory = tempdir().expect("tempdir");
-        let harness = start_server(test_config(directory.path().join("store"), name, name)).await;
+        let mut config = test_config(directory.path().join("store"), name, name);
+        config.max_merge_bytes = allowance;
+        let harness = start_server(config).await;
         let main = namespace_id("main");
         let fork = namespace_id("fork");
         harness
@@ -118,13 +127,16 @@ fn api_error(error: ClientError) -> (String, ErrorDetails) {
     }
 }
 
-/// Checks that a merge of creates, an edit, a move, and a delete commits
-/// them in `main` as one commit with the merge record, and that a retry with
-/// the commit ID returns the merge.
+/// Checks that the default merge allowance advertises `filesystem.merges`,
+/// that a merge of creates, an edit, a move, and a delete commits them in
+/// `main` as one commit with the merge record, and that a retry with the
+/// commit ID returns the merge.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_merge_commits_the_forks_change_and_a_retry_returns_it() {
     let family = Family::new("http-merge").await;
     let client = &family.harness.client;
+    let capabilities = client.get_capabilities().await.expect("capabilities");
+    assert!(capabilities.supports(FEATURE_MERGES));
     let fork = &family.fork;
     client
         .put_file(&path(fork, "/new/c.txt"), b"c", &actor())
@@ -179,6 +191,30 @@ async fn a_merge_commits_the_forks_change_and_a_retry_returns_it() {
 
     let retried = family.merge("merge").await.expect("a retry");
     assert_eq!(retried, merged);
+    family.harness.server.abort();
+}
+
+/// Checks that a merge allowance of zero turns merges off. The capability
+/// document leaves out `filesystem.merges`, and the merge route returns 501
+/// `not_supported` with that key in its `feature` field.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_zero_allowance_turns_the_merge_route_and_its_key_off() {
+    let family = Family::with_merge_allowance("http-merge-off", Some(0)).await;
+    let capabilities = family
+        .harness
+        .client
+        .get_capabilities()
+        .await
+        .expect("capabilities");
+    assert!(!capabilities.features.contains_key(FEATURE_MERGES));
+    match family.merge("off").await.expect_err("merges are off") {
+        ClientError::Api { status, response } => {
+            assert_eq!(status, 501);
+            assert_eq!(response.code, "not_supported");
+            assert_eq!(response.feature.as_deref(), Some(FEATURE_MERGES));
+        }
+        other => panic!("expected an API error, got {other:?}"),
+    }
     family.harness.server.abort();
 }
 

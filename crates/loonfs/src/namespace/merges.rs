@@ -67,7 +67,10 @@ impl Namespace<Writable> {
     /// in which case the next maintenance pass folds the tail. The subject of
     /// this handle has to be able to read each inode whose change the merge
     /// applies in the fork, and needs the rights in this namespace that each
-    /// planned operation needs.
+    /// planned operation needs. A runtime whose merge allowance
+    /// ([`ExecutionBudgetBuilder::max_merge_bytes`](crate::ExecutionBudgetBuilder::max_merge_bytes))
+    /// is zero has merges turned off, and a merge returns `merge_too_large`
+    /// with `max_bytes` 0 before it takes the merge slot or folds the fork.
     pub async fn merge_fork_with_options(
         &self,
         source_namespace_id: &NamespaceId,

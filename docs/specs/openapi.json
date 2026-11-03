@@ -8987,6 +8987,16 @@
             },
             "description": "The merge is too large, or the JSON body exceeds the 2 MiB limit"
           },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Merges are disabled"
+          },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
           }

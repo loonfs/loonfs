@@ -97,11 +97,15 @@ impl PublicationAdmission {
 
     /// Takes the merge slot for a merge into `namespace_id`. The budget
     /// admits one merge at a time, so another merge gets `commit_queue_full`
-    /// until the permit is dropped.
+    /// until the permit is dropped. An allowance of zero, which turns merges
+    /// off, refuses the merge with `merge_too_large` instead, so no merge
+    /// takes the slot.
     pub(super) fn acquire_merge(
         self: &Arc<Self>,
         namespace_id: &NamespaceId,
     ) -> Result<Arc<AdmissionPermit>, CoreError> {
+        // A merge that plans no bytes fits every allowance but zero.
+        self.merge_allowance().check(0)?;
         self.charge(namespace_id, AdmissionCharge::Merge)
     }
 
@@ -528,13 +532,18 @@ mod tests {
     }
 
     /// Checks that a budget whose merge allowance is zero, which turns
-    /// merges off, admits no merge, even one that plans no bytes, and
-    /// charges nothing.
+    /// merges off, refuses the merge slot and every merge, even one that
+    /// plans no bytes, with `merge_too_large`, and charges nothing.
     #[test]
     fn a_zero_allowance_admits_no_merge() {
         let namespace_id = NamespaceId::parse("main").expect("namespace");
         let budget = ExecutionBudget::builder().max_merge_bytes(0).build();
         let admission = runtime_admission(PublicationPolicy::default(), &budget);
+        let error = admission
+            .acquire_merge(&namespace_id)
+            .err()
+            .expect("no merge slot");
+        assert_matches!(error, CoreError::MergeTooLarge { max_bytes: 0, .. });
         for planned_bytes in [0, 1] {
             let error = admission
                 .acquire_candidate(&namespace_id, &merge(planned_bytes))

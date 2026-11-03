@@ -13,8 +13,8 @@ use loonfs_types::ErrorResponse;
 use loonfs_types::{
     CapabilityDocument, Commit, CreateNamespaceRequest, ForkNamespaceRequest, MergeForkRequest,
     API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0, API_GROUP_QUERY_V0,
-    FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_MAINTENANCE_GREP_INDEX, FEATURE_QUERY_GREP,
-    FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
+    FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_MAINTENANCE_GREP_INDEX, FEATURE_MERGES,
+    FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
     LIMIT_COMMIT_MAX_REQUEST_BODY_BYTES, LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS,
     LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES,
     LIMIT_QUERY_GREP_TAIL_BUDGET_FILES, LIMIT_UPLOAD_COMPLETE_MAX_REQUEST_BODY_BYTES,
@@ -369,7 +369,9 @@ pub(super) async fn fork_namespace(
 }
 
 /// Merges a fork into the namespace. The server stores the `Loonfs-Actor`
-/// header, and the shared token doesn't verify the header.
+/// header, and the shared token doesn't verify the header. A runtime whose
+/// merge allowance is zero returns `not_supported` for `filesystem.merges`
+/// before it opens the namespace.
 #[cfg_attr(
     feature = "openapi",
     utoipa::path(
@@ -394,6 +396,7 @@ pub(super) async fn fork_namespace(
             (status = 409, description = "Merge conflict, range conflict, or history below a retention floor", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
             (status = 413, description = "The merge is too large, or the JSON body exceeds the 2 MiB limit", body = ErrorResponse),
+            (status = 501, description = "Merges are disabled", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
@@ -412,6 +415,12 @@ pub(super) async fn merge_fork(
         commit_id,
         message,
     } = request;
+    if state.runtime.execution_budget().max_merge_bytes() == 0 {
+        return Err(
+            ApiResponseError::not_supported(FEATURE_MERGES, "merges are disabled")
+                .with_commit_id(&commit_id),
+        );
+    }
     let namespace = state
         .open_writer(&namespace_id, subject)
         .await

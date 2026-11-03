@@ -50,10 +50,13 @@ fn is_grep_key(key: &str) -> bool {
     key.starts_with("query.") || key.starts_with("maintenance.grep.")
 }
 
+/// A feature that the read-only embedded document leaves out: the writable
+/// runtime's inline content and merges, and the HTTP host's direct transfers.
 fn is_host_feature_key(key: &str) -> bool {
     matches!(
         key,
         "filesystem.commits.inline_content"
+            | "filesystem.merges"
             | "filesystem.uploads.direct_put"
             | "filesystem.uploads.direct_multipart"
             | "filesystem.downloads.direct_get"
