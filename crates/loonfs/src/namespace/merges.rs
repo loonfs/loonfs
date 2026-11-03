@@ -8,8 +8,8 @@ use crate::publish::CommitCandidate;
 use crate::publisher::MergeSlot;
 use crate::trace::{self, operation_span};
 use crate::{
-    ActorId, Commit, CommitId, Consistency, CoreError, Error, ErrorCode, Maintenance,
-    MergeForkOptions, Mode, Namespace, NamespaceId, NextMergeRangeResponse, Result, Writable,
+    ActorId, Commit, CommitId, Consistency, CoreError, Error, Maintenance, MergeForkOptions, Mode,
+    Namespace, NamespaceId, NextMergeRangeResponse, Result, Writable,
 };
 use futures::future::BoxFuture;
 use loonfs_core::MergeRequest;
@@ -225,7 +225,8 @@ impl Namespace<Writable> {
 
     /// Commits the merge, or the replay commit, that `planned` found or
     /// planned, and calls `replan` when the commit fails because this
-    /// namespace changed after the plan (see [`is_stale_plan`]), up to
+    /// namespace changed after the plan (see
+    /// [`ErrorCode::is_stale_plan`](crate::ErrorCode::is_stale_plan)), up to
     /// [`MAX_MERGE_PLANS`] plans in all. A later plan applies the first
     /// plan's range, so it never merges a longer range, and a merge of the
     /// fork that committed in between returns `merge_range_conflict`.
@@ -247,7 +248,7 @@ impl Namespace<Writable> {
                 PlannedMerge::Candidate(planned) => *planned,
             };
             match self.submit_merge(candidate, &slot).await {
-                Err(error) if is_stale_plan(error.code()) && plans < MAX_MERGE_PLANS => {
+                Err(error) if error.code().is_stale_plan() && plans < MAX_MERGE_PLANS => {
                     plans += 1;
                     let request = MergeRequest {
                         after_seq: Some(record.source_after_seq),
@@ -344,37 +345,6 @@ impl Namespace<Writable> {
             self.mode.writer.writer_id.clone(),
         )
     }
-}
-
-/// Returns whether `code` is an error that a merge's commit returns when
-/// this namespace changed after the plan, so that a later plan reads the
-/// change. Those errors are:
-///
-/// - `stale_head`, `stale_revision`, `stale_attributes`, `stale_access`,
-///   and `binding_version_mismatch`, from the commit's preconditions.
-/// - `path_conflict`, when another inode took a name that a create, move,
-///   or undelete needs.
-/// - `inode_not_found`, when a deletion hid an inode that the merge
-///   changes, or the directory that an inode goes into.
-/// - `not_deleted`, when another writer undeleted an inode that the merge
-///   undeletes.
-///
-/// A later plan reports a changed row that isn't the fork's own as
-/// `merge_conflict`, such as a `name` conflict for a taken name. In a
-/// namespace with ACLs, the plan checks the subject's rights as the commit
-/// does, so the commit's `inode_not_found` isn't a subject's missing rights.
-fn is_stale_plan(code: ErrorCode) -> bool {
-    matches!(
-        code,
-        ErrorCode::StaleHead
-            | ErrorCode::StaleRevision
-            | ErrorCode::StaleAttributes
-            | ErrorCode::StaleAccess
-            | ErrorCode::BindingVersionMismatch
-            | ErrorCode::PathConflict
-            | ErrorCode::InodeNotFound
-            | ErrorCode::NotDeleted
-    )
 }
 
 /// Returns `invalid_request` for a fork that doesn't exist or was deleted,

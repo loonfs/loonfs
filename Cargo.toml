@@ -11,6 +11,7 @@ members = [
   "crates/loonfs-http",
   "crates/loonfs-server",
   "crates/loonfs-client",
+  "crates/loonfs-merge",
   "crates/loonfs-cli",
   "crates/loonfs-conformance",
   "crates/loonfs-sim",
@@ -104,6 +105,7 @@ loonfs-client = { path = "crates/loonfs-client", version = "0.5.0" }
 loonfs-core = { path = "crates/loonfs-core", version = "0.5.0" }
 loonfs-grep = { path = "crates/loonfs-grep", version = "0.5.0" }
 loonfs-http = { path = "crates/loonfs-http", version = "0.5.0" }
+loonfs-merge = { path = "crates/loonfs-merge", version = "0.5.0" }
 loonfs-objectstore = { path = "crates/loonfs-objectstore", version = "0.5.0" }
 loonfs-types = { path = "crates/loonfs-types", version = "0.5.0" }
 tempfile = "3"

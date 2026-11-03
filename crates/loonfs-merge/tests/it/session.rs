@@ -1,0 +1,318 @@
+//! Merge sessions against scripted server answers: the transitions of the
+//! loop, and the requests that each transition sends.
+
+use crate::scripted_mechanics::{
+    conflict, merges, run_to_end, sandbox, start, Answer, RecordingResolver, ScriptedMechanics,
+    Sent,
+};
+use loonfs_merge::{
+    DefaultResolver, MergeError, MergeFailure, MergeSession, MergeSessionOutcome,
+    MergeSessionStatus, MAX_MERGE_ATTEMPTS,
+};
+use loonfs_types::{ChangeSeq, ErrorCode};
+use std::collections::BTreeSet;
+
+#[tokio::test]
+async fn a_fork_without_conflicts_merges_in_one_commit() {
+    let mechanics = ScriptedMechanics::new([Answer::range(10, 20), Answer::Committed(31)]);
+    let session = start(&mechanics, DefaultResolver).await;
+
+    let (outcomes, state) = run_to_end(&mechanics, &DefaultResolver, session).await;
+
+    assert_eq!(state.status, MergeSessionStatus::Merged);
+    assert!(state.new_fork_ids.is_empty());
+    assert!(matches!(
+        outcomes.as_slice(),
+        [MergeSessionOutcome::MergeCommitted {
+            committed_seq: ChangeSeq(31),
+            through_seq: ChangeSeq(20),
+            ..
+        }]
+    ));
+    let merges = merges(&mechanics.sent());
+    assert_eq!(merges.len(), 1);
+    assert_eq!(merges[0].0, sandbox());
+    assert_eq!(merges[0].1.through_seq, Some(ChangeSeq(20)));
+}
+
+#[tokio::test]
+async fn a_merge_too_large_merges_through_the_split_hint_and_then_the_rest() {
+    let mechanics = ScriptedMechanics::new([
+        Answer::range(10, 20),
+        Answer::too_large(15),
+        Answer::Committed(31),
+        Answer::Committed(32),
+    ]);
+    let session = start(&mechanics, DefaultResolver).await;
+
+    let (outcomes, state) = run_to_end(&mechanics, &DefaultResolver, session).await;
+
+    assert_eq!(state.status, MergeSessionStatus::Merged);
+    assert!(matches!(
+        outcomes.as_slice(),
+        [
+            MergeSessionOutcome::Split {
+                split_at_seq: ChangeSeq(15),
+                ..
+            },
+            MergeSessionOutcome::MergeCommitted {
+                through_seq: ChangeSeq(15),
+                ..
+            },
+            MergeSessionOutcome::MergeCommitted {
+                through_seq: ChangeSeq(20),
+                ..
+            },
+        ]
+    ));
+    let merges = merges(&mechanics.sent());
+    let through_seqs: Vec<_> = merges
+        .iter()
+        .map(|(_, options)| options.through_seq)
+        .collect();
+    assert_eq!(
+        through_seqs,
+        [
+            Some(ChangeSeq(20)),
+            Some(ChangeSeq(15)),
+            Some(ChangeSeq(20))
+        ]
+    );
+    let commit_ids: BTreeSet<_> = merges
+        .iter()
+        .map(|(_, options)| &options.commit_id)
+        .collect();
+    assert_eq!(commit_ids.len(), 3, "each piece is a merge of its own");
+}
+
+#[tokio::test]
+async fn a_conflict_rebases_in_pieces_and_the_resolved_new_fork_merges() {
+    let mechanics = ScriptedMechanics::new([
+        Answer::range(10, 20),
+        Answer::refused(ErrorCode::MergeConflict),
+        Answer::too_large(15),
+        Answer::Replayed(Some(vec![conflict("/a.txt")])),
+        Answer::Replayed(Some(vec![conflict("/b.txt")])),
+        Answer::range(40, 43),
+        Answer::Committed(50),
+        Answer::Deleted,
+    ]);
+    let resolver = RecordingResolver::default();
+    let session = start(&mechanics, resolver.clone()).await;
+
+    let (_, state) = run_to_end(&mechanics, &resolver, session).await;
+
+    assert_eq!(state.status, MergeSessionStatus::Merged);
+    assert!(
+        state.new_fork_ids.is_empty(),
+        "the session deletes its new fork"
+    );
+    let sent = mechanics.sent();
+    let rebases: Vec<_> = sent
+        .iter()
+        .filter_map(|sent| match sent {
+            Sent::Rebase {
+                fork_id,
+                new_fork_id,
+                options,
+            } => Some((fork_id, new_fork_id, options)),
+            _ => None,
+        })
+        .collect();
+    let new_fork_id = rebases[0].1.clone();
+    assert!(rebases
+        .iter()
+        .all(|(fork_id, into, _)| **fork_id == sandbox() && **into == new_fork_id));
+    let through_seqs: Vec<_> = rebases
+        .iter()
+        .map(|(_, _, options)| options.through_seq)
+        .collect();
+    assert_eq!(
+        through_seqs,
+        [
+            Some(ChangeSeq(20)),
+            Some(ChangeSeq(15)),
+            Some(ChangeSeq(20))
+        ],
+        "the rebase replays the whole unmerged range, in pieces"
+    );
+    let resolved = resolver.resolved();
+    assert_eq!(resolved.len(), 1);
+    assert_eq!(resolved[0].0, new_fork_id);
+    let report_ends: Vec<_> = resolved[0]
+        .1
+        .iter()
+        .map(|report| report.through_seq)
+        .collect();
+    assert_eq!(
+        report_ends,
+        [ChangeSeq(15), ChangeSeq(20)],
+        "the resolver gets every piece's report"
+    );
+    let merges = merges(&sent);
+    assert_eq!(
+        merges.last().map(|(fork_id, _)| fork_id),
+        Some(&new_fork_id)
+    );
+    assert_eq!(
+        merges.last().and_then(|(_, options)| options.through_seq),
+        Some(ChangeSeq(43))
+    );
+    assert_eq!(
+        sent.last(),
+        Some(&Sent::Delete {
+            namespace_id: new_fork_id
+        })
+    );
+}
+
+#[tokio::test]
+async fn a_lost_report_rebases_again_and_the_default_resolver_fails_with_the_reports() {
+    let mechanics = ScriptedMechanics::new([
+        Answer::range(10, 20),
+        Answer::refused(ErrorCode::MergeConflict),
+        Answer::Replayed(None),
+        Answer::Deleted,
+        Answer::Replayed(Some(vec![conflict("/a.txt")])),
+        // After the caller abandons the session, it deletes both new forks.
+        Answer::refused(ErrorCode::NamespaceDeleted),
+        Answer::Deleted,
+    ]);
+    let mut session = start(&mechanics, DefaultResolver).await;
+    for _ in 0..4 {
+        session.step().await.expect("step");
+    }
+
+    let MergeSessionStatus::Failed {
+        fork_id,
+        failure,
+        reports,
+    } = session.state().status.clone()
+    else {
+        panic!(
+            "the default resolver fails the session: {:?}",
+            session.state().status
+        );
+    };
+    assert!(matches!(failure, MergeFailure::Unresolved { .. }));
+    assert_eq!(reports.len(), 1);
+    let [lost_id, replacement_id] = session
+        .state()
+        .new_fork_ids
+        .clone()
+        .try_into()
+        .expect("two new forks");
+    assert_eq!(
+        fork_id, replacement_id,
+        "the failure identifies the new fork to inspect"
+    );
+    let sent = mechanics.sent();
+    assert_eq!(
+        sent[3],
+        Sent::Delete {
+            namespace_id: lost_id.clone()
+        }
+    );
+    let Sent::Rebase { new_fork_id, .. } = &sent[4] else {
+        panic!("the session rebases again: {:?}", sent[4]);
+    };
+    assert_eq!(*new_fork_id, replacement_id);
+    assert!(
+        matches!(session.step().await, Ok(None)),
+        "a failed session waits for the caller"
+    );
+
+    session.abandon().expect("abandon");
+    let (outcomes, state) = run_to_end(&mechanics, &DefaultResolver, session).await;
+
+    assert_eq!(state.status, MergeSessionStatus::Abandoned);
+    assert!(state.new_fork_ids.is_empty());
+    assert_eq!(outcomes.len(), 2, "one step deletes each new fork");
+}
+
+#[tokio::test]
+async fn a_retry_after_commit_queue_full_returns_the_original_commit() {
+    let mechanics = ScriptedMechanics::new([
+        Answer::range(10, 20),
+        Answer::refused(ErrorCode::CommitQueueFull),
+        Answer::Committed(31),
+    ]);
+    let session = start(&mechanics, DefaultResolver).await;
+
+    let (outcomes, state) = run_to_end(&mechanics, &DefaultResolver, session).await;
+
+    assert_eq!(state.status, MergeSessionStatus::Merged);
+    assert!(matches!(
+        outcomes.as_slice(),
+        [
+            MergeSessionOutcome::Retrying {
+                failed_attempts: 1,
+                ..
+            },
+            MergeSessionOutcome::MergeCommitted {
+                committed_seq: ChangeSeq(31),
+                ..
+            },
+        ]
+    ));
+    let merges = merges(&mechanics.sent());
+    assert_eq!(merges.len(), 2);
+    assert_eq!(
+        merges[0], merges[1],
+        "the retry repeats the request and its commit ID"
+    );
+}
+
+#[tokio::test]
+async fn errors_that_the_loop_cant_act_on_fail_the_session() {
+    let cases: [(&str, Vec<Answer>, ErrorCode); 3] = [
+        (
+            "a namespace that keeps changing past the retry limit",
+            std::iter::repeat_with(|| Answer::refused(ErrorCode::StaleHead))
+                .take(usize::try_from(MAX_MERGE_ATTEMPTS).expect("attempts fit usize"))
+                .collect(),
+            ErrorCode::StaleHead,
+        ),
+        (
+            "a first unmerged commit that's too large alone",
+            vec![Answer::refused(ErrorCode::MergeTooLarge)],
+            ErrorCode::MergeTooLarge,
+        ),
+        (
+            "a fork point below the retention floor",
+            vec![Answer::refused(ErrorCode::RebootstrapRequired)],
+            ErrorCode::RebootstrapRequired,
+        ),
+    ];
+    for (case, answers, code) in cases {
+        let mechanics =
+            ScriptedMechanics::new(std::iter::once(Answer::range(10, 20)).chain(answers));
+        let session = start(&mechanics, DefaultResolver).await;
+
+        let (_, state) = run_to_end(&mechanics, &DefaultResolver, session).await;
+
+        let MergeSessionStatus::Failed {
+            fork_id,
+            failure: MergeFailure::Refused { error },
+            ..
+        } = &state.status
+        else {
+            panic!("{case}: the session should fail: {:?}", state.status);
+        };
+        assert_eq!(*fork_id, sandbox(), "{case}");
+        assert_eq!(error.code, code.as_str(), "{case}");
+        let mut session = MergeSession::resume(mechanics.clone(), DefaultResolver, state);
+        session
+            .abandon()
+            .expect("a failed session can be abandoned");
+        assert!(
+            matches!(
+                session.abandon(),
+                Err(MergeError::NotFailed {
+                    status: "abandoned"
+                })
+            ),
+            "{case}"
+        );
+    }
+}
