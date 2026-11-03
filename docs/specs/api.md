@@ -271,7 +271,7 @@ The full registry (`ErrorCode` in `loonfs-types`) lists every error code and its
 | `maintenance_required` | 503 | The namespace's metadata needs maintenance before the request can be served. Run maintenance and retry. A new commit at the WAL write-stop threshold waits for a fold, and if the [write-stop wait](format.md#73-recovery-material-and-maintenance-policy) passes first, it returns this code and isn't committed. A request with a commit ID that the namespace already knows still returns the result recorded in its receipt. |
 | `index_lagging` | 503 | The grep index is further behind the head than the exhaustive-scan budget allows. Run maintenance or set `allow_stale`, then retry. |
 | `storage_permission_denied` | 503 | The object store rejected the deployment's storage credentials for this operation. Fix the storage credentials or bucket policy, because an unchanged retry won't succeed. |
-| `index_corrupt` | 500 | The grep index's derived state failed validation. Disable and re-enable grep on the namespace to rebuild it. Core filesystem state stays available. |
+| `index_corrupt` | 500 | The grep index's derived state failed validation. Disable and re-enable grep on the namespace to rebuild it. Requests on an index in another version of the grep format also return this code, and disabling that index needs a LoonFS release that reads that version. Core filesystem state stays available. |
 | `namespace_corrupt` | 500 | Durable namespace state failed validation. |
 | `server_error` | 500 | An unclassified internal failure. |
 
@@ -778,6 +778,8 @@ This section describes the grep index routes, and the jobs that `run_maintenance
 #### Grep index
 
 A `gc` run also collects the grep index's unreferenced segments, as described in [Garbage collection runs](#garbage-collection-runs).
+
+If an index's grep entry is corrupt, the disable route replaces that entry with a disabled entry, so the index can be enabled again. If the entry has another version of the grep format, the route returns `index_corrupt` and leaves the entry unchanged.
 
 The status, enable, and disable routes all return the same flat grep index object. It contains `namespace_id`, the lifecycle fields for its `status`, and `reorganize_pending`. No two lifecycle statuses share a sequence field:
 

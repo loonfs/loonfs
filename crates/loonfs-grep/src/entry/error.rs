@@ -8,7 +8,10 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum GrepEntryError {
-    #[error("grep entry version `{version}` is not supported; this build reads version 2")]
+    #[error(
+        "grep entry version `{version}` is not supported; this build reads version `{}`",
+        super::GREP_ENTRY_VERSION
+    )]
     UnsupportedVersion { version: u32 },
     #[error("grep entry members don't decode: {message}")]
     UndecodableState { message: String },

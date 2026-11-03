@@ -263,7 +263,7 @@ async fn read_grep_index_status(
         path = "/v0/maintenance/namespaces/{namespace_id}/grep/index/disable",
         tag = "maintenance",
         summary = "Disable the grep index",
-        description = "Disables the namespace's grep index by publishing a namespace manifest whose grep entry lists no segments. Index maintenance stops when a step reads the disabled entry, and garbage collection reclaims the segments later. Repeating the request has the same result. A deployment that doesn't maintain the grep index returns `not_supported`.",
+        description = "Disables the namespace's grep index by publishing a namespace manifest whose grep entry lists no segments. Index maintenance stops when a step reads the disabled entry, and garbage collection reclaims the segments later. Repeating the request has the same result. If the grep entry is corrupt, the request replaces it with a disabled entry, so the index can be enabled again. If the entry has another version of the grep format, the request returns `index_corrupt` and leaves the entry unchanged. A deployment that doesn't maintain the grep index returns `not_supported`.",
         params(("namespace_id" = String, Path, description = "The namespace ID.")),
         responses(
             (status = 200, description = "Grep index disabled or already disabled", body = GrepIndex),

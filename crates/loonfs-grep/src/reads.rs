@@ -244,14 +244,9 @@ impl NamespaceReadView<'_> {
         else {
             return Ok(None);
         };
-        GrepEntry::decode(&entry)
-            .map(Some)
-            .map_err(|error| GrepError::IndexCorrupt {
-                message: format!(
-                    "the grep entry of namespace `{}` is invalid: {error}",
-                    self.namespace_id()
-                ),
-            })
+        GrepEntry::decode(&entry).map(Some).map_err(|error| {
+            GrepError::invalid_entry(format_args!("namespace `{}`", self.namespace_id()), error)
+        })
     }
 
     /// Returns a view of this view's head at `seq`, which checks the

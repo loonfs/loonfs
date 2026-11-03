@@ -1337,17 +1337,17 @@ async fn grep_entry_lifecycle_pins_not_materialized_error_surface() {
         new_query(&store, &namespace_id, &request("needle")).await,
     );
 
-    publish_entry_of_another_version(&host, &namespace_id).await;
-    assert_corrupt_index_error(
-        "an entry of another version",
-        new_query(&store, &namespace_id, &request("needle")).await,
-    );
     publish_edited_entry(&host, &namespace_id, |entry| {
         entry["status"]["field_from_the_future"] = serde_json::Value::from(true);
     })
     .await;
     assert_corrupt_index_error(
         "an entry with a member grep doesn't define",
+        new_query(&store, &namespace_id, &request("needle")).await,
+    );
+    publish_entry_of_another_version(&host, &namespace_id).await;
+    assert_unsupported_version_error(
+        "an entry of another version",
         new_query(&store, &namespace_id, &request("needle")).await,
     );
     writer.shutdown().await.expect("shutdown");
@@ -1425,6 +1425,149 @@ async fn a_backfilling_entry_without_a_pin_id_is_index_corrupt() {
     assert_corrupt_index_error(
         "backfilling entry missing pin id",
         new_query(&store, &namespace_id, &request("needle")).await,
+    );
+    writer.shutdown().await.expect("shutdown");
+}
+
+/// Checks that disabling grep replaces an invalid entry of grep's version,
+/// which enabling grep refuses, so a query then reports grep as not enabled
+/// and enabling grep starts a new backfill.
+#[tokio::test]
+async fn disable_resets_an_invalid_entry_and_enable_starts_a_new_backfill() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store: SharedObjectStore =
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
+    let namespace_id = NamespaceId::parse("disable-invalid-entry").expect("namespace id");
+    let writer = LoonFs::builder_with_store(store.clone())
+        .writer_id(loonfs_test_support::ids::writer_id("invalid-entry-writer"))
+        .build()
+        .await
+        .expect("writer");
+    writer
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("create namespace");
+    writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace")
+        .put_file(
+            "/reset.txt",
+            b"reset needle\n",
+            &loonfs_test_support::test_actor(),
+        )
+        .await
+        .expect("write a file");
+    let host = GrepHost::new(&store, "invalid-entry").await;
+    let worker = &host.worker;
+    worker.enable(&namespace_id).await.expect("enable");
+
+    type EntryEdit = fn(&mut serde_json::Value);
+    let cases: [(&str, EntryEdit); 2] = [
+        (
+            "a backfilling entry with a member grep doesn't define",
+            |entry| {
+                entry["status"]["field_from_the_future"] = serde_json::Value::from(true);
+            },
+        ),
+        ("a disabled entry that lists runs", |entry| {
+            entry["status"] = serde_json::json!({ "kind": "disabled" });
+        }),
+    ];
+    for (case, edit) in cases {
+        let before = control::grep_entry(&store, &namespace_id)
+            .await
+            .expect("grep's entry");
+        publish_edited_entry(&host, &namespace_id, edit).await;
+        let refused = worker.enable(&namespace_id).await.expect_err(case);
+        assert_matches!(refused, GrepError::IndexCorrupt { .. }, "{case}");
+        assert!(
+            refused.to_string().contains("disable and re-enable grep"),
+            "{case}: {refused}"
+        );
+
+        assert_eq!(
+            worker.disable(&namespace_id).await.expect(case),
+            loonfs_grep::GrepDisableOutcome::Disabled,
+            "{case}"
+        );
+        let disabled = control::grep_entry(&store, &namespace_id)
+            .await
+            .expect("grep's entry");
+        assert_matches!(disabled.status(), GrepIndexStatus::Disabled {}, "{case}");
+        assert!(disabled.runs().is_empty(), "{case}");
+        if let GrepIndexStatus::Backfilling { pin_id, .. } = before.status() {
+            assert!(
+                control::pin(&store, &namespace_id, pin_id).await.is_some(),
+                "the invalid entry's backfill pin is left to expire"
+            );
+        }
+        assert_not_enabled_error(
+            case,
+            new_query(&store, &namespace_id, &request("needle")).await,
+        );
+
+        let enabled = worker.enable(&namespace_id).await.expect(case);
+        assert_matches!(enabled, loonfs_grep::GrepEnableOutcome::Enabled { .. });
+        let backfill = control::grep_entry(&store, &namespace_id)
+            .await
+            .expect("grep's entry");
+        assert_matches!(backfill.status(), GrepIndexStatus::Backfilling { .. });
+        drive_worker_to_current(worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+    }
+    writer.shutdown().await.expect("shutdown");
+}
+
+/// Checks that enabling and disabling grep both refuse an entry of another
+/// version and leave the manifest unchanged, so a build never discards an
+/// index that another version wrote.
+#[tokio::test]
+async fn enable_and_disable_refuse_an_entry_of_another_version_and_leave_it() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store: SharedObjectStore =
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
+    let namespace_id = NamespaceId::parse("another-version").expect("namespace id");
+    let writer = LoonFs::builder_with_store(store.clone())
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "another-version-writer",
+        ))
+        .build()
+        .await
+        .expect("writer");
+    writer
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("create namespace");
+    writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace")
+        .put_file(
+            "/kept.txt",
+            b"kept needle\n",
+            &loonfs_test_support::test_actor(),
+        )
+        .await
+        .expect("write a file");
+    let host = GrepHost::new(&store, "another-version").await;
+    let worker = &host.worker;
+    worker.enable(&namespace_id).await.expect("enable");
+    drive_worker_to_current(worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+    publish_entry_of_another_version(&host, &namespace_id).await;
+    let before = control::metadata_manifest(&store, &namespace_id).await;
+    assert!(
+        !before.payload().extensions[&grep_extension_name()]
+            .runs
+            .is_empty(),
+        "the other version's entry lists the index's runs"
+    );
+
+    assert_unsupported_version_error("enable", worker.enable(&namespace_id).await);
+    assert_unsupported_version_error("disable", worker.disable(&namespace_id).await);
+    assert_eq!(
+        control::metadata_manifest(&store, &namespace_id)
+            .await
+            .payload(),
+        before.payload(),
+        "neither refusal publishes a manifest"
     );
     writer.shutdown().await.expect("shutdown");
 }
@@ -1675,6 +1818,24 @@ fn assert_corrupt_index_error(case: &str, result: loonfs_grep::Result<GrepRespon
             );
         }
         outcome => panic!("expected corrupt-index error for {case}, got {outcome:?}"),
+    }
+}
+
+fn assert_unsupported_version_error<T: std::fmt::Debug>(
+    case: &str,
+    result: loonfs_grep::Result<T>,
+) {
+    match result {
+        Err(error @ GrepError::UnsupportedVersion { version: 3 }) => {
+            assert_eq!(error.code(), ErrorCode::IndexCorrupt, "code for {case}");
+            assert_eq!(
+                error.to_string(),
+                "grep index has format version `3`, and this build reads version `2`; query or \
+                 disable the index with a build that reads version `3`",
+                "error text for {case}"
+            );
+        }
+        outcome => panic!("expected unsupported-version error for {case}, got {outcome:?}"),
     }
 }
 

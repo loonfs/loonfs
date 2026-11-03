@@ -1,5 +1,6 @@
 //! Public grep failures and their wire-code classification.
 
+use crate::entry::{GrepEntryError, GREP_ENTRY_VERSION};
 use loonfs::CoreError;
 use loonfs_objectstore::ObjectStoreError;
 use loonfs_objectstore::ObjectStoreErrorKind;
@@ -60,6 +61,18 @@ pub enum GrepError {
         /// Entry or segment validation failure.
         message: String,
     },
+    /// Grep's entry has a format version that this build doesn't read. The
+    /// build doesn't disable such an entry either, so it never discards an
+    /// index that it can't read.
+    #[error(
+        "grep index has format version `{version}`, and this build reads version `{current}`; \
+         query or disable the index with a build that reads version `{version}`",
+        current = GREP_ENTRY_VERSION
+    )]
+    UnsupportedVersion {
+        /// The version of the entry.
+        version: u32,
+    },
     /// A genuine runtime failure encountered while grep read or wrote
     /// through the filesystem handles, or published its entry.
     #[error(transparent)]
@@ -95,6 +108,22 @@ impl GrepError {
         }
     }
 
+    /// Builds the grep error for an invalid grep entry in `location`, where
+    /// `error` says why the entry is invalid.
+    ///
+    /// The error for an entry of another version is
+    /// [`GrepError::UnsupportedVersion`]. The error for any other invalid
+    /// entry is [`GrepError::IndexCorrupt`], and disabling grep replaces that
+    /// entry.
+    pub(crate) fn invalid_entry(location: impl std::fmt::Display, error: GrepEntryError) -> Self {
+        match error {
+            GrepEntryError::UnsupportedVersion { version } => Self::UnsupportedVersion { version },
+            error => Self::IndexCorrupt {
+                message: format!("the grep entry of {location} is invalid: {error}"),
+            },
+        }
+    }
+
     /// Preserves public error fields for embedded and HTTP callers.
     pub fn to_error_response(&self) -> loonfs_types::ErrorResponse {
         if let Self::Runtime(error) = self {
@@ -124,7 +153,7 @@ impl GrepError {
             Self::QueryUnindexable(_) => ErrorCode::QueryUnindexable,
             Self::IndexLagging { .. } => ErrorCode::IndexLagging,
             Self::StoreUnavailable { kind, .. } => loonfs::classify_store_failure(*kind),
-            Self::IndexCorrupt { .. } => ErrorCode::IndexCorrupt,
+            Self::IndexCorrupt { .. } | Self::UnsupportedVersion { .. } => ErrorCode::IndexCorrupt,
             Self::Runtime(error) => error.code(),
         }
     }

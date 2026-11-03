@@ -465,7 +465,9 @@ Maintenance
     Show whether the gram content index is disabled, backfilling, or active.
 
   loonfs maintenance index disable
-    Disable the gram content index
+    Disable the gram content index. This also resets a corrupt index so
+    that you can enable it again. For an index in another version of the
+    index format, the command fails and leaves the index unchanged.
 
 Profile create options
   Used by:
