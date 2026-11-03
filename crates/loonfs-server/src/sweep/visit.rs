@@ -10,7 +10,7 @@ use crate::sweep::GrepIndexing;
 use crate::sweep::Sweep;
 use crate::sweep::SweepInner;
 use crate::sweep::SweepState;
-use crate::sweep::MAX_GREP_BUILD_STEPS_PER_VISIT;
+use crate::sweep::MAX_GREP_STEPS_PER_VISIT;
 use futures::FutureExt as _;
 use loonfs::SharedObjectStore;
 use loonfs::{
@@ -18,7 +18,7 @@ use loonfs::{
     NamespaceId, RetentionTarget,
 };
 use loonfs_grep::{
-    GrepBuildOutcome, GrepError, GrepPublishOutcome, GrepReorganizeOutcome, GrepSteps,
+    GrepBuildOutcome, GrepError, GrepProgress, GrepPublishOutcome, GrepReorganizeOutcome, GrepSteps,
 };
 use loonfs_http::HeldNamespace;
 
@@ -285,10 +285,13 @@ impl Sweep {
         self.record_call(namespace_id, entry, SweepCall::Retention, result, 0);
     }
 
-    /// Runs build steps while each one indexes something, at most
-    /// [`MAX_GREP_BUILD_STEPS_PER_VISIT`], then one reorganize step once the
-    /// index is up to date, and publishes what the steps left pending.
-    /// Returns whether the index has nothing left to build for now.
+    /// Runs steps while each one does some work, at most
+    /// [`MAX_GREP_STEPS_PER_VISIT`], and publishes what the steps left
+    /// pending. Returns whether the index has nothing left to build or
+    /// reorganize for now.
+    ///
+    /// Each step is a reorganize step when a reorganization is due, and a
+    /// build step otherwise (see [`GrepSteps::step`]).
     ///
     /// The steps' changes are published at most once per tick interval, and
     /// once more when the visit ends, so a visit's sixteen steps are published
@@ -315,22 +318,25 @@ impl Sweep {
         grep: &GrepIndexing,
         steps: &mut GrepSteps<'_, SharedObjectStore>,
     ) -> Result<bool, GrepError> {
-        for _ in 0..MAX_GREP_BUILD_STEPS_PER_VISIT {
+        for _ in 0..MAX_GREP_STEPS_PER_VISIT {
             if self.inner.stop.is_cancelled() {
                 return Ok(false);
             }
-            match steps.build_step(grep.policy).await? {
-                GrepBuildOutcome::Indexed { .. } | GrepBuildOutcome::BackfillRestarted { .. } => {
-                    continue
-                }
-                GrepBuildOutcome::UpToDate { .. } => {
-                    return Ok(matches!(
-                        steps.reorganize_step(grep.policy).await?,
-                        GrepReorganizeOutcome::NotNeeded { .. } | GrepReorganizeOutcome::NotEnabled
-                    ));
-                }
-                GrepBuildOutcome::NotEnabled => return Ok(true),
-                GrepBuildOutcome::Superseded => return Ok(false),
+            match steps.step(grep.policy).await? {
+                GrepProgress::Built(
+                    GrepBuildOutcome::Indexed { .. } | GrepBuildOutcome::BackfillRestarted { .. },
+                )
+                | GrepProgress::Reorganized(
+                    GrepReorganizeOutcome::UnitWritten { .. } | GrepReorganizeOutcome::Abandoned,
+                ) => continue,
+                GrepProgress::Built(
+                    GrepBuildOutcome::UpToDate { .. } | GrepBuildOutcome::NotEnabled,
+                )
+                | GrepProgress::Reorganized(
+                    GrepReorganizeOutcome::NotNeeded { .. } | GrepReorganizeOutcome::NotEnabled,
+                ) => return Ok(true),
+                GrepProgress::Built(GrepBuildOutcome::Superseded)
+                | GrepProgress::Reorganized(GrepReorganizeOutcome::Superseded) => return Ok(false),
             }
         }
         Ok(false)

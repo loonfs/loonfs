@@ -2597,7 +2597,7 @@ Each step's change to grep's entry MUST keep the `captured_seq` of the build it 
 
 A query reads grep's entry from the manifest of its read view, so the index is as current as that manifest. The view's manifest was published after every commit that its entry records, so the view's head is at or above every sequence that the entry records, such as a backfill's captured sequence and the sequences that a reorganization's `pruning` records. An index watermark can still be ahead of the sequence that a page reads at, for example on a later page of a search. The page then still uses the index, and it leaves out the index's rows of commits above its read sequence (see [Querying the index](#d6-querying-the-index)).
 
-Why does a run of steps publish once for each tick interval? If each step published its own manifest, a sweep visit's sixteen build steps would publish sixteen manifests. A writer whose position walk finds more than eight new manifests drops its position and rediscovers it with a tail replay (see [Replaying the visible WAL](#42-replaying-the-visible-wal)), and every cached reader's successor probe would find a successor and run discovery. Publishing once for each interval keeps grep to about one manifest every five seconds.
+Why does a run of steps publish once for each tick interval? If each step published its own manifest, a sweep visit's sixteen steps would publish sixteen manifests. A writer whose position walk finds more than eight new manifests drops its position and rediscovers it with a tail replay (see [Replaying the visible WAL](#42-replaying-the-visible-wal)), and every cached reader's successor probe would find a successor and run discovery. Publishing once for each interval keeps grep to about one manifest every five seconds.
 
 Why does a step start from the pending entry instead of the manifest's? The earlier steps of its run of steps wrote `texts` rows that aren't published yet. A step that started from the manifest's entry would index the earlier steps' range again.
 
@@ -2631,6 +2631,10 @@ Grep's runs, and each run's segments, follow list order. Grep uses a run's `leve
 - Level 2 is the base.
 
 An in-progress reorganization records the output level and run number, so resumed steps continue the same run. A reorganization that starts in a change has a provisional run number until the change is published, like the change's other new runs (see [The entry and its publication](#d1-the-entry-and-its-publication)).
+
+A reorganization starts when a level reaches its run limit. When the entry lists eight delta runs, a reorganization merges them into a new run at level 1, and when it lists eight runs at level 1, a reorganization merges them and the base into a new base. (Eight is the reference worker's default for both limits, not a format requirement.) Within a run of steps, the next step is a reorganization step whenever the pending entry records a reorganization or a level has reached its limit, and a backfill or build step otherwise. So grep reorganizes the index while the index is behind the namespace's head, and the entry lists no more delta runs than the limit, however many commits are left to index.
+
+Why doesn't a reorganization wait until a build step finds the index up to date? Before a backfill or build step reads a content value, it looks up the value's `texts` row in the segments that its pending entry lists (see [The `texts` and `content_revisions` families](#d4-the-texts-and-content_revisions-families)), and each of those steps that indexes something adds a delta run. While a writer keeps committing, a build step might never find the index up to date, so the delta runs would grow without a limit, and each build step would cost more than the one before it.
 
 ### D.3 Tokenization and postings
 

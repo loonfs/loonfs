@@ -2,12 +2,16 @@
 //! the steps make, which is kept in memory, and its publication in a
 //! manifest of its own.
 
-use super::{next_index_run_no, GrepWorker};
+use super::reorganize::reorganize_due;
+use super::{
+    next_index_run_no, GramIndexBuildPolicy, GrepBuildOutcome, GrepReorganizeOutcome, GrepWorker,
+};
 use crate::entry::{grep_extension_name, GrepEntry, GrepEntryError, GrepIndexStatus};
 use crate::{GrepError, Result};
 use loonfs::engine::{ExtensionBasis, ExtensionPublication};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{NamespaceId, PinId, RunNo};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// How long a run of steps in a host without a tick of its own, such as
 /// the CLI, keeps its changes in memory before it publishes them.
@@ -27,6 +31,49 @@ pub enum GrepPublishOutcome {
     /// change built on, so the change wasn't published, and its segments are
     /// left to the collector.
     Superseded,
+}
+
+/// How one step of a run of steps ended (see [`GrepSteps::step`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GrepProgress {
+    /// The step was a build step.
+    Built(GrepBuildOutcome),
+    /// The step was a reorganize step, because a reorganization was due.
+    Reorganized(GrepReorganizeOutcome),
+}
+
+/// How a worker's publications of grep's entry ended since the worker was
+/// created, as counts of the changes that its runs of steps tried to
+/// publish.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GrepPublicationStats {
+    /// Changes published in the manifest after the one that they built on.
+    pub published: usize,
+    /// Changes whose put lost to a manifest with the same grep entry, such
+    /// as a fold's, and that were published over that manifest.
+    pub rebuilt: usize,
+    /// Changes that weren't published, because another process changed
+    /// grep's entry first.
+    pub superseded: usize,
+}
+
+/// The counters behind [`GrepPublicationStats`], which clones of a worker
+/// share.
+#[derive(Debug, Default)]
+pub(super) struct PublicationCounts {
+    published: AtomicUsize,
+    rebuilt: AtomicUsize,
+    superseded: AtomicUsize,
+}
+
+impl PublicationCounts {
+    pub(super) fn stats(&self) -> GrepPublicationStats {
+        GrepPublicationStats {
+            published: self.published.load(Ordering::Relaxed),
+            rebuilt: self.rebuilt.load(Ordering::Relaxed),
+            superseded: self.superseded.load(Ordering::Relaxed),
+        }
+    }
 }
 
 /// The change that a run's steps made to grep's entry since the manifest
@@ -248,6 +295,31 @@ impl<'w, S: ObjectStore + Clone> GrepSteps<'w, S> {
         }
     }
 
+    /// Runs the run's next step, which is a reorganize step when the pending
+    /// entry has a reorganization in progress or a level at its run limit
+    /// (`max_delta_runs` delta runs, or `max_mid_runs` mid runs), and a build
+    /// step otherwise.
+    ///
+    /// A build step looks up its content values' `texts` rows in the
+    /// segments that the entry lists, and each build step that indexes
+    /// something adds a delta run, so a build step's cost grows with the
+    /// entry's runs. The run reorganizes a full level before its next build
+    /// step, so the delta level has at most `max_delta_runs` runs however far
+    /// the index is behind.
+    pub async fn step(&mut self, policy: GramIndexBuildPolicy) -> Result<GrepProgress> {
+        let due = self
+            .pending()
+            .await?
+            .enabled_entry()
+            .is_some_and(|entry| reorganize_due(entry, policy));
+        if due {
+            return Ok(GrepProgress::Reorganized(
+                self.reorganize_step(policy).await?,
+            ));
+        }
+        Ok(GrepProgress::Built(self.build_step(policy).await?))
+    }
+
     /// Returns the status of the entry that the run's steps left pending, or
     /// `None` before the run's first step or after a superseded publication.
     pub fn pending_status(&self) -> Option<&GrepIndexStatus> {
@@ -325,7 +397,8 @@ impl<'w, S: ObjectStore + Clone> GrepSteps<'w, S> {
     /// changed the entry, the change's new backfill pins are deleted, and the
     /// next step loads the current manifest. An error drops the change and
     /// keeps its pins, because a put whose outcome is unknown can still list
-    /// them.
+    /// them. A change that's published or superseded is recorded in
+    /// [`GrepWorker::publication_stats`].
     pub async fn publish(&mut self) -> Result<GrepPublishOutcome> {
         let Some(pending) = self.pending.take() else {
             return Ok(GrepPublishOutcome::NothingPending);
@@ -342,8 +415,17 @@ impl<'w, S: ObjectStore + Clone> GrepSteps<'w, S> {
                 (entry.encode(), next_run_no)
             })
             .await?;
+        let counts = &self.worker.publications;
         match publication {
             ExtensionPublication::Published(basis) => {
+                let first_put = pending.basis.manifest().manifest_no.successor().ok()
+                    == Some(basis.manifest().manifest_no);
+                let outcome = if first_put {
+                    &counts.published
+                } else {
+                    &counts.rebuilt
+                };
+                outcome.fetch_add(1, Ordering::Relaxed);
                 self.delete_pins(&pending.released_pins).await;
                 self.pending = Some(PendingEntry::new(basis)?);
                 Ok(GrepPublishOutcome::Published)
@@ -380,11 +462,13 @@ impl<'w, S: ObjectStore + Clone> GrepSteps<'w, S> {
                                 .is_some_and(|pin_id| pending.created_pins.contains(pin_id))
                     });
                     if published {
+                        counts.published.fetch_add(1, Ordering::Relaxed);
                         self.delete_pins(&pending.released_pins).await;
                         self.pending = Some(current);
                         return Ok(GrepPublishOutcome::Published);
                     }
                 }
+                counts.superseded.fetch_add(1, Ordering::Relaxed);
                 tracing::debug!(
                     namespace_id = %self.namespace_id,
                     "another process changed the grep entry; the next step plans from the current \

@@ -263,7 +263,7 @@ async fn ticks_finish_a_backfill_without_a_local_commit_before_closing() {
         .await
         .expect("create");
     let session = writer.open_namespace(&namespace_id).expect("open");
-    let files = super::super::MAX_GREP_BUILD_STEPS_PER_VISIT + 4;
+    let files = super::super::MAX_GREP_STEPS_PER_VISIT + 4;
     for index in 0..files {
         session
             .put_file(&format!("/file-{index}"), b"needle", &test_actor())
@@ -300,11 +300,16 @@ async fn ticks_finish_a_backfill_without_a_local_commit_before_closing() {
             .built_through_seq(),
         ChangeSeq(u64::try_from(files).expect("count"))
     );
-    store.reset();
-    server.sweep.tick().await;
     assert!(
-        !store.take().is_empty(),
-        "reorganization needs a step that finds nothing left"
+        !server
+            .grep_worker
+            .as_ref()
+            .expect("worker")
+            .get_grep_index(&namespace_id)
+            .await
+            .expect("status")
+            .reorganize_pending,
+        "the visits reorganized each full delta level before the next build step"
     );
     assert_eq!(
         visit_held(&server.sweep.inner.namespaces, &namespace_id, |held| held
@@ -312,6 +317,7 @@ async fn ticks_finish_a_backfill_without_a_local_commit_before_closing() {
             .last_published_seq()),
         Some(None)
     );
+    store.reset();
     server.sweep.tick().await;
     assert!(store.take().is_empty(), "closing costs no store requests");
     assert!(held_ids(&server.sweep.inner.namespaces).is_empty());
@@ -352,10 +358,16 @@ async fn pending_reorganization_keeps_an_idle_session_open() {
         .open(&namespace_id)
         .await
         .expect("open");
+    // Each file has about 40 grams, so the reorganization of the two
+    // files' runs, one row at a time, takes more steps than a visit runs.
     for index in 0..2 {
-        held.put_file(&format!("/file-{index}"), b"abc", &test_actor())
-            .await
-            .expect("publish");
+        held.put_file(
+            &format!("/file-{index}"),
+            b"the quick brown fox jumps over the lazy dog",
+            &test_actor(),
+        )
+        .await
+        .expect("publish");
     }
     server.enable_index(&namespace_id).await;
     drop(held);
@@ -390,13 +402,16 @@ async fn pending_reorganization_keeps_an_idle_session_open() {
         }
     }
     assert!(!pending);
-    store.reset();
-    server.sweep.tick().await;
-    assert!(
-        !store.take().is_empty(),
-        "a completed unit needs a step that finds nothing left"
-    );
-    server.sweep.tick().await;
+    // The visit that finished the reorganization goes on to a build step
+    // that finds nothing left, unless the visit's step bound stopped it
+    // first, and then the next visit does.
+    for _ in 0..2 {
+        store.reset();
+        server.sweep.tick().await;
+        if held_ids(&server.sweep.inner.namespaces).is_empty() {
+            break;
+        }
+    }
     assert!(
         store.take().is_empty(),
         "a finished session closes without requests"

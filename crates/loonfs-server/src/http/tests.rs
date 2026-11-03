@@ -102,6 +102,7 @@ async fn runtime_and_grep_cache_metrics_render_from_the_cache_stats() {
         "loonfs_grep_cache_gets_total",
         "loonfs_grep_cache_inserts_total",
         "loonfs_grep_cache_evictions_total",
+        "loonfs_grep_publications_total",
     ] {
         assert_eq!(
             rendered

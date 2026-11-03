@@ -2,6 +2,8 @@
 //! merges read them through, and the reads of one key range that lookups
 //! make.
 
+mod texts;
+
 use crate::cache::GrepBlockCache;
 use crate::codec::{lookup, ContentValue, IndexRow, ValueRow};
 use crate::entry::grep_extension_name;
@@ -15,7 +17,7 @@ use crate::{GrepError, Result};
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
-use futures::{stream, FutureExt, StreamExt, TryFutureExt, TryStreamExt};
+use futures::{stream, FutureExt, StreamExt, TryStreamExt};
 use loonfs::engine::SegmentBlockLoader;
 use loonfs::MAX_PENDING_SEGMENT_BYTES;
 use loonfs_objectstore::keys::extension_segment_object_key;
@@ -25,7 +27,7 @@ use loonfs_types::format::manifest::lookup_keys::after_row_key;
 use loonfs_types::format::manifest::ExtensionSegmentRef;
 use loonfs_types::format::segment_blocks::{
     decode_filter_block, index_blocks_for_key_range, key_range_may_intersect, DecodedDataBlock,
-    SegmentBlocksBuilder, SegmentIndexEntry, DEFAULT_TARGET_SEGMENT_BYTES,
+    SegmentBlocksBuilder, SegmentFilter, SegmentIndexEntry, DEFAULT_TARGET_SEGMENT_BYTES,
 };
 use loonfs_types::{IndexSegmentId, NamespaceId};
 use std::collections::{BTreeMap, BTreeSet};
@@ -46,16 +48,6 @@ fn value_rows(object_key: &str, rows: impl IntoIterator<Item = IndexRow>) -> Res
             }),
         })
         .collect()
-}
-
-/// One `texts` row that a lookup reads from one segment.
-struct TextLookup<'a> {
-    value: &'a ContentValue,
-    probe: String,
-    row_key: String,
-    /// The exclusive bound just after `row_key`.
-    upper_bound: String,
-    descriptor: &'a ExtensionSegmentRef,
 }
 
 /// The rows of one segment in a key range, and the key that a bounded read
@@ -99,14 +91,9 @@ impl<S: ObjectStore + ?Sized> GrepSegments<'_, S> {
         writer.finish().await
     }
 
-    /// Whether the filter of `descriptor` may contain `probe`. The filter is
-    /// read from the descriptor's inline copy when it has one, and otherwise
-    /// from the segment's filter block.
-    pub(crate) async fn filter_admits(
-        &self,
-        descriptor: &ExtensionSegmentRef,
-        probe: &str,
-    ) -> Result<bool> {
+    /// Returns the filter of `descriptor`, from the descriptor's inline copy
+    /// when it has one, and otherwise from the segment's filter block.
+    async fn filter(&self, descriptor: &ExtensionSegmentRef) -> Result<Arc<SegmentFilter>> {
         let object_key = self.object_key(descriptor);
         match &descriptor.filter_inline {
             Some(inline) => {
@@ -119,13 +106,9 @@ impl<S: ObjectStore + ?Sized> GrepSegments<'_, S> {
                     })?;
                 let filter = decode_filter_block(&filter_bytes, &descriptor.filter_block)
                     .map_err(|error| index_segment_corrupt(&object_key, "filter block", &error))?;
-                Ok(filter.may_contain(probe))
+                Ok(Arc::new(filter))
             }
-            None => Ok(
-                load_filter_block(self.store, self.block_cache, &object_key, descriptor)
-                    .await?
-                    .may_contain(probe),
-            ),
+            None => load_filter_block(self.store, self.block_cache, &object_key, descriptor).await,
         }
     }
 
@@ -159,7 +142,7 @@ impl<S: ObjectStore + ?Sized> GrepSegments<'_, S> {
             return Ok(range_rows);
         }
         if let Some(probe) = probe {
-            if !self.filter_admits(descriptor, probe).await? {
+            if !self.filter(descriptor).await?.may_contain(probe) {
                 return Ok(range_rows);
             }
         }
@@ -196,76 +179,6 @@ impl<S: ObjectStore + ?Sized> GrepSegments<'_, S> {
             );
         }
         Ok(range_rows)
-    }
-
-    /// Returns whether each of `values` that has a `texts` row in `segments`
-    /// was eligible, and leaves out the values without a row. The lookups
-    /// run with at most `in_flight` segment reads in flight.
-    ///
-    /// Rows of one value in two segments record the same eligibility, because
-    /// eligibility is a property of the bytes, so a disagreement is index
-    /// corruption.
-    pub(crate) async fn text_rows(
-        &self,
-        segments: &[ExtensionSegmentRef],
-        values: &BTreeSet<ContentValue>,
-        in_flight: usize,
-    ) -> Result<BTreeMap<ContentValue, bool>> {
-        let lookups: Vec<TextLookup<'_>> = values
-            .iter()
-            .flat_map(|value| {
-                let content_id = value.content_id();
-                let probe = lookup::text_probe(&content_id);
-                let row_key = lookup::text_row_key(&content_id, value.size_bytes);
-                segments.iter().map(move |descriptor| TextLookup {
-                    value,
-                    probe: probe.clone(),
-                    upper_bound: after_row_key(&row_key),
-                    row_key: row_key.clone(),
-                    descriptor,
-                })
-            })
-            .collect();
-        let mut texts = BTreeMap::new();
-        let mut reads = stream::iter(0..lookups.len())
-            .map(|index| {
-                let lookup = &lookups[index];
-                self.rows_in_range(
-                    lookup.descriptor,
-                    Some(&lookup.probe),
-                    &lookup.row_key,
-                    Some(&lookup.upper_bound),
-                    1,
-                )
-                .map_ok(move |found| (index, found.rows))
-            })
-            .buffered(in_flight);
-        while let Some((index, rows)) = reads.try_next().await? {
-            let TextLookup {
-                value, descriptor, ..
-            } = &lookups[index];
-            for (_, row) in rows {
-                let IndexRow::Text(row) = row else {
-                    return Err(GrepError::IndexCorrupt {
-                        message: format!(
-                            "index segment `{}` has a row of another family under a `texts` key",
-                            self.object_key(descriptor)
-                        ),
-                    });
-                };
-                if texts.insert(**value, row.eligible) == Some(!row.eligible) {
-                    return Err(GrepError::IndexCorrupt {
-                        message: format!(
-                            "the index records content `{}` of {} bytes as both eligible and \
-                             ineligible",
-                            value.content_id(),
-                            value.size_bytes
-                        ),
-                    });
-                }
-            }
-        }
-        Ok(texts)
     }
 
     /// Reads the rows of `descriptor` whose keys are in `keys`, from the data

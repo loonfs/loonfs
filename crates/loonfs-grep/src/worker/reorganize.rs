@@ -240,6 +240,16 @@ impl<S: ObjectStore + Clone> GrepSteps<'_, S> {
     }
 }
 
+/// Returns whether the next step over `entry` is a reorganize step, which
+/// it is when the entry records a reorganization or a level has reached its
+/// run limit under `policy`.
+pub(super) fn reorganize_due(entry: &GrepEntry, policy: GramIndexBuildPolicy) -> bool {
+    !matches!(
+        plan_reorganize(entry, policy),
+        ReorganizePlan::NotNeeded { .. }
+    )
+}
+
 /// Continues the reorganization that `entry` records, or picks the inputs
 /// of a new one when a level has reached its run limit.
 fn plan_reorganize(entry: &GrepEntry, policy: GramIndexBuildPolicy) -> ReorganizePlan {

@@ -8,7 +8,10 @@ mod reorganize;
 mod steps;
 mod tables;
 
-pub use steps::{GrepPublishOutcome, GrepSteps, DEFAULT_GREP_PUBLISH_INTERVAL_MS};
+pub use steps::{
+    GrepProgress, GrepPublicationStats, GrepPublishOutcome, GrepSteps,
+    DEFAULT_GREP_PUBLISH_INTERVAL_MS,
+};
 
 use crate::cache::GrepBlockCache;
 use crate::entry::{GrepEntry, GrepIndexStatus};
@@ -172,6 +175,8 @@ pub struct GrepWorker<S> {
     /// value tables that the steps of one reorganization read again within a
     /// bounded size. Clones of a worker share it.
     reorganize_blocks: Arc<GrepBlockCache>,
+    /// How the worker's publications ended. Clones of a worker share it.
+    publications: Arc<steps::PublicationCounts>,
 }
 
 /// The runtime handles have no debug representation (they are clones of a
@@ -206,12 +211,19 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             reorganize_blocks: Arc::new(GrepBlockCache::new(DecodedBlockCacheConfig::new(
                 build::GREP_STEP_BLOCK_CACHE_DECODED_BYTES,
             ))),
+            publications: Arc::default(),
         }
     }
 
     /// The budget this worker's build and reorganize steps draw from.
     pub fn step_budget(&self) -> &GrepPassBudget {
         &self.step_budget
+    }
+
+    /// Reports how the publications of grep's entry by this worker and its
+    /// clones ended.
+    pub fn publication_stats(&self) -> GrepPublicationStats {
+        self.publications.stats()
     }
 
     /// This worker's filesystem reads for one namespace.

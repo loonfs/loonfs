@@ -7,8 +7,8 @@ use crate::common::{control, fold_wal_and_advance_retention, page_request, GrepH
 use loonfs::{LoonFs, SharedObjectStore, Writable};
 use loonfs_grep::entry::GrepIndexStatus;
 use loonfs_grep::{
-    GramIndexBuildPolicy, GrepBuildOutcome, GrepEnableOutcome, GrepError, GrepPublishOutcome,
-    GrepReorganizeOutcome,
+    GramIndexBuildPolicy, GrepBuildOutcome, GrepEnableOutcome, GrepError, GrepPublicationStats,
+    GrepPublishOutcome, GrepReorganizeOutcome,
 };
 use loonfs_objectstore::keys::metadata_manifest_prefix;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -141,6 +141,14 @@ async fn the_steps_of_a_run_publish_once_and_a_query_reads_the_published_entry()
         steps.publish().await.expect("publish nothing"),
         GrepPublishOutcome::NothingPending
     );
+    assert_eq!(
+        host.worker.publication_stats(),
+        GrepPublicationStats {
+            published: 2,
+            ..GrepPublicationStats::default()
+        },
+        "the enable and the run published, and an empty publication isn't one"
+    );
     let found = host
         .grep(&namespace_id, &needle(), page_request(None, 10))
         .await
@@ -254,6 +262,15 @@ async fn a_step_that_loses_its_put_to_a_copy_of_its_entry_is_published_over_it()
         NonZeroU64::new(60_000),
         "grep's publications copy the winner's other fields"
     );
+    assert_eq!(
+        host.worker.publication_stats(),
+        GrepPublicationStats {
+            published: 1,
+            rebuilt: 1,
+            superseded: 0,
+        },
+        "the enable published at its first put, and the step's change was rebuilt"
+    );
 
     host.enable_grep_index(&namespace_id)
         .await
@@ -300,6 +317,14 @@ async fn a_step_that_loses_its_put_to_another_change_of_its_entry_publishes_noth
         }
     );
     assert_matches!(lost, Ok(GrepBuildOutcome::Superseded));
+    assert_eq!(
+        host.worker.publication_stats(),
+        GrepPublicationStats {
+            published: 1,
+            rebuilt: 0,
+            superseded: 1,
+        }
+    );
     let winner = control::metadata_manifest(&base, &namespace_id).await;
     assert_eq!(
         host.worker.entry(&namespace_id).await.expect("entry"),
