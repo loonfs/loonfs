@@ -873,6 +873,20 @@ async fn point_lookups_skip_inline_filtered_runs_without_fetches() {
         .clone();
     let prefix = lookup_keys::direntry_bind_prefix(binding.parent_inode_id, &binding.name_key);
     let probe = lookup_keys::direntry_bind_probe(binding.parent_inode_id, &binding.name_key);
+    // The probe contains `/docs`'s inode ID, whose low bits are random, so
+    // the filters of the two older delta runs usually reject it, but either
+    // filter can admit it by a false positive, depending on the IDs that a
+    // run of the test drew. The lookup loads every segment whose filter
+    // admits the probe.
+    let mut admitted_segments = 0;
+    for descriptor in &direntry_descriptors {
+        let filter = load_segment_filter(&store, None, &SessionBlockMemo::default(), descriptor)
+            .await
+            .expect("decode the inline filter");
+        if filter.may_contain(&probe) {
+            admitted_segments += 1;
+        }
+    }
 
     store.reset();
     let rows = segments
@@ -891,8 +905,8 @@ async fn point_lookups_skip_inline_filtered_runs_without_fetches() {
     );
     assert_eq!(
         store.count(OperationSelector::Read),
-        1,
-        "inline filters reject the other runs without fetches, and the one \
+        admitted_segments,
+        "inline filters reject the other runs without fetches, and each \
          admitted small segment loads whole with a single ranged GET"
     );
 
