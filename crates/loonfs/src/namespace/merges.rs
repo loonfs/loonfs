@@ -2,6 +2,7 @@
 //! merge slot, the checks, the fork's fold, the plan, the commit, and the
 //! fold of the namespace.
 
+use crate::pinned_read::PinnedRead;
 use crate::publish::CommitCandidate;
 use crate::publisher::MergeSlot;
 use crate::trace::{self, operation_span};
@@ -138,11 +139,7 @@ impl Namespace<Writable> {
             main.engine
                 .check_merge(&main.context, &fork.engine, &fork.context, request)
                 .await?;
-            self.maintenance().fold_wal(source_namespace_id).await?;
-            let fork = self
-                .core
-                .pinned_read(source_namespace_id, Consistency::Strong)
-                .await?;
+            let fork = self.fold_and_read(source_namespace_id).await?;
             Ok(main
                 .engine
                 .plan_merge(
@@ -253,6 +250,28 @@ impl Namespace<Writable> {
             }
             () = crate::publisher::sleep_ms(remaining_ms) => {}
         }
+    }
+
+    /// Folds the WAL tail of `namespace_id`, and returns a strong read of
+    /// it at the fold's manifest or a newer one.
+    ///
+    /// A strong read confirms a namespace's head, but the manifest that the
+    /// read starts from is the cached head's, which a runtime checks for a
+    /// successor only once per
+    /// [`manifest_revalidation_interval_ms`](crate::RuntimeConfig::manifest_revalidation_interval_ms)
+    /// when it has no writer session for the namespace, such as a fork
+    /// whose handle the caller dropped, or one that another process writes.
+    /// A read right after the fold could then start from the manifest before
+    /// the fold, or from one older than a fold that another process
+    /// published, and a merge, whose range ends at the fork's folded head,
+    /// would quietly merge a shorter range. So the fold drops the
+    /// namespace's cached head before the read, whether or not it published.
+    pub(crate) async fn fold_and_read(&self, namespace_id: &NamespaceId) -> Result<PinnedRead> {
+        self.maintenance().fold_wal(namespace_id).await?;
+        self.core.invalidate_namespace_read_cache(namespace_id);
+        self.core
+            .pinned_read(namespace_id, Consistency::Strong)
+            .await
     }
 
     /// Returns a maintenance value that folds as this runtime's writer.

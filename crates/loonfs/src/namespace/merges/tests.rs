@@ -18,6 +18,7 @@ use tempfile::TempDir;
 
 struct Family {
     _directory: TempDir,
+    runtime: LoonFs<Writable>,
     main: Namespace<Writable>,
     fork: Namespace<Writable>,
 }
@@ -56,6 +57,7 @@ async fn family() -> Family {
         .expect("write in the fork");
     Family {
         _directory: directory,
+        runtime,
         main,
         fork,
     }
@@ -171,6 +173,78 @@ async fn a_merge_keeps_the_slot_from_its_plan() {
         .submit_merge(planned.candidate, &planned.slot)
         .await
         .expect("the first merge");
+}
+
+/// Checks that a merge after the caller dropped the fork's handle, right
+/// after a commit, merges that commit. The fork's session ends on the fork's
+/// first manifest, which folded none of the fork's commits, so the runtime
+/// keeps the fork's head on that manifest, and the merge has to read the
+/// manifest that its fold of the fork publishes.
+#[tokio::test]
+async fn a_merge_after_the_forks_handle_is_dropped_merges_its_last_commit() {
+    let Family {
+        _directory: _store,
+        runtime,
+        main,
+        fork,
+    } = family().await;
+    let fork_id = fork.id().clone();
+    let last = fork
+        .put_file("/c.txt", b"c", &actor())
+        .await
+        .expect("write in the fork");
+    drop(fork);
+    runtime.drain().await.expect("end the fork's session");
+
+    let merged = main
+        .merge_fork(&fork_id, &actor())
+        .await
+        .expect("the merge");
+    let record = merged.merge.expect("a merge record");
+    assert_eq!(record.source_through_seq, last.committed_seq);
+    let file = main
+        .read_file("/c.txt")
+        .await
+        .expect("the fork's last file");
+    assert_eq!(file.bytes, b"c");
+}
+
+/// Checks that a merge reads the fork at the manifest that its fold
+/// publishes, not at an older manifest that folded some of the fork's
+/// commits. A fold of the fork covers `/b.txt`, the fork then commits
+/// `/c.txt`, and its handle is dropped, so the runtime keeps the fork's
+/// head on the older manifest. The merge applies both files, through the
+/// fork's head.
+#[tokio::test]
+async fn a_merge_reads_the_fork_at_its_folds_manifest() {
+    let Family {
+        _directory: _store,
+        runtime,
+        main,
+        fork,
+    } = family().await;
+    let fork_id = fork.id().clone();
+    main.maintenance()
+        .fold_wal(&fork_id)
+        .await
+        .expect("fold the fork's first commit");
+    let last = fork
+        .put_file("/c.txt", b"c", &actor())
+        .await
+        .expect("write in the fork");
+    drop(fork);
+    runtime.drain().await.expect("end the fork's session");
+
+    let merged = main
+        .merge_fork(&fork_id, &actor())
+        .await
+        .expect("the merge");
+    let record = merged.merge.expect("a merge record");
+    assert_eq!(record.source_through_seq, last.committed_seq);
+    for (path, bytes) in [("/b.txt", &b"b"[..]), ("/c.txt", &b"c"[..])] {
+        let file = main.read_file(path).await.expect("the fork's file");
+        assert_eq!(file.bytes, bytes, "{path}");
+    }
 }
 
 /// Checks that a retry of a merge that's still planned or in flight gets
