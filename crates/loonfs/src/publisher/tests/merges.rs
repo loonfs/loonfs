@@ -184,12 +184,12 @@ async fn a_merge_is_held_to_the_merge_allowance_and_admitted_one_at_a_time() {
     );
 }
 
-/// Checks that a retry of a merge whose commit is still in flight shares the
-/// merge's admission and joins its waiters, instead of finding the merge
-/// slot taken, while a different merge still gets `commit_queue_full`. Both
-/// calls return the one commit.
+/// Checks that a retry of a merge whose commit is still in flight gets
+/// `commit_queue_full`, as a different merge does, because the budget admits
+/// one merge at a time, and that a retry after the merge commits returns the
+/// merge.
 #[tokio::test]
-async fn a_retry_of_a_merge_in_flight_joins_its_waiters() {
+async fn a_retry_of_a_merge_in_flight_finds_the_slot_taken() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("main").expect("namespace");
     let store: SharedStore = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
@@ -202,18 +202,19 @@ async fn a_retry_of_a_merge_in_flight_joins_its_waiters() {
         futures::poll!(first.as_mut()).is_pending(),
         "the merge is admitted"
     );
-    let mut retry = Box::pin(publisher.submit(merge("merge", "merged")));
-    assert!(
-        futures::poll!(retry.as_mut()).is_pending(),
-        "the retry joins the merge"
-    );
-    assert_matches!(
-        publisher.submit(merge("other", "merged")).await,
-        Err(crate::Error::Core(CoreError::CommitQueueFull))
-    );
+    for candidate in [merge("merge", "merged"), merge("other", "merged")] {
+        assert_matches!(
+            publisher.submit(candidate).await,
+            Err(crate::Error::Core(CoreError::CommitQueueFull))
+        );
+    }
 
     let first = first.await.expect("the merge");
-    let retry = retry.await.expect("the retry");
+    publisher.wait_for_worker().await;
+    let retry = publisher
+        .submit(merge("merge", "merged"))
+        .await
+        .expect("the retry");
     assert_eq!(retry, first);
     publisher.wait_for_worker().await;
 }

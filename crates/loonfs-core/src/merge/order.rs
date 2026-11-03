@@ -10,18 +10,20 @@ use crate::error::{CoreError, Result};
 use crate::metadata::MetadataView;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{
-    AbsolutePath, DestinationPrecondition, DisplayName, FilesystemOperation, InodeId, InodeKind,
-    NameKey, ROOT_INODE_ID,
+    AbsolutePath, CommitPrecondition, DestinationPrecondition, DisplayName, FilesystemOperation,
+    InodeId, InodeKind, NameKey, ROOT_INODE_ID,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 /// The operations of a merge's commit, and, by operation index, the fork's
 /// ID of the inode that each create makes and the legs of the moves through
-/// a temporary name.
+/// a temporary name. The preconditions are the revisions of the files that
+/// the commit deletes.
 pub(super) struct MergeOperations {
     pub(super) operations: Vec<FilesystemOperation>,
     pub(super) created_inode_ids: BTreeMap<usize, InodeId>,
     pub(super) temporary_moves: BTreeMap<usize, TemporaryMove>,
+    pub(super) preconditions: Vec<CommitPrecondition>,
 }
 
 /// An inode's parent and its name there.
@@ -52,6 +54,7 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
             operations,
             created_inode_ids: order.created_inode_ids,
             temporary_moves: order.temporary_moves,
+            preconditions: order.preconditions,
         })
     }
 
@@ -158,6 +161,7 @@ struct Order<'p, 'v, S: ObjectStore + ?Sized> {
     operations: Vec<FilesystemOperation>,
     created_inode_ids: BTreeMap<usize, InodeId>,
     temporary_moves: BTreeMap<usize, TemporaryMove>,
+    preconditions: Vec<CommitPrecondition>,
 }
 
 impl<'p, 'v, S: ObjectStore + ?Sized> Order<'p, 'v, S> {
@@ -202,6 +206,7 @@ impl<'p, 'v, S: ObjectStore + ?Sized> Order<'p, 'v, S> {
             operations: Vec::new(),
             created_inode_ids: BTreeMap::new(),
             temporary_moves: BTreeMap::new(),
+            preconditions: Vec::new(),
         };
         for (index, plan) in plans.iter().enumerate() {
             match &plan.binding {
@@ -557,6 +562,7 @@ impl<'p, 'v, S: ObjectStore + ?Sized> Order<'p, 'v, S> {
             }
             BindingChange::Delete { .. } => {
                 self.operations.push(binding.operation(inode_id, plan.kind));
+                self.preconditions.extend(binding.precondition(inode_id));
                 self.left.insert(inode_id);
                 self.pending_deletes.remove(&inode_id);
             }

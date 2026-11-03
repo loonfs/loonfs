@@ -198,6 +198,8 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// because the move off the temporary name finds the inode and its new
     /// directory by path, and another writer can rename a directory on
     /// either path without changing a row that those preconditions cover.
+    /// A file's delete expects the file's revision, because another writer
+    /// can change the file's content without changing its binding version.
     ///
     /// In a namespace with ACLs, the plan also plans the merge's commit as
     /// the writer does, against the head that the plan read, and returns the
@@ -265,6 +267,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             operations,
             created_inode_ids,
             temporary_moves,
+            preconditions: file_revisions,
         } = classifier.order(&holders).await?;
         let moves_or_deletes_a_directory = classifier.plans.iter().any(|plan| {
             plan.kind == InodeKind::Directory
@@ -273,13 +276,12 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
                     Some(BindingChange::Move { .. } | BindingChange::Delete { .. })
                 )
         });
-        let preconditions = if moves_or_deletes_a_directory || !temporary_moves.is_empty() {
-            vec![CommitPrecondition::NamespaceHead {
+        let head = (moves_or_deletes_a_directory || !temporary_moves.is_empty()).then(|| {
+            CommitPrecondition::NamespaceHead {
                 expected_head_seq: main.head().seq,
-            }]
-        } else {
-            Vec::new()
-        };
+            }
+        });
+        let preconditions = head.into_iter().chain(file_revisions).collect();
         let conflict = classifier
             .first_conflict
             .take()

@@ -15,7 +15,7 @@ use loonfs_core::limits::HINT_RAISE_INTERVAL_MS;
 use loonfs_core::publish::{NamespaceCommitEngine, WriterPosition};
 use loonfs_core::{Phase, PublicationReport, PublishedManifest};
 use loonfs_types::Commit;
-use loonfs_types::{ChangeSeq, CommitId, ManifestNo, NamespaceId};
+use loonfs_types::{ChangeSeq, ManifestNo, NamespaceId};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -150,11 +150,12 @@ impl NamespaceSession {
         self.publisher.validate_merge(candidate)
     }
 
-    /// Takes the merge slot for a merge under `commit_id`, before the merge
-    /// is planned. Another merge, into any namespace that shares the
-    /// execution budget, gets `commit_queue_full` until the slot is dropped.
-    pub(crate) fn acquire_merge_slot(&self, commit_id: &CommitId) -> Result<MergeSlot> {
-        Ok(MergeSlot(self.publisher.acquire_merge_slot(commit_id)?))
+    /// Takes the merge slot for a merge, before the merge is planned.
+    /// Another merge, into any namespace that shares the execution budget,
+    /// including a retry of this merge, gets `commit_queue_full` until the
+    /// slot is dropped.
+    pub(crate) fn acquire_merge_slot(&self) -> Result<MergeSlot> {
+        Ok(MergeSlot(self.publisher.acquire_merge_slot()?))
     }
 
     /// Submits a merge under `slot`. Admitted work continues if the caller is

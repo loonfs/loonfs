@@ -128,7 +128,7 @@ impl Namespace<Writable> {
         }
         let slot = match slot {
             Some(slot) => slot,
-            None => self.session().acquire_merge_slot(&request.commit_id)?,
+            None => self.session().acquire_merge_slot()?,
         };
         let plan = async {
             let fork = self

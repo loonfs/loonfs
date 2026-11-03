@@ -2711,7 +2711,7 @@ The response is the merge's commit, with its `merge` record, as for every route 
 To merge a fork, the server:
 
 1. Looks up the commit receipt of `commit_id`, and returns the original merge if one was committed, without folding or planning anything.
-2. Takes the merge slot, which one merge at a time keeps from its plan until its commit settles, and returns `commit_queue_full` if another merge has it.
+2. Takes the merge slot, which one merge at a time keeps from its plan until its commit settles, and returns `commit_queue_full` if another merge has it. A retry with the `commit_id` of a merge that's still in flight gets `commit_queue_full` too, and a retry after that merge commits returns it at step 1.
 3. Checks that the fork was made from this namespace, and reads the fork point.
 4. Refuses a fork point below this namespace's retention floor with `rebootstrap_required`.
 5. Reads this namespace's [merge index](glossary.md#merge-index) for the fork's newest merge, which sets where the range starts, and refuses a start below the fork's own retention floor with `rebootstrap_required`.
@@ -2723,14 +2723,14 @@ To merge a fork, the server:
 
 A refused merge commits nothing. The size check comes before the conflict check, so a conflict always refers to a range that fits one commit.
 
-The merge's commit applies the net change with inode-addressed operations, and each operation's precondition is this namespace's current value, such as the binding version of an inode that the merge moves. If this namespace changes between the plan and the commit, the commit fails as any commit does, and the server plans the merge again (step 9). Another writer can also change this namespace in two ways that leave those preconditions' rows unchanged. It can add an item below a directory, or it can rename a directory on the path of a move off a temporary name (described below), which finds the inode and its new directory by path. So when the merge deletes or moves a directory, or moves an inode through a temporary name, the commit also expects this namespace's head to be the head that the plan read, and the commit fails with `stale_head` if the head moved. An inode that the merge creates keeps its ID from the fork, and each content reference comes from the fork's rows, so the merge reads no file bytes.
+The merge's commit applies the net change with inode-addressed operations, and each operation's precondition is this namespace's current value, such as the binding version of an inode that the merge moves. A file's delete also expects the file's revision, because another writer can change the file's content without changing its binding version. If this namespace changes between the plan and the commit, the commit fails as any commit does, and the server plans the merge again (step 9). Another writer can also change this namespace in two ways that leave those preconditions' rows unchanged. It can add an item below a directory, or it can rename a directory on the path of a move off a temporary name (described below), which finds the inode and its new directory by path. So when the merge deletes or moves a directory, or moves an inode through a temporary name, the commit also expects this namespace's head to be the head that the plan read, and the commit fails with `stale_head` if the head moved. An inode that the merge creates keeps its ID from the fork, and each content reference comes from the fork's rows, so the merge reads no file bytes.
 
 The commit returns these codes when this namespace changed after the plan:
 
 | Code | Change since the plan |
 | --- | --- |
 | `stale_head` | The head moved, and the merge deletes or moves a directory, or moves an inode through a temporary name. |
-| `stale_revision` | Another writer changed the content of a file that the merge changes. |
+| `stale_revision` | Another writer changed the content of a file that the merge changes or deletes. |
 | `stale_attributes` | Another writer changed the attributes of an inode that the merge changes. |
 | `stale_access` | Another writer changed the access of an inode that the merge changes. |
 | `binding_version_mismatch` | Another writer moved an inode that the merge moves or deletes. |
@@ -2766,7 +2766,7 @@ Errors beyond those that any commit returns:
 | `rebootstrap_required` | 409 | The fork point is below this namespace's retention floor, or the range's start is below the fork's own floor. The details say which. |
 | `stale_head`, `stale_revision`, `stale_attributes`, `stale_access`, `binding_version_mismatch`, `path_conflict`, `not_deleted` | 409 | This namespace changed between the plan and the commit four times in a row. Retry the merge. |
 | `inode_not_found` | 404 | This namespace changed between the plan and the commit four times in a row, and the last time a deletion hid an inode that the merge changes, or the directory that an inode goes into. Retry the merge. |
-| `commit_queue_full` | 503 | Another merge, into any namespace, has the merge slot while the server plans or commits it, and the server admits one merge at a time. Retry later. |
+| `commit_queue_full` | 503 | Another merge, into any namespace, has the merge slot while the server plans or commits it, and the server admits one merge at a time. That merge can be an earlier request with the same `commit_id`. Retry later. |
 | `invalid_request` | 400 | The fork doesn't exist, was deleted, or wasn't made from this namespace (`param` is `/source_namespace_id`). Or `through_seq` isn't above the range's start and at or below the fork's head, or the planner couldn't order the merge's operations (`param` is `/through_seq`). |
 
 ### 6.15 `GET /grep`

@@ -4,8 +4,8 @@
 use super::state::InodeState;
 use crate::error::{CoreError, Result};
 use loonfs_types::{
-    AttributesRevisionNo, BindingVersion, ChangeSeq, ContentRef, DeleteDirectoryBehavior,
-    DisplayName, FilesystemOperation, InodeId, InodeKind,
+    AttributesRevisionNo, BindingVersion, ChangeSeq, CommitPrecondition, ContentRef,
+    DeleteDirectoryBehavior, DisplayName, FilesystemOperation, InodeId, InodeKind, RevisionNo,
 };
 
 /// What a merge's commit does to one inode.
@@ -36,6 +36,12 @@ pub(super) enum BindingChange {
     },
     Delete {
         expected_binding_version: BindingVersion,
+        /// A file's revision in the merged-into namespace, which the commit
+        /// expects with a precondition, because another writer can change
+        /// the file's content without changing its binding version. A
+        /// directory has none, and the subtree check and the head
+        /// precondition cover its delete.
+        expected_revision_no: Option<RevisionNo>,
     },
     /// The merged-into namespace deleted the inode in an earlier merge of
     /// the fork, and the fork undid the deletion, so the merge undoes it too
@@ -49,6 +55,21 @@ pub(super) enum BindingChange {
 }
 
 impl BindingChange {
+    /// Returns the precondition that the change to `inode_id` needs beyond
+    /// its operation, which only a file's delete has.
+    pub(super) fn precondition(&self, inode_id: InodeId) -> Option<CommitPrecondition> {
+        match self {
+            Self::Delete {
+                expected_revision_no: Some(expected_revision_no),
+                ..
+            } => Some(CommitPrecondition::FileRevision {
+                inode_id,
+                expected_revision_no: *expected_revision_no,
+            }),
+            _ => None,
+        }
+    }
+
     /// Returns the operation that makes the change to `inode_id`.
     pub(super) fn operation(&self, inode_id: InodeId, kind: InodeKind) -> FilesystemOperation {
         match self {
@@ -95,6 +116,7 @@ impl BindingChange {
             },
             Self::Delete {
                 expected_binding_version,
+                ..
             } => FilesystemOperation::DeleteByInode {
                 inode_id,
                 expected_binding_version: expected_binding_version.clone(),

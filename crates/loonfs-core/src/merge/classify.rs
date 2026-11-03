@@ -354,6 +354,7 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
                 }
                 BindingChange::Delete {
                     expected_binding_version,
+                    expected_revision_no: theirs.revision.as_ref().map(|row| row.revision_no),
                 }
             }
         };

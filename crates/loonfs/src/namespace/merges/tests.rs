@@ -143,7 +143,7 @@ async fn a_merge_planned_before_another_commits_fails_the_range_check() {
     let slot = family
         .main
         .session()
-        .acquire_merge_slot(&CommitId::parse("late").expect("commit id"))
+        .acquire_merge_slot()
         .expect("the slot");
     let error = family
         .main
@@ -171,6 +171,85 @@ async fn a_merge_keeps_the_slot_from_its_plan() {
         .submit_merge(planned.candidate, &planned.slot)
         .await
         .expect("the first merge");
+}
+
+/// Checks that a retry of a merge that's still planned or in flight gets
+/// `commit_queue_full`, instead of planning the merge a second time under
+/// the merge slot, and that a retry after the merge commits returns the
+/// merge from its receipt.
+#[tokio::test]
+async fn a_retry_of_a_merge_in_flight_finds_the_slot_taken() {
+    let family = family().await;
+    let request = family.request("merge");
+    let PlannedCommit {
+        candidate, slot, ..
+    } = family.plan(&request).await;
+    let options = MergeForkOptions {
+        commit_id: Some(request.commit_id.clone()),
+        ..MergeForkOptions::default()
+    };
+    let error = family
+        .main
+        .merge_fork_with_options(family.fork.id(), &actor(), &options)
+        .await
+        .expect_err("the merge has the slot");
+    assert_eq!(error.code(), ErrorCode::CommitQueueFull);
+    let merged = family
+        .main
+        .submit_merge(candidate, &slot)
+        .await
+        .expect("the merge");
+    drop(slot);
+    let retried = family
+        .main
+        .merge_fork_with_options(family.fork.id(), &actor(), &options)
+        .await
+        .expect("the retry");
+    assert_eq!(retried, merged);
+}
+
+/// Checks that a merge's delete of a file expects the file's revision. `main`
+/// writes `/a.txt`, which the fork deleted, between the plan and the commit,
+/// the commit fails with `stale_revision`, and the next plan reports the
+/// change as a `content` conflict.
+#[tokio::test]
+async fn a_merge_that_deletes_a_file_plans_again_after_a_write() {
+    let family = family().await;
+    family
+        .fork
+        .delete_path("/a.txt", &actor())
+        .await
+        .expect("delete in the fork");
+    let request = family.request("delete-a");
+    let planned = family.plan(&request).await;
+    family
+        .main
+        .put_file_with_options(
+            "/a.txt",
+            b"theirs",
+            &actor(),
+            &crate::PutFileOptions {
+                behavior: loonfs_types::DestinationBehavior::Replace,
+                ..crate::PutFileOptions::default()
+            },
+        )
+        .await
+        .expect("edit in main");
+
+    let error = family
+        .main
+        .submit_merge(planned.candidate, &planned.slot)
+        .await
+        .expect_err("the file changed");
+    assert_eq!(error.code(), ErrorCode::StaleRevision);
+    let Err(error) = family.main.plan_merge(&request, Some(planned.slot)).await else {
+        panic!("the second plan finds the conflict");
+    };
+    assert_matches!(
+        error,
+        crate::Error::Core(CoreError::MergeConflict { ref conflict, .. })
+            if conflict.kind == MergeConflictKind::Content
+    );
 }
 
 /// Checks that a merge that deletes a directory expects the head that it was
