@@ -169,7 +169,8 @@ impl axum::serve::Listener for TlsListener {
     async fn accept(&mut self) -> (Self::Io, Self::Addr) {
         loop {
             match self.tcp.accept().await {
-                Ok((stream, addr)) => {
+                Ok((mut stream, addr)) => {
+                    super::serve::set_nodelay(&mut stream);
                     self.accept_recovered();
                     return (
                         TlsIo::Handshaking(Box::new(self.acceptor.accept(stream))),

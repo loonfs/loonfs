@@ -10,6 +10,7 @@ use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::middleware::Next;
 use axum::response::Response;
+use axum::serve::ListenerExt as _;
 use axum::Router;
 use loonfs::metrics::{JsonlObjectStoreMetricsRecorder, ObjectStoreMetricsRecorder};
 use loonfs::{LoonFs, Maintenance, SharedObjectStore, Writable, WriterId};
@@ -27,6 +28,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::net::TcpStream;
 use tokio::sync::Notify;
 
 const OBJECT_STORE_METRICS_JSONL_ENV: &str = "LOONFS_OBJECT_STORE_METRICS_JSONL";
@@ -413,7 +415,22 @@ pub async fn serve_with_shutdown(
     );
     match tls {
         Some(tls) => serve_on(TlsListener::new(listener, tls), config, shutdown).await,
-        None => serve_on(listener, config, shutdown).await,
+        None => serve_on(listener.tap_io(set_nodelay), config, shutdown).await,
+    }
+}
+
+/// Turns off Nagle's algorithm on an accepted connection.
+///
+/// hyper writes a streamed response's head before the body's first chunk is
+/// ready, so a read whose content comes from the store leaves in more than
+/// one segment. With Nagle's algorithm on, the kernel holds each later small
+/// segment until the client acknowledges the one before, and a client that
+/// has nothing to send delays that acknowledgement, by 40 ms on Linux. A
+/// connection that refuses the option still serves, only slower, so the
+/// failure is logged and the connection kept.
+pub(super) fn set_nodelay(stream: &mut TcpStream) {
+    if let Err(error) = stream.set_nodelay(true) {
+        tracing::debug!(error = %error, "failed to set `TCP_NODELAY` on an accepted connection");
     }
 }
 
