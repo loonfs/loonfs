@@ -1,10 +1,11 @@
 //! Gram tokenizer and durable segment codecs for LoonFS grep.
 //!
-//! The frozen tokenizer, posting-batch, and row-key grammar is specified in
+//! The frozen tokenizer, the posting batch, and the row grammar of the
+//! index's three row families are specified in
 //! [`docs/specs/format.md` Appendix D](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#appendix-d-grep-extension-format).
 
 use loonfs_types::format::segment_blocks::{read_varint, write_varint, SegmentBlockCodecError};
-use loonfs_types::{InodeId, RevisionNo};
+use loonfs_types::{ChangeSeq, ContentId, ContentRef, InodeId, RevisionNo};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use thiserror::Error;
@@ -89,15 +90,46 @@ pub(crate) fn extract_grams(content: &[u8]) -> BTreeSet<Gram> {
         .collect()
 }
 
-/// One posting: a file revision whose content contains the gram.
+/// One content value: the bytes that a content reference identifies, by the
+/// reference's content ID and size.
 ///
-/// Postings name durable `(inode_id, revision_no)` identity, never paths:
-/// inode identity survives renames and forks, and paths are derived at
-/// query time.
+/// Two references with the same content ID and size refer to the same bytes in
+/// every namespace of a fork family, so an index of content values is valid
+/// in every member. Values order by content ID, then size, which is the order
+/// of their row keys and of a run's value table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct GramPosting {
-    pub inode_id: InodeId,
-    pub revision_no: RevisionNo,
+pub struct ContentValue {
+    /// The content ID's 128-bit value, whose order is the order of the IDs'
+    /// bodies. A value keeps the number rather than the ID's string, because
+    /// steps and queries copy and compare many values.
+    content_id: u128,
+    pub size_bytes: u64,
+}
+
+impl ContentValue {
+    /// The value of the content ID `content_id` at `size_bytes`.
+    pub fn new(content_id: &ContentId, size_bytes: u64) -> Self {
+        Self {
+            content_id: u128::from_be_bytes(content_id.to_be_bytes()),
+            size_bytes,
+        }
+    }
+
+    /// The value that `content_ref` identifies.
+    pub fn of(content_ref: &ContentRef) -> Self {
+        Self::new(&content_ref.content_id, content_ref.size_bytes)
+    }
+
+    /// Returns the value's content ID.
+    pub fn content_id(&self) -> ContentId {
+        ContentId::from_be_bytes(self.content_id.to_be_bytes())
+    }
+
+    /// The value's content ID body and size, which a pruning filter keys a
+    /// value by.
+    pub(crate) fn filter_key(&self) -> String {
+        format!("{}-{:020}", self.content_id().body(), self.size_bytes)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -105,54 +137,41 @@ pub struct GramPosting {
 pub enum IndexGramsCodecError {
     #[error("a posting batch must contain at least one posting")]
     EmptyPostings,
-    #[error(
-        "posting inode {inode}/revision {revision} is not in strictly ascending \
-         order after inode {previous_inode}/revision {previous_revision}"
-    )]
-    PostingsOutOfOrder {
-        previous_inode: InodeId,
-        previous_revision: u64,
-        inode: InodeId,
-        revision: u64,
-    },
+    #[error("posting ordinal {ordinal} is not in strictly ascending order after {previous}")]
+    PostingsOutOfOrder { previous: u64, ordinal: u64 },
     #[error("malformed posting batch: {0}")]
     Malformed(String),
     #[error("invalid gram hex: {reason}")]
     InvalidGram { reason: String },
-    #[error("gram postings row first inode {declared} does not match its batch's {actual}")]
-    FirstInodeMismatch { declared: InodeId, actual: InodeId },
+    #[error("gram postings row first ordinal {declared} does not match its batch's {actual}")]
+    FirstOrdinalMismatch { declared: u64, actual: u64 },
 }
 
-/// Bytes of one posting's inode ID in a batch.
-const POSTING_INODE_ID_BYTES: usize = 16;
-
-/// Packs postings into the frozen batch layout. The slice must be
-/// non-empty and strictly ascending by `(inode_id, revision_no)`.
-pub(crate) fn encode_gram_postings(
-    postings: &[GramPosting],
-) -> Result<Vec<u8>, IndexGramsCodecError> {
-    if postings.is_empty() {
-        return Err(IndexGramsCodecError::EmptyPostings);
-    }
-    // Each posting is its 16 inode ID bytes and a revision varint, which is
-    // usually one byte.
-    let mut bytes = Vec::with_capacity(1 + postings.len() * (POSTING_INODE_ID_BYTES + 1));
-    write_varint(&mut bytes, postings.len() as u64);
-    let mut previous: Option<GramPosting> = None;
-    for posting in postings {
-        if let Some(previous) = previous.filter(|previous| *posting <= *previous) {
-            return Err(out_of_order(previous, *posting));
+/// Packs a run's value ordinals into the batch layout: the count, the first
+/// ordinal, and then the gap from each ordinal to the next. The slice must
+/// be non-empty and strictly ascending.
+pub(crate) fn encode_gram_postings(ordinals: &[u64]) -> Result<Vec<u8>, IndexGramsCodecError> {
+    let (&first, rest) = ordinals
+        .split_first()
+        .ok_or(IndexGramsCodecError::EmptyPostings)?;
+    // A gap is usually one or two bytes.
+    let mut bytes = Vec::with_capacity(2 + ordinals.len() * 2);
+    write_varint(&mut bytes, ordinals.len() as u64);
+    write_varint(&mut bytes, first);
+    let mut previous = first;
+    for &ordinal in rest {
+        if ordinal <= previous {
+            return Err(IndexGramsCodecError::PostingsOutOfOrder { previous, ordinal });
         }
-        bytes.extend_from_slice(&posting.inode_id.to_be_bytes());
-        write_varint(&mut bytes, posting.revision_no.0);
-        previous = Some(*posting);
+        write_varint(&mut bytes, ordinal - previous);
+        previous = ordinal;
     }
     Ok(bytes)
 }
 
 /// Unpacks a posting batch, validating the count, strict ascending order,
 /// and that the batch ends exactly where its bytes do.
-pub(crate) fn decode_gram_postings(bytes: &[u8]) -> Result<Vec<GramPosting>, IndexGramsCodecError> {
+pub(crate) fn decode_gram_postings(bytes: &[u8]) -> Result<Vec<u64>, IndexGramsCodecError> {
     let mut cursor = 0usize;
     let count = read_varint(bytes, &mut cursor).map_err(malformed_varint)?;
     if count == 0 {
@@ -160,24 +179,31 @@ pub(crate) fn decode_gram_postings(bytes: &[u8]) -> Result<Vec<GramPosting>, Ind
     }
     let count = usize::try_from(count)
         .map_err(|_| IndexGramsCodecError::Malformed("posting count exceeds usize".to_owned()))?;
-    if count > bytes.len() / (POSTING_INODE_ID_BYTES + 1) {
-        // Every posting costs at least seventeen bytes past the count varint;
-        // a count beyond that is corrupt, not just implausible.
+    if count > bytes.len() {
+        // Every posting costs at least one byte past the count varint, so a
+        // count beyond that is corrupt, not just implausible.
         return Err(IndexGramsCodecError::Malformed(format!(
             "posting count {count} exceeds batch bytes {}",
             bytes.len()
         )));
     }
-    let mut postings: Vec<GramPosting> = Vec::with_capacity(count);
-    for _ in 0..count {
-        let posting = GramPosting {
-            inode_id: read_inode_id(bytes, &mut cursor)?,
-            revision_no: read_revision_no(bytes, &mut cursor)?,
-        };
-        if let Some(previous) = postings.last().filter(|previous| posting <= **previous) {
-            return Err(out_of_order(*previous, posting));
+    let mut ordinals = Vec::with_capacity(count);
+    let mut previous = read_varint(bytes, &mut cursor).map_err(malformed_varint)?;
+    ordinals.push(previous);
+    for _ in 1..count {
+        let gap = read_varint(bytes, &mut cursor).map_err(malformed_varint)?;
+        if gap == 0 {
+            return Err(IndexGramsCodecError::PostingsOutOfOrder {
+                previous,
+                ordinal: previous,
+            });
         }
-        postings.push(posting);
+        previous = previous.checked_add(gap).ok_or_else(|| {
+            IndexGramsCodecError::Malformed(format!(
+                "posting gap {gap} after ordinal {previous} overflows"
+            ))
+        })?;
+        ordinals.push(previous);
     }
     if cursor != bytes.len() {
         return Err(IndexGramsCodecError::Malformed(format!(
@@ -185,89 +211,203 @@ pub(crate) fn decode_gram_postings(bytes: &[u8]) -> Result<Vec<GramPosting>, Ind
             bytes.len() - cursor
         )));
     }
-    Ok(postings)
-}
-
-fn out_of_order(previous: GramPosting, posting: GramPosting) -> IndexGramsCodecError {
-    IndexGramsCodecError::PostingsOutOfOrder {
-        previous_inode: previous.inode_id,
-        previous_revision: previous.revision_no.0,
-        inode: posting.inode_id,
-        revision: posting.revision_no.0,
-    }
-}
-
-fn read_inode_id(bytes: &[u8], cursor: &mut usize) -> Result<InodeId, IndexGramsCodecError> {
-    let end = cursor
-        .checked_add(POSTING_INODE_ID_BYTES)
-        .filter(|end| *end <= bytes.len())
-        .ok_or_else(|| {
-            IndexGramsCodecError::Malformed("posting inode ID is truncated".to_owned())
-        })?;
-    let inode_id: [u8; POSTING_INODE_ID_BYTES] = bytes[*cursor..end]
-        .try_into()
-        .expect("the slice should have the inode ID's length");
-    *cursor = end;
-    Ok(InodeId::from_be_bytes(inode_id))
-}
-
-fn read_revision_no(bytes: &[u8], cursor: &mut usize) -> Result<RevisionNo, IndexGramsCodecError> {
-    let value = read_varint(bytes, cursor).map_err(malformed_varint)?;
-    RevisionNo::parse(value).map_err(|error| {
-        IndexGramsCodecError::Malformed(format!("invalid posting revision `{value}`: {error}"))
-    })
+    Ok(ordinals)
 }
 
 fn malformed_varint(error: SegmentBlockCodecError) -> IndexGramsCodecError {
     IndexGramsCodecError::Malformed(error.to_string())
 }
 
-/// One row of a gram index segment. Kind-tagged so a later released format
-/// version can define additional row kinds.
+/// One row of a grep index segment, from one of the index's five row
+/// families. Kind-tagged so a later released format version can define
+/// additional row kinds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum IndexRow {
-    GramPostings {
-        gram: Gram,
-        /// The batch's first inode id, repeated from the packed postings so
-        /// row keys derive without decoding the batch. [`Self::postings`]
-        /// validates the pairing.
-        first_inode_id: InodeId,
-        postings: serde_bytes::ByteBuf,
-    },
+    /// A batch of the run's value ordinals whose bytes contain one gram.
+    GramPostings(GramPostingsRow),
+    /// Records that a grep step examined one content value.
+    Text(TextRow),
+    /// Indexes one file revision by the content value that it refers to.
+    ContentRevision(ContentRevisionRow),
+    /// One entry of the run's value table.
+    Value(ValueRow),
+    /// One chunk of the revision filter of a reorganization into the base
+    /// level.
+    Filter(FilterRow),
+}
+
+/// A batch of the ordinals, in the run's value table, of the content values
+/// whose bytes contain one gram, in ascending order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GramPostingsRow {
+    pub gram: Gram,
+    /// The batch's first ordinal, repeated from the packed postings so row
+    /// keys derive without decoding the batch. [`Self::ordinals`] validates
+    /// the pairing.
+    pub first_ordinal: u64,
+    pub postings: serde_bytes::ByteBuf,
+}
+
+impl GramPostingsRow {
+    /// Unpacks and validates this row's batch, including that the declared
+    /// first ordinal matches the batch.
+    pub fn ordinals(&self) -> Result<Vec<u64>, IndexGramsCodecError> {
+        let decoded = decode_gram_postings(&self.postings)?;
+        let actual = decoded[0];
+        if actual != self.first_ordinal {
+            return Err(IndexGramsCodecError::FirstOrdinalMismatch {
+                declared: self.first_ordinal,
+                actual,
+            });
+        }
+        Ok(decoded)
+    }
+}
+
+/// One entry of a run's value table: the content value that the run's
+/// postings refer to by `ordinal`.
+///
+/// A run's table lists each content value that the run has a `texts` row
+/// for once, ordered by content ID and then size, and an entry's ordinal is
+/// its position in that order, from zero.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValueRow {
+    pub ordinal: u64,
+    pub content_id: ContentId,
+    pub size_bytes: u64,
+}
+
+impl ValueRow {
+    /// The content value that this entry describes.
+    pub fn value(&self) -> ContentValue {
+        ContentValue::new(&self.content_id, self.size_bytes)
+    }
+}
+
+/// One chunk of the revision filter that a reorganization into the base level
+/// writes in its output run, so that its later steps prune
+/// `content_revisions` rows without scanning the namespace again.
+///
+/// The chunks' payloads, in chunk order, form the payload of a segment
+/// filter block over the kept revisions' `{inode_id_body}-{revision_no:020}`
+/// keys.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FilterRow {
+    pub chunk: u64,
+    pub payload: serde_bytes::ByteBuf,
+}
+
+/// Records that a grep step examined one content value, and whether the
+/// value passed the eligibility rule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TextRow {
+    pub content_id: ContentId,
+    pub size_bytes: u64,
+    /// Whether the value passed the eligibility rule, so the index has its
+    /// postings.
+    pub eligible: bool,
+}
+
+impl TextRow {
+    /// The content value that this row records.
+    pub fn value(&self) -> ContentValue {
+        ContentValue::new(&self.content_id, self.size_bytes)
+    }
+}
+
+/// Indexes one file revision by the content value that it refers to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContentRevisionRow {
+    pub content_id: ContentId,
+    pub size_bytes: u64,
+    pub inode_id: InodeId,
+    pub revision_no: RevisionNo,
+    /// The sequence of the commit that published the revision.
+    pub committed_seq: ChangeSeq,
+}
+
+impl ContentRevisionRow {
+    /// The content value that the revision refers to.
+    pub fn value(&self) -> ContentValue {
+        ContentValue::new(&self.content_id, self.size_bytes)
+    }
 }
 
 impl IndexRow {
-    /// Packs postings into a row for `gram`. The postings must be
-    /// non-empty and strictly ascending, as for `encode_gram_postings`.
-    pub fn gram_postings(
-        gram: Gram,
-        postings: &[GramPosting],
-    ) -> Result<Self, IndexGramsCodecError> {
-        let first = postings
+    /// Packs a run's value ordinals into a row for `gram`. The ordinals must
+    /// be non-empty and strictly ascending, as for `encode_gram_postings`.
+    pub fn gram_postings(gram: Gram, ordinals: &[u64]) -> Result<Self, IndexGramsCodecError> {
+        let first_ordinal = *ordinals
             .first()
             .ok_or(IndexGramsCodecError::EmptyPostings)?;
-        let first_inode_id = first.inode_id;
-        let bytes = encode_gram_postings(postings)?;
-        Ok(Self::GramPostings {
+        let bytes = encode_gram_postings(ordinals)?;
+        Ok(Self::GramPostings(GramPostingsRow {
             gram,
-            first_inode_id,
+            first_ordinal,
             postings: serde_bytes::ByteBuf::from(bytes),
+        }))
+    }
+
+    /// The `texts` row of `value`.
+    pub fn text(value: &ContentValue, eligible: bool) -> Self {
+        Self::Text(TextRow {
+            content_id: value.content_id(),
+            size_bytes: value.size_bytes,
+            eligible,
+        })
+    }
+
+    /// The `content_revisions` row of one file revision.
+    pub fn content_revision(
+        value: &ContentValue,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+        committed_seq: ChangeSeq,
+    ) -> Self {
+        Self::ContentRevision(ContentRevisionRow {
+            content_id: value.content_id(),
+            size_bytes: value.size_bytes,
+            inode_id,
+            revision_no,
+            committed_seq,
+        })
+    }
+
+    /// The revision filter chunk `chunk`, whose payload is `payload`.
+    pub fn filter(chunk: u64, payload: &[u8]) -> Self {
+        Self::Filter(FilterRow {
+            chunk,
+            payload: serde_bytes::ByteBuf::from(payload.to_vec()),
+        })
+    }
+
+    /// The value table entry of `value` at `ordinal`.
+    pub fn value(ordinal: u64, value: &ContentValue) -> Self {
+        Self::Value(ValueRow {
+            ordinal,
+            content_id: value.content_id(),
+            size_bytes: value.size_bytes,
         })
     }
 
     pub fn row_key(&self) -> String {
         match self {
-            Self::GramPostings {
-                gram,
-                first_inode_id,
-                ..
-            } => format!(
-                "{}{}-{}",
-                lookup::GRAM_ROW_PREFIX,
-                gram.as_hex(),
-                first_inode_id.body()
+            Self::GramPostings(row) => lookup::gram_row_key(row.gram, row.first_ordinal),
+            Self::Text(row) => lookup::text_row_key(&row.content_id, row.size_bytes),
+            Self::ContentRevision(row) => lookup::content_revision_row_key(
+                &row.content_id,
+                row.size_bytes,
+                row.inode_id,
+                row.revision_no,
             ),
+            Self::Value(row) => lookup::value_row_key(row.ordinal),
+            Self::Filter(row) => lookup::filter_row_key(row.chunk),
         }
     }
 
@@ -275,44 +415,43 @@ impl IndexRow {
     /// inserted into the segment's bloom filter.
     pub fn filter_key(&self) -> String {
         match self {
-            Self::GramPostings { gram, .. } => lookup::gram_probe(*gram),
-        }
-    }
-
-    /// Unpacks and validates this row's posting batch, including that the
-    /// declared first inode matches the batch.
-    pub fn postings(&self) -> Result<Vec<GramPosting>, IndexGramsCodecError> {
-        match self {
-            Self::GramPostings {
-                first_inode_id,
-                postings,
-                ..
-            } => {
-                let decoded = decode_gram_postings(postings)?;
-                let actual = decoded
-                    .first()
-                    .expect("decoded posting batches should be nonempty")
-                    .inode_id;
-                if actual != *first_inode_id {
-                    return Err(IndexGramsCodecError::FirstInodeMismatch {
-                        declared: *first_inode_id,
-                        actual,
-                    });
-                }
-                Ok(decoded)
+            Self::GramPostings(row) => lookup::gram_probe(row.gram),
+            Self::Text(row) => lookup::text_probe(&row.content_id),
+            Self::ContentRevision(row) => {
+                lookup::content_revision_probe(&row.content_id, row.size_bytes)
             }
+            Self::Value(_) => lookup::VALUE_FILTER_KEY.to_owned(),
+            Self::Filter(_) => lookup::FILTER_ROWS_FILTER_KEY.to_owned(),
         }
     }
 }
 
-/// Reader-side lookup grammar for gram index rows, defined beside the row
+/// Reader-side lookup grammar for grep index rows, defined beside the row
 /// keys they select: a probe must equal the filter key the writer stored,
 /// and a prefix must be a prefix of the row keys it selects.
 pub mod lookup {
     use super::Gram;
+    use loonfs_types::{ContentId, InodeId, RevisionNo};
 
     /// Scan floor shared by every gram row key.
     pub(crate) const GRAM_ROW_PREFIX: &str = "gram-";
+    /// Scan floor shared by every `texts` row key.
+    pub(crate) const TEXT_ROW_PREFIX: &str = "text-";
+    /// Scan floor shared by every `content_revisions` row key.
+    pub(crate) const CONTENT_REVISION_ROW_PREFIX: &str = "content-revision-";
+    /// Scan floor shared by every value table row key. It sorts after every
+    /// other family's prefix, so a run's value table ends the run's keys.
+    pub(crate) const VALUE_ROW_PREFIX: &str = "value-";
+    /// The filter key of every value table row. The rows share it, so a
+    /// run's table adds one key to a segment's filter, and no lookup probes
+    /// it: a value table's rows end the run's keys, so a segment's key range
+    /// says whether it has any.
+    pub(crate) const VALUE_FILTER_KEY: &str = "value";
+    /// Scan floor shared by every revision filter row key.
+    pub(crate) const FILTER_ROW_PREFIX: &str = "filter-";
+    /// The filter key of every revision filter row, which, like the value
+    /// table's, no lookup probes.
+    pub(crate) const FILTER_ROWS_FILTER_KEY: &str = "filter";
 
     pub(crate) fn gram_probe(gram: Gram) -> String {
         format!("{GRAM_ROW_PREFIX}{}", gram.as_hex())
@@ -321,6 +460,54 @@ pub mod lookup {
     pub(crate) fn gram_prefix(gram: Gram) -> String {
         format!("{}-", gram_probe(gram))
     }
+
+    pub(crate) fn gram_row_key(gram: Gram, first_ordinal: u64) -> String {
+        format!("{}{first_ordinal:020}", gram_prefix(gram))
+    }
+
+    pub(crate) fn value_row_key(ordinal: u64) -> String {
+        format!("{VALUE_ROW_PREFIX}{ordinal:020}")
+    }
+
+    pub(crate) fn filter_row_key(chunk: u64) -> String {
+        format!("{FILTER_ROW_PREFIX}{chunk:020}")
+    }
+
+    pub(crate) fn text_probe(content_id: &ContentId) -> String {
+        format!("{TEXT_ROW_PREFIX}{}", content_id.body())
+    }
+
+    pub(crate) fn text_row_key(content_id: &ContentId, size_bytes: u64) -> String {
+        format!("{}-{size_bytes:020}", text_probe(content_id))
+    }
+
+    pub(crate) fn content_revision_probe(content_id: &ContentId, size_bytes: u64) -> String {
+        format!(
+            "{CONTENT_REVISION_ROW_PREFIX}{}-{size_bytes:020}",
+            content_id.body()
+        )
+    }
+
+    /// The prefix of one content value's `content_revisions` rows.
+    pub(crate) fn content_revision_prefix(content_id: &ContentId, size_bytes: u64) -> String {
+        format!("{}-", content_revision_probe(content_id, size_bytes))
+    }
+
+    /// A `content_revisions` row key, which sorts one value's revisions by
+    /// inode and then newest first.
+    pub(crate) fn content_revision_row_key(
+        content_id: &ContentId,
+        size_bytes: u64,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+    ) -> String {
+        format!(
+            "{}{}-{:020}",
+            content_revision_prefix(content_id, size_bytes),
+            inode_id.body(),
+            u64::MAX - revision_no.0
+        )
+    }
 }
 
 #[cfg(test)]
@@ -328,11 +515,12 @@ mod tests {
     use super::*;
     use std::assert_matches;
 
-    fn posting(inode: u128, revision: u64) -> GramPosting {
-        GramPosting {
-            inode_id: InodeId(inode),
-            revision_no: RevisionNo(revision),
-        }
+    fn content_id(value: u128) -> ContentId {
+        ContentId::from_be_bytes(value.to_be_bytes())
+    }
+
+    fn content_value(content: u128, size_bytes: u64) -> ContentValue {
+        ContentValue::new(&content_id(content), size_bytes)
     }
 
     #[test]
@@ -361,15 +549,9 @@ mod tests {
 
     #[test]
     fn posting_batches_round_trip() {
-        let postings = vec![
-            posting(1, 1),
-            posting(1, 4),
-            posting(7, 2),
-            posting(900, 1),
-            posting(900, 2),
-        ];
-        let bytes = encode_gram_postings(&postings).expect("encode");
-        assert_eq!(decode_gram_postings(&bytes).expect("decode"), postings);
+        let ordinals = vec![0, 1, 4, 900, 70_000, u64::MAX];
+        let bytes = encode_gram_postings(&ordinals).expect("encode");
+        assert_eq!(decode_gram_postings(&bytes).expect("decode"), ordinals);
     }
 
     #[test]
@@ -379,18 +561,21 @@ mod tests {
             Err(IndexGramsCodecError::EmptyPostings)
         );
         assert_matches!(
-            encode_gram_postings(&[posting(2, 1), posting(1, 1)]),
-            Err(IndexGramsCodecError::PostingsOutOfOrder { .. })
+            encode_gram_postings(&[2, 1]),
+            Err(IndexGramsCodecError::PostingsOutOfOrder {
+                previous: 2,
+                ordinal: 1
+            })
         );
         assert_matches!(
-            encode_gram_postings(&[posting(1, 1), posting(1, 1)]),
+            encode_gram_postings(&[1, 1]),
             Err(IndexGramsCodecError::PostingsOutOfOrder { .. })
         );
     }
 
     #[test]
-    fn posting_batch_decode_rejects_trailing_and_truncated_bytes() {
-        let bytes = encode_gram_postings(&[posting(1, 1), posting(2, 1)]).expect("encode");
+    fn posting_batch_decode_rejects_trailing_truncated_and_overflowing_bytes() {
+        let bytes = encode_gram_postings(&[1, 2]).expect("encode");
 
         let mut trailing = bytes.clone();
         trailing.push(0);
@@ -409,81 +594,120 @@ mod tests {
             decode_gram_postings(&[]),
             Err(IndexGramsCodecError::Malformed(_))
         );
+
+        let mut overflowing = Vec::new();
+        for value in [2, u64::MAX, 1] {
+            write_varint(&mut overflowing, value);
+        }
+        assert_matches!(
+            decode_gram_postings(&overflowing),
+            Err(IndexGramsCodecError::Malformed(message)) if message.contains("overflows")
+        );
     }
 
     #[test]
     fn posting_batches_pin_their_byte_layout() {
-        let bytes = encode_gram_postings(&[posting(7, 1), posting(1 << 120, 300)]).expect("encode");
-        let mut expected = vec![2];
-        expected.extend_from_slice(&7_u128.to_be_bytes());
-        expected.push(1);
-        expected.extend_from_slice(&(1_u128 << 120).to_be_bytes());
-        expected.extend_from_slice(&[0xac, 0x02]);
-        assert_eq!(bytes, expected);
+        let bytes = encode_gram_postings(&[7, 8, 300]).expect("encode");
+        assert_eq!(bytes, [3, 7, 1, 0xa4, 0x02]);
     }
 
-    /// Builds a batch from raw `(inode bytes, revision varint)` postings.
-    fn hand_built_batch(postings: &[(u128, u64)]) -> Vec<u8> {
+    #[test]
+    fn posting_batch_decode_rejects_a_zero_gap() {
         let mut bytes = Vec::new();
-        write_varint(&mut bytes, postings.len() as u64);
-        for (inode, revision) in postings {
-            bytes.extend_from_slice(&inode.to_be_bytes());
-            write_varint(&mut bytes, *revision);
+        for value in [2, 5, 0] {
+            write_varint(&mut bytes, value);
         }
-        bytes
-    }
-
-    #[test]
-    fn posting_batch_decode_rejects_oversized_revisions_but_allows_full_inode_range() {
-        let full_inode_range = hand_built_batch(&[(u128::MAX, loonfs_types::MAX_PUBLIC_INTEGER)]);
-        assert_eq!(
-            decode_gram_postings(&full_inode_range).expect("full-range inode id"),
-            vec![posting(u128::MAX, loonfs_types::MAX_PUBLIC_INTEGER)]
-        );
-
-        let first_revision_overflow =
-            hand_built_batch(&[(1, loonfs_types::MAX_PUBLIC_INTEGER + 1)]);
-        let error = decode_gram_postings(&first_revision_overflow)
-            .expect_err("first revision above the public range");
         assert_matches!(
-            error,
-            IndexGramsCodecError::Malformed(message)
-                if message.contains("must be an integer from 0 through 9007199254740991")
+            decode_gram_postings(&bytes),
+            Err(IndexGramsCodecError::PostingsOutOfOrder {
+                previous: 5,
+                ordinal: 5
+            })
         );
-
-        let later_revision_overflow =
-            hand_built_batch(&[(1, 1), (2, loonfs_types::MAX_PUBLIC_INTEGER + 1)]);
-        let error = decode_gram_postings(&later_revision_overflow)
-            .expect_err("later revision above the public range");
-        assert_matches!(
-            error,
-            IndexGramsCodecError::Malformed(message)
-                if message.contains("must be an integer from 0 through 9007199254740991")
-        );
-    }
-
-    #[test]
-    fn posting_batch_decode_rejects_reordered_bytes() {
-        // Valid postings in the wrong order: a repeat, then a lower inode.
-        for postings in [[(5, 3), (5, 3)], [(1 << 100, 1), (5, 1)]] {
-            assert_matches!(
-                decode_gram_postings(&hand_built_batch(&postings)),
-                Err(IndexGramsCodecError::PostingsOutOfOrder { .. })
-            );
-        }
     }
 
     #[test]
     fn row_keys_and_filter_keys_pin_their_shapes() {
-        let row =
-            IndexRow::gram_postings(Gram(*b"fox"), &[posting(42, 7), posting(43, 1)]).expect("row");
-        assert_eq!(row.row_key(), "gram-666f78-0000000000000000000000001a");
+        let value = content_value(42, 7);
+        let row = IndexRow::gram_postings(Gram(*b"fox"), &[3, 9]).expect("row");
+        assert_eq!(row.row_key(), "gram-666f78-00000000000000000003");
         assert_eq!(row.filter_key(), "gram-666f78");
         assert_eq!(lookup::gram_prefix(Gram(*b"fox")), "gram-666f78-");
+        let IndexRow::GramPostings(gram_row) = &row else {
+            panic!("expected a gram postings row");
+        };
+        assert_eq!(gram_row.ordinals().expect("ordinals"), vec![3, 9]);
+
+        let entry = IndexRow::value(12, &value);
+        assert_eq!(entry.row_key(), "value-00000000000000000012");
+        assert_eq!(entry.filter_key(), "value");
+
+        let filter = IndexRow::filter(2, &[1, 2, 3]);
+        assert_eq!(filter.row_key(), "filter-00000000000000000002");
+        assert_eq!(filter.filter_key(), "filter");
+        let IndexRow::Value(entry) = entry else {
+            panic!("expected a value row");
+        };
+        assert_eq!(entry.value(), value);
+
+        let text = IndexRow::text(&value, true);
         assert_eq!(
-            row.postings().expect("postings"),
-            vec![posting(42, 7), posting(43, 1)]
+            text.row_key(),
+            "text-0000000000000000000000001a-00000000000000000007"
         );
+        assert_eq!(text.filter_key(), "text-0000000000000000000000001a");
+
+        let revision = IndexRow::content_revision(&value, InodeId(9), RevisionNo(3), ChangeSeq(12));
+        assert_eq!(
+            revision.row_key(),
+            "content-revision-0000000000000000000000001a-00000000000000000007-00000000000000000000000009-18446744073709551612"
+        );
+        assert_eq!(
+            revision.filter_key(),
+            "content-revision-0000000000000000000000001a-00000000000000000007"
+        );
+        assert!(revision
+            .row_key()
+            .starts_with(&lookup::content_revision_prefix(&value.content_id(), 7)));
+    }
+
+    /// Checks that the five families sort in the order a step writes them,
+    /// with a run's value table last, and that one value's
+    /// `content_revisions` rows sort by inode, then newest revision first,
+    /// apart from another size of the same content ID.
+    #[test]
+    fn content_revision_rows_sort_each_values_revisions_by_inode_newest_first() {
+        let mut keys = [(5, 42, 1), (12, 9, 3), (5, 9, 2), (5, 42, 7), (5, 9, 10)].map(
+            |(size_bytes, inode_id, revision_no)| {
+                let row = IndexRow::content_revision(
+                    &content_value(1, size_bytes),
+                    InodeId(inode_id),
+                    RevisionNo(revision_no),
+                    ChangeSeq(1),
+                );
+                (row.row_key(), size_bytes, inode_id, revision_no)
+            },
+        );
+        keys.sort();
+        assert_eq!(
+            keys.map(|(_, size_bytes, inode_id, revision_no)| (size_bytes, inode_id, revision_no)),
+            [(5, 9, 10), (5, 9, 2), (5, 42, 7), (5, 42, 1), (12, 9, 3)]
+        );
+        let rows = [
+            IndexRow::content_revision(
+                &content_value(9, 1),
+                InodeId(1),
+                RevisionNo(1),
+                ChangeSeq(1),
+            ),
+            IndexRow::filter(u64::MAX, &[0]),
+            IndexRow::gram_postings(Gram(*b"abc"), &[0]).expect("row"),
+            IndexRow::text(&content_value(1, 1), true),
+            IndexRow::value(0, &content_value(1, 1)),
+        ];
+        assert!(rows
+            .windows(2)
+            .all(|pair| pair[0].row_key() < pair[1].row_key()));
     }
 
     #[test]
@@ -493,7 +717,7 @@ mod tests {
         let mut builder = SegmentBlocksBuilder::new(std::num::NonZeroUsize::MIN);
         let mut last_row_key = String::new();
         for gram in [Gram(*b"abc"), Gram(*b"abd"), Gram(*b"abe")] {
-            let row = IndexRow::gram_postings(gram, &[posting(42, 7)]).expect("row");
+            let row = IndexRow::gram_postings(gram, &[7]).expect("row");
             last_row_key = row.row_key();
             builder
                 .push(&last_row_key, &row.filter_key(), &row)
@@ -505,19 +729,17 @@ mod tests {
     }
 
     #[test]
-    fn rows_reject_first_inode_mismatch() {
-        let row = IndexRow::GramPostings {
+    fn rows_reject_first_ordinal_mismatch() {
+        let row = GramPostingsRow {
             gram: Gram(*b"fox"),
-            first_inode_id: InodeId(9),
-            postings: serde_bytes::ByteBuf::from(
-                encode_gram_postings(&[posting(42, 7)]).expect("encode"),
-            ),
+            first_ordinal: 9,
+            postings: serde_bytes::ByteBuf::from(encode_gram_postings(&[42]).expect("encode")),
         };
         assert_matches!(
-            row.postings(),
-            Err(IndexGramsCodecError::FirstInodeMismatch {
-                declared: InodeId(9),
-                actual: InodeId(42)
+            row.ordinals(),
+            Err(IndexGramsCodecError::FirstOrdinalMismatch {
+                declared: 9,
+                actual: 42
             })
         );
     }

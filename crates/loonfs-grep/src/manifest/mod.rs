@@ -14,7 +14,7 @@ pub use codec::{
 };
 pub use error::{GrepEnvelopeCodecError, GrepManifestStateError};
 pub use state::{
-    ChangeFeedResume, GrepHint, GrepIndexState, GrepIndexStatus, GrepManifestState,
+    ChangeFeedResume, GrepHint, GrepIndexState, GrepIndexStatus, GrepManifestState, GrepPruning,
     GrepReorganizeState, GrepSegmentRef,
 };
 pub use store::{

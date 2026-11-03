@@ -1,17 +1,18 @@
 //! Frozen full-pipeline `GrepService` query semantics and budgets.
 
-use crate::common::{control, default_block_cache, grep_with, page_request, GrepHost};
-use loonfs::publish::{CommitCandidate, CommitIntent, FilesystemOperation};
+use crate::common::{
+    control, default_block_cache, grep_with, page_request, publish_same_content_files, GrepHost,
+};
 use loonfs::{
-    CommitId, DestinationBehavior, LoonFs, MaintainMetadataOptions, Maintenance, NamespaceId,
-    PutFileOptions, ReadOnly, SharedObjectStore, Writable,
+    DestinationBehavior, LoonFs, MaintainMetadataOptions, Maintenance, NamespaceId, PutFileOptions,
+    ReadOnly, SharedObjectStore, Writable,
 };
 use loonfs_grep::manifest::load_current_grep_manifest;
 use loonfs_grep::GramIndexBuildPolicy;
 use loonfs_grep::{GrepBuildOutcome, GrepError, GrepReorganizeOutcome, GrepService, GrepWorker};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{first_page, nonzero_usize};
-use loonfs_types::{AbsolutePath, GrepRequest, GrepResponse, GrepScope, PageRequest};
+use loonfs_types::{GrepRequest, GrepResponse, GrepScope, PageRequest};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use tempfile::{tempdir, TempDir};
@@ -102,52 +103,6 @@ impl ServiceHarness {
             expected.to_string(),
             "error text for {case}"
         );
-    }
-}
-
-async fn publish_same_content_files(
-    writer: &LoonFs<Writable>,
-    namespace_id: &NamespaceId,
-    prefix: &str,
-    count: usize,
-    content: &[u8],
-) {
-    let namespace = writer.open_namespace(namespace_id).expect("open namespace");
-    let prepared = namespace
-        .prepare_content(content)
-        .await
-        .expect("prepare shared content");
-    let content_ref = prepared.content_ref().clone();
-    let candidates = (0..count)
-        .map(|index| {
-            CommitCandidate::prepared(
-                CommitIntent::single(
-                    CommitId::generate(),
-                    loonfs_test_support::test_actor(),
-                    None,
-                    FilesystemOperation::PutFile {
-                        path: AbsolutePath::parse(format!("/{prefix}-{index:04}.txt"))
-                            .expect("batch path"),
-                        content: loonfs_types::FileContent::Ref {
-                            content_ref: content_ref.clone(),
-                            source_namespace_id: None,
-                        },
-                        behavior: DestinationBehavior::NoReplace,
-                        expected_inode_id: None,
-                        expected_revision_no: None,
-                    },
-                ),
-                vec![prepared.clone()],
-            )
-        })
-        .collect::<Vec<_>>();
-    // Every candidate is admitted before the publisher's worker can take
-    // any of them, so they coalesce into one publication.
-    let submissions = candidates
-        .into_iter()
-        .map(|candidate| namespace.commit_candidate(candidate));
-    for result in futures::future::join_all(submissions).await {
-        result.expect("publish batch file");
     }
 }
 
@@ -444,8 +399,10 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
         drive_worker_step(&worker, &namespace_id, policy).await;
     }
 
-    // Add a new mid-level run, then leave the large batch below at the delta level.
-    for round in 10..12u32 {
+    // Every file adds a delta run, because each one writes `content_revisions`
+    // and `texts` rows. Leave one mid-level run, then leave the large batch
+    // below at the delta level.
+    for round in 10..14u32 {
         namespace
             .put_file(
                 &format!("/reorganize/filler-{round:02}.txt"),
@@ -461,8 +418,7 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
     // force the 256-file verification budget while preserving delta, mid,
     // and base levels in the same caller-provided snapshot.
     publish_same_content_files(
-        &writer,
-        &namespace_id,
+        &namespace,
         "budget/candidate",
         270,
         b"budget-needle without the final letter\n",
@@ -540,10 +496,12 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
     let mut scanned_paths = BTreeSet::new();
     let mut scan_pages = 0usize;
     let mut cursor = None;
+    // One match for each page, so the scan resumes from a cursor.
     loop {
         let scanned = harness
-            .success_at("allow_scan on and short pattern", &scan_off, cursor)
-            .await;
+            .page(&scan_off, page_request(cursor, 1))
+            .await
+            .expect("allow_scan on and short pattern");
         scan_pages += 1;
         assert!(scanned.tail_scanned);
         scanned_paths.extend(
@@ -621,33 +579,17 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
     assert!(pages > 1);
     assert_eq!(matches, 270);
 
-    let budget_page = harness
-        .success("verified-file budget page", &request("budget-needle.*z"))
+    // The 270 files share one content value, so a page that rejects them all
+    // reads and verifies their bytes once, within one page's budgets.
+    let one_value = harness
+        .success("one value's false positives", &request("budget-needle.*z"))
         .await;
-    assert!(budget_page.matches.is_empty());
-    assert!(
-        budget_page.next_cursor.is_some(),
-        "budget exit must return a cursor"
-    );
-    let budget_end = harness
-        .success_at(
-            "verified-file budget resume",
-            &request("budget-needle.*z"),
-            budget_page.next_cursor.clone(),
-        )
-        .await;
-    assert!(budget_end.next_cursor.is_none());
+    assert!(one_value.matches.is_empty());
+    assert!(one_value.next_cursor.is_none());
 
     // Add 512 more unindexed revisions without advancing the index, taking
     // the existing tail past the exact scan budget.
-    publish_same_content_files(
-        &writer,
-        &namespace_id,
-        "tail/lagging",
-        512,
-        b"tail-only-token bulk\n",
-    )
-    .await;
+    publish_same_content_files(&namespace, "tail/lagging", 512, b"tail-only-token bulk\n").await;
     let stale_request = request("indexed-needle");
     harness
         .error(

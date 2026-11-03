@@ -1,5 +1,7 @@
 # Content search index
 
+The [fork-family grep note](grep-fork-family.md) replaces this note's description of the index's postings, its row families, pruning, and the order of a query's results. In that design, the index records content values instead of file revisions, a posting refers to a value by its position in the value table of the posting's run, and matches are ordered by content value. The rest of this note still describes the approach, the index's lifecycle, and collection.
+
 LoonFS supports grep-style regular-expression queries through a derived content index. The index narrows down the files that a query needs to read, and then the query checks those files against the original pattern. Index maintenance runs separately from metadata maintenance, so a file's metadata commit doesn't wait until its content has been indexed.
 
 The index is stored under the namespace's grep extension prefix. It can be rebuilt from filesystem state, and core readers don't need to decode it to read the namespace. This note explains what the index contains, how it's built, how queries use it, and how its objects are collected. [Grep extension format](../specs/format.md#appendix-d-grep-extension-format) defines the durable encodings.

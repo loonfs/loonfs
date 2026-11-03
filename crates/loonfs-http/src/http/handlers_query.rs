@@ -72,7 +72,7 @@ pub(super) struct GrepQuery {
         path = "/v0/namespaces/{namespace_id}/grep",
         tag = "query",
         summary = "Content search",
-        description = "Searches file content with a regular expression, using the namespace's grep index to narrow the candidates. The server checks each candidate against the full pattern and returns matches in ascending `(inode_id, byte_offset)` order. It scans every revision committed after the index watermark, unless `allow_stale` skips them. The deployment must serve grep, and the namespace must have a materialized, active grep index.",
+        description = "Searches file content with a regular expression, using the namespace's grep index to narrow the candidates. The server checks each candidate against the full pattern and returns matches ordered by the content value of each file's revision, then by `inode_id`, and then by `byte_offset`. It scans every revision committed after the index watermark, unless `allow_stale` skips them. A first page reads the namespace at its head, and a later page reads at the first page's head. The deployment must serve grep, and the namespace must have a materialized, active grep index.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             GrepQuery
@@ -82,6 +82,7 @@ pub(super) struct GrepQuery {
             (status = 400, description = "Invalid pattern, cursor, or scope, both scopes, or an unindexable pattern without allow_scan", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace, scope path, or scope inode not found", body = ErrorResponse),
+            (status = 409, description = "The cursor's sequence is older than the retention floor. Run the search again from its first page.", body = ErrorResponse),
             (status = 410, description = "Namespace deleted", body = ErrorResponse),
             (status = 501, description = "This deployment doesn't serve grep queries, the grep index isn't enabled, or its backfill hasn't completed on this namespace", body = ErrorResponse),
             (status = 500, description = "The grep index is corrupt or its backing store is unavailable", body = ErrorResponse),

@@ -4,7 +4,7 @@ use crate::common::GrepHost;
 use bytes::Bytes;
 use loonfs::engine::{OperationClock, SegmentBlockKind};
 use loonfs::SharedObjectStore;
-use loonfs_grep::codec::{Gram, GramPosting, IndexRow};
+use loonfs_grep::codec::{ContentValue, Gram, IndexRow};
 use loonfs_grep::keyspace::{segment_key, segments_prefix};
 use loonfs_grep::manifest::{
     load_current_grep_manifest, publish_grep_manifest, GrepIndexState, GrepIndexStatus,
@@ -18,41 +18,57 @@ use loonfs_objectstore::{ObjectStore, PutMode};
 use loonfs_test_support::ids::nonzero_usize;
 use loonfs_test_support::stores::{ConcurrencyWatchStore, KeyPredicate, RecordingStore};
 use loonfs_types::format::segment_blocks::{
-    decode_data_block_rows, decode_index_block, BuiltSegmentBlocks, SegmentBlocksBuilder,
+    decode_data_block_rows, decode_index_block, index_blocks_for_key_range,
+    string_prefix_upper_bound, BuiltSegmentBlocks, SegmentBlocksBuilder,
 };
 use loonfs_types::StdMonotonicTimer;
-use loonfs_types::{
-    ChangeSeq, IndexSegmentId, InodeId, ManifestNo, NamespaceId, RevisionNo, RunNo,
-};
+use loonfs_types::{ChangeSeq, ContentId, IndexSegmentId, ManifestNo, NamespaceId, RunNo};
 use std::assert_matches;
 use std::sync::Arc;
 use tempfile::tempdir;
 
+/// Values in the fixture run's value table, which every posting's ordinal
+/// falls within.
+const FIXTURE_VALUES: u64 = 4096;
+
+/// One run's segment: 2048 grams, each with four batches of 256 ordinals,
+/// which a reorganization batches the same way, and the run's value table.
 fn many_block_segment() -> (Vec<IndexRow>, BuiltSegmentBlocks) {
     let mut state = 1u64;
     let mut rows = Vec::new();
     let mut builder = SegmentBlocksBuilder::default();
-    for gram in 0..1024u32 {
-        let mut inode_id = InodeId(0);
-        let postings = (0..128)
+    for gram in 0..2048u32 {
+        let mut ordinal = 0;
+        let postings = (0..1024)
             .map(|_| {
                 state ^= state << 13;
                 state ^= state >> 7;
                 state ^= state << 17;
-                inode_id = InodeId(inode_id.0 + u128::from(state & 0xffff) + 1);
-                GramPosting {
-                    inode_id,
-                    revision_no: RevisionNo((state >> 32).max(1)),
-                }
+                ordinal += 1 + (state & 3);
+                ordinal - 1
             })
             .collect::<Vec<_>>();
         let bytes = gram.to_be_bytes();
-        let row = IndexRow::gram_postings(Gram([bytes[1], bytes[2], bytes[3]]), &postings)
-            .expect("valid posting row");
+        for batch in postings.chunks(256) {
+            rows.push(
+                IndexRow::gram_postings(Gram([bytes[1], bytes[2], bytes[3]]), batch)
+                    .expect("valid posting row"),
+            );
+        }
+    }
+    rows.extend((0..FIXTURE_VALUES).map(|ordinal| {
+        IndexRow::value(
+            ordinal,
+            &ContentValue::new(
+                &ContentId::from_be_bytes(u128::from(ordinal + 1).to_be_bytes()),
+                ordinal + 1,
+            ),
+        )
+    }));
+    for row in &rows {
         builder
-            .push(&row.row_key(), &row.filter_key(), &row)
+            .push(&row.row_key(), &row.filter_key(), row)
             .expect("append row");
-        rows.push(row);
     }
     (rows, builder.build().expect("build segment"))
 }
@@ -117,6 +133,7 @@ async fn reorganize_with_cache(warm_cache: bool) -> usize {
         namespace_id.clone(),
         ManifestNo(1),
         GrepIndexStatus::Active {
+            captured_seq: ChangeSeq(0),
             built_through_seq: ChangeSeq(0),
             next_event_index: 0,
         },
@@ -189,19 +206,21 @@ async fn reorganize_with_cache(warm_cache: bool) -> usize {
             &namespace_id,
             GramIndexBuildPolicy {
                 max_delta_runs: nonzero_usize(8),
-                max_decoded_input_rows_per_step: nonzero_usize(16_384),
+                max_decoded_input_rows_per_step: nonzero_usize(65_536),
                 ..Default::default()
             },
         )
         .await
         .expect("reorganize");
+    // The merge reads every input row but the value tables, which the
+    // step reads whole and replaces with the output's table.
     assert_matches!(
         outcome,
         GrepReorganizeOutcome::UnitPublished {
             merged_rows,
             completed: true,
             ..
-        } if merged_rows == built.row_count * 8
+        } if merged_rows == (built.row_count - FIXTURE_VALUES) * 8
     );
     assert_eq!(host.block_cache.stats(), cache_before);
     let reads = watched.reads();
@@ -211,21 +230,37 @@ async fn reorganize_with_cache(warm_cache: bool) -> usize {
         .iter()
         .filter(|(_, range)| range.is_some_and(|(start, _)| start == 0))
         .count();
-    assert_eq!(gets.len(), 16, "eight index reads and eight data spans");
+    let table_blocks: Vec<_> = index_blocks_for_key_range(
+        &index,
+        "value-",
+        string_prefix_upper_bound("value-").as_deref(),
+    )
+    .map(|position| index[position].block)
+    .collect();
+    assert_eq!(
+        gets.len(),
+        8 * (2 + table_blocks.len()),
+        "each input's index, value table blocks, and data span"
+    );
     for segment in segments {
         let key = segment_key(&namespace_id, &segment.segment_id);
-        let ranges: Vec<_> = gets
+        let mut ranges: Vec<_> = gets
             .iter()
             .filter(|(object_key, _)| object_key == &key)
             .map(|(_, range)| *range)
             .collect();
-        assert_eq!(
-            ranges,
-            vec![
-                Some((built.index.offset, built.bytes.len() as u64)),
-                Some((0, built.filter.offset))
-            ]
+        ranges.sort();
+        let mut expected = vec![
+            Some((0, built.filter.offset)),
+            Some((built.index.offset, built.bytes.len() as u64)),
+        ];
+        expected.extend(
+            table_blocks
+                .iter()
+                .map(|block| Some((block.offset, block.offset + u64::from(block.stored_bytes)))),
         );
+        expected.sort();
+        assert_eq!(ranges, expected);
     }
 
     let current = load_current_grep_manifest(&store, &namespace_id, crate::common::observation())
@@ -255,6 +290,9 @@ async fn reorganize_with_cache(warm_cache: bool) -> usize {
             actual_rows.extend(block.rows);
         }
     }
+    // The first step writes the output's value table in segments of its own,
+    // so the rows are in key order once the segments are.
+    actual_rows.sort_by_cached_key(IndexRow::row_key);
     assert_eq!(actual_rows, expected_rows);
     data_gets
 }

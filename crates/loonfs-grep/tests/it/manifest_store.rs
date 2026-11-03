@@ -307,6 +307,7 @@ fn state(
         namespace_id,
         manifest_no,
         GrepIndexStatus::Active {
+            captured_seq: ChangeSeq(0),
             built_through_seq: ChangeSeq(0),
             next_event_index: 0,
         },
@@ -446,6 +447,7 @@ async fn regressing_successors_fail_on_publication_and_discovery() {
                 namespace_id.clone(),
                 ManifestNo(number),
                 GrepIndexStatus::Active {
+                    captured_seq: ChangeSeq(0),
                     built_through_seq: ChangeSeq(seq),
                     next_event_index: event,
                 },

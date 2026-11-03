@@ -1,6 +1,6 @@
 //! Tests grep through runtime handles and direct `GrepWorker` operations.
 
-use crate::common::{page_request, GrepHost};
+use crate::common::{in_walk_order, page_request, GrepHost};
 use loonfs::publish::{CommitIntent, FilesystemOperation};
 use loonfs::{
     ChangeSeq, CommitId, DestinationBehavior, ErrorCode, LoonFs, MetadataCache, NamespaceId,
@@ -49,44 +49,28 @@ async fn content_blob_keys(store: &SharedObjectStore) -> BTreeSet<String> {
         .collect()
 }
 
-/// Creates an empty file at each of `paths` and returns the paths in the
-/// order a grep walk visits the files, which is ascending inode ID.
-async fn create_in_walk_order<const N: usize>(
+/// Writes `bytes` to a new file at `path`, and returns the key of the one
+/// content object that the write adds.
+async fn put_new_content(
+    store: &SharedObjectStore,
     namespace: &loonfs::Namespace<loonfs::Writable>,
-    paths: [&str; N],
-) -> [String; N] {
-    let mut created = Vec::with_capacity(N);
-    for path in paths {
-        namespace
-            .put_file(path, b"", &loonfs_test_support::test_actor())
-            .await
-            .expect("create an empty file");
-        let inode_id = namespace.stat(path).await.expect("stat the file").inode_id;
-        created.push((inode_id, path.to_owned()));
-    }
-    created.sort();
-    created
-        .into_iter()
-        .map(|(_, path)| path)
-        .collect::<Vec<_>>()
-        .try_into()
-        .expect("one path for each file")
-}
-
-/// Replaces the contents of the file at `path`, which keeps its inode ID.
-async fn replace_file(namespace: &loonfs::Namespace<loonfs::Writable>, path: &str, bytes: &[u8]) {
+    path: &str,
+    bytes: &[u8],
+) -> String {
+    let blobs_before = content_blob_keys(store).await;
     namespace
-        .put_file_with_options(
-            path,
-            bytes,
-            &loonfs_test_support::test_actor(),
-            &loonfs::PutFileOptions {
-                behavior: DestinationBehavior::Replace,
-                ..loonfs::PutFileOptions::default()
-            },
-        )
+        .put_file(path, bytes, &loonfs_test_support::test_actor())
         .await
-        .expect("replace the file");
+        .expect("write the file");
+    let new_blobs: Vec<String> = content_blob_keys(store)
+        .await
+        .difference(&blobs_before)
+        .cloned()
+        .collect();
+    let [content_key] = new_blobs.as_slice() else {
+        panic!("the write must add exactly one content blob, got {new_blobs:?}");
+    };
+    content_key.clone()
 }
 
 async fn drive_worker_step(
@@ -775,20 +759,22 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
     let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    // The test doesn't rely on how LoonFS orders inode IDs, so the walk order
-    // decides which file plays alpha. Two matches in alpha, so a one-match
-    // page fills before the walk reaches bravo.
-    let [alpha, bravo] = create_in_walk_order(&namespace, ["/alpha.txt", "/bravo.txt"]).await;
-    replace_file(&namespace, &alpha, b"needle one\nneedle two\n").await;
-    let blobs_before_bravo = content_blob_keys(&store).await;
-    replace_file(&namespace, &bravo, b"needle three\n").await;
-    let new_blobs: Vec<String> = content_blob_keys(&store)
-        .await
-        .difference(&blobs_before_bravo)
-        .cloned()
-        .collect();
-    let [bravo_content_key] = new_blobs.as_slice() else {
-        panic!("bravo must add exactly one content blob, got {new_blobs:?}");
+    // Content IDs are random, so the walk order decides which file plays
+    // alpha. Each file has two matches, so a one-match page fills before the
+    // walk reaches bravo.
+    let mut content_keys = std::collections::BTreeMap::new();
+    for (path, bytes) in [
+        ("/one.txt", b"needle one\nneedle two\n"),
+        ("/two.txt", b"needle six\nneedle ten\n"),
+    ] {
+        content_keys.insert(path, put_new_content(&store, &namespace, path, bytes).await);
+    }
+    let [alpha, bravo] = in_walk_order(&namespace, ["/one.txt", "/two.txt"]).await;
+    let bravo_content_key = &content_keys[bravo.as_str()];
+    let alpha_first_line = if alpha == "/one.txt" {
+        "needle one"
+    } else {
+        "needle six"
     };
 
     host.enable_grep_index(&namespace_id).await.expect("enable");
@@ -799,7 +785,7 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
         .grep(&namespace_id, &request("needle"), first_page())
         .await
         .expect("grep before the fault");
-    assert_eq!(healthy.matches.len(), 3);
+    assert_eq!(healthy.matches.len(), 4);
 
     // Break bravo's content read out from under the query.
     store
@@ -827,7 +813,7 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
         .expect("a page that fills before the failed candidate must succeed");
     assert_eq!(response.matches.len(), 1);
     assert_eq!(response.matches[0].path, alpha.as_str());
-    assert_eq!(response.matches[0].line, "needle one");
+    assert_eq!(response.matches[0].line, alpha_first_line);
     let cursor = response
         .next_cursor
         .expect("a truncated page must carry a cursor");
@@ -886,12 +872,14 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
     let namespace = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");
-    // The test doesn't rely on how LoonFS orders inode IDs, so the walk order
-    // decides which file plays each part: alpha first, the oversized bravo
-    // next, and charlie last.
-    let [alpha, bravo, charlie] =
-        create_in_walk_order(&namespace, ["/alpha.txt", "/bravo.big", "/charlie.txt"]).await;
-    replace_file(&namespace, &alpha, b"a needle in alpha\n").await;
+    namespace
+        .put_file(
+            "/alpha.txt",
+            b"a needle in alpha\n",
+            &loonfs_test_support::test_actor(),
+        )
+        .await
+        .expect("write alpha");
     host.enable_grep_index(&namespace_id).await.expect("enable");
     for _ in 0..2 {
         drive_worker_step(&host.worker, &namespace_id, GramIndexBuildPolicy::default()).await;
@@ -902,19 +890,31 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
     let oversized_bytes =
         b"needle\n".repeat(loonfs_types::usize_from_u64(MAX_INDEX_GRAMS_FILE_BYTES) / 7 + 1);
     assert!(oversized_bytes.len() as u64 > MAX_INDEX_GRAMS_FILE_BYTES);
-    let blobs_before_bravo = content_blob_keys(&store).await;
-    replace_file(&namespace, &bravo, &oversized_bytes).await;
-    let new_blobs: Vec<String> = content_blob_keys(&store)
+    let oversized_content_key =
+        put_new_content(&store, &namespace, "/bravo.big", &oversized_bytes).await;
+    namespace
+        .put_file(
+            "/charlie.txt",
+            b"a needle in charlie\n",
+            &loonfs_test_support::test_actor(),
+        )
         .await
-        .difference(&blobs_before_bravo)
-        .cloned()
-        .collect();
-    let [oversized_content_key] = new_blobs.as_slice() else {
-        panic!("the oversized write must add exactly one content blob, got {new_blobs:?}");
-    };
-    replace_file(&namespace, &charlie, b"a needle in charlie\n").await;
+        .expect("write charlie");
     // No step after these writes: bravo and charlie stay in the unindexed
     // tail, where no gram filter screens candidates before verification.
+
+    // Content IDs are random, so the walk order decides which matching file
+    // comes first, and where the oversized file falls.
+    let walk = in_walk_order(&namespace, ["/alpha.txt", "/bravo.big", "/charlie.txt"]).await;
+    let matching: Vec<&String> = walk.iter().filter(|path| *path != "/bravo.big").collect();
+    let second_position = walk
+        .iter()
+        .position(|path| path == matching[1])
+        .expect("the second matching file is in the walk");
+    let before_second = namespace
+        .stat(&walk[second_position - 1])
+        .await
+        .expect("stat the file before the second match");
 
     raw_store.reset();
 
@@ -923,19 +923,17 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
         .await
         .expect("first page");
     assert_eq!(page_one.matches.len(), 1);
-    assert_eq!(page_one.matches[0].path, alpha.as_str());
+    assert_eq!(page_one.matches[0].path, matching[0].as_str());
     let cursor_token = page_one
         .next_cursor
         .clone()
         .expect("a truncated page must carry a cursor");
 
-    // The cursor already stands past the oversized file: fully scanned,
-    // never to be re-verified by a later page.
+    // The cursor stands after the last file before the second match, so
+    // when the oversized file falls between the two matches, the cursor is
+    // past it: fully scanned, never to be re-verified by a later page.
     let cursor: GrepPageCursor = decode_cursor(&cursor_token).expect("decode grep cursor");
-    assert!(
-        cursor.last_inode_id > page_one.matches[0].inode_id,
-        "the cursor must have advanced past the oversized candidate"
-    );
+    assert_eq!(cursor.last_inode_id, before_second.inode_id);
     assert_eq!(cursor.resume, GrepCursorPosition::AfterFile {});
 
     let page_two = host
@@ -947,12 +945,8 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
         .await
         .expect("second page");
     assert_eq!(page_two.matches.len(), 1);
-    assert_eq!(page_two.matches[0].path, charlie.as_str());
+    assert_eq!(page_two.matches[0].path, matching[1].as_str());
     assert!(page_two.next_cursor.is_none());
-    assert!(
-        cursor.last_inode_id < page_two.matches[0].inode_id,
-        "the first page's cursor must sit between alpha and charlie"
-    );
 
     let fetched_during_greps = raw_store.take_get_keys();
     assert!(
@@ -962,7 +956,7 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
     assert!(
         fetched_during_greps
             .iter()
-            .all(|key| key != oversized_content_key),
+            .all(|key| *key != oversized_content_key),
         "no content GET may touch the oversized object: {fetched_during_greps:?}"
     );
 
@@ -1064,11 +1058,8 @@ async fn reorganization_does_not_warm_the_query_cache() {
 #[tokio::test]
 async fn a_cold_reorganization_fans_out_its_segment_opens_within_the_io_cap() {
     let temp_dir = tempdir().expect("tempdir");
-    let raw_store = Arc::new(ConcurrencyWatchStore::new(
-        LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
-        index_segment_keys(),
-    ));
-    let store: loonfs::SharedObjectStore = raw_store.clone();
+    let store: loonfs::SharedObjectStore =
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local-fs store"));
     let namespace_id = NamespaceId::parse("grams-reorganization-fan-out").expect("namespace id");
 
     let writer = LoonFs::builder_with_store(store.clone())
@@ -1091,27 +1082,48 @@ async fn a_cold_reorganization_fans_out_its_segment_opens_within_the_io_cap() {
         .expect("open namespace");
     host.enable_grep_index(&namespace_id).await.expect("enable");
 
-    // Each round writes one file and runs one build and reorganization step.
-    // The first segment read marks the start of reorganization.
-    let mut rounds = 0u32;
-    while raw_store.reads().peak_in_flight == 0 {
-        rounds += 1;
-        assert!(
-            rounds <= 24,
-            "the delta threshold must trigger reorganization within a bounded number of rounds"
-        );
+    // Each round writes one file, and its build step writes one delta run,
+    // until the delta level has enough runs to reorganize.
+    let policy = GramIndexBuildPolicy::default();
+    for round in 0..policy.max_delta_runs.get() {
         namespace
             .put_file(
-                &format!("/notes/needle-{rounds:02}.txt"),
-                format!("a needle numbered {rounds}\n").as_bytes(),
+                &format!("/notes/needle-{round:02}.txt"),
+                format!("a needle numbered {round}\n").as_bytes(),
                 &loonfs_test_support::test_actor(),
             )
             .await
             .expect("write file");
-        drive_worker_step(&host.worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+        assert_matches!(
+            host.worker
+                .build_step(&namespace_id, policy)
+                .await
+                .expect("grep build step"),
+            GrepBuildOutcome::Published { .. }
+        );
     }
 
-    let peak = raw_store.reads().peak_in_flight;
+    // The reorganization runs through a store that watches only its own
+    // segment reads, because build steps read segments too.
+    let watched = Arc::new(ConcurrencyWatchStore::new(
+        store.clone(),
+        index_segment_keys(),
+    ));
+    let watched_store: loonfs::SharedObjectStore = watched.clone();
+    let reorganizer = GrepHost::new(&watched_store, "grams-fan-out-reorganizer").await;
+    assert_matches!(
+        reorganizer
+            .worker
+            .reorganize_step(&namespace_id, policy)
+            .await
+            .expect("grep reorganization step"),
+        GrepReorganizeOutcome::UnitPublished {
+            completed: true,
+            ..
+        }
+    );
+
+    let peak = watched.reads().peak_in_flight;
     assert!(
         peak > 1,
         "a cold reorganization's segment opens must overlap, got a serial peak of {peak}"

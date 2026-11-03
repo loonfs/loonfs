@@ -311,19 +311,41 @@ fn decode_data_cache_block(
     })
 }
 
+/// Loads the data blocks of `entries` through `cache` when it is set, and
+/// reads each run of adjacent blocks that the cache doesn't have in one
+/// ranged read of at most `MAX_BULK_LOAD_BYTES`.
 pub(crate) async fn load_data_block_span<S: ObjectStore + ?Sized>(
     store: &S,
+    cache: Option<&GrepBlockCache>,
     object_key: &str,
+    segment_id: &IndexSegmentId,
     entries: &[SegmentIndexEntry],
 ) -> Result<Vec<Arc<DecodedDataBlock<IndexRow>>>> {
-    let mut blocks = Vec::with_capacity(entries.len());
+    let key =
+        |entry: &SegmentIndexEntry| cache_key(segment_id, SegmentBlockKind::Data, &entry.block);
+    let mut blocks = entries
+        .iter()
+        .map(
+            |entry| match cache.and_then(|cache| cache.get(&key(entry))) {
+                Some(cached) => cached
+                    .data()
+                    .map(Some)
+                    .ok_or_else(|| cache_kind_corrupt(object_key, "data")),
+                None => Ok(None),
+            },
+        )
+        .collect::<Result<Vec<_>>>()?;
     let mut cursor = 0;
     while cursor < entries.len() {
+        if blocks[cursor].is_some() {
+            cursor += 1;
+            continue;
+        }
         let start = cursor;
         let mut handle = entries[start].block;
         let mut span_bytes = u64::from(handle.stored_bytes);
         cursor += 1;
-        while cursor < entries.len() {
+        while cursor < entries.len() && blocks[cursor].is_none() {
             let next = entries[cursor].block;
             let next_span_bytes = span_bytes + u64::from(next.stored_bytes);
             if handle.offset.checked_add(span_bytes) != Some(next.offset)
@@ -337,15 +359,32 @@ pub(crate) async fn load_data_block_span<S: ObjectStore + ?Sized>(
         handle.stored_bytes = u32::try_from(span_bytes)
             .expect("a span should fit the byte limit or contain one u32-sized block");
         let bytes = load_index_section_bytes(store, object_key, &handle).await?;
-        for entry in &entries[start..cursor] {
+        for (entry, slot) in entries[start..cursor]
+            .iter()
+            .zip(&mut blocks[start..cursor])
+        {
             let offset = loonfs_types::usize_from_u64(entry.block.offset - handle.offset);
             let stored = &bytes[offset..offset + entry.block.stored_bytes as usize];
-            let block = decode_data_block_rows::<IndexRow>(stored, &entry.block)
-                .map_err(|error| index_segment_corrupt(object_key, "data block", &error))?;
-            blocks.push(Arc::new(block));
+            let block = Arc::new(
+                decode_data_block_rows::<IndexRow>(stored, &entry.block)
+                    .map_err(|error| index_segment_corrupt(object_key, "data block", &error))?,
+            );
+            if let Some(cache) = cache {
+                cache.insert(
+                    key(entry),
+                    DecodedGrepBlock::Data {
+                        block: Arc::clone(&block),
+                        decoded_bytes: entry.block.decoded_bytes as usize,
+                    },
+                );
+            }
+            *slot = Some(block);
         }
     }
-    Ok(blocks)
+    Ok(blocks
+        .into_iter()
+        .map(|block| block.expect("every block should be cached or loaded"))
+        .collect())
 }
 
 fn cache_kind_corrupt(object_key: &str, expected: &str) -> GrepError {
@@ -359,25 +398,30 @@ fn cache_kind_corrupt(object_key: &str, expected: &str) -> GrepError {
 #[cfg(test)]
 mod tests {
     use super::{
-        load_data_block_span, load_index_section_bytes, BlockHandle, GrepError, IndexRow,
-        MAX_BULK_LOAD_BYTES,
+        cache_key, load_data_block_span, load_index_section_bytes, BlockHandle, GrepError,
+        IndexRow, MAX_BULK_LOAD_BYTES,
     };
-    use crate::codec::{Gram, GramPosting};
+    use crate::cache::GrepBlockCache;
+    use crate::codec::Gram;
     use bytes::Bytes;
+    use loonfs::engine::{DecodedBlockCacheConfig, SegmentBlockKind};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::{ByteRange, ObjectStore, PutMode, Result as StoreResult};
     use loonfs_test_support::stores::{
         delegate_object_store, ConcurrencyWatchStore, KeyPredicate, RecordingStore,
     };
     use loonfs_types::format::segment_blocks::{decode_index_block, SegmentBlocksBuilder};
-    use loonfs_types::{InodeId, RevisionNo};
+    use loonfs_types::IndexSegmentId;
     use std::assert_matches;
     use std::num::NonZeroUsize;
     use std::sync::Arc;
     use tempfile::tempdir;
 
+    /// Checks that a span read stays within the byte limit, and that a load
+    /// through a cache reads only the blocks that the cache doesn't have, in
+    /// spans of adjacent blocks.
     #[tokio::test]
-    async fn data_spans_obey_the_byte_limit() {
+    async fn data_spans_obey_the_byte_limit_and_skip_cached_blocks() {
         let temp_dir = tempdir().expect("tempdir");
         let watched = Arc::new(ConcurrencyWatchStore::new(
             LocalFsStore::new(temp_dir.path()).expect("store"),
@@ -389,17 +433,16 @@ mod tests {
         let mut rows = Vec::new();
         let mut state = 1u64;
         for gram in 0..12 {
-            let mut inode_id = InodeId(0);
-            let postings = (0..65_536)
+            // Gaps of up to 2^24 take about four bytes each, so a row is
+            // about 750 KiB and a span reads five rows.
+            let mut ordinal = 0;
+            let postings = (0..196_608)
                 .map(|_| {
                     state ^= state << 13;
                     state ^= state >> 7;
                     state ^= state << 17;
-                    inode_id = InodeId(inode_id.0 + u128::from(state & 0xffff) + 1);
-                    GramPosting {
-                        inode_id,
-                        revision_no: RevisionNo((state >> 32).max(1)),
-                    }
+                    ordinal += 1 + (state & 0xff_ffff);
+                    ordinal
                 })
                 .collect::<Vec<_>>();
             let row =
@@ -426,7 +469,9 @@ mod tests {
             .await
             .expect("write segment");
 
-        let blocks = load_data_block_span(&store, object_key, &entries)
+        let cache = GrepBlockCache::new(DecodedBlockCacheConfig::new(64 << 20));
+        let segment_id = IndexSegmentId::generate();
+        let blocks = load_data_block_span(&store, Some(&cache), object_key, &segment_id, &entries)
             .await
             .expect("load spans");
         assert_eq!(watched.reads().peak_in_flight, 1);
@@ -455,6 +500,39 @@ mod tests {
                 .count();
             assert_eq!(reads, 1);
         }
+
+        for position in [1, 2, 5] {
+            cache.invalidate(&cache_key(
+                &segment_id,
+                SegmentBlockKind::Data,
+                &entries[position].block,
+            ));
+        }
+        let reloaded =
+            load_data_block_span(&store, Some(&cache), object_key, &segment_id, &entries)
+                .await
+                .expect("reload spans");
+        assert_eq!(
+            reloaded
+                .iter()
+                .flat_map(|block| &block.rows)
+                .collect::<Vec<_>>(),
+            rows.iter().collect::<Vec<_>>()
+        );
+        let end = |position: usize| {
+            entries[position].block.offset + u64::from(entries[position].block.stored_bytes)
+        };
+        assert_eq!(
+            store
+                .take_gets()
+                .into_iter()
+                .map(|(_, range)| range)
+                .collect::<Vec<_>>(),
+            [
+                Some((entries[1].block.offset, end(2))),
+                Some((entries[5].block.offset, end(5)))
+            ]
+        );
     }
 
     #[derive(Debug)]

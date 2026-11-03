@@ -1,12 +1,13 @@
 //! GrepWorker lifecycle, rebootstrap, query contracts, and GC boundaries.
 
 use crate::common::{
-    collector_at, control, default_block_cache, grep_with, page_request, GrepHost,
+    collector_at, control, default_block_cache, fold_wal_and_advance_retention, grep_with,
+    page_request, GrepHost,
 };
 use bytes::Bytes;
 use loonfs::{
-    CreateNamespaceOptions, ErrorCode, LoonFs, MaintainMetadataOptions, Maintenance, NamespaceId,
-    PutFileOptions, SharedObjectStore, UndeleteDestination, UndeleteOptions,
+    CreateNamespaceOptions, ErrorCode, LoonFs, NamespaceId, PutFileOptions, SharedObjectStore,
+    UndeleteDestination, UndeleteOptions,
 };
 use loonfs_grep::keyspace::{
     grep_prefix, hint_key, manifest_key, manifests_prefix, segment_key, segments_prefix,
@@ -134,32 +135,6 @@ async fn new_query_page(
     .await
 }
 
-/// Folds the tail through `maintenance`, then advances the floor to the head
-/// through a handle whose wall clock is one default grace window ahead, so the
-/// advance can pass every commit made before the call.
-async fn fold_wal_and_advance_retention(
-    store: &SharedObjectStore,
-    maintenance: &Maintenance,
-    namespace_id: &NamespaceId,
-) -> ChangeSeq {
-    maintenance
-        .maintain_metadata_with_options(
-            namespace_id,
-            &MaintainMetadataOptions {
-                max_wal_tail_objects: std::num::NonZeroU64::MIN,
-                ..Default::default()
-            },
-        )
-        .await
-        .expect("fold wal");
-    loonfs::test_support::maintenance_past_the_grace_window(store.clone())
-        .await
-        .advance_retention_floor(namespace_id)
-        .await
-        .expect("advance retention")
-        .retention_floor_seq
-}
-
 /// Clears what differs between the responses of two namespaces that contain
 /// the same files: the namespace ID, and the inode IDs, which each namespace
 /// generates separately and which also set the order of the matches.
@@ -174,8 +149,11 @@ fn normalize_namespace(mut response: GrepResponse) -> GrepResponse {
     response
 }
 
+/// A query loads the index before it takes its read view, so a commit and an
+/// index build during the index load are both in the view, and an index
+/// status read during a build sees the index enabled.
 #[tokio::test]
-async fn an_index_built_past_a_stale_read_view_stays_enabled_and_refreshes_queries() {
+async fn a_query_takes_its_read_view_after_it_loads_the_index() {
     let directory = tempdir().expect("directory");
     let base: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
     let namespace_id = NamespaceId::parse("index-ahead").expect("namespace id");
@@ -212,9 +190,13 @@ async fn an_index_built_past_a_stale_read_view_stays_enabled_and_refreshes_queri
                 let response = query_host
                     .grep(&namespace_id, &request("needle"), first_page())
                     .await
-                    .expect("query takes a new read view");
-                assert_eq!(response.head_seq, response.built_through_seq);
-                assert_eq!(response.matches.len(), 2);
+                    .expect("query reads at its view's head");
+                assert!(response.head_seq >= response.built_through_seq);
+                assert_eq!(
+                    response.matches.len(),
+                    2,
+                    "the file committed during the index load is in the view"
+                );
             } else {
                 let index = query_host
                     .worker
@@ -240,8 +222,10 @@ async fn an_index_built_past_a_stale_read_view_stays_enabled_and_refreshes_queri
     }
 }
 
+/// A file committed while a query loads the index is in the query's read
+/// view, which the query takes afterwards.
 #[tokio::test]
-async fn grep_query_keeps_its_read_view_when_a_matching_file_commits_mid_query() {
+async fn a_file_committed_during_a_querys_index_load_is_in_its_view() {
     let temp_dir = tempdir().expect("tempdir");
     let base = Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let base_store: SharedObjectStore = base.clone();
@@ -293,15 +277,9 @@ async fn grep_query_keeps_its_read_view_when_a_matching_file_commits_mid_query()
     let committed = committed.expect("publish matching file while query is paused");
     let paused_response = paused_response.expect("paused query completes");
 
-    assert!(paused_response.matches.is_empty());
-    assert!(paused_response.head_seq < committed.committed_seq);
-
-    let latest = new_query(&query_store, &namespace_id, &grep_request)
-        .await
-        .expect("later query sees committed file");
-    assert_eq!(latest.head_seq, committed.committed_seq);
-    assert_eq!(latest.matches.len(), 1);
-    assert_eq!(latest.matches[0].path, "/later.txt");
+    assert_eq!(paused_response.head_seq, committed.committed_seq);
+    assert_eq!(paused_response.matches.len(), 1);
+    assert_eq!(paused_response.matches[0].path, "/later.txt");
 }
 
 #[tokio::test]
@@ -2616,6 +2594,7 @@ async fn gc_preserves_discovery_and_applies_manifest_and_segment_age_rules() {
             namespace_id.clone(),
             ManifestNo(number),
             GrepIndexStatus::Active {
+                captured_seq: ChangeSeq(0),
                 built_through_seq: ChangeSeq(0),
                 next_event_index: 0,
             },
@@ -2807,6 +2786,7 @@ async fn gc_keeps_a_superseded_manifest_and_its_segments_while_its_successor_is_
             namespace_id.clone(),
             ManifestNo(number),
             GrepIndexStatus::Active {
+                captured_seq: ChangeSeq(0),
                 built_through_seq: ChangeSeq(0),
                 next_event_index: 0,
             },
@@ -3014,6 +2994,166 @@ async fn grep_filters_candidates_the_subject_cannot_read() {
             .map(|found| found.path.as_str())
             .collect::<Vec<_>>(),
         ["/team/file"]
+    );
+}
+
+/// A later page reads at its cursor's sequence, but it serves a file whose
+/// content hasn't changed since then with the subject's rights at the head,
+/// so a subject without the `history` right follows a cursor over unchanged
+/// files, and the page leaves out a file whose content changed.
+#[tokio::test]
+async fn a_subject_without_history_follows_a_cursor_over_unchanged_files() {
+    use loonfs::publish::{CommitIntent, FilesystemOperation};
+    use loonfs_types::{
+        AccessGrants, AccessRight, AccessRights, CommitId, NamespaceAccess, PrincipalId,
+        PrincipalScope, PrincipalSet, Subject, SubjectId,
+    };
+    let subject = |principal: &str| Subject {
+        principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
+        subject_id: SubjectId::parse(principal).expect("subject"),
+        principals: PrincipalSet::new(BTreeSet::from([
+            PrincipalId::parse(principal).expect("principal")
+        ]))
+        .expect("principals"),
+    };
+    let grants = |principal: &str, rights: &[AccessRight]| {
+        AccessGrants::new(std::collections::BTreeMap::from([(
+            PrincipalId::parse(principal).expect("principal"),
+            AccessRights::from_iter(rights.iter().copied()),
+        )]))
+        .expect("grants")
+    };
+    let temp_dir = tempdir().expect("tempdir");
+    let store: SharedObjectStore = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let writer = LoonFs::builder_with_store(store.clone())
+        .writer_id(loonfs_test_support::ids::writer_id("grep-pages-access"))
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
+        .build()
+        .await
+        .expect("writer");
+    let namespace_id = NamespaceId::parse("grep-pages-access").expect("namespace");
+    writer
+        .create_namespace_with_options(
+            &namespace_id,
+            &loonfs_test_support::test_actor(),
+            &CreateNamespaceOptions {
+                access: NamespaceAccess::Acl {
+                    principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
+                    root_grants: grants("prn_root", &[AccessRight::Admin]),
+                },
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("namespace");
+    let namespace = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    let commit = |operation| {
+        namespace.commit(
+            CommitIntent::single(
+                CommitId::generate(),
+                loonfs_test_support::test_actor(),
+                None,
+                operation,
+            )
+            .with_subject(subject("prn_root")),
+        )
+    };
+    commit(FilesystemOperation::CreateDirectory {
+        path: AbsolutePath::parse("/team").expect("path"),
+        parents: false,
+    })
+    .await
+    .expect("directory");
+    commit(FilesystemOperation::UpdateAccess {
+        path: AbsolutePath::parse("/team").expect("path"),
+        boundary: false,
+        grants: grants("viewer", &[AccessRight::Read]),
+        expected_inode_id: None,
+        expected_access_revision_no: None,
+    })
+    .await
+    .expect("grant read");
+    let namespace = &namespace;
+    let put = |path: &'static str, bytes: &'static [u8]| async move {
+        let content = namespace.prepare_content(bytes).await.expect("content");
+        namespace
+            .commit_prepared(
+                CommitIntent::single(
+                    CommitId::generate(),
+                    loonfs_test_support::test_actor(),
+                    None,
+                    FilesystemOperation::PutFile {
+                        path: AbsolutePath::parse(path).expect("path"),
+                        content: loonfs_types::FileContent::Ref {
+                            content_ref: content.content_ref().clone(),
+                            source_namespace_id: None,
+                        },
+                        behavior: loonfs::DestinationBehavior::Replace,
+                        expected_inode_id: None,
+                        expected_revision_no: None,
+                    },
+                )
+                .with_subject(subject("prn_root")),
+                vec![content],
+            )
+            .await
+            .expect("put")
+    };
+    put("/team/one", b"page needle one\n").await;
+    put("/team/two", b"page needle two\n").await;
+    let host = GrepHost::new(&store, "grep-pages-access").await;
+    host.enable_grep_index(&namespace_id).await.expect("index");
+    let page = |principal: &'static str, cursor: Option<String>| {
+        let reads = NamespaceReads::new(host.reader.namespace(&namespace_id))
+            .with_subject(subject(principal));
+        let store = store.clone();
+        let service = &host.service;
+        async move {
+            service
+                .query(
+                    &request("page needle"),
+                    page_request(cursor, 1),
+                    &reads,
+                    &store,
+                )
+                .await
+                .expect("grep page")
+        }
+    };
+
+    let viewer_first = page("viewer", None).await;
+    let root_first = page("prn_root", None).await;
+    assert_eq!(matched_paths(&viewer_first), matched_paths(&root_first));
+    let first = matched_paths(&viewer_first)[0].clone();
+    let second = if first == "/team/one" {
+        "/team/two"
+    } else {
+        "/team/one"
+    };
+    let viewer_cursor = viewer_first.next_cursor.expect("a cursor");
+    let root_cursor = root_first.next_cursor.expect("a cursor");
+    assert_eq!(
+        matched_paths(&page("viewer", Some(viewer_cursor.clone())).await),
+        [second],
+        "with no writes between pages, the viewer's second page serves the other file"
+    );
+
+    put(second, b"page needle changed\n").await;
+    assert!(
+        page("viewer", Some(viewer_cursor)).await.matches.is_empty(),
+        "the viewer can't read the revision that the page's sequence serves"
+    );
+    let root_second = page("prn_root", Some(root_cursor)).await;
+    assert_eq!(matched_paths(&root_second), [second]);
+    assert_eq!(
+        root_second.matches[0].line,
+        format!("page needle {}", &second[6..]),
+        "an administrator's second page serves the revision at the page's sequence"
     );
 }
 

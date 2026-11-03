@@ -1,6 +1,6 @@
 //! Page sizes, page envelopes, and opaque cursors for paginated endpoints.
 
-use crate::{ChangeSeq, InodeId, NameKey, RevisionNo};
+use crate::{ChangeSeq, ContentId, InodeId, NameKey, RevisionNo};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
@@ -567,12 +567,26 @@ impl PageCursor for TrashPageCursor {
     const KIND: &'static str = "trash";
 }
 
-/// A cursor that resumes content search at one position in candidate order.
+/// A cursor that resumes content search at one position in candidate order,
+/// which is content value, then inode.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GrepPageCursor {
-    /// Sequence the issuing page was evaluated at.
+    /// Sequence the first page was evaluated at, which every later page of
+    /// the search reads at.
     pub head_seq: ChangeSeq,
+    /// Sequence that the backfill of the grep index which issued the cursor
+    /// captured. It identifies that build of the index, and a page served by
+    /// another build rejects the cursor.
+    pub index_captured_seq: ChangeSeq,
+    /// The newest commit whose `content_revisions` rows the issuing page
+    /// used. A later page uses no newer one, so a stale search is one cut
+    /// across its pages.
+    pub cut_seq: ChangeSeq,
+    /// Content ID of the last candidate's content value.
+    pub last_content_id: ContentId,
+    /// Size of the last candidate's content value.
+    pub last_size_bytes: u64,
     /// Inode of the last candidate the issuing page reached.
     pub last_inode_id: InodeId,
     /// Where the next page resumes in `last_inode_id`.
@@ -945,6 +959,11 @@ mod tests {
         ] {
             assert_cursor_round_trips(GrepPageCursor {
                 head_seq: ChangeSeq(11),
+                index_captured_seq: ChangeSeq(5),
+                cut_seq: ChangeSeq(9),
+                last_content_id: ContentId::parse("con_3s0drmj8em84yb4mnetqkz2j0x")
+                    .expect("valid content ID"),
+                last_size_bytes: 13,
                 last_inode_id: InodeId(7),
                 resume,
                 fingerprint: 17,

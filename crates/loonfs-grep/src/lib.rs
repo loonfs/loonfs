@@ -25,6 +25,7 @@ mod reads;
 mod segments;
 mod service;
 mod step_budget;
+mod value_table;
 mod worker;
 
 pub use cache::{
