@@ -21,12 +21,14 @@ mod commands;
 mod config;
 mod config_file;
 mod error;
+mod merge_record;
 mod payload;
 mod profiles;
 mod progress;
 mod prompt;
 mod render;
 mod resolve;
+mod state_file;
 mod uploads;
 
 use clap::Parser;

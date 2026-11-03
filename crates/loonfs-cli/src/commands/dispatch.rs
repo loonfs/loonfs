@@ -2,7 +2,7 @@
 
 use super::context::{fail, Invocation};
 use super::{
-    access, completion, config, fs, inspection, maintenance, namespace, profile, snapshot,
+    access, completion, config, fs, inspection, maintenance, merge, namespace, profile, snapshot,
     CommandData, CommandFailure, CommandOutput,
 };
 use crate::args::{AccessCommand, Cli, Command, RuntimeBehavior, TopLevelCommand};
@@ -55,6 +55,7 @@ pub(crate) async fn run(
         }
         Command::Snapshot { command } => snapshot::run_snapshot_command(invocation, command).await,
         Command::Use(args) => namespace::run_namespace_use(invocation, args).await,
+        Command::Merge(args) => merge::run_merge(invocation, args).await,
         Command::Current => namespace::run_namespace_current(invocation),
         Command::Ls(args) => fs::run_filesystem_ls(invocation, args).await,
         Command::Stat(args) => fs::run_filesystem_stat(invocation, args).await,

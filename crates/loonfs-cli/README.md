@@ -190,6 +190,24 @@ Namespace management
     --expected-head-seq, the command deletes only if the namespace head is
     still at that sequence
 
+  loonfs merge <namespace> --from <fork> [--through <seq>] [--record <path>]
+               [--abandon] [--actor-id <stable-id>]
+    Merge a fork into the namespace it was forked from. A merge that's too
+    large is merged in pieces. A merge that conflicts is rebased into a new
+    fork, and because the command doesn't resolve conflicts, it then fails
+    with the conflicts and the new fork to inspect. On a terminal, the
+    command prints one line for each step. --through merges the fork's
+    commits through that sequence instead of through its head.
+
+    The command saves the session in a record file after every step, under
+    $XDG_STATE_HOME/loonfs/merges (or ~/.local/state/loonfs/merges when
+    XDG_STATE_HOME is unset) unless --record points to another file. A rerun
+    resumes the session, and it has to use the same actor, subject, and
+    --through. The command removes the record once the session is merged
+    or abandoned. Without a record, it recovers the session's new forks
+    from the namespace's fork pins. --abandon abandons a failed session and
+    deletes the new forks that its rebases created
+
   loonfs use <namespace>
     Set the default namespace for a profile. This sets the interactive
     default. Automation that runs concurrently should pass --namespace or

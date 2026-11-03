@@ -10,6 +10,7 @@ pub(crate) mod download;
 mod fs;
 mod inspection;
 mod maintenance;
+mod merge;
 mod namespace;
 mod output;
 mod pagination;

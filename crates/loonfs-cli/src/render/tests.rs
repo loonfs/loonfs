@@ -688,3 +688,47 @@ fn gc_summaries_report_counts_retention_and_namespace_retirement() {
     assert!(!empty.contains("namespace is retired"), "{empty}");
     assert!(empty.contains("0 fork checkpoints, 0 snapshots"), "{empty}");
 }
+
+#[test]
+fn human_merge_failure_lists_the_conflicts_and_the_fork_to_inspect() {
+    let session: loonfs_merge::MergeSessionState = serde_json::from_value(serde_json::json!({
+        "namespace_id": "demo",
+        "original_fork_id": "sandbox",
+        "actor_id": "loonfs-cli",
+        "new_fork_ids": ["rebase-1"],
+        "status": {
+            "status": "failed",
+            "fork_id": "rebase-1",
+            "failure": {"kind": "unresolved", "message": "nothing resolved"},
+            "reports": [{
+                "through_seq": 9,
+                "conflicts": [{
+                    "inode_id": "ino_000000r0000013kje0d47gc8kw",
+                    "kind": "content",
+                    "ours": {"path": "/a.txt"},
+                }],
+            }],
+        },
+    }))
+    .expect("a failed session decodes");
+    let output = CommandOutput {
+        kind: CommandKind::Merge,
+        profile: Some("remote".to_owned()),
+        mode: Some(ProfileMode::Remote),
+        data: CommandData::MergeSession {
+            record_path: "/state/merges/key.json".to_owned(),
+            session,
+            steps: Vec::new(),
+        },
+    };
+
+    assert!(output.data.reports_failures());
+    assert_eq!(
+        human_success(&output),
+        "the merge of `sandbox` into `demo` failed: nothing resolved\n\
+         fork to inspect: rebase-1\n\
+         conflict: content /a.txt\n\
+         the session is saved in `/state/merges/key.json`; rerun with `--abandon` to delete \
+         its new forks"
+    );
+}

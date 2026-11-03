@@ -9,7 +9,7 @@ use super::filesystem::{
 };
 use super::flags::PageLimitArgs;
 use super::maintenance::{MaintenanceCheckpointCommand, MaintenanceCommand};
-use super::namespace::{NamespaceCommand, NamespaceUseArgs, SnapshotCommand};
+use super::namespace::{MergeArgs, NamespaceCommand, NamespaceUseArgs, SnapshotCommand};
 use super::profile::ProfileCommand;
 use crate::progress::ProgressMode;
 use crate::render::OutputFormat;
@@ -42,6 +42,7 @@ Context and configuration:
   profile       Manage connection profiles
   namespace     Manage namespaces
   snapshot      Manage point-in-time snapshots
+  merge         Merge a fork into the namespace it was forked from
   use           Set a profile's default namespace
   current       Show the selected profile and namespace
   config        Inspect the CLI config file
@@ -214,6 +215,15 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: SnapshotCommand,
     },
+    /// Merge a fork into the namespace it was forked from.
+    ///
+    /// The command merges the fork in pieces when a merge is too large, and
+    /// when a merge conflicts, it rebases the fork into a new fork and fails
+    /// with the conflicts and the new fork to inspect. It saves the session
+    /// in a record file after every step, so a rerun resumes where the last
+    /// run stopped. Without a record, it recovers the session's new forks
+    /// from the namespace's fork pins.
+    Merge(MergeArgs),
     /// Set the default namespace for a profile.
     /// This sets the interactive default. Automation that runs concurrently
     /// should pass `--namespace` or set `LOONFS_NAMESPACE` instead.

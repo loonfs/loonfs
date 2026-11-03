@@ -1,10 +1,11 @@
-//! The `namespace`, `use`, and `snapshot` commands.
+//! The `namespace`, `use`, `merge`, and `snapshot` commands.
 
 use super::flags::{ActorSelectorArgs, PaginationArgs};
 use super::parse::parse_change_seq;
 use clap::{Args, Subcommand, ValueEnum, ValueHint};
 use loonfs_types::{ChangeSeq, NamespaceId, PinId, PrincipalId};
 use std::num::NonZeroU64;
+use std::path::PathBuf;
 
 #[derive(Debug, Args)]
 pub(crate) struct NamespaceUseArgs {
@@ -86,6 +87,31 @@ pub(crate) struct NamespaceForkArgs {
     /// Fork from an unexpired snapshot instead of the current head.
     #[arg(long = "snapshot", value_name = "id")]
     pub snapshot_id: Option<PinId>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct MergeArgs {
+    #[command(flatten)]
+    pub actor: ActorSelectorArgs,
+    /// Namespace to merge into.
+    #[arg(value_hint = ValueHint::Other)]
+    pub namespace_id: NamespaceId,
+    /// The fork whose commits to merge. It has to be a fork of the namespace.
+    #[arg(long = "from", value_name = "fork", value_hint = ValueHint::Other)]
+    pub fork_id: NamespaceId,
+    /// Merge the fork's commits through this sequence instead of the fork's
+    /// head when the session starts.
+    #[arg(long = "through", value_name = "seq", value_parser = parse_change_seq)]
+    pub through_seq: Option<ChangeSeq>,
+    /// Record file that keeps the session between runs. Defaults to a file
+    /// under $XDG_STATE_HOME/loonfs/merges for this profile, namespace, and
+    /// fork.
+    #[arg(long, value_name = "path", value_hint = ValueHint::FilePath)]
+    pub record: Option<PathBuf>,
+    /// Abandon the failed session that the record keeps, and delete the new
+    /// forks that its rebases created.
+    #[arg(long, conflicts_with = "through_seq")]
+    pub abandon: bool,
 }
 
 #[derive(Debug, Subcommand)]

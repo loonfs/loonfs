@@ -17,6 +17,7 @@ use loonfs_types::{
 use serde::Serialize;
 use std::io::{self, Write};
 
+pub(crate) use human_maintenance::human_merge_step;
 pub(crate) use json::{json_error, render_parse_error};
 #[cfg(test)]
 pub(crate) use output::write_success;
