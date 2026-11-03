@@ -1,10 +1,12 @@
-//! Subject reads observe access changes through the runtime cache.
+//! Subject reads observe access changes through the runtime cache, and a stat
+//! batch hides each inode that the subject can't read.
 
 use loonfs::publish::{CommitIntent, FilesystemOperation};
 use loonfs::{
-    Consistency, CreateNamespaceOptions, CurrentFile, DestinationBehavior, LoonFs, ReadAt,
-    ReadFileOptions,
+    Consistency, CreateNamespaceOptions, CurrentFile, CurrentFileState, DestinationBehavior,
+    InodeId, LoonFs, NamespaceId, ReadAt, ReadFileOptions, RevisionNo, Writable,
 };
+use loonfs_core::test_support::STORE_READS_IN_FLIGHT;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_types::{
@@ -462,4 +464,147 @@ async fn check_former_writer_read(warm_before_handoff: bool, consistency: Consis
     );
     peer.shutdown().await.expect("peer shutdown");
     old_writer.shutdown().await.expect("old writer shutdown");
+}
+
+/// Checks that a stat batch several read windows long returns each inode's
+/// state in its request position: a file the subject can read, an inode ID
+/// that doesn't exist, and a file that only an administrator can read.
+#[tokio::test]
+async fn a_stat_batch_returns_readable_unknown_and_unreadable_inodes_in_request_order() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let writer = LoonFs::builder_with_store(store)
+        .writer_id(loonfs_test_support::ids::writer_id("stat-batch-access"))
+        .build()
+        .await
+        .expect("writer");
+    let namespace_id = namespace_id("stat-batch-access");
+    // Each index adds three requests, so the batch is three read windows
+    // long and later requests start while earlier ones are in flight.
+    let files = STORE_READS_IN_FLIGHT;
+    publish_team_and_private_files(&writer, &namespace_id, files).await;
+    let administrator = writer
+        .read_only()
+        .with_subject(subject("prn_root"))
+        .namespace(&namespace_id);
+    let viewer = writer
+        .read_only()
+        .with_subject(subject("viewer"))
+        .namespace(&namespace_id);
+    let visible = |inode_id, path: String| CurrentFileState {
+        inode_id,
+        file: CurrentFile::Visible {
+            path: AbsolutePath::parse(path).expect("path"),
+            revision_no: Some(RevisionNo(1)),
+        },
+    };
+    let hidden = |inode_id| CurrentFileState {
+        inode_id,
+        file: CurrentFile::Hidden { readable: false },
+    };
+    let mut requested = Vec::new();
+    let mut for_viewer = Vec::new();
+    let mut for_administrator = Vec::new();
+    for index in 0..files {
+        let (team, private) = (team_file(index), private_file(index));
+        let readable = administrator.stat(&team).await.expect("stat").inode_id;
+        let unreadable = administrator.stat(&private).await.expect("stat").inode_id;
+        let unknown = InodeId(1_000_000 + index as u128);
+        requested.extend([readable, unknown, unreadable]);
+        for_viewer.extend([
+            visible(readable, team.clone()),
+            hidden(unknown),
+            hidden(unreadable),
+        ]);
+        for_administrator.extend([
+            visible(readable, team),
+            hidden(unknown),
+            visible(unreadable, private),
+        ]);
+    }
+    assert_eq!(
+        viewer
+            .stat_current_files_by_inode(&requested)
+            .await
+            .expect("the viewer's batch"),
+        for_viewer
+    );
+    assert_eq!(
+        administrator
+            .stat_current_files_by_inode(&requested)
+            .await
+            .expect("the administrator's batch"),
+        for_administrator
+    );
+}
+
+fn team_file(index: usize) -> String {
+    format!("/team/file-{index}")
+}
+
+fn private_file(index: usize) -> String {
+    format!("/private/file-{index}")
+}
+
+/// Creates an ACL namespace and publishes `files` files under `/team`, which
+/// `viewer` can read, and as many under `/private`, which only `prn_root`
+/// can read.
+async fn publish_team_and_private_files(
+    writer: &LoonFs<Writable>,
+    namespace_id: &NamespaceId,
+    files: usize,
+) {
+    writer
+        .create_namespace_with_options(
+            namespace_id,
+            &loonfs_test_support::test_actor(),
+            &CreateNamespaceOptions {
+                access: NamespaceAccess::Acl {
+                    principal_scope: PrincipalScope::parse("org_demo").expect("scope"),
+                    root_grants: grants("prn_root", AccessRight::Admin),
+                },
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("namespace");
+    let namespace_writer = writer
+        .open_namespace(namespace_id)
+        .expect("open namespace")
+        .with_subject(subject("prn_root"));
+    let prepared = namespace_writer
+        .prepare_content(b"body")
+        .await
+        .expect("prepare content");
+    let put = |path: String| FilesystemOperation::PutFile {
+        path: AbsolutePath::parse(path).expect("path"),
+        content: loonfs_types::FileContent::Ref {
+            content_ref: prepared.content_ref().clone(),
+            source_namespace_id: None,
+        },
+        behavior: DestinationBehavior::NoReplace,
+        expected_inode_id: None,
+        expected_revision_no: None,
+    };
+    let mut operations: Vec<_> = (0..files)
+        .flat_map(|index| [put(team_file(index)), put(private_file(index))])
+        .collect();
+    operations.push(FilesystemOperation::UpdateAccess {
+        path: AbsolutePath::parse("/team").expect("path"),
+        boundary: false,
+        grants: grants("viewer", AccessRight::Read),
+        expected_inode_id: None,
+        expected_access_revision_no: None,
+    });
+    let mut request = CommitIntent::single(
+        CommitId::generate(),
+        loonfs_test_support::test_actor(),
+        None,
+        operations.remove(0),
+    );
+    request.operations.extend(operations);
+    namespace_writer
+        .commit_prepared(request, vec![prepared.clone()])
+        .await
+        .expect("publish the files and the grant");
 }
