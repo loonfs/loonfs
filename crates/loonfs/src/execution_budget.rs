@@ -39,7 +39,7 @@ const DEFAULT_MAX_ADMITTED_BYTES: NonZeroUsize = NonZeroUsize::new(64 * 1024 * 1
 /// about 36,000 file creates. One WAL object fits about 110,000 creates, and
 /// an allowance of 1.5 GiB, three times the WAL object's 512 MiB, admits
 /// every merge that fits one WAL object.
-pub const DEFAULT_MAX_MERGE_BYTES: NonZeroUsize = NonZeroUsize::new(512 * 1024 * 1024).unwrap();
+pub const DEFAULT_MAX_MERGE_BYTES: usize = 512 * 1024 * 1024;
 
 /// Work in flight that one or more runtimes share.
 ///
@@ -164,9 +164,9 @@ impl ExecutionBudget {
     }
 
     /// Returns the merge allowance, the estimated peak memory that publishing
-    /// one merge may have.
+    /// one merge may have, which is zero when merges are off.
     pub(crate) fn max_merge_bytes(&self) -> usize {
-        self.inner.admission.max_merge_bytes.get()
+        self.inner.admission.max_merge_bytes
     }
 
     /// Reports a charge or a refund to the metrics recorder. The recorder is
@@ -216,7 +216,7 @@ pub struct ExecutionBudgetBuilder {
     max_read_working_bytes: usize,
     max_admitted_requests: NonZeroUsize,
     max_admitted_bytes: NonZeroUsize,
-    max_merge_bytes: NonZeroUsize,
+    max_merge_bytes: usize,
     max_concurrent_reads: NonZeroUsize,
     max_concurrent_publications: NonZeroUsize,
     max_concurrent_folds: NonZeroUsize,
@@ -265,9 +265,10 @@ impl ExecutionBudgetBuilder {
     /// that arrives while one is admitted fails at once with
     /// `commit_queue_full`. A merge whose estimate exceeds the allowance
     /// fails with `merge_too_large`. Defaults to
-    /// [`DEFAULT_MAX_MERGE_BYTES`].
-    pub fn max_merge_bytes(mut self, limit: NonZeroUsize) -> Self {
-        self.max_merge_bytes = limit;
+    /// [`DEFAULT_MAX_MERGE_BYTES`]; zero turns merges off, so the budget
+    /// admits no merge.
+    pub fn max_merge_bytes(mut self, bytes: usize) -> Self {
+        self.max_merge_bytes = bytes;
         self
     }
 
@@ -424,7 +425,7 @@ pub struct ExecutionBudgetStats {
 struct AdmittedTotals {
     max_requests: NonZeroUsize,
     max_bytes: NonZeroUsize,
-    max_merge_bytes: NonZeroUsize,
+    max_merge_bytes: usize,
     admitted: Mutex<Admitted>,
     instruments: AdmissionInstruments,
 }

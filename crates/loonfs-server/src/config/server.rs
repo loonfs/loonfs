@@ -76,10 +76,11 @@ pub struct ServerConfig {
     /// The merge allowance, which limits the estimated peak memory of
     /// publishing the one merge that the server admits at a time, three
     /// times the merge's planned WAL bytes. A merge whose estimate exceeds it
-    /// returns `merge_too_large`. Defaults to the runtime's
+    /// returns `merge_too_large`. Zero turns merges off, and the sizing
+    /// formula then reserves nothing for them. Defaults to the runtime's
     /// [`DEFAULT_MAX_MERGE_BYTES`](loonfs::DEFAULT_MAX_MERGE_BYTES), 512 MiB,
     /// with or without a memory limit.
-    pub max_merge_bytes: Option<NonZeroUsize>,
+    pub max_merge_bytes: Option<usize>,
     /// Maximum publication batches running at once. Defaults to 8.
     pub max_concurrent_publications: Option<NonZeroUsize>,
     /// The per-namespace admission limits of the server's runtime. The
@@ -422,7 +423,7 @@ impl ServerConfig {
             .max_compaction_input_bytes(positive(memory.compaction_input.bytes))
             .max_read_working_bytes(memory.read_working.bytes)
             .max_admitted_bytes(positive(memory.admitted.bytes))
-            .max_merge_bytes(positive(memory.merge.bytes))
+            .max_merge_bytes(memory.merge.bytes)
             .metrics_recorder(recorder);
         if let Some(limit) = self.max_concurrent_reads {
             builder = builder.max_concurrent_reads(limit);

@@ -241,6 +241,34 @@ fn the_smallest_limit_that_fits_the_default_counts_is_2684_mib() {
     );
 }
 
+/// Checks that `max_merge_bytes = 0`, which turns merges off, reserves
+/// nothing for merges, so the smallest limit that fits the default counts
+/// falls from 2,684 MiB to 2,044 MiB.
+#[test]
+fn turning_merges_off_lowers_the_smallest_limit_to_2044_mib() {
+    let merges_off = |limit: usize| {
+        memory_config(&format!(
+            "memory_limit_bytes = {limit}\nmax_merge_bytes = 0"
+        ))
+    };
+    let memory = merges_off(2044 * MIB)
+        .validate()
+        .expect("2,044 MiB fits the default counts without merges")
+        .memory;
+    assert_eq!(
+        (memory.merge.bytes, memory.merge.source),
+        (0, MemorySource::Set)
+    );
+    assert_eq!(memory.headroom, 276 * MIB);
+    assert_eq!(memory.managed, 256 * MIB);
+    assert_invalid_field(
+        merges_off(2043 * MIB)
+            .validate()
+            .expect_err("managed memory is below 256 MiB"),
+        "memory_limit_bytes",
+    );
+}
+
 #[test]
 fn content_writes_reserve_one_part_and_one_read_each_and_72_mib_on_r2() {
     let local = memory_config("max_concurrent_content_writes = 4");

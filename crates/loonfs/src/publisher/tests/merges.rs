@@ -139,7 +139,7 @@ async fn a_merge_is_held_to_the_merge_allowance_and_admitted_one_at_a_time() {
         core.config.publication.max_estimated_bytes_per_namespace = below_the_merge;
         core.execution_budget = ExecutionBudget::builder()
             .max_admitted_bytes(below_the_merge)
-            .max_merge_bytes(NonZeroUsize::new(max_merge_bytes).expect("allowance"))
+            .max_merge_bytes(max_merge_bytes)
             .build();
         standalone_publisher_with(&namespace_id, &runtime, core)
     };

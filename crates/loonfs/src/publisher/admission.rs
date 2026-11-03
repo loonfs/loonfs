@@ -97,14 +97,16 @@ impl PublicationAdmission {
     /// peak exceeds the merge allowance, with `merge_too_large`. The
     /// estimate is [`MERGE_PEAK_PER_PLANNED_BYTE`] times the merge's planned
     /// WAL bytes. Such a merge would be refused on every retry, so its caller
-    /// merges a smaller range of the fork's commits instead.
+    /// merges a smaller range of the fork's commits instead. An allowance of
+    /// zero, which turns merges off, refuses every merge before it takes the
+    /// merge slot.
     pub(super) fn validate_merge(&self, candidate: &PreparedCandidate) -> Result<(), CoreError> {
         Self::validate_candidate(candidate)?;
         let estimated_bytes = candidate
             .wal_record_bytes_upper_bound
             .saturating_mul(MERGE_PEAK_PER_PLANNED_BYTE);
         let max_bytes = self.budget.max_merge_bytes();
-        if estimated_bytes > max_bytes {
+        if max_bytes == 0 || estimated_bytes > max_bytes {
             return Err(CoreError::MergeTooLarge {
                 estimated_bytes,
                 max_bytes,
@@ -399,7 +401,7 @@ mod tests {
         let overhead = 512 + namespace_id.as_str().len();
         let budget = ExecutionBudget::builder()
             .max_admitted_bytes(limit(4096))
-            .max_merge_bytes(limit(16384))
+            .max_merge_bytes(16384)
             .build();
         let admission = runtime_admission(
             PublicationPolicy {
@@ -454,7 +456,7 @@ mod tests {
         let namespace_id = NamespaceId::parse("main").expect("namespace");
         let recorder = Arc::new(DefaultMetricsRecorder::new());
         let budget = ExecutionBudget::builder()
-            .max_merge_bytes(limit(3072))
+            .max_merge_bytes(3072)
             .metrics_recorder(recorder.clone())
             .build();
         let first_runtime = runtime_admission(PublicationPolicy::default(), &budget);
@@ -503,6 +505,24 @@ mod tests {
             metric(&recorder, "loonfs.execution_budget.admitted_merges"),
             MetricValue::Gauge(0)
         );
+    }
+
+    /// Checks that a budget whose merge allowance is zero, which turns
+    /// merges off, admits no merge, even one that plans no bytes, and
+    /// charges nothing.
+    #[test]
+    fn a_zero_allowance_admits_no_merge() {
+        let namespace_id = NamespaceId::parse("main").expect("namespace");
+        let budget = ExecutionBudget::builder().max_merge_bytes(0).build();
+        let admission = runtime_admission(PublicationPolicy::default(), &budget);
+        for planned_bytes in [0, 1] {
+            let error = admission
+                .acquire_candidate(&namespace_id, &merge(planned_bytes))
+                .err()
+                .expect("merges are off");
+            assert_matches!(error, CoreError::MergeTooLarge { max_bytes: 0, .. });
+        }
+        assert_eq!(budget.stats(), ExecutionBudgetStats::default());
     }
 
     #[test]

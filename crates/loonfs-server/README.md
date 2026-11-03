@@ -53,7 +53,7 @@ When a limit is available, each memory setting is derived from it by default. A 
 | `max_merge_bytes` | 512 MiB (not derived) | 512 MiB |
 | `max_compaction_input_bytes` | Derived: 10% divided by `max_concurrent_compactions` | 64 MiB per compaction |
 
-You can set a cache size or `max_read_working_bytes` to zero to disable retention. The publication byte limit, the merge allowance, and the compaction input limit must be positive. `grep.max_cache_bytes` applies only when the configured grep mode serves queries.
+You can set a cache size or `max_read_working_bytes` to zero to disable retention, and `max_merge_bytes` to zero to turn merges off. The publication byte limit and the compaction input limit must be positive. `grep.max_cache_bytes` applies only when the configured grep mode serves queries.
 
 The host admission settings are top-level positive integers:
 

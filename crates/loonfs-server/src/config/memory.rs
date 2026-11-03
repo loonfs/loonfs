@@ -242,9 +242,9 @@ impl ServerConfig {
         );
         let merge = MemoryTerm::new(
             "max_merge_bytes",
-            self.max_merge_bytes.map(NonZeroUsize::get),
+            self.max_merge_bytes,
             None,
-            loonfs::DEFAULT_MAX_MERGE_BYTES.get(),
+            loonfs::DEFAULT_MAX_MERGE_BYTES,
         );
         let managed = (limit.unwrap_or(0) as u128).saturating_sub(
             fixed_bytes
