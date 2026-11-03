@@ -113,11 +113,13 @@ pub enum MergeSessionStatus {
     /// forks.
     Merged,
     /// A merge, a rebase, or the resolver failed in a way that the loop can't
-    /// act on. The caller chooses the next step, and the new forks stay until
-    /// the caller abandons the session.
+    /// act on, or the next-range query said that the fork can't merge. The
+    /// caller chooses the next step, and the new forks stay until the caller
+    /// abandons the session.
     Failed {
-        /// The fork to inspect: the fork that the failed merge or rebase
-        /// read, or the new fork that the resolver didn't resolve.
+        /// The fork to inspect: the fork that the failed merge, rebase, or
+        /// next-range query read, or the new fork that the resolver didn't
+        /// resolve.
         fork_id: NamespaceId,
         /// What failed.
         failure: MergeFailure,
@@ -161,7 +163,7 @@ pub struct PendingCommit {
     pub through_seq: ChangeSeq,
     /// The number of times that the request failed with a transient error,
     /// which is less than [`MAX_MERGE_ATTEMPTS`](crate::MAX_MERGE_ATTEMPTS).
-    pub failed_attempts: u32,
+    pub failed_attempts: u64,
 }
 
 impl PendingCommit {
@@ -227,4 +229,21 @@ pub enum MergeFailure {
     /// The session needed another new fork after its rebases had created
     /// [`MAX_NEW_FORKS`](crate::MAX_NEW_FORKS) new forks.
     NewForkLimit,
+    /// The next-range query returned `range_start_below_floor`: the fork's
+    /// next merge starts below the fork's own retention floor, so a merge of
+    /// the fork would return `rebootstrap_required`.
+    RangeStartBelowFloor {
+        /// The fork's retention floor.
+        retention_floor_seq: ChangeSeq,
+    },
+    /// The next-range query returned `fork_point_below_floor`: the fork point
+    /// is below the retention floor of the namespace that the session merges
+    /// into, so a merge of the fork would return `rebootstrap_required`.
+    ForkPointBelowFloor {
+        /// The retention floor of the namespace that the session merges into.
+        retention_floor_seq: ChangeSeq,
+    },
+    /// The next-range query returned an outcome from a newer server, which
+    /// this crate doesn't know.
+    UnknownRangeOutcome,
 }

@@ -1,12 +1,12 @@
 //! Recovering a merge session whose state was lost, from the store.
 
 use crate::refusal::is_gone;
-use crate::session::{merging_or_merged, new_fork_id};
+use crate::session::{new_fork_id, status_after_range};
 use crate::{
     Mechanics, MergeError, MergeFailure, MergeSession, MergeSessionOptions, MergeSessionState,
     MergeSessionStatus, PendingCommit, Resolver, Result, MAX_NEW_FORKS,
 };
-use loonfs_types::{ActorId, CheckpointOwner, NamespaceId};
+use loonfs_types::{ActorId, CheckpointOwner, NamespaceId, NextMergeRangeOutcome};
 
 /// A fork of the session's namespace that a rebase created.
 struct RebasedFork {
@@ -33,7 +33,10 @@ impl<M: Mechanics, R: Resolver> MergeSession<M, R> {
     /// it's `merged` or `abandoned`.
     ///
     /// The session merges the original fork through `options.through_seq`,
-    /// or through its head, and a new fork through its head.
+    /// or through its head, and a new fork through its head. It starts
+    /// `failed` when the next-range query of the fork to merge says that the
+    /// fork can't merge, as in [`start`](Self::start), or when the query of a
+    /// new fork returns an outcome that this crate doesn't know.
     pub async fn recover(
         mechanics: M,
         resolver: R,
@@ -51,7 +54,7 @@ impl<M: Mechanics, R: Resolver> MergeSession<M, R> {
         // Each pass that doesn't end the loop moves to a fork that `rebased`
         // lists, and the forks form a tree under the original fork, so the
         // loop makes at most `rebased.len()` + 1 passes.
-        let status = loop {
+        let status = 'recover: loop {
             let mut continued = Vec::new();
             let mut was_rebased = false;
             for new_fork in rebased.iter().filter(|fork| fork.rebased_from == fork_id) {
@@ -59,13 +62,29 @@ impl<M: Mechanics, R: Resolver> MergeSession<M, R> {
                 let rebased_again = rebased
                     .iter()
                     .any(|fork| fork.rebased_from == new_fork.namespace_id);
-                if rebased_again
-                    || mechanics
+                let was_continued = rebased_again
+                    || match mechanics
                         .next_merge_range(&namespace_id, &new_fork.namespace_id)
                         .await?
-                        .merge
-                        .is_some()
-                {
+                        .outcome
+                    {
+                        NextMergeRangeOutcome::Open { merge, .. }
+                        | NextMergeRangeOutcome::RangeStartBelowFloor { merge, .. } => {
+                            merge.is_some()
+                        }
+                        // A merge of this new fork would return
+                        // `rebootstrap_required`, so recovery doesn't
+                        // continue with it.
+                        NextMergeRangeOutcome::ForkPointBelowFloor { .. } => false,
+                        NextMergeRangeOutcome::Unknown => {
+                            break 'recover MergeSessionStatus::Failed {
+                                fork_id: new_fork.namespace_id.clone(),
+                                failure: MergeFailure::UnknownRangeOutcome,
+                                reports: Vec::new(),
+                            };
+                        }
+                    };
+                if was_continued {
                     continued.push(new_fork.namespace_id.clone());
                 }
             }
@@ -84,8 +103,9 @@ impl<M: Mechanics, R: Resolver> MergeSession<M, R> {
                 Some(through_seq) if fork_id == original_fork_id => through_seq,
                 _ => range.source_head_seq,
             };
-            if !was_rebased {
-                break merging_or_merged(fork_id, through_seq, range.next_after_seq);
+            let status = status_after_range(&fork_id, through_seq, &range.outcome, &[]);
+            if !was_rebased || matches!(status, MergeSessionStatus::Failed { .. }) {
+                break status;
             }
             let Some(new_fork_id) = new_fork_id(&new_fork_ids) else {
                 break MergeSessionStatus::Failed {

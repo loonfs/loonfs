@@ -7,7 +7,9 @@ use crate::{
     ConflictReport, Mechanics, MergeError, MergeFailure, MergeSessionOutcome, MergeSessionState,
     MergeSessionStatus, PendingCommit, Resolver, Result,
 };
-use loonfs_types::{generated_id, ActorId, ChangeSeq, MergeConflict, NamespaceId};
+use loonfs_types::{
+    generated_id, ActorId, ChangeSeq, MergeConflict, NamespaceId, NextMergeRangeOutcome,
+};
 
 /// The most new forks that one session's rebases create.
 ///
@@ -76,7 +78,9 @@ impl<M: Mechanics, R: Resolver> MergeSession<M, R> {
     ///
     /// The session merges through `options.through_seq`, or through the
     /// fork's head. When the fork's next merge would start at or after that
-    /// sequence, the session starts `merged`.
+    /// sequence, the session starts `merged`. When a retention floor refuses
+    /// the fork's next merge, or the server returns an outcome that this
+    /// crate doesn't know, the session starts `failed`.
     pub async fn start(
         mechanics: M,
         resolver: R,
@@ -87,7 +91,7 @@ impl<M: Mechanics, R: Resolver> MergeSession<M, R> {
     ) -> Result<Self> {
         let range = mechanics.next_merge_range(&namespace_id, &fork_id).await?;
         let through_seq = options.through_seq.unwrap_or(range.source_head_seq);
-        let status = merging_or_merged(fork_id.clone(), through_seq, range.next_after_seq);
+        let status = status_after_range(&fork_id, through_seq, &range.outcome, &[]);
         Ok(Self::resume(
             mechanics,
             resolver,
@@ -369,13 +373,15 @@ impl<M: Mechanics, R: Resolver> MergeSession<M, R> {
             .next_merge_range(&self.state.namespace_id, new_fork_id)
             .await?;
         let through_seq = range.source_head_seq;
-        Ok(Transition::new(
-            merging_or_merged(new_fork_id.clone(), through_seq, range.next_after_seq),
-            MergeSessionOutcome::Resolved {
+        let status = status_after_range(new_fork_id, through_seq, &range.outcome, reports);
+        let outcome = match status {
+            MergeSessionStatus::Failed { .. } => MergeSessionOutcome::Failed,
+            _ => MergeSessionOutcome::Resolved {
                 fork_id: new_fork_id.clone(),
                 through_seq,
             },
-        ))
+        };
+        Ok(Transition::new(status, outcome))
     }
 
     /// Deletes the oldest new fork that the session hasn't deleted yet.
@@ -404,20 +410,45 @@ pub(crate) fn new_fork_id(new_fork_ids: &[NamespaceId]) -> Option<NamespaceId> {
     })
 }
 
-/// Returns the status that merges `fork_id` through `through_seq`, or
-/// `merged` when the fork's next merge starts at or after `through_seq`.
-pub(crate) fn merging_or_merged(
-    fork_id: NamespaceId,
+/// Returns the status after the next-range query of `fork_id` returned
+/// `outcome`: `merging` through `through_seq`, `merged` when the fork's next
+/// merge starts at or after `through_seq`, or `failed` with `reports` when a
+/// retention floor refuses that merge or the outcome is one that this crate
+/// doesn't know.
+pub(crate) fn status_after_range(
+    fork_id: &NamespaceId,
     through_seq: ChangeSeq,
-    next_after_seq: Option<ChangeSeq>,
+    outcome: &NextMergeRangeOutcome,
+    reports: &[ConflictReport],
 ) -> MergeSessionStatus {
-    if next_after_seq.is_some_and(|after_seq| after_seq >= through_seq) {
-        return MergeSessionStatus::Merged;
-    }
-    MergeSessionStatus::Merging {
-        fork_id,
-        through_seq,
-        merge: PendingCommit::new(through_seq),
+    let failure = match *outcome {
+        NextMergeRangeOutcome::Open { next_after_seq, .. } => {
+            if next_after_seq >= through_seq {
+                return MergeSessionStatus::Merged;
+            }
+            return MergeSessionStatus::Merging {
+                fork_id: fork_id.clone(),
+                through_seq,
+                merge: PendingCommit::new(through_seq),
+            };
+        }
+        NextMergeRangeOutcome::RangeStartBelowFloor {
+            retention_floor_seq,
+            ..
+        } => MergeFailure::RangeStartBelowFloor {
+            retention_floor_seq,
+        },
+        NextMergeRangeOutcome::ForkPointBelowFloor {
+            retention_floor_seq,
+        } => MergeFailure::ForkPointBelowFloor {
+            retention_floor_seq,
+        },
+        NextMergeRangeOutcome::Unknown => MergeFailure::UnknownRangeOutcome,
+    };
+    MergeSessionStatus::Failed {
+        fork_id: fork_id.clone(),
+        failure,
+        reports: reports.to_vec(),
     }
 }
 

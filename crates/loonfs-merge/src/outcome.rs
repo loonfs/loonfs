@@ -73,7 +73,7 @@ pub enum MergeSessionOutcome {
         /// The error.
         error: ErrorResponse,
         /// The times that the request has failed so far.
-        failed_attempts: u32,
+        failed_attempts: u64,
     },
     /// The session failed, and its status says why.
     Failed,

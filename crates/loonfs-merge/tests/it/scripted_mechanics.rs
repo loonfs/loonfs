@@ -13,7 +13,7 @@ use loonfs_types::options::MergeForkOptions;
 use loonfs_types::{
     ActorId, ChangeSeq, Commit, DeleteNamespaceResponse, ErrorCode, ErrorDetails, ErrorResponse,
     ListCheckpointsResponse, Merge, MergeConflict, NamespaceId, NamespaceMetadata,
-    NextMergeRangeResponse, Pager, RebaseForkResponse,
+    NextMergeRangeOutcome, NextMergeRangeResponse, Pager, RebaseForkResponse,
 };
 use serde_json::json;
 use std::collections::VecDeque;
@@ -52,11 +52,17 @@ pub(crate) enum Answer {
     /// The replay commit commits with this conflict report, or without one,
     /// as when the request's commit ID identifies an earlier replay commit.
     Replayed(Option<Vec<MergeConflict>>),
-    /// The next-range query's answer.
+    /// The next-range query's `open` answer, with the fork's newest merge
+    /// when `merged`.
     Range {
         next_after_seq: u64,
         source_head_seq: u64,
         merged: bool,
+    },
+    /// The next-range query's answer with another outcome.
+    RangeOutcome {
+        source_head_seq: u64,
+        outcome: NextMergeRangeOutcome,
     },
     /// The namespace is deleted.
     Deleted,
@@ -207,15 +213,24 @@ impl Mechanics for ScriptedMechanics {
                 source_head_seq,
                 merged,
             } => Ok(NextMergeRangeResponse {
-                merge: merged.then(|| Merge {
-                    source_namespace_id: source_namespace_id.clone(),
-                    source_after_seq: ChangeSeq(0),
-                    source_through_seq: ChangeSeq(next_after_seq),
-                }),
-                next_after_seq: Some(ChangeSeq(next_after_seq)),
                 fork_point_seq: ChangeSeq(0),
                 source_head_seq: ChangeSeq(source_head_seq),
-                rebootstrap_required: None,
+                outcome: NextMergeRangeOutcome::Open {
+                    merge: merged.then(|| Merge {
+                        source_namespace_id: source_namespace_id.clone(),
+                        source_after_seq: ChangeSeq(0),
+                        source_through_seq: ChangeSeq(next_after_seq),
+                    }),
+                    next_after_seq: ChangeSeq(next_after_seq),
+                },
+            }),
+            Answer::RangeOutcome {
+                source_head_seq,
+                outcome,
+            } => Ok(NextMergeRangeResponse {
+                fork_point_seq: ChangeSeq(0),
+                source_head_seq: ChangeSeq(source_head_seq),
+                outcome,
             }),
             Answer::Refused(code, details) => Err(refused(code, details)),
             answer => panic!("the next-range query can't answer {answer:?}"),

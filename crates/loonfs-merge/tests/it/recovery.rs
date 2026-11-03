@@ -4,10 +4,12 @@
 use crate::scripted_mechanics::{
     main, merges, run_to_end, sandbox, Answer, ScriptedMechanics, Sent,
 };
-use loonfs_merge::{DefaultResolver, MergeSession, MergeSessionOptions, MergeSessionStatus};
+use loonfs_merge::{
+    DefaultResolver, MergeFailure, MergeSession, MergeSessionOptions, MergeSessionStatus,
+};
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::test_actor;
-use loonfs_types::ChangeSeq;
+use loonfs_types::{ChangeSeq, NextMergeRangeOutcome};
 
 async fn recover(
     mechanics: &ScriptedMechanics,
@@ -116,4 +118,34 @@ async fn a_lost_state_rebases_again_when_the_new_fork_never_merged() {
         mechanics.sent().last(),
         Some(&Sent::NextMergeRange { fork_id: sandbox() })
     );
+}
+
+#[tokio::test]
+async fn a_lost_state_fails_when_a_new_forks_next_range_is_unknown() {
+    let rebased = namespace_id("rebase-1");
+    let mechanics = ScriptedMechanics::new([
+        Answer::ForkPins(vec![rebased.clone()]),
+        Answer::Namespace {
+            rebased_from: Some(sandbox()),
+        },
+        Answer::ForkPins(vec![rebased.clone()]),
+        // The outcome doesn't say whether the new fork merged.
+        Answer::RangeOutcome {
+            source_head_seq: 12,
+            outcome: NextMergeRangeOutcome::Unknown,
+        },
+    ]);
+
+    let session = recover(&mechanics).await;
+
+    mechanics.assert_script_used();
+    assert_eq!(
+        session.state().status,
+        MergeSessionStatus::Failed {
+            fork_id: rebased.clone(),
+            failure: MergeFailure::UnknownRangeOutcome,
+            reports: Vec::new(),
+        }
+    );
+    assert_eq!(session.state().new_fork_ids, [rebased]);
 }

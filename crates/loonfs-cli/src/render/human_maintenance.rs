@@ -378,6 +378,23 @@ fn merge_failure(failure: &MergeFailure) -> String {
             "the session's rebases created {MAX_NEW_FORKS} new forks, the most that one \
              session creates"
         ),
+        MergeFailure::RangeStartBelowFloor {
+            retention_floor_seq,
+        } => format!(
+            "the fork's next merge starts below the fork's retention floor, seq {}, so the fork \
+             can't be merged (`range_start_below_floor`)",
+            retention_floor_seq.0
+        ),
+        MergeFailure::ForkPointBelowFloor {
+            retention_floor_seq,
+        } => format!(
+            "the fork point is below the namespace's retention floor, seq {}, so the fork can't \
+             be merged (`fork_point_below_floor`)",
+            retention_floor_seq.0
+        ),
+        MergeFailure::UnknownRangeOutcome => {
+            "the server returned a next-range outcome unknown to this CLI".to_owned()
+        }
     }
 }
 

@@ -2,7 +2,7 @@
 
 use crate::{PendingCommit, Result};
 use loonfs_client::ClientError;
-use loonfs_types::{ChangeSeq, ErrorCode, ErrorKind, ErrorResponse};
+use loonfs_types::{u64_from_usize, ChangeSeq, ErrorCode, ErrorKind, ErrorResponse};
 
 /// The attempts that one merge or rebase request gets when it fails with a
 /// transient error: the first attempt and three more.
@@ -13,7 +13,7 @@ use loonfs_types::{ChangeSeq, ErrorCode, ErrorKind, ErrorResponse};
 /// the plan (see [`ErrorCode::is_stale_plan`]), which the server returns
 /// after it planned the merge four times. So a session that reaches this
 /// limit is merging into a namespace that doesn't stop changing.
-pub const MAX_MERGE_ATTEMPTS: u32 = 4;
+pub const MAX_MERGE_ATTEMPTS: usize = 4;
 
 /// How the loop acts on an error that a merge or a rebase returned.
 pub(crate) enum Refusal {
@@ -60,7 +60,7 @@ pub(crate) fn refusal(request: &PendingCommit, error: &ErrorResponse) -> Refusal
         },
         ErrorCode::MergeConflict => Refusal::Conflict,
         code if code.is_stale_plan() || code.retryable_without_operator_action() => {
-            if request.failed_attempts + 1 < MAX_MERGE_ATTEMPTS {
+            if request.failed_attempts + 1 < u64_from_usize(MAX_MERGE_ATTEMPTS) {
                 Refusal::Retry
             } else {
                 Refusal::Fail

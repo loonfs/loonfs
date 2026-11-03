@@ -9,7 +9,7 @@ use loonfs_merge::{
     DefaultResolver, MergeError, MergeFailure, MergeSession, MergeSessionOutcome,
     MergeSessionStatus, MAX_MERGE_ATTEMPTS,
 };
-use loonfs_types::{ChangeSeq, ErrorCode};
+use loonfs_types::{ChangeSeq, ErrorCode, NextMergeRangeOutcome};
 use std::collections::BTreeSet;
 
 #[tokio::test]
@@ -313,6 +313,93 @@ async fn the_default_resolver_merges_a_new_fork_whose_rebase_left_out_nothing() 
 }
 
 #[tokio::test]
+async fn a_new_fork_whose_range_starts_below_its_floor_fails_with_the_reports() {
+    let mechanics = ScriptedMechanics::new([
+        Answer::range(10, 20),
+        Answer::refused(ErrorCode::MergeConflict),
+        Answer::Replayed(Some(vec![conflict("/a.txt")])),
+        Answer::RangeOutcome {
+            source_head_seq: 43,
+            outcome: NextMergeRangeOutcome::RangeStartBelowFloor {
+                merge: None,
+                next_after_seq: ChangeSeq(40),
+                retention_floor_seq: ChangeSeq(42),
+            },
+        },
+    ]);
+    let resolver = RecordingResolver::default();
+    let session = start(&mechanics, resolver.clone()).await;
+
+    let (outcomes, state) = run_to_end(&mechanics, &resolver, session).await;
+
+    assert_eq!(outcomes.last(), Some(&MergeSessionOutcome::Failed));
+    let MergeSessionStatus::Failed {
+        fork_id,
+        failure,
+        reports,
+    } = &state.status
+    else {
+        panic!("the session should fail: {:?}", state.status);
+    };
+    assert_eq!(
+        *failure,
+        MergeFailure::RangeStartBelowFloor {
+            retention_floor_seq: ChangeSeq(42)
+        }
+    );
+    assert_eq!(
+        state.new_fork_ids,
+        std::slice::from_ref(fork_id),
+        "the failure identifies the new fork to inspect"
+    );
+    let resolved = resolver.resolved();
+    assert_eq!(resolved.len(), 1);
+    assert_eq!(*reports, resolved[0].1, "the failure keeps the reports");
+    assert_eq!(
+        merges(&mechanics.sent()).len(),
+        1,
+        "the session doesn't merge the new fork"
+    );
+}
+
+#[tokio::test]
+async fn a_fork_point_below_the_floor_fails_the_session_before_it_merges() {
+    let cases = [
+        (
+            NextMergeRangeOutcome::ForkPointBelowFloor {
+                retention_floor_seq: ChangeSeq(15),
+            },
+            MergeFailure::ForkPointBelowFloor {
+                retention_floor_seq: ChangeSeq(15),
+            },
+        ),
+        (
+            NextMergeRangeOutcome::Unknown,
+            MergeFailure::UnknownRangeOutcome,
+        ),
+    ];
+    for (outcome, failure) in cases {
+        let mechanics = ScriptedMechanics::new([Answer::RangeOutcome {
+            source_head_seq: 20,
+            outcome,
+        }]);
+        let session = start(&mechanics, DefaultResolver).await;
+
+        let (outcomes, state) = run_to_end(&mechanics, &DefaultResolver, session).await;
+
+        assert!(outcomes.is_empty(), "{outcomes:?}");
+        assert_eq!(
+            state.status,
+            MergeSessionStatus::Failed {
+                fork_id: sandbox(),
+                failure,
+                reports: Vec::new(),
+            }
+        );
+    }
+}
+
+#[tokio::test]
 async fn a_retry_after_commit_queue_full_returns_the_original_commit() {
     let mechanics = ScriptedMechanics::new([
         Answer::range(10, 20),
@@ -351,7 +438,7 @@ async fn errors_that_the_loop_cant_act_on_fail_the_session() {
         (
             "a namespace that keeps changing past the retry limit",
             std::iter::repeat_with(|| Answer::refused(ErrorCode::StaleHead))
-                .take(usize::try_from(MAX_MERGE_ATTEMPTS).expect("attempts fit usize"))
+                .take(MAX_MERGE_ATTEMPTS)
                 .collect(),
             ErrorCode::StaleHead,
         ),
