@@ -65,9 +65,14 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
                 Some(BindingChange::Move {
                     parent_inode_id, ..
                 }) => starts.extend([plan.inode_id, *parent_inode_id]),
-                Some(BindingChange::Create {
-                    parent_inode_id, ..
-                }) => starts.push(*parent_inode_id),
+                Some(
+                    BindingChange::Create {
+                        parent_inode_id, ..
+                    }
+                    | BindingChange::Undelete {
+                        parent_inode_id, ..
+                    },
+                ) => starts.push(*parent_inode_id),
                 Some(BindingChange::Delete { .. }) => starts.push(plan.inode_id),
                 None => {}
             }
@@ -100,6 +105,10 @@ enum Readiness {
     Blocked,
 }
 
+/// The largest numeric suffix that a temporary name can take before the
+/// planner gives up on the directory.
+const MAX_TEMPORARY_NAME_SUFFIX: u32 = 8;
+
 /// Returns the error for a merge whose changes the planner can't order.
 fn unordered() -> CoreError {
     CoreError::InvalidMerge {
@@ -120,7 +129,7 @@ struct Order<'p, 'v, S: ObjectStore + ?Sized> {
     /// Each inode's edge as the operations so far leave it, starting from
     /// the merged-into namespace's edges.
     edges: HashMap<InodeId, Edge>,
-    /// The inodes that the merge creates and hasn't created yet.
+    /// The inodes that the merge creates or undeletes and hasn't yet.
     pending_creates: HashSet<InodeId>,
     /// The inodes that the merge moves and hasn't yet moved to their place,
     /// with the index of each one's plan.
@@ -163,7 +172,7 @@ impl<'p, 'v, S: ObjectStore + ?Sized> Order<'p, 'v, S> {
         let mut deleted = HashSet::new();
         for (index, plan) in plans.iter().enumerate() {
             match &plan.binding {
-                Some(BindingChange::Create { .. }) => {
+                Some(BindingChange::Create { .. } | BindingChange::Undelete { .. }) => {
                     pending_creates.insert(plan.inode_id);
                 }
                 Some(BindingChange::Move { .. }) => {
@@ -304,6 +313,9 @@ impl<'p, 'v, S: ObjectStore + ?Sized> Order<'p, 'v, S> {
                     parent_inode_id, ..
                 }
                 | BindingChange::Move {
+                    parent_inode_id, ..
+                }
+                | BindingChange::Undelete {
                     parent_inode_id, ..
                 },
             ) => {
@@ -467,7 +479,9 @@ impl<'p, 'v, S: ObjectStore + ?Sized> Order<'p, 'v, S> {
     /// or the ID with the first numeric suffix that no inode in the directory
     /// has in the merged-into namespace or in the order so far.
     async fn temporary_name(&self, inode_id: InodeId, directory: InodeId) -> Result<DisplayName> {
-        for suffix in 0_u32.. {
+        // Each name that the search tries reads a child of the directory, so
+        // the search stops after the inode ID and a few suffixes.
+        for suffix in 0..=MAX_TEMPORARY_NAME_SUFFIX {
             let name = match suffix {
                 0 => inode_id.to_string(),
                 _ => format!("{inode_id}-{suffix}"),
@@ -497,6 +511,16 @@ impl<'p, 'v, S: ObjectStore + ?Sized> Order<'p, 'v, S> {
             } => {
                 self.created_inode_ids
                     .insert(self.operations.len(), inode_id);
+                self.operations.push(binding.operation(inode_id, plan.kind));
+                self.edges
+                    .insert(inode_id, (*parent_inode_id, display_name.clone()));
+                self.pending_creates.remove(&inode_id);
+            }
+            BindingChange::Undelete {
+                parent_inode_id,
+                display_name,
+                ..
+            } => {
                 self.operations.push(binding.operation(inode_id, plan.kind));
                 self.edges
                     .insert(inode_id, (*parent_inode_id, display_name.clone()));

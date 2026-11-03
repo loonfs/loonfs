@@ -26,8 +26,8 @@ fn actor() -> ActorId {
     loonfs_test_support::test_actor()
 }
 
-/// Creates `main` with `/a.txt` and `/d/x.txt`, forks it, and writes
-/// `/b.txt` in the fork.
+/// Creates `main` with `/a.txt`, `/d/x.txt`, and `/d/y.txt`, forks it, and
+/// writes `/b.txt` in the fork.
 async fn family() -> Family {
     let directory = tempfile::tempdir().expect("tempdir");
     let main_id = namespace_id("main");
@@ -42,7 +42,7 @@ async fn family() -> Family {
         .await
         .expect("main");
     let main = runtime.open_namespace(&main_id).expect("open main");
-    for path in ["/a.txt", "/d/x.txt"] {
+    for path in ["/a.txt", "/d/x.txt", "/d/y.txt"] {
         main.put_file(path, b"a", &actor()).await.expect("seed");
     }
     let fork_id = namespace_id("main-fork");
@@ -105,7 +105,7 @@ impl Family {
     }
 
     /// Commits `planned` as the merge route does, and plans again with
-    /// `replan` after `stale_head`.
+    /// `replan` after a commit that `main` changed under.
     async fn commit<'a>(
         &'a self,
         request: &MergeRequest,
@@ -222,6 +222,60 @@ async fn a_merge_that_moves_a_directory_expects_its_head() {
     assert_eq!(error.code(), ErrorCode::StaleHead);
 }
 
+/// Checks that a merge that moves a file through a temporary name expects
+/// the head that it was planned at. The fork swaps the names of `/d/x.txt`
+/// and `/d/y.txt`, so one of them moves through a temporary name, and `main`
+/// renames `/d` to `/e` between planning and publication. The commit fails
+/// with `stale_head`, and the next plan commits the swap under `/e`.
+#[tokio::test]
+async fn a_merge_through_a_temporary_name_plans_again_after_a_rename() {
+    let family = family().await;
+    let x = family.main.stat("/d/x.txt").await.expect("x").inode_id;
+    let y = family.main.stat("/d/y.txt").await.expect("y").inode_id;
+    for (from, to) in [
+        ("/d/x.txt", "/d/t.txt"),
+        ("/d/y.txt", "/d/x.txt"),
+        ("/d/t.txt", "/d/y.txt"),
+    ] {
+        family
+            .fork
+            .move_path(from, to, &actor())
+            .await
+            .expect("swap the names in the fork");
+    }
+    let request = family.request("swap");
+    let planned = family.plan(&request).await;
+    family
+        .main
+        .move_path("/d", "/e", &actor())
+        .await
+        .expect("rename the directory in main");
+
+    let error = family
+        .main
+        .submit_merge(planned.candidate, &planned.slot)
+        .await
+        .expect_err("the head moved");
+    assert_eq!(error.code(), ErrorCode::StaleHead);
+    let PlannedMerge::Candidate(planned) = family
+        .main
+        .plan_merge(&request, Some(planned.slot))
+        .await
+        .expect("the second plan")
+    else {
+        panic!("expected a plan");
+    };
+    family
+        .main
+        .submit_merge(planned.candidate, &planned.slot)
+        .await
+        .expect("the second plan commits");
+    let swapped = family.main.stat("/e/x.txt").await.expect("x.txt under /e");
+    assert_eq!(swapped.inode_id, y);
+    let swapped = family.main.stat("/e/y.txt").await.expect("y.txt under /e");
+    assert_eq!(swapped.inode_id, x);
+}
+
 /// Checks that a merge with no directory change doesn't expect its head, so
 /// it commits after an unrelated commit between planning and publication.
 #[tokio::test]
@@ -256,6 +310,83 @@ async fn a_merge_commits_on_its_second_plan() {
         .expect("the second plan commits");
     assert_eq!(plans, 2);
     assert!(commit.merge.is_some());
+}
+
+/// Checks that a merge plans again after any failed precondition, and not
+/// only `stale_head`. `main` changes a file that the fork edited between the
+/// plan and the commit, the commit fails with `stale_revision`, and the next
+/// plan reports the change as a `content` conflict.
+#[tokio::test]
+async fn a_merge_plans_again_after_a_stale_revision() {
+    let family = family().await;
+    family
+        .fork
+        .put_file_with_options(
+            "/a.txt",
+            b"ours",
+            &actor(),
+            &crate::PutFileOptions {
+                behavior: loonfs_types::DestinationBehavior::Replace,
+                ..crate::PutFileOptions::default()
+            },
+        )
+        .await
+        .expect("edit in the fork");
+    let request = family.request("edit");
+    let planned = family.plan(&request).await;
+    family
+        .main
+        .put_file_with_options(
+            "/a.txt",
+            b"theirs",
+            &actor(),
+            &crate::PutFileOptions {
+                behavior: loonfs_types::DestinationBehavior::Replace,
+                ..crate::PutFileOptions::default()
+            },
+        )
+        .await
+        .expect("edit in main");
+    let error = family
+        .commit(&request, planned, |request, slot| {
+            let main = &family.main;
+            Box::pin(async move { main.plan_merge(&request, Some(slot)).await })
+        })
+        .await
+        .expect_err("the second plan finds the conflict");
+    assert_matches!(
+        error,
+        crate::Error::Core(CoreError::MergeConflict { ref conflict, .. })
+            if conflict.kind == MergeConflictKind::Content
+    );
+}
+
+/// Checks that a merge plans again after another writer takes a name that
+/// the merge's create needs. `main` creates `/b.txt`, which the fork created,
+/// between the plan and the commit, the commit fails with `path_conflict`,
+/// and the next plan reports the taken name as a `name` conflict.
+#[tokio::test]
+async fn a_merge_plans_again_after_another_writer_takes_its_name() {
+    let family = family().await;
+    let request = family.request("create");
+    let planned = family.plan(&request).await;
+    family
+        .main
+        .put_file("/b.txt", b"main", &actor())
+        .await
+        .expect("create the fork's name in main");
+    let error = family
+        .commit(&request, planned, |request, slot| {
+            let main = &family.main;
+            Box::pin(async move { main.plan_merge(&request, Some(slot)).await })
+        })
+        .await
+        .expect_err("the second plan finds the conflict");
+    assert_matches!(
+        error,
+        crate::Error::Core(CoreError::MergeConflict { ref conflict, .. })
+            if conflict.kind == MergeConflictKind::Name
+    );
 }
 
 /// Checks that a merge whose head moves before each of its commits returns

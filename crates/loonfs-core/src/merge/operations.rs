@@ -4,8 +4,8 @@
 use super::state::InodeState;
 use crate::error::{CoreError, Result};
 use loonfs_types::{
-    AttributesRevisionNo, BindingVersion, ContentRef, DeleteDirectoryBehavior, DisplayName,
-    FilesystemOperation, InodeId, InodeKind,
+    AttributesRevisionNo, BindingVersion, ChangeSeq, ContentRef, DeleteDirectoryBehavior,
+    DisplayName, FilesystemOperation, InodeId, InodeKind,
 };
 
 /// What a merge's commit does to one inode.
@@ -36,6 +36,15 @@ pub(super) enum BindingChange {
     },
     Delete {
         expected_binding_version: BindingVersion,
+    },
+    /// The merged-into namespace deleted the inode in an earlier merge of
+    /// the fork, and the fork undid the deletion, so the merge undoes it too
+    /// and gives the inode its parent and name in the fork. The deletion's
+    /// sequence identifies the deletion that the undelete reverses.
+    Undelete {
+        deletion_seq: ChangeSeq,
+        parent_inode_id: InodeId,
+        display_name: DisplayName,
     },
 }
 
@@ -72,6 +81,17 @@ impl BindingChange {
                 destination_parent_inode_id: *parent_inode_id,
                 destination_display_name: display_name.clone(),
                 precondition: loonfs_types::DestinationPrecondition::default(),
+            },
+            Self::Undelete {
+                deletion_seq,
+                parent_inode_id,
+                display_name,
+            } => FilesystemOperation::Undelete {
+                inode_id,
+                deletion_seq: *deletion_seq,
+                destination_path: None,
+                destination_parent_inode_id: Some(*parent_inode_id),
+                destination_display_name: Some(display_name.clone()),
             },
             Self::Delete {
                 expected_binding_version,

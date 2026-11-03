@@ -4,7 +4,7 @@
 //! and plans what the merge's commit does to each inode.
 
 use super::operations::{access_update, attributes_update, display_name, BindingChange, InodePlan};
-use super::state::{InodeState, StateReader};
+use super::state::{Edge, InodeState, StateReader};
 use super::MergeAllowance;
 use crate::authorize::{require, Absence, Authorizer};
 use crate::commit::wal_size::{
@@ -16,8 +16,9 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::{MergeRecord, MAX_WAL_OBJECT_BYTES, WAL_OBJECT_OVERHEAD_BYTES};
 use loonfs_types::options::DiffOptions;
 use loonfs_types::{
-    AbsolutePath, AccessRight, ChangeSeq, ContentLayout, ContentRef, FilesystemOperation, InodeId,
-    InodeKind, MergeConflict, MergeConflictKind, MergeConflictVersion,
+    AbsolutePath, AccessRight, ChangeSeq, ContentLayout, ContentRef, DisplayName,
+    FilesystemOperation, InodeId, InodeKind, MergeConflict, MergeConflictKind,
+    MergeConflictVersion, NameKey, MAX_PATH_DEPTH, ROOT_INODE_ID,
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -56,6 +57,26 @@ impl Changed {
     }
 }
 
+/// A directory that the fork deleted or moved, whose subtree in the
+/// merged-into namespace a merge checks for changes that aren't the fork's
+/// own, with the versions that a `subtree` conflict reports.
+pub(super) struct SubtreeCheck {
+    directory: InodeId,
+    /// The directory's path at the merged-into namespace's head.
+    path: AbsolutePath,
+    ours: InodeState,
+    theirs: Option<MergeConflictVersion>,
+}
+
+/// Returns the name keys of `path`'s components, which compare names as
+/// path lookups do.
+fn name_keys(path: &AbsolutePath) -> Vec<NameKey> {
+    path.components()
+        .iter()
+        .map(|component| NameKey::for_display_name(&component.to_display_name()))
+        .collect()
+}
+
 /// The reads and the results of one merge's classification.
 pub(super) struct Classifier<'v, S: ObjectStore + ?Sized> {
     /// The merged-into namespace's view, whose diff the subtree check reads.
@@ -87,6 +108,10 @@ pub(super) struct Classifier<'v, S: ObjectStore + ?Sized> {
     pub(super) layouts: HashMap<ContentRef, ContentLayout>,
     /// An upper bound on the commit's planned WAL record so far.
     pub(super) planned_bytes: usize,
+    /// The directories that the fork deleted or moved with no other
+    /// conflict, which [`Self::check_subtrees`] checks after the inodes are
+    /// classified.
+    pub(super) subtree_checks: Vec<SubtreeCheck>,
     /// The inodes whose change conflicts, each counted once.
     pub(super) conflicted: HashSet<InodeId>,
     /// The conflicting inode with the smallest ID.
@@ -100,7 +125,7 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
         for inode_id in self.touched_inodes().await? {
             self.classify_inode(inode_id).await?;
         }
-        Ok(())
+        self.check_subtrees().await
     }
 
     /// Lists the inodes that the fork's commits in the range touched.
@@ -195,13 +220,6 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
         theirs: &InodeState,
         changed: &Changed,
     ) -> Result<()> {
-        if theirs.visible.is_none() {
-            if ours.visible.is_some() {
-                self.conflict(inode_id, MergeConflictKind::Visibility, ours, None)
-                    .await?;
-            }
-            return Ok(());
-        }
         let mut plan = InodePlan {
             inode_id,
             kind: ours.kind,
@@ -209,7 +227,25 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
             updates: Vec::new(),
         };
         let mut conflict = None;
-        if changed.binding && !ours.same_binding(theirs) {
+        if theirs.visible.is_none() {
+            let Some(edge) = ours.edge() else {
+                return Ok(());
+            };
+            // A deletion that an earlier merge of this fork made, and that
+            // the fork has since undone, is undone by this merge too, while
+            // the deletion is recoverable here. Any other deletion conflicts.
+            if let Some(deletion_seq) = self.undeletion(inode_id).await? {
+                plan.binding = Some(BindingChange::Undelete {
+                    deletion_seq,
+                    parent_inode_id: edge.parent_inode_id,
+                    display_name: display_name(&edge.display_name)?,
+                });
+            } else if !self.hidden_by_undeleted_ancestor(inode_id, edge).await? {
+                self.conflict(inode_id, MergeConflictKind::Visibility, ours, None)
+                    .await?;
+                return Ok(());
+            }
+        } else if changed.binding && !ours.same_binding(theirs) {
             let (binding, kind) = self.plan_binding(inode_id, ours, theirs).await?;
             plan.binding = Some(binding);
             conflict = conflict.or(kind);
@@ -222,6 +258,67 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
                 .await?;
         }
         self.add_plan(plan, ours, Some(theirs)).await
+    }
+
+    /// Returns the sequence of the deletion that hides `inode_id` in the
+    /// merged-into namespace, when the merge undoes the deletion. That's a
+    /// deletion of the inode itself that's the fork's own (see
+    /// [`Self::is_own`]), which an earlier merge of the fork made, that's
+    /// still recoverable there, and that the fork undid, so the inode is
+    /// visible in the fork.
+    async fn undeletion(&mut self, inode_id: InodeId) -> Result<Option<ChangeSeq>> {
+        let Some(deletion) = self.theirs.view().recoverable_deletion(inode_id).await? else {
+            return Ok(None);
+        };
+        if !self.is_own(deletion.committed_seq).await? {
+            return Ok(None);
+        }
+        let visible_in_fork = self
+            .ours
+            .state(inode_id)
+            .await?
+            .is_some_and(|state| state.visible.is_some());
+        Ok(visible_in_fork.then_some(deletion.committed_seq))
+    }
+
+    /// Returns whether `inode_id` is hidden in the merged-into namespace
+    /// only by deletions of its ancestors that the merge undoes (see
+    /// [`Self::undeletion`]), and keeps there the parent and the name that
+    /// `edge` gives it in the fork. Undoing those deletions shows the inode
+    /// again without a change of its own.
+    async fn hidden_by_undeleted_ancestor(
+        &mut self,
+        inode_id: InodeId,
+        edge: &Edge,
+    ) -> Result<bool> {
+        let view = self.theirs.view();
+        let Some(binding) = view.current_parent_binding_for_child(inode_id).await? else {
+            return Ok(false);
+        };
+        if binding.parent_inode_id != edge.parent_inode_id
+            || binding.display_name().map(DisplayName::as_str) != Some(edge.display_name.as_str())
+        {
+            return Ok(false);
+        }
+        let mut undeleted = false;
+        let mut ancestor = binding.parent_inode_id;
+        // A binding cycle would be corrupt, and the bound ends the walk.
+        for _ in 0..=MAX_PATH_DEPTH {
+            if view.hiding_subtree_tombstone(ancestor).await?.is_some() {
+                if self.undeletion(ancestor).await?.is_none() {
+                    return Ok(false);
+                }
+                undeleted = true;
+            }
+            if ancestor == ROOT_INODE_ID {
+                return Ok(undeleted);
+            }
+            let Some(binding) = view.current_parent_binding_for_child(ancestor).await? else {
+                return Ok(false);
+            };
+            ancestor = binding.parent_inode_id;
+        }
+        Ok(false)
     }
 
     /// Plans a move or a delete of a visible inode, and returns the kind of
@@ -261,14 +358,18 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
             }
         };
         if conflict.is_none() && theirs.kind == InodeKind::Directory {
-            let path = &theirs
+            let path = theirs
                 .visible
                 .as_ref()
                 .expect("a visible inode has a path")
-                .path;
-            if self.subtree_changed(inode_id, path).await? {
-                conflict = Some(MergeConflictKind::Subtree);
-            }
+                .path
+                .clone();
+            self.subtree_checks.push(SubtreeCheck {
+                directory: inode_id,
+                path,
+                ours: ours.clone(),
+                theirs: theirs.conflict_version(),
+            });
         }
         Ok((binding, conflict))
     }
@@ -431,30 +532,70 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
         Ok(own)
     }
 
-    /// Returns whether something below `directory`, at `path`, changed in
-    /// the merged-into namespace after the fork point through a row that
-    /// isn't the fork's own, from the namespace's diff over the directory.
+    /// Records a `subtree` conflict for each directory that the fork deleted
+    /// or moved when something below the directory changed in the
+    /// merged-into namespace after the fork point through a row that isn't
+    /// the fork's own (see [`Self::is_own`]).
     ///
-    /// The diff's pages advance through the commits after the fork point, so
-    /// the loop ends after the namespace's head.
-    async fn subtree_changed(&mut self, directory: InodeId, path: &AbsolutePath) -> Result<bool> {
+    /// One diff of the namespace from the fork point to its head, over the
+    /// root, finds the changes. An entry counts for each checked directory
+    /// that its path at either end is at or below, other than its own, and
+    /// an entry below none of them is skipped. The diff's pages advance
+    /// through the commits after the fork point, so the loop ends after the
+    /// namespace's head.
+    async fn check_subtrees(&mut self) -> Result<()> {
+        if self.subtree_checks.is_empty() {
+            return Ok(());
+        }
+        let checks = std::mem::take(&mut self.subtree_checks);
+        let by_path: HashMap<Vec<NameKey>, usize> = checks
+            .iter()
+            .enumerate()
+            .map(|(index, check)| (name_keys(&check.path), index))
+            .collect();
+        let mut changed = vec![false; checks.len()];
         let mut options = DiffOptions {
-            path: path.clone(),
+            path: AbsolutePath::root(),
             to_seq: Some(self.main.head().seq),
             ..DiffOptions::default()
         };
         loop {
             let page = crate::diff::diff_page(self.main, self.fork_point_seq, &options).await?;
             for entry in &page.response.entries {
-                if entry.inode_id != directory && self.has_foreign_row(entry.inode_id).await? {
-                    return Ok(true);
+                let below: BTreeSet<usize> = [entry.path.as_ref(), entry.previous_path.as_ref()]
+                    .into_iter()
+                    .flatten()
+                    .flat_map(|path| {
+                        let keys = name_keys(path);
+                        (0..=keys.len())
+                            .filter_map(|length| by_path.get(&keys[..length]).copied())
+                            .collect::<Vec<_>>()
+                    })
+                    .filter(|index| !changed[*index] && checks[*index].directory != entry.inode_id)
+                    .collect();
+                if !below.is_empty() && self.has_foreign_row(entry.inode_id).await? {
+                    for index in below {
+                        changed[index] = true;
+                    }
                 }
             }
             match page.response.next_after_seq {
                 Some(after_seq) => options.after_seq = Some(after_seq),
-                None => return Ok(false),
+                None => break,
             }
         }
+        for (check, changed) in checks.into_iter().zip(changed) {
+            if changed {
+                self.conflict(
+                    check.directory,
+                    MergeConflictKind::Subtree,
+                    &check.ours,
+                    check.theirs,
+                )
+                .await?;
+            }
+        }
+        Ok(())
     }
 
     /// Returns whether one of the inode's newest rows in the merged-into

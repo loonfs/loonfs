@@ -192,7 +192,11 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// merge deletes or moves a directory, its commit expects this
     /// namespace's head to be the one that the plan read, because another
     /// writer can add an item below the directory without changing a row
-    /// that the commit's other preconditions cover.
+    /// that the commit's other preconditions cover. The commit also expects
+    /// the head when the merge moves an inode through a temporary name,
+    /// because the move off the temporary name finds the inode and its new
+    /// directory by path, and another writer can rename a directory on
+    /// either path without changing a row that those preconditions cover.
     pub async fn plan_merge<F>(
         &self,
         context: &RuntimeReadContext,
@@ -241,6 +245,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
                 intent.message.as_deref(),
                 Some(&record),
             ),
+            subtree_checks: Vec::new(),
             conflicted: HashSet::new(),
             first_conflict: None,
         };
@@ -258,7 +263,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
                     Some(BindingChange::Move { .. } | BindingChange::Delete { .. })
                 )
         });
-        let preconditions = if moves_or_deletes_a_directory {
+        let preconditions = if moves_or_deletes_a_directory || !temporary_moves.is_empty() {
             vec![CommitPrecondition::NamespaceHead {
                 expected_head_seq: main.head().seq,
             }]

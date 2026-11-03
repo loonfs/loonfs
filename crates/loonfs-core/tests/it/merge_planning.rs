@@ -594,6 +594,106 @@ async fn a_create_that_needs_a_conflicting_inodes_name_conflicts_too() {
     assert_eq!(conflict.kind, MergeConflictKind::Content);
 }
 
+/// Undoes the fork's deletion of `inode_id`, whose commit was `deleted`, so
+/// the inode comes back where it was.
+async fn undelete_in_the_fork(family: &Family, inode_id: InodeId, deleted: &Commit) {
+    family
+        .fork()
+        .submit_operation(
+            CommitId::generate(),
+            FilesystemOperation::Undelete {
+                inode_id,
+                deletion_seq: deleted.committed_seq,
+                destination_path: None,
+                destination_parent_inode_id: None,
+                destination_display_name: None,
+            },
+            Vec::new(),
+        )
+        .await
+        .expect("undelete in the fork");
+}
+
+/// Checks that a deletion that an earlier merge of the fork made, and that
+/// the fork then undid, merges as an undelete. The fork deletes `a.txt`, the
+/// merge deletes it in `main`, the fork undeletes it, and the next merge
+/// undeletes it in `main` under the same inode ID.
+#[tokio::test]
+async fn a_file_that_the_fork_undeleted_after_a_merge_merges() {
+    let family = Family::new().await;
+    let inode_id = family.inode(&family.main, "/docs/a.txt").await;
+    let deleted = family
+        .fork()
+        .delete_path("/docs/a.txt", None)
+        .await
+        .expect("delete");
+    family
+        .merge("delete", None)
+        .await
+        .expect("merge the delete");
+    assert!(family.entry(&family.main, "/docs/a.txt").await.is_none());
+    undelete_in_the_fork(&family, inode_id, &deleted).await;
+
+    family
+        .merge("undelete", None)
+        .await
+        .expect("merge the undelete");
+    assert_eq!(family.inode(&family.main, "/docs/a.txt").await, inode_id);
+    assert_eq!(
+        family.main_bytes("/docs/a.txt").await.as_deref(),
+        Some(&b"/docs/a.txt"[..])
+    );
+}
+
+/// Checks the undelete of a directory. The items below it come back with it,
+/// with no change of their own.
+#[tokio::test]
+async fn a_directory_that_the_fork_undeleted_after_a_merge_merges() {
+    let family = Family::new().await;
+    let inode_id = family.inode(&family.main, "/old").await;
+    let deleted = family
+        .fork()
+        .delete_path("/old", None)
+        .await
+        .expect("delete");
+    family
+        .merge("delete", None)
+        .await
+        .expect("merge the delete");
+    undelete_in_the_fork(&family, inode_id, &deleted).await;
+
+    family
+        .merge("undelete", None)
+        .await
+        .expect("merge the undelete");
+    assert_eq!(
+        family.main_bytes("/old/x.txt").await.as_deref(),
+        Some(&b"/old/x.txt"[..])
+    );
+}
+
+/// Checks that a deletion that isn't the fork's own still conflicts. `main`
+/// deleted `a.txt` after the fork point, and the fork changed the file.
+#[tokio::test]
+async fn a_deletion_that_isnt_the_forks_own_conflicts() {
+    let family = Family::new().await;
+    family
+        .main()
+        .delete_path("/docs/a.txt", None)
+        .await
+        .expect("main");
+    family
+        .set_attribute(family.fork(), "/docs/a.txt", "ours")
+        .await;
+
+    let error = family.merge("foreign", None).await.expect_err("conflict");
+    let conflict = error
+        .details()
+        .and_then(|details| details.conflict)
+        .expect("the first conflict");
+    assert_eq!(conflict.kind, MergeConflictKind::Visibility);
+}
+
 /// Checks the `access` check of the conflict rule in a namespace with ACLs.
 /// A directory whose access row `main` changed after the fork point, and
 /// whose access row the fork changed too, conflicts.
@@ -1165,6 +1265,46 @@ async fn a_temporary_name_that_is_taken_takes_a_suffix() {
         ],
     )
     .await;
+}
+
+/// Checks that the search for a temporary name stops after the inode ID and
+/// eight suffixes. `main` has a file under each of those names, so the swap
+/// of `a.txt` and `b.txt` can't take a temporary name, and the merge returns
+/// `invalid_request`.
+#[tokio::test]
+async fn a_temporary_name_search_gives_up_after_eight_suffixes() {
+    let family = Family::new().await;
+    let a_id = family.inode(&family.main, "/docs/a.txt").await;
+    for suffix in 0..=8 {
+        let name = match suffix {
+            0 => format!("/docs/{a_id}"),
+            _ => format!("/docs/{a_id}-{suffix}"),
+        };
+        family
+            .main()
+            .write_file_bytes(&name, b"taken", None)
+            .await
+            .expect("a taken name");
+    }
+    let fork = family.fork();
+    fork.move_path("/docs/a.txt", "/docs/t.txt", None)
+        .await
+        .expect("move a");
+    fork.move_path("/docs/b.txt", "/docs/a.txt", None)
+        .await
+        .expect("move b");
+    fork.move_path("/docs/t.txt", "/docs/b.txt", None)
+        .await
+        .expect("move t");
+
+    let error = family.merge("no-name", None).await.expect_err("no name");
+    assert_matches!(
+        error,
+        CoreError::InvalidMerge {
+            param: "/through_seq",
+            ..
+        }
+    );
 }
 
 /// Checks a swap of two names. Each move waits for the other, so the merge

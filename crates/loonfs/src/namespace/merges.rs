@@ -14,8 +14,9 @@ use loonfs_core::MergeRequest;
 use loonfs_types::format::wal::MergeRecord;
 use std::sync::Arc;
 
-/// The plans that one merge makes before it returns `stale_head`, which are
-/// the first and three more after the head moved past a plan.
+/// The plans that one merge makes before it returns its commit's error,
+/// which are the first and three more after this namespace changed between
+/// a plan and its commit.
 const MAX_MERGE_PLANS: usize = 4;
 
 /// A merge request at one view of the namespace that it merges into.
@@ -56,9 +57,10 @@ impl Namespace<Writable> {
     /// the fork's previous merge, or since the fork point, and refuses a
     /// change that conflicts with this namespace with `merge_conflict`. A
     /// retry with the commit ID of a merge that committed returns that
-    /// merge. When the merge deletes or moves a directory and this
-    /// namespace's head moves before the merge commits, the merge plans
-    /// again, up to three times, and then returns `stale_head`. After the
+    /// merge. When the commit fails because this namespace changed after
+    /// the plan, the merge plans again, up to three times, and then returns
+    /// the commit's error. A later plan reports a changed row that isn't the
+    /// fork's own as `merge_conflict`. After the
     /// commit, the merge folds this namespace's WAL tail through it, unless
     /// the merge has already run for the runtime's
     /// [`merge_fold_budget_ms`](crate::PublicationPolicy::merge_fold_budget_ms),
@@ -162,8 +164,9 @@ impl Namespace<Writable> {
     }
 
     /// Commits the merge that `planned` found or planned, and calls
-    /// `replan` when the commit fails with `stale_head`, up to
-    /// [`MAX_MERGE_PLANS`] plans in all. A later plan applies the first
+    /// `replan` when the commit fails because this namespace changed after
+    /// the plan (see [`is_stale_plan`]), up to [`MAX_MERGE_PLANS`] plans in
+    /// all. A later plan applies the first
     /// plan's range, so it never merges a longer range, and a merge of the
     /// fork that committed in between returns `merge_range_conflict`.
     pub(crate) async fn commit_merge<'a>(
@@ -183,7 +186,7 @@ impl Namespace<Writable> {
                 PlannedMerge::Candidate(planned) => *planned,
             };
             match self.submit_merge(candidate, &slot).await {
-                Err(error) if error.code() == ErrorCode::StaleHead && plans < MAX_MERGE_PLANS => {
+                Err(error) if is_stale_plan(error.code()) && plans < MAX_MERGE_PLANS => {
                     plans += 1;
                     let request = MergeRequest {
                         after_seq: Some(record.source_after_seq),
@@ -231,6 +234,10 @@ impl Namespace<Writable> {
             return;
         }
         let maintenance = self.maintenance();
+        // When the budget runs out first, the dropped fold leaves the segments
+        // that it wrote unlisted by any manifest, and garbage collection
+        // removes them, as it does the output of an abandoned compaction
+        // unit.
         tokio::select! {
             folded = maintenance.fold_wal(&self.namespace_id) => {
                 if let Err(error) = folded {
@@ -254,6 +261,35 @@ impl Namespace<Writable> {
             self.mode.writer.writer_id.clone(),
         )
     }
+}
+
+/// Returns whether `code` is an error that a merge's commit returns when
+/// this namespace changed after the plan, so that a later plan reads the
+/// change. Those errors are:
+///
+/// - `stale_head`, `stale_revision`, `stale_attributes`, `stale_access`,
+///   and `binding_version_mismatch`, from the commit's preconditions.
+/// - `path_conflict`, when another inode took a name that a create, move,
+///   or undelete needs.
+/// - `inode_not_found`, when a deletion hid an inode that the merge
+///   changes, or the directory that an inode goes into.
+/// - `not_deleted`, when another writer undeleted an inode that the merge
+///   undeletes.
+///
+/// A later plan reports a changed row that isn't the fork's own as
+/// `merge_conflict`, such as a `name` conflict for a taken name.
+fn is_stale_plan(code: ErrorCode) -> bool {
+    matches!(
+        code,
+        ErrorCode::StaleHead
+            | ErrorCode::StaleRevision
+            | ErrorCode::StaleAttributes
+            | ErrorCode::StaleAccess
+            | ErrorCode::BindingVersionMismatch
+            | ErrorCode::PathConflict
+            | ErrorCode::InodeNotFound
+            | ErrorCode::NotDeleted
+    )
 }
 
 /// Returns `invalid_request` for a fork that doesn't exist or was deleted,
