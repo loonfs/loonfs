@@ -7,6 +7,7 @@ use crate::config_file::ConfigSource;
 use crate::error::CliError;
 use crate::profiles::ProfileSummary;
 use crate::render::{store_probe_run_outcome, StoreProbeRunOutcome};
+use loonfs_merge::{MergeSessionOutcome, MergeSessionState, MergeSessionStatus};
 use loonfs_types::{
     AbsolutePath, CapabilityDocument, ChangeSeq, CommitId, DeleteNamespaceResponse,
     DeleteSnapshotResponse, FileRevision, GrepIndex, GrepMatch, InodeId, ListChangesResponse,
@@ -188,6 +189,16 @@ pub(crate) enum CommandData {
     SnapshotExtended(Snapshot),
     SnapshotDeleted(DeleteSnapshotResponse),
     CheckpointsListed(ListCheckpointsResponse),
+    /// A merge session after `loonfs merge` ran it as far as it goes.
+    MergeSession {
+        /// The record file that keeps the session between runs. The command
+        /// removes it once the session is merged or abandoned.
+        record_path: String,
+        /// The session's state.
+        session: MergeSessionState,
+        /// How each step of this run ended, in order.
+        steps: Vec<MergeSessionOutcome>,
+    },
     GrepIndexEnabled {
         /// The lifecycle and bookkeeping last observed: what enable read
         /// with `--no-wait`, otherwise the status after waiting stopped.
@@ -350,6 +361,12 @@ impl CommandData {
                     store_probe_run_outcome(response),
                     StoreProbeRunOutcome::Failed { .. }
                 )
+            }
+            // A failed merge session prints its conflicts and the fork to
+            // inspect, and still exits nonzero, because the fork wasn't
+            // merged.
+            CommandData::MergeSession { session, .. } => {
+                matches!(session.status, MergeSessionStatus::Failed { .. })
             }
             _ => false,
         }

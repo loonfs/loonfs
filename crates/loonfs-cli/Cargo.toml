@@ -29,6 +29,7 @@ dialoguer.workspace = true
 hostname.workspace = true
 loonfs-types.workspace = true
 loonfs-client.workspace = true
+loonfs-merge.workspace = true
 loonfs.workspace = true
 loonfs-grep.workspace = true
 loonfs-objectstore.workspace = true

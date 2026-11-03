@@ -163,7 +163,7 @@ A `merge_too_large` error's details include `split_at_seq`, a fork sequence such
 
 ## The loop
 
-`loonfs-merge` is a crate that depends on `loonfs-types` and on nothing private in core. It defines a trait, `Mechanics`, with a method for each server operation that the loop uses: merge, rebase, the next-range query, and deleting a namespace. The HTTP client implements the trait for the CLI and the lab. The crate implements the loop as a state machine in which every step is one or two requests.
+`loonfs-merge` is a crate that depends on `loonfs-types` and the HTTP client, and on nothing private in core. It defines a trait, `Mechanics`, with a method for each server operation that the loop uses: merge, rebase, the next-range query, deleting a namespace, and the two reads that recover a lost session record (reading a namespace, and listing a namespace's checkpoints). The HTTP client implements the trait for the CLI and the lab. The crate implements the loop as a state machine in which every step is one or two requests.
 
 A "merge session" is the loop's record of one fork's merge, from the first request to the last. A session moves through these states:
 
@@ -176,33 +176,56 @@ A "merge session" is the loop's record of one fork's merge, from the first reque
               +-----------------+   merge committed   +--------+
    start ---> |     merging     | ------------------> | merged |
               +-----------------+                     +--------+
-                 |      ^     |
- merge_conflict: |      |     | merge_too_large without
- rebase          |      |     | split_at_seq, or
-                 v      |     | rebootstrap_required
-          +-----------+ |     v
-          | resolving |-+  +--------+   caller abandons   +-----------+
-          +-----------+    | failed | ------------------> | abandoned |
-       resolver returns    +--------+                     +-----------+
+                 |           ^
+ merge_conflict: |           | resolver returns: merge
+ rebase into a   |           | the new fork through its head
+ new fork        v           |
+          +----------+    +-----------+
+          | rebasing | -> | resolving |
+          +----------+    +-----------+
+       replay committed
+       through the end
+
+ An error that the loop can't act on, while merging or rebasing,
+ or an error from the resolver:
+
+          +--------+   caller abandons   +-----------+
+          | failed | ------------------> | abandoned |
+          +--------+                     +-----------+
 ```
 
 | State | Meaning | Next step |
 | --- | --- | --- |
-| `merging` | The current fork (the original fork, or the latest new fork) is ready to merge. | Merge it through the session's sequence. On success, the session is `merged`. On `merge_conflict`, rebase the fork's whole unmerged range through the session's sequence into a new fork, in pieces if the rebase returns `merge_too_large`, and the session is `resolving`. On `merge_too_large` with `split_at_seq`, whichever bound refused the merge, merge through `split_at_seq`, and the session stays `merging`. On `merge_too_large` without `split_at_seq` (the fork's first unmerged commit alone is too large), or on `rebootstrap_required`, the session is `failed`. |
-| `resolving` | A new fork exists with its conflict reports, and the resolver is working in it. | When the resolver returns, the new fork becomes the current fork, with its own head as the sequence to merge through, and the session is `merging`. |
-| `merged` | The session's last merge committed, and nothing remains of the current fork's range. | Delete the new forks that the session's rebases created. |
-| `failed` | A merge or a rebase returned an error that the loop can't act on, and the session's report says which. | The caller chooses the next step. The new forks stay until the caller abandons the session. |
-| `abandoned` | The caller abandoned the session. | Delete the new forks that the session's rebases created. |
+| `merging` | The current fork (the original fork, or the latest new fork) is ready to merge. | Merge it through the session's sequence. On success, the session is `merged`, or stays `merging` for the rest of the range when the merge went through a split hint. On `merge_conflict`, the session is `rebasing` into a new fork. On `merge_too_large` with `split_at_seq`, whichever bound refused the merge, merge through `split_at_seq`, and the session stays `merging`. On `merge_too_large` without `split_at_seq` (the fork's first unmerged commit alone is too large), on `rebootstrap_required`, or on another error that the loop can't act on, the session is `failed`. |
+| `rebasing` | A merge of the current fork conflicted, and the loop replays the fork's whole unmerged range through the session's sequence into a new fork. | Send the next replay commit. On `merge_too_large` with `split_at_seq`, send it through `split_at_seq`, and then send the rest of the range into the same new fork. Once a replay commit reaches the session's sequence, the session is `resolving`. On an error that the loop can't act on, the session is `failed`. |
+| `resolving` | The new fork has every replay commit, and the resolver is working in it. | When the resolver returns, the new fork becomes the current fork, with its own head as the sequence to merge through, and the session is `merging`. When the resolver fails, the session is `failed`. |
+| `merged` | The session's last merge committed, and nothing remains of the current fork's range. | Delete the new forks that the session's rebases created, one in each step. |
+| `failed` | A merge, a rebase, or the resolver returned an error that the loop can't act on, and the session record says which. | The caller chooses the next step. The new forks stay until the caller abandons the session. |
+| `abandoned` | The caller abandoned the failed session. | Delete the new forks that the session's rebases created, one in each step. |
 
-The route already plans a merge again when its commit fails because main changed after the plan, up to four plans in all, so a failure of that kind (such as `stale_head` or `stale_revision`) that reaches the loop means that main kept changing through all four plans. The loop treats that failure as transient and merges again in the `merging` state. `loonfs merge` gives up after a set number of attempts and reports the failure, so a main that never stops changing doesn't keep a merge running forever.
+The loop sends a merge or a rebase again, with the same commit ID, when the request fails with a transient error. A transient error is either an error that the client has already retried with a backoff (`commit_queue_full`, `server_busy`, or `shutting_down`), or the error of a commit that failed because main changed after the plan (such as `stale_head` or `stale_revision`). The route already plans a merge again after a failure of that second kind, up to four plans in all, so a failure of that kind that reaches the loop means that main kept changing through all four plans. Each request gets four attempts (`MAX_MERGE_ATTEMPTS`), and then the session is `failed`, so a main that doesn't stop changing can't keep a merge running without end.
 
-The session record stores main, the original fork, the sequence to merge through, the current fork, the new fork while the session is `resolving`, the commit ID of the merge in flight (so that a retry returns the original commit), the state, and the conflict report of every replay commit in the session. It keeps every report because a rebase in pieces returns one report for each piece, and the resolver needs all of them. The CLI writes the record to a file after every step, so that a run that crashed can resume. A caller that lost its record recovers the forks and the next range from the store. The next range comes from the next-range query, and the new forks are the forks of main whose fork basis has a `rebased_from` that identifies the original fork or an earlier new fork, which the checkpoint inventory in `maintenance/v0` lists. The caller regains the reports only by rebasing again into a fresh new fork, which repeats the classification.
+A split hint at or above the end of the refused request wouldn't shorten the range, so the loop treats it as no hint instead of sending the same request again without end, and the session is `failed`.
 
-The crate represents a resolver as a trait, `Resolver`. Given the new fork and its conflict reports, an implementation writes resolutions into the fork and returns when the fork is ready to merge. The crate's default resolver fails and returns the reports, so a caller with no resolver gets the conflict reports and a fork to inspect, and the conflicting changes aren't merged.
+The loop sends the next-range query when a session starts or is recovered, and after the resolver returns, to find the fork's head and whether anything is left to merge. If the query's outcome says that a retention floor refuses the fork's next merge (`range_start_below_floor` or `fork_point_below_floor`), the session is `failed` before it sends the merge, and the session record stores the outcome and the floor. An outcome from a newer server fails the session in the same way.
+
+A session creates at most eight new forks (`MAX_NEW_FORKS`). The first rebase follows the first conflict, and a later one follows a conflict with a change that main made after the latest rebase, or replaces a new fork whose conflict report was lost. So a session that reaches the limit is merging into a main that doesn't stop conflicting, and the session is `failed`. The limit also bounds the size of the session record and the number of passes that recovery makes over main's forks.
+
+The session record stores main, the original fork, the actor, the state, the current fork and the sequence to merge it through, the new fork while the session is `rebasing` or `resolving`, the commit ID and range end of the merge or replay commit in flight (so that a retry returns the original commit), every new fork that the session's rebases created, and the conflict report of every replay commit of the current rebase. It keeps every report of the rebase because a rebase in pieces returns one report for each piece, and the resolver needs all of them. The loop chooses the commit ID of a request in the step before the one that sends the request, so the record that a caller saved includes the commit ID before the request is sent. The CLI writes the record to a file after every step, so that a run that crashed can resume.
+
+A rebase returns no conflict report when its commit ID identifies a replay commit that an earlier request committed, as when a response was lost and the client sent the request again. The loop then rebases the fork again into another new fork, which repeats the classification. The new fork whose report was lost stays in the record's list of new forks, and the loop deletes it with the other new forks once the session is `merged` or `abandoned`. (If the loop deleted it in the step that chose its replacement, a run that stopped before the caller saved that step's record would resume with a record whose new fork is deleted, and the next rebase would fail with `namespace_deleted`.)
+
+A caller that lost its record recovers the forks and the next range from the store. The new forks are the forks of main whose fork basis has a `rebased_from` that identifies the original fork or another new fork, which the checkpoint inventory in `maintenance/v0` lists. Recovery follows them from the original fork. A new fork that merged into main, or that was itself rebased, is one that the lost session continued with, so the recovered session merges the last fork that the lost session continued with, starting after the sequence that the next-range query returns for that fork. When that fork was rebased into new forks that never merged and weren't rebased, their conflict reports are lost, and the caller regains them only by rebasing the fork again into a fresh new fork, which repeats the classification. Once the recovered session is `merged` or `abandoned`, it deletes every new fork that recovery found.
+
+Recovery has one gap. It finds a new fork through the fork that the new fork was rebased from, so if the record is lost after a `merged` session deleted some of its new forks, recovery can't connect the remaining new forks to the original fork, and the session merges the original fork again. A change that a new fork already merged is then left out where main has the same version, and conflicts where it doesn't, so main keeps what the new forks merged, but the session can end `failed`, with new forks of its own to abandon. A caller avoids the gap by keeping the record until the session has deleted its new forks.
+
+The crate represents a resolver as a trait, `Resolver`. Given the new fork and its conflict reports, an implementation writes resolutions into the fork and returns when the fork is ready to merge. If the next-range query that reads the new fork's head fails after the resolver returned, the step fails, and the next step calls the resolver again, so a resolver has to handle a second call for the same new fork. The crate's default resolver fails when the reports list a conflict, so a caller with no resolver gets the conflict reports and a fork to inspect, and the conflicting changes aren't merged. When the reports list no conflict, because the rebase applied every change, the default resolver returns, and the session merges the new fork.
 
 The loop deletes the new forks that it asked the rebase route to create, and the caller deletes the original fork when the session reaches `merged`, or whenever the caller no longer needs the fork.
 
-Two callers drive the steps. `loonfs merge` runs the loop to completion with the default resolver, and the lab's merge scenarios drive it with resolvers that simulate an agent.
+Two callers drive the steps. `loonfs merge` runs the loop as far as it goes with the default resolver. It keeps the record in a file under the CLI's state directory, recovers the session from the store when it has no record, and abandons a failed session with `--abandon`. The lab's merge scenarios drive the loop with resolvers that simulate an agent.
+
+Why is `rebasing` a state of its own? A rebase in pieces makes one request in each step, and the session record has to keep the progress of the pieces between the steps, before the resolver has anything to work on.
 
 Why is the loop outside core? It writes nothing that core doesn't already write through its routes, it needs no private type, and its policy (when to merge, and what to do with a conflict) belongs to the caller.
 

@@ -1,0 +1,25 @@
+[package]
+name = "loonfs-merge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "The loop that merges a LoonFS fork: merge, split, rebase, resolve, and merge again."
+repository.workspace = true
+homepage.workspace = true
+keywords = ["filesystem", "object-storage", "merge", "fork"]
+categories = ["filesystem"]
+
+[dependencies]
+loonfs-client.workspace = true
+loonfs-types.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+loonfs-test-support.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[lints]
+workspace = true

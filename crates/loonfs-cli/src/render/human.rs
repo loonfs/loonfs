@@ -65,6 +65,11 @@ fn human_success_text(output: &CommandOutput) -> String {
         CommandData::SnapshotExtended(snapshot) => human_snapshot_extended(snapshot),
         CommandData::SnapshotDeleted(response) => human_snapshot_deleted(response),
         CommandData::CheckpointsListed(response) => human_checkpoints_listed(response),
+        CommandData::MergeSession {
+            record_path,
+            session,
+            steps,
+        } => human_merge_session(record_path, session, steps),
         CommandData::MaintenanceRan(response) => human_maintenance_ran(response),
         CommandData::Changes(response) => human_changes(response),
         CommandData::Trash(listing) => human_trash(listing),

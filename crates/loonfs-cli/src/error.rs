@@ -50,6 +50,7 @@ cli_error_codes! {
     JsonNotSupportedForStreaming => "json_not_supported_for_streaming",
     Cancelled => "cancelled",
     ClientError => "client_error",
+    MergeNotRecoverable => "merge_not_recoverable",
 }
 
 /// Structured failure reported by every CLI command (`--json` renders it verbatim).
@@ -245,6 +246,23 @@ impl From<ClientError> for CliError {
             // variants map to a generic transport failure. Add an explicit arm when a
             // new variant needs a more specific CLI code.
             other => Self::client_error(other.to_string()),
+        }
+    }
+}
+
+impl From<loonfs_merge::MergeError> for CliError {
+    fn from(error: loonfs_merge::MergeError) -> Self {
+        match error {
+            loonfs_merge::MergeError::Client(error) => error.into(),
+            error @ loonfs_merge::MergeError::NotFailed { .. } => {
+                Self::invalid_request(error.to_string()).with_param("--abandon")
+            }
+            // Recovery found new forks that don't fit one session, which
+            // only a person can sort out.
+            other => Self::new(
+                CliErrorCode::MergeNotRecoverable.as_str(),
+                other.to_string(),
+            ),
         }
     }
 }

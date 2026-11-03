@@ -2,11 +2,16 @@
 
 use super::summaries::*;
 use crate::commands::MaintenanceRan;
+use loonfs_merge::{
+    MergeFailure, MergeSessionOutcome, MergeSessionState, MergeSessionStatus, MAX_MERGE_ATTEMPTS,
+    MAX_NEW_FORKS,
+};
 use loonfs_types::{
     ChangeSeq, DeleteNamespaceResponse, DeleteSnapshotResponse, GrepIndex, ListChangesResponse,
     ListCheckpointsResponse, ListSnapshotsResponse, MetadataMaintenanceOutcome, NamespaceMetadata,
     RunMaintenanceResponse, Snapshot, StoreProbeResponse,
 };
+use loonfs_types::{MergeConflict, MergeConflictKind};
 
 pub(super) fn human_default_namespace(profile: &str, namespace: &str) -> String {
     format!("default namespace for `{profile}` set to `{namespace}`")
@@ -242,4 +247,176 @@ pub(super) fn human_grep_index_status(response: &GrepIndex) -> String {
         summary.push_str("; a reorganization is in progress");
     }
     summary
+}
+
+/// Returns the line that `loonfs merge` prints for one step of its session.
+pub(crate) fn human_merge_step(outcome: &MergeSessionOutcome) -> String {
+    match outcome {
+        MergeSessionOutcome::MergeCommitted {
+            fork_id,
+            committed_seq,
+            through_seq,
+            ..
+        } => format!(
+            "merged `{fork_id}` through seq {} at seq {}",
+            through_seq.0, committed_seq.0
+        ),
+        MergeSessionOutcome::Split {
+            error,
+            split_at_seq,
+        } => format!(
+            "{}; merging through seq {} first",
+            error.message, split_at_seq.0
+        ),
+        MergeSessionOutcome::Conflicted { error, new_fork_id } => {
+            format!("{}; rebasing into `{new_fork_id}`", error.message)
+        }
+        MergeSessionOutcome::ReplayCommitted {
+            new_fork_id,
+            through_seq,
+            conflict_count,
+        } => {
+            let noun = if *conflict_count == 1 {
+                "change"
+            } else {
+                "changes"
+            };
+            format!(
+                "replayed through seq {} into `{new_fork_id}`, leaving out {conflict_count} \
+                 conflicting {noun}",
+                through_seq.0
+            )
+        }
+        MergeSessionOutcome::ReportLost {
+            replaced_fork_id,
+            new_fork_id,
+        } => format!(
+            "the conflict report of `{replaced_fork_id}` was lost; rebasing again into \
+             `{new_fork_id}`"
+        ),
+        MergeSessionOutcome::Resolved {
+            fork_id,
+            through_seq,
+        } => format!(
+            "resolved `{fork_id}`; merging it through seq {}",
+            through_seq.0
+        ),
+        MergeSessionOutcome::Retrying {
+            error,
+            failed_attempts,
+        } => format!(
+            "attempt {failed_attempts} of {MAX_MERGE_ATTEMPTS} failed with `{}`; trying again",
+            error.code
+        ),
+        MergeSessionOutcome::Failed => "failed".to_owned(),
+        MergeSessionOutcome::Deleted { namespace_id } => {
+            format!("deleted new fork `{namespace_id}`")
+        }
+    }
+}
+
+pub(super) fn human_merge_session(
+    record_path: &str,
+    session: &MergeSessionState,
+    steps: &[MergeSessionOutcome],
+) -> String {
+    let fork_id = &session.original_fork_id;
+    let namespace_id = &session.namespace_id;
+    match &session.status {
+        MergeSessionStatus::Merged => {
+            let merges = steps
+                .iter()
+                .filter(|step| matches!(step, MergeSessionOutcome::MergeCommitted { .. }))
+                .count();
+            match merges {
+                0 => format!("`{fork_id}` has nothing left to merge into `{namespace_id}`"),
+                1 => format!("merged `{fork_id}` into `{namespace_id}` in 1 merge"),
+                _ => format!("merged `{fork_id}` into `{namespace_id}` in {merges} merges"),
+            }
+        }
+        MergeSessionStatus::Abandoned => format!(
+            "abandoned the merge of `{fork_id}` into `{namespace_id}`, and deleted its new forks"
+        ),
+        MergeSessionStatus::Failed {
+            fork_id: inspect_id,
+            failure,
+            reports,
+        } => {
+            let mut lines = vec![
+                format!(
+                    "the merge of `{fork_id}` into `{namespace_id}` failed: {}",
+                    merge_failure(failure)
+                ),
+                format!("fork to inspect: {inspect_id}"),
+            ];
+            lines.extend(
+                reports
+                    .iter()
+                    .flat_map(|report| &report.conflicts)
+                    .map(merge_conflict_line),
+            );
+            lines.push(format!(
+                "the session is saved in `{record_path}`; rerun with `--abandon` to delete its \
+                 new forks"
+            ));
+            lines.join("\n")
+        }
+        // A run ends only in one of the statuses above, so this is a record
+        // read in the middle of a session.
+        status => format!(
+            "the merge of `{fork_id}` into `{namespace_id}` is {}",
+            status.as_str()
+        ),
+    }
+}
+
+fn merge_failure(failure: &MergeFailure) -> String {
+    match failure {
+        MergeFailure::Refused { error } => format!("{} (`{}`)", error.message, error.code),
+        MergeFailure::Unresolved { message } => message.clone(),
+        MergeFailure::NewForkLimit => format!(
+            "the session's rebases created {MAX_NEW_FORKS} new forks, the most that one \
+             session creates"
+        ),
+        MergeFailure::RangeStartBelowFloor {
+            retention_floor_seq,
+        } => format!(
+            "the fork's next merge starts below the fork's retention floor, seq {}, so the fork \
+             can't be merged (`range_start_below_floor`)",
+            retention_floor_seq.0
+        ),
+        MergeFailure::ForkPointBelowFloor {
+            retention_floor_seq,
+        } => format!(
+            "the fork point is below the namespace's retention floor, seq {}, so the fork can't \
+             be merged (`fork_point_below_floor`)",
+            retention_floor_seq.0
+        ),
+        MergeFailure::UnknownRangeOutcome => {
+            "the server returned a next-range outcome unknown to this CLI".to_owned()
+        }
+    }
+}
+
+fn merge_conflict_line(conflict: &MergeConflict) -> String {
+    let kind = match conflict.kind {
+        MergeConflictKind::Content => "content",
+        MergeConflictKind::Binding => "binding",
+        MergeConflictKind::Attributes => "attributes",
+        MergeConflictKind::Access => "access",
+        MergeConflictKind::Visibility => "visibility",
+        MergeConflictKind::Name => "name",
+        MergeConflictKind::Subtree => "subtree",
+        MergeConflictKind::Dependency => "dependency",
+        MergeConflictKind::Unknown => "unknown",
+    };
+    let version = conflict
+        .ours
+        .as_ref()
+        .or(conflict.theirs.as_ref())
+        .or(conflict.base.as_ref());
+    match version {
+        Some(version) => format!("conflict: {kind} {}", version.path),
+        None => format!("conflict: {kind} inode {}", conflict.inode_id),
+    }
 }

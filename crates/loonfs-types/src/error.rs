@@ -373,6 +373,77 @@ impl ErrorCode {
             | ErrorCode::ServerError => false,
         }
     }
+
+    /// Returns whether a merge or a replay commit that failed with this code
+    /// failed because the namespace that it commits into changed between the
+    /// plan and the commit, so that a later plan reads the change.
+    ///
+    /// The commit's preconditions return `stale_head`, `stale_revision`,
+    /// `stale_attributes`, `stale_access`, and `binding_version_mismatch`.
+    /// The commit returns `path_conflict` when another inode took a name that
+    /// a create, move, or undelete needs, `inode_not_found` when a deletion
+    /// hid an inode that the merge changes or the directory that an inode
+    /// goes into, and `not_deleted` when another writer undeleted an inode
+    /// that the merge undeletes. A later plan reports a changed row that isn't
+    /// the fork's own as `merge_conflict`. The plan checks a subject's rights
+    /// as the commit does, so the commit's `inode_not_found` isn't a subject's
+    /// missing rights.
+    pub fn is_stale_plan(self) -> bool {
+        match self {
+            ErrorCode::StaleHead
+            | ErrorCode::StaleRevision
+            | ErrorCode::StaleAttributes
+            | ErrorCode::StaleAccess
+            | ErrorCode::BindingVersionMismatch
+            | ErrorCode::PathConflict
+            | ErrorCode::InodeNotFound
+            | ErrorCode::NotDeleted => true,
+            ErrorCode::InvalidRequest
+            | ErrorCode::Unauthorized
+            | ErrorCode::Forbidden
+            | ErrorCode::StoragePermissionDenied
+            | ErrorCode::ContentTooLarge
+            | ErrorCode::MergeTooLarge
+            | ErrorCode::RangeNotSatisfiable
+            | ErrorCode::NotSupported
+            | ErrorCode::RouteNotFound
+            | ErrorCode::MethodNotAllowed
+            | ErrorCode::NamespaceNotFound
+            | ErrorCode::NamespaceDeleted
+            | ErrorCode::NamespaceExists
+            | ErrorCode::SnapshotNotFound
+            | ErrorCode::ContentNotPrepared
+            | ErrorCode::PathNotFound
+            | ErrorCode::RevisionNotFound
+            | ErrorCode::DirectoryNotEmpty
+            | ErrorCode::NamespaceUnrestricted
+            | ErrorCode::WriterFenced
+            | ErrorCode::WouldCycle
+            | ErrorCode::CommitIdReuseConflict
+            | ErrorCode::MergeRangeConflict
+            | ErrorCode::MergeConflict
+            | ErrorCode::CommitOutcomeUnknown
+            | ErrorCode::OutcomeUnknown
+            | ErrorCode::CommitQueueFull
+            | ErrorCode::ServerBusy
+            | ErrorCode::ShuttingDown
+            | ErrorCode::WriterSessionClosed
+            | ErrorCode::StoreContention
+            | ErrorCode::DeadlineExceeded
+            | ErrorCode::CheckpointUnavailable
+            | ErrorCode::ContentNotMaterialized
+            | ErrorCode::MaintenanceRequired
+            | ErrorCode::UploadNotFound
+            | ErrorCode::UploadAlreadyCompleted
+            | ErrorCode::UploadContentConflict
+            | ErrorCode::RebootstrapRequired
+            | ErrorCode::QueryUnindexable
+            | ErrorCode::IndexLagging
+            | ErrorCode::IndexCorrupt
+            | ErrorCode::NamespaceCorrupt
+            | ErrorCode::ServerError => false,
+        }
+    }
 }
 
 impl fmt::Display for ErrorCode {

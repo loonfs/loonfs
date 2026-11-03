@@ -1,7 +1,7 @@
 //! Durable recovery records for file-backed PUT attempts.
 
-use crate::config::absolute_env_path;
 use crate::error::{CliError, Result};
+use crate::state_file::{state_directory, OwnedStateFile};
 use loonfs_client::{
     CommitOptions, MultipartUploadResume, NamespacePath, PutFileJournal, PutFileOptions,
 };
@@ -11,12 +11,10 @@ use loonfs_types::{
     UploadId,
 };
 use serde::{Deserialize, Serialize};
-use std::fs::{File, OpenOptions};
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-const XDG_STATE_SUBDIR: &str = "loonfs";
 const UPLOADS_SUBDIR: &str = "uploads";
 
 enum UploadOutcome {
@@ -129,12 +127,10 @@ impl SourceIdentity {
 /// One PUT attempt, exclusively owned until this value is dropped.
 #[derive(Debug)]
 pub(crate) struct UploadJournal {
-    path: PathBuf,
+    file: OwnedStateFile,
     state: Mutex<UploadState>,
     /// Explicit commit IDs retain their requests for subsequent invocations.
     keep_after_ack: bool,
-    /// A stable sidecar inode prevents rename/removal from bypassing the lock.
-    _ownership: File,
 }
 
 impl UploadJournal {
@@ -186,7 +182,7 @@ impl UploadJournal {
             local_path,
             attempt.commit_id.as_ref(),
         )?;
-        let dir = uploads_directory().ok_or_else(|| {
+        let dir = state_directory(UPLOADS_SUBDIR).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
                 "upload journals require an absolute XDG_STATE_HOME or HOME",
@@ -196,33 +192,11 @@ impl UploadJournal {
     }
 
     fn open_at(path: PathBuf, mut attempt: UploadAttempt) -> io::Result<Self> {
-        let parent = path
-            .parent()
-            .expect("a journal path should have a parent directory");
-        std::fs::create_dir_all(parent).map_err(|error| journal_error(&path, error))?;
-        let ownership = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(path.with_extension("lock"))
+        let file = OwnedStateFile::open(path.clone(), "PUT attempt")
             .map_err(|error| journal_error(&path, error))?;
-        if !fs4::fs_std::FileExt::try_lock_exclusive(&ownership)
-            .map_err(|error| journal_error(&path, error))?
-        {
-            return Err(journal_error(
-                &path,
-                "another command owns this PUT attempt",
-            ));
-        }
-        let recorded = match std::fs::read(&path) {
-            Ok(bytes) => Some(
-                serde_json::from_slice::<UploadState>(&bytes)
-                    .map_err(|error| journal_error(&path, error))?,
-            ),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-            Err(error) => return Err(journal_error(&path, error)),
-        };
+        let recorded = file
+            .read::<UploadState>()
+            .map_err(|error| journal_error(&path, error))?;
         let keep_after_ack = attempt.commit_id.is_some();
         let is_new = recorded.is_none();
         let state = match recorded {
@@ -265,10 +239,9 @@ impl UploadJournal {
             }
         };
         let journal = Self {
-            path,
+            file,
             state: Mutex::new(state),
             keep_after_ack,
-            _ownership: ownership,
         };
         if is_new {
             journal.flush(&journal.lock())?;
@@ -330,42 +303,15 @@ impl UploadJournal {
         if self.keep_after_ack && matches!(outcome, UploadOutcome::Committed) {
             return Ok(());
         }
-        match std::fs::remove_file(&self.path) {
-            Ok(()) => self.sync_directory().map_err(|error| self.error(error)),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(self.error(error)),
-        }
+        self.file.remove().map_err(|error| self.error(error))
     }
 
     fn flush(&self, state: &UploadState) -> io::Result<()> {
-        let write = || -> io::Result<()> {
-            let parent = self
-                .path
-                .parent()
-                .expect("a journal path should have a parent directory");
-            let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
-            serde_json::to_writer(&mut temporary, state)?;
-            temporary.flush()?;
-            temporary.as_file().sync_all()?;
-            temporary.persist(&self.path).map_err(|error| error.error)?;
-            self.sync_directory()
-        };
-        write().map_err(|error| self.error(error))
-    }
-
-    fn sync_directory(&self) -> io::Result<()> {
-        #[cfg(unix)]
-        File::open(
-            self.path
-                .parent()
-                .expect("a journal path should have a parent directory"),
-        )?
-        .sync_all()?;
-        Ok(())
+        self.file.write(state).map_err(|error| self.error(error))
     }
 
     fn error(&self, error: impl std::fmt::Display) -> io::Error {
-        journal_error(&self.path, error)
+        journal_error(self.file.path(), error)
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, UploadState> {
@@ -506,21 +452,6 @@ fn journal_key(
         local_path.as_os_str().as_encoded_bytes(),
         commit_id,
     ))?))
-}
-
-/// Where per-upload records live: `$XDG_STATE_HOME/loonfs/uploads` when that
-/// variable names an absolute directory, and `$HOME/.local/state/loonfs/uploads`
-/// otherwise — the same order, and the same reasoning, as the config file's.
-fn uploads_directory() -> Option<PathBuf> {
-    if let Some(state_home) = absolute_env_path("XDG_STATE_HOME") {
-        return Some(state_home.join(XDG_STATE_SUBDIR).join(UPLOADS_SUBDIR));
-    }
-    let home = absolute_env_path("HOME")?;
-    Some(
-        home.join(".local/state")
-            .join(XDG_STATE_SUBDIR)
-            .join(UPLOADS_SUBDIR),
-    )
 }
 
 #[cfg(test)]

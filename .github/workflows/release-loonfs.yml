@@ -481,6 +481,7 @@ jobs:
             loonfs-types \
             loonfs-objectstore \
             loonfs-client \
+            loonfs-merge \
             loonfs-core \
             loonfs \
             loonfs-grep \
