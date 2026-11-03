@@ -290,3 +290,26 @@ fn a_cache_without_an_ssd_tier_renders_only_the_memory_tier() {
     assert!(!rendered.contains("tier=\"ssd\""), "{rendered}");
     assert!(!rendered.contains("loonfs_segment_cache_retained_stored_bytes"));
 }
+
+#[test]
+fn grep_publications_render_one_series_for_each_outcome() {
+    let mut rendered = String::new();
+    render_grep_publications(
+        &mut rendered,
+        GrepPublicationStats {
+            published: 5,
+            rebuilt: 2,
+            superseded: 1,
+        },
+    );
+
+    assert_eq!(
+        rendered,
+        "# HELP loonfs_grep_publications_total Publications of grep's entry by this server's \
+         index steps, by outcome\n\
+         # TYPE loonfs_grep_publications_total counter\n\
+         loonfs_grep_publications_total{outcome=\"published\"} 5\n\
+         loonfs_grep_publications_total{outcome=\"rebuilt\"} 2\n\
+         loonfs_grep_publications_total{outcome=\"superseded\"} 1\n"
+    );
+}

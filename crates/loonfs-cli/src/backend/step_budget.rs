@@ -2,7 +2,10 @@
 
 use crate::error::Result;
 use crate::resolve::{Backend, ResolvedTarget};
-use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome, DEFAULT_GREP_PUBLISH_INTERVAL_MS};
+use loonfs_grep::{
+    GramIndexBuildPolicy, GrepBuildOutcome, GrepProgress, GrepReorganizeOutcome,
+    DEFAULT_GREP_PUBLISH_INTERVAL_MS,
+};
 use loonfs_types::{ChangeSeq, GrepIndexStatus, MonotonicTimer, NamespaceId, StdMonotonicTimer};
 use std::future::Future;
 
@@ -22,7 +25,7 @@ impl ResolvedTarget {
             })
             .await;
         };
-        // The steps' changes pend in memory between publications, so the
+        // The steps' changes are kept in memory between publications, so the
         // wait reads the pending status, and each step keeps the run locked
         // across its awaits.
         let steps = tokio::sync::Mutex::new(
@@ -47,15 +50,25 @@ impl ResolvedTarget {
                 let outcome = steps
                     .lock()
                     .await
-                    .build_step(GramIndexBuildPolicy::default())
+                    .step(GramIndexBuildPolicy::default())
                     .await?;
                 Ok(match outcome {
-                    GrepBuildOutcome::Indexed { .. }
-                    | GrepBuildOutcome::BackfillRestarted { .. }
-                    | GrepBuildOutcome::Superseded => GrepWaitOutcome::Continue,
-                    GrepBuildOutcome::UpToDate { .. } | GrepBuildOutcome::NotEnabled => {
-                        GrepWaitOutcome::Settled
-                    }
+                    GrepProgress::Built(
+                        GrepBuildOutcome::Indexed { .. }
+                        | GrepBuildOutcome::BackfillRestarted { .. }
+                        | GrepBuildOutcome::Superseded,
+                    )
+                    | GrepProgress::Reorganized(
+                        GrepReorganizeOutcome::UnitWritten { .. }
+                        | GrepReorganizeOutcome::Abandoned
+                        | GrepReorganizeOutcome::Superseded,
+                    ) => GrepWaitOutcome::Continue,
+                    GrepProgress::Built(
+                        GrepBuildOutcome::UpToDate { .. } | GrepBuildOutcome::NotEnabled,
+                    )
+                    | GrepProgress::Reorganized(
+                        GrepReorganizeOutcome::NotNeeded { .. } | GrepReorganizeOutcome::NotEnabled,
+                    ) => GrepWaitOutcome::Settled,
                 })
             },
         )

@@ -28,9 +28,10 @@ use loonfs_types::{ChangeSeq, ContentRef, InodeId, PinId, RevisionNo, MAX_PAGE_L
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Decoded bytes of the block cache that one build step reads index segments
-/// through, so a step loads each segment's filter and index block once, and
-/// of the cache that a worker's reorganize steps share. It fits 256 data
-/// blocks, enough for a build step's lookups of 256 values.
+/// through, and of the cache that a worker's reorganize steps share. It fits
+/// 256 data blocks, enough for the blocks that a build step's lookups of 256
+/// values read, and it keeps the blocks of a small segment that a lookup
+/// loads whole until the lookup reads them.
 pub(super) const GREP_STEP_BLOCK_CACHE_DECODED_BYTES: usize =
     256 * DEFAULT_TARGET_BLOCK_BYTES.get();
 

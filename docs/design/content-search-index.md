@@ -149,13 +149,13 @@ The index doesn't stop the namespace's retention floor from advancing. If the ch
 
 This section describes when the reference server and the CLI run index work.
 
-The reference server runs `GrepWorker` from its maintenance sweep, alongside core metadata maintenance. Each visit runs build steps for as long as each step publishes, up to 16 steps, and then runs one reorganization step once the index is up to date. A collection pass also runs grep garbage collection. A failure for one namespace is logged and retried on the next pass, and it doesn't delay unrelated namespaces.
+The reference server runs `GrepWorker` from its maintenance sweep, alongside core metadata maintenance. Each visit runs up to 16 steps, for as long as each step does some work. A step is a reorganization step when a reorganization is due (see [Reorganization](#reorganization)), and a build step otherwise. A collection pass also runs grep garbage collection. A failure for one namespace is logged and retried on the next pass, and it doesn't delay unrelated namespaces.
 
 Every five seconds, a second pass checks each writer session that the server has open. If the session's last published sequence has moved since that pass last indexed it, the pass builds that namespace's index, so a commit through that server is indexed within seconds. The sweep and that pass never build the same namespace's index at the same time. Enabling the index publishes the backfill, and the next sweep pass starts it. Queries don't schedule any work.
 
 A query-only server doesn't build indexes, and it rejects index mutations. No grep operation lists namespaces. The sweep lists them from the store.
 
-Embedded CLI profiles don't run any index work after a write. `loonfs maintenance index enable` captures a target sequence and runs bounded build steps until the index reaches it. Later writes to the namespace don't extend that target. The command has these options:
+Embedded CLI profiles don't run any index work after a write. `loonfs maintenance index enable` captures a target sequence and runs bounded steps, chosen the same way as the sweep's, until the index reaches it. Later writes to the namespace don't extend that target. The command has these options:
 
 - `--no-wait` returns after the index is enabled.
 - `--max-steps` and `--deadline-ms` limit the wait. When either one runs out, the command prints its progress and exits with a nonzero status.
@@ -167,6 +167,8 @@ Building and reorganizing the index don't collect garbage. Grep garbage collecti
 ## Reorganization
 
 Reorganization merges the index's runs across three tiers: delta, mid, and base. Delta runs are merged into mid runs, and accumulated mid runs are merged with the base into a new base.
+
+A reorganization starts when a tier reaches its run limit, eight delta runs or eight mid runs by default. The sweep and the CLI run a reorganization step instead of a build step whenever a reorganization is in progress or a tier is at its limit, so the delta tier has at most eight runs while the index is behind a writer. Every build step looks up its content values' `texts` rows in the index's segments, so a build step's cost grows with the number of runs. A reorganization that waited for a build step to find the index up to date might never run while a writer keeps committing, and the build steps would keep getting slower.
 
 The thresholds count logical runs, not physical segments. Every build step that writes rows adds one run for its batch, whose `run_no` is allocated from `next_run_no` when the step's change is published. A run can contain several segments, and it still counts as one run toward reorganization. Separate backfill batches stay separate runs, even though they share the same captured target sequence.
 

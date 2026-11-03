@@ -27,8 +27,9 @@ mod passes;
 mod retries;
 mod visit;
 
-/// Grep build steps one visit runs while each step publishes.
-const MAX_GREP_BUILD_STEPS_PER_VISIT: usize = 16;
+/// The largest number of grep steps, build or reorganize, that one visit
+/// runs while each step does some work.
+const MAX_GREP_STEPS_PER_VISIT: usize = 16;
 
 /// Longest failure backoff for a call that keeps failing on a held
 /// namespace. The backoff after the first failure is one tick interval, and

@@ -4,9 +4,9 @@ mod caches;
 mod prometheus;
 
 use self::caches::{render_grep_block_cache, render_metadata_cache};
-use self::prometheus::{render_snapshot, write_gauge};
+use self::prometheus::{render_snapshot, write_counter, write_gauge};
 use super::AppState;
-use loonfs_grep::GrepPassBudgetStats;
+use loonfs_grep::{GrepPassBudgetStats, GrepPublicationStats};
 use loonfs_http::RequestLimit;
 
 /// Renders the recorder's snapshot, then the values that a scrape reads from
@@ -20,17 +20,44 @@ pub(super) fn render(state: &AppState) -> String {
     if let Some(grep_block_cache) = &state.grep_block_cache {
         render_grep_block_cache(&mut rendered, &grep_block_cache.stats());
     }
+    let grep_worker = binding.grep.worker();
     render_scrape_gauges(
         &mut rendered,
-        binding
-            .grep
-            .worker()
-            .map(|worker| worker.step_budget().stats()),
+        grep_worker.map(|worker| worker.step_budget().stats()),
         binding.upload_permits().available_permits(),
         binding.download_permits().available_permits(),
         binding.request_limit().map_or(0, RequestLimit::in_flight),
     );
+    // A server that doesn't maintain grep publishes no grep entries, and
+    // zeros would suggest that its index steps publish nothing.
+    if let Some(worker) = grep_worker {
+        render_grep_publications(&mut rendered, worker.publication_stats());
+    }
     rendered
+}
+
+/// Writes how the grep worker's publications of grep's entry ended, as one
+/// counter with an `outcome` label.
+///
+/// Listing every field makes this code fail to compile when
+/// `GrepPublicationStats` gains a field, which ensures a new outcome is
+/// considered for export.
+fn render_grep_publications(rendered: &mut String, stats: GrepPublicationStats) {
+    let GrepPublicationStats {
+        published,
+        rebuilt,
+        superseded,
+    } = stats;
+    write_counter(
+        rendered,
+        "loonfs_grep_publications",
+        "Publications of grep's entry by this server's index steps, by outcome",
+        &[
+            (&[("outcome", "published")], published),
+            (&[("outcome", "rebuilt")], rebuilt),
+            (&[("outcome", "superseded")], superseded),
+        ],
+    );
 }
 
 /// Appends current gauge values sampled during a scrape: grep steps, Linux

@@ -506,7 +506,7 @@ async fn a_sweep_drives_a_grep_backfill_to_active() {
     let session = writer
         .open_namespace(&namespace_id)
         .expect("open the namespace");
-    let files = super::MAX_GREP_BUILD_STEPS_PER_VISIT + 4;
+    let files = super::MAX_GREP_STEPS_PER_VISIT + 4;
     for index in 0..files {
         session
             .put_file(
@@ -544,7 +544,7 @@ async fn a_sweep_drives_a_grep_backfill_to_active() {
         server.grep_status(&namespace_id).await,
         GrepIndexStatus::Backfilling { .. },
         "one visit runs at most {} build steps",
-        super::MAX_GREP_BUILD_STEPS_PER_VISIT
+        super::MAX_GREP_STEPS_PER_VISIT
     );
     server
         .sweep
