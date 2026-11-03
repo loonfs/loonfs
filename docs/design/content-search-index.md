@@ -64,34 +64,33 @@ The writer's target is about 256 postings per row. The batch stores its count as
 
 Batching reduces the overhead of each row, and it keeps using the same segment and iteration code as other sorted rows. Readers take the union of posting batches from different runs, so reorganization doesn't need to combine every posting for a gram into one large payload to stay correct.
 
-Sharing inode IDs doesn't make an index reusable across namespaces. A fork starts with no grep state and no copied posting segments, and it's indexed on its own, even though its inherited metadata contains the same inode IDs.
+A fork inherits its source's index. The fork's first manifest copies grep's entry, and the fork pin protects the inherited segments, which stay in the source's prefix. Grep reads the source's commits that the inherited index doesn't cover through the fork pin, and after that it indexes only the fork's own commits. [Grep across a fork family](grep-fork-family.md) describes the rules.
 
-## Segments, manifests, and discovery
+## Segments and grep's entry
 
 This section describes how the index's objects are stored, and how a query finds the current set of segments.
 
 Grep segments use the layout described in [Metadata block storage](metadata-block-storage.md), which has prefix-compressed row keys, independently compressed data blocks, a Bloom filter, an index, and per-section checksums. Only the row payload is specific to grep. The filter key is the `gram-{hex}` part of the row key, so a negative filter result rules out a segment for that gram.
 
 ```text
-namespaces/{namespace_id}/extensions/grep/
-├── hint.json
-├── manifests/{manifest_no:020}.json
+namespaces/{owner_namespace_id}/extensions/grep/
 └── segments/{segment_id}.sst.zst
 ```
 
-The grep hint records the manifest number where discovery starts. A reader loads that manifest, and then probes the following numbers until one isn't found. The current grep manifest contains the lifecycle state, the visible segments, the run allocator, and any pending reorganization. Core manifests contain none of this state.
+The index's state is grep's entry in the namespace manifest (see [Extensions](../specs/format.md#124-extensions)). The entry contains the lifecycle state, the index's runs with their segment descriptors, and any in-progress reorganization. The index's run numbers are allocated from the manifest's `next_run_no` when grep publishes a change. Every core publication copies the entry forward, so the index needs no manifests, hint, or discovery of its own. [Grep across a fork family](grep-fork-family.md) explains why.
 
-Enabling the index writes a hint that points to manifest 1, and then creates manifest 1. Each later publication works in these steps:
+A run of index steps changes a copy of the entry in memory (the "pending entry") and publishes the change in a manifest of its own:
 
-1. The publisher writes the completed segments.
-2. It creates the next manifest with put-if-absent. A publisher that loses the race stops, and its next step loads the winning manifest and plans again.
-3. After a successful publication, it raises the hint with compare-and-swap. If raising the hint fails, the publication still stands.
+1. The run loads the current manifest.
+2. Each step writes its segments and records its change in the pending entry.
+3. Once the change is a tick interval old, or when the run ends, the run creates the next manifest with put-if-absent, and the change's new runs are numbered from the `next_run_no` of the manifest that it's published over.
+4. If the run loses the race to a manifest that copied grep's entry, such as a fold, the run publishes the change over that manifest. If another process changed the entry, the run publishes nothing, and its next step loads the winning manifest and plans again.
 
-On every request, a query checks whether its cached manifest has a successor. The query runs discovery again if a successor exists, or if the response arrives `READ_REVALIDATION_BOUND_MS` or more after the manifest's previous check. The hint can lag, so it doesn't replace this freshness check. [Grep extension format](../specs/format.md#appendix-d-grep-extension-format) defines how identity and checksums are validated.
+A query reads grep's entry from the manifest of its read view, so the index is as current as the view, and the query sends no request to find the index. [Grep extension format](../specs/format.md#appendix-d-grep-extension-format) defines the entry and its publication.
 
 ## Index lifecycle
 
-An index is in one of three lifecycle states, and the current grep manifest records the state along with its position:
+An index is in one of three lifecycle states, and grep's entry records the state along with its position:
 
 | State | Position and behavior |
 | --- | --- |
@@ -114,7 +113,7 @@ A `next_event_index` of zero means the cursor is at a completed commit boundary.
 
 One request operation can produce several change events, so the event index is an offset within the commit's ordered events, not a count of request operations.
 
-Disabling the index publishes a `disabled` manifest with no segment references. The operation doesn't delete the previous objects synchronously. A worker that's in progress when it finds the disabled manifest stops, instead of publishing its earlier state again.
+Disabling the index publishes a `disabled` entry that lists no segments. The operation doesn't delete the previous objects synchronously. A worker whose run is in progress loses its publication to the disable, so it doesn't publish its earlier state again.
 
 ## Building the index
 
@@ -122,7 +121,7 @@ A worker builds the index in two phases, first with a backfill from a [snapshot]
 
 ### Initial backfill
 
-Enabling the index creates a snapshot of the namespace head with a 24-hour lifetime, and then publishes a `backfilling` manifest with that snapshot's ID, the target sequence, and no inode cursor.
+Enabling the index creates a snapshot of the namespace head with a 24-hour lifetime, and then publishes a `backfilling` entry with that snapshot's ID, the target sequence, and no inode cursor.
 
 Each bounded build step:
 
@@ -130,7 +129,7 @@ Each bounded build step:
 2. Reads one current revision of each retained file, including deleted files.
 3. Applies the eligibility rule and extracts grams.
 4. Writes new delta segments.
-5. Publishes the segment set and the last inode it consumed together, in the next numbered grep manifest.
+5. Records the segment set and the last inode it consumed together in the pending entry, which is published in the next manifest.
 
 The final backfill step changes the lifecycle state to `active` at the captured sequence, and deletes the snapshot. Writes committed after that sequence are then processed through the change feed. They don't change the target of the backfill that's already in progress, which was set when the backfill started.
 
@@ -138,7 +137,7 @@ If the snapshot is deleted or expires, or the change history that the worker nee
 
 ### Incremental builds
 
-An active worker resumes the change feed from its cursor (a sequence and an event index). It indexes the eligible revisions that those events publish, and it advances the cursor in the same numbered manifest publication that publishes their segment references.
+An active worker resumes the change feed from its cursor (a sequence and an event index). It indexes the eligible revisions that those events publish, and it advances the cursor in the same publication that lists their segments.
 
 Moves, deletes, and undeletes don't publish new content revisions in those events, so they don't need new postings. Queries check their effect on visibility and paths against metadata. Operations that append a new revision are processed as revision events, even when the underlying bytes were already stored.
 
@@ -169,19 +168,19 @@ Building and reorganizing the index don't collect garbage. Grep garbage collecti
 
 Reorganization merges the index's runs across three tiers: delta, mid, and base. Delta runs are merged into mid runs, and accumulated mid runs are merged with the base into a new base.
 
-The thresholds count logical runs, not physical segments. Every build publication that writes rows allocates one `run_no` for its batch from `next_run_no`. A run can contain several segments, and it still counts as one run toward reorganization. Separate backfill batches stay separate runs, even though they share the same captured target sequence.
+The thresholds count logical runs, not physical segments. Every build step that writes rows adds one run for its batch, whose `run_no` is allocated from `next_run_no` when the step's change is published. A run can contain several segments, and it still counts as one run toward reorganization. Separate backfill batches stay separate runs, even though they share the same captured target sequence.
 
 With eight delta runs per mid run, and eight mid runs per base rewrite, a simplified sequence of full batches rewrites the base about once every 64 build runs. A two-tier scheme that rewrote the base after every eight delta runs would rewrite it eight times as often in that example. This is a constant-factor reduction. Because the structure always has three tiers, it doesn't provide logarithmic cumulative write amplification as the corpus grows.
 
 ### Processing a reorganization in steps
 
-A reorganization first records the exact set of input segments that it will merge. It then scans the gram key space in steps that each process a bounded number of rows. Each step writes output segments at the selected tier and publishes its progress.
+A reorganization first records the exact set of input segments that it will merge. It then scans the gram key space in steps that each process a bounded number of rows. Each step writes output segments at the selected tier and records its progress in the pending entry.
 
 Until the scan completes, both the inputs and the completed outputs stay referenced and visible to queries. Segments published after the reorganization selected its inputs aren't part of that reorganization, and they stay referenced when it completes. The final step removes the selected inputs, and keeps the completed outputs and the unrelated segments.
 
 The row budget can be exceeded for rows with equal keys. All the rows with the same key are processed together before the cursor moves past that key.
 
-The manifest records each segment's `level` (`0`, `1`, or `2`) and `run_no`, and the index's `next_run_no`. An in-progress reorganization records its `output_level`, its output `run_no` (which doesn't change during the reorganization), its selected inputs, its outputs, and its cursor. A replacement worker resumes from the last manifest that was published successfully.
+Grep's entry records each run's `level` (`0`, `1`, or `2`) and `run_no`, and a change's new runs are assigned their numbers from the manifest's `next_run_no` when the change is published. An in-progress reorganization records its `output_level`, its output `run_no` (which doesn't change once a published entry records it), its selected inputs, its outputs, and its cursor. A replacement worker resumes from the last entry that was published successfully.
 
 Why can queries see both the inputs and the outputs? Postings are add-only, and readers take the union of the batches, so a posting that appears twice doesn't cause a missed candidate. This isn't a general rule for replacing metadata rows that have different retention semantics.
 
@@ -251,35 +250,13 @@ If the tail is larger than the query's budget:
 - By default, the query fails with an `index_lagging` error.
 - With `allow_stale`, the server can return indexed-only results and report `tail_scanned: false`, along with the index and head positions. Stale results still go through visibility checks and content verification, but they might leave out eligible revisions that aren't indexed yet.
 
-If the tail's change history is below the retention floor, the query returns `rebootstrap_required`, with or without `allow_stale`. The worker's next step rebuilds the index from a new snapshot.
+If the tail's change history is below the retention floor, the query returns `rebootstrap_required`, with or without `allow_stale`. The worker's next step rebuilds the index from a new snapshot, and the rebuild keeps the index's segments, so it reads only the values that they don't record.
 
 Index maintenance reduces this gap when it runs. Core backpressure on the WAL tail doesn't limit grep lag by itself, because metadata can be folded while grep maintenance is still behind. When the gap is too large, the query's tail budget and the explicit stale-result option determine what happens.
 
 ## Grep garbage collection
 
-Grep garbage collection deletes grep manifests and segments that are no longer needed. Each call covers one namespace, and it runs right after the core collector in each of these:
-
-- `loonfs maintenance gc`
-- `POST /v0/maintenance/namespaces/{ns}/runs` with `kind: "gc"`
-- the reference server's sweep, on each collection pass
-
-Building and reorganizing the index don't run the grep collector.
-
-Grep is an extension, and an extension owns its key prefix, its collector, its routes, and its feature keys. For grep, those are `namespaces/{namespace_id}/extensions/grep/`, the collector that this section describes, the query and index routes, and the `query.grep` and `maintenance.grep.index` keys. The core collector doesn't delete objects under an extension's prefix. Instead, the core `gc` job runs each extension's collector after its own, and the `gc` result reports each extension under its name in `extensions`, so the grep collector's counts are in `extensions.grep`.
-
-Each call loads the current manifest, builds its set of live segments, and scans the manifest and segment collections from beginning to end. It uses one clock value for the whole call, and it stores no progress cursor. If a root is invalid or unreadable, the call fails before it deletes anything.
-
-The collector keeps objects under these rules:
-
-- Manifest numbers at or above the observed hint stay, so discovery can use them.
-- A manifest below the current one, and every segment it lists, stays while its immediate successor is younger than the ordinary grace. A successor without a provider timestamp counts as young.
-- Once that rule no longer keeps a manifest below the hint, the manifest's own provider age must meet the ordinary grace before it's deleted.
-- The current manifest keeps every segment it lists, including the inputs and outputs of a pending reorganization.
-- An unreferenced segment must be strictly older than 24 hours before it's deleted.
-
-Every step that produces output checks the bounded metadata publication budget before it creates its next manifest. That budget and the collection age rules protect concurrent builds. A failed or interrupted step can leave segments behind for a later collection.
-
-If the core namespace is missing or deleted, a `gc` job can delete the entire grep prefix after the ordinary grace. The core and grep collectors work on separate families of objects, so the job runs the grep collector even when the core collector fails, and neither one resumes a durable collection run from a previous call.
+Core garbage collection collects grep segments under the segment rule that it applies to metadata segments. A segment stays while a current, pinned, or recently superseded manifest lists it in grep's entry, including the inputs and outputs of an in-progress reorganization, and an unlisted segment is deleted once it's more than 24 hours old. The `gc` result counts the deleted segments in `deleted.extension_segments`. A run that lost its publication, or that stopped before it published, leaves its segments unlisted, and a later pass collects them. Disabling the index and deleting the namespace empty the entry's runs, so the index's segments become unlisted too.
 
 ## Costs and defaults
 

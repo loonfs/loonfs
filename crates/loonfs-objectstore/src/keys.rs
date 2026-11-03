@@ -2,9 +2,10 @@
 //!
 //! [durable object family]: https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a8-object-keys
 
-use loonfs_types::format::manifest::MetadataSegmentRef;
+use loonfs_types::format::manifest::{ExtensionSegmentRef, MetadataSegmentRef};
 use loonfs_types::{
-    ContentId, ManifestNo, MetadataSegmentId, NamespaceId, PinId, ProbeRunId, UploadId, WalNo,
+    ContentId, ExtensionName, IndexSegmentId, ManifestNo, MetadataSegmentId, NamespaceId, PinId,
+    ProbeRunId, UploadId, WalNo,
 };
 
 /// Prefix for objects created by store probes.
@@ -25,16 +26,53 @@ pub(crate) const UPLOAD_SESSION_SUFFIX: &str = ".json";
 pub(crate) const UPLOAD_OUTCOME_SUFFIX: &str = ".outcome.json";
 pub(crate) const CONTENT_DIRECTORY: &str = "content";
 pub(crate) const TEMPORARY_DIRECTORY: &str = "temporary";
+pub(crate) const EXTENSIONS_DIRECTORY: &str = "extensions";
 
 /// Builds the listing prefix containing every durable object owned by one namespace.
 pub fn namespace_prefix(namespace_id: &NamespaceId) -> String {
     format!("{NAMESPACES_DIRECTORY}/{namespace_id}/")
 }
 
+/// Builds the listing prefix containing every extension's objects in one
+/// namespace.
+pub fn extensions_prefix(namespace_id: &NamespaceId) -> String {
+    format!("{}{EXTENSIONS_DIRECTORY}/", namespace_prefix(namespace_id))
+}
+
 /// Builds the listing prefix containing every object one extension owns in
 /// one namespace.
-pub fn extension_prefix(namespace_id: &NamespaceId, name: &str) -> String {
-    format!("{}extensions/{name}/", namespace_prefix(namespace_id))
+pub fn extension_prefix(namespace_id: &NamespaceId, name: &ExtensionName) -> String {
+    format!("{}{name}/", extensions_prefix(namespace_id))
+}
+
+/// Builds the listing prefix containing one extension's segment objects
+/// owned by one namespace.
+pub fn extension_segment_prefix(namespace_id: &NamespaceId, name: &ExtensionName) -> String {
+    format!(
+        "{}{SEGMENT_DIRECTORY}/",
+        extension_prefix(namespace_id, name)
+    )
+}
+
+/// Builds the immutable key of one extension segment.
+pub fn extension_segment(
+    namespace_id: &NamespaceId,
+    name: &ExtensionName,
+    segment_id: &IndexSegmentId,
+) -> String {
+    format!(
+        "{}{segment_id}{SEGMENT_SUFFIX}",
+        extension_segment_prefix(namespace_id, name)
+    )
+}
+
+/// Derives the key of a segment that the entry of extension `name` lists,
+/// from the segment's owner and generated identity.
+pub fn extension_segment_object_key(
+    name: &ExtensionName,
+    descriptor: &ExtensionSegmentRef,
+) -> String {
+    extension_segment(&descriptor.owner_namespace_id, name, &descriptor.segment_id)
 }
 
 /// Builds the immutable object key for a numbered WAL object.
@@ -184,7 +222,7 @@ mod tests {
     #![allow(clippy::disallowed_methods)]
 
     use super::{
-        content_blob, hint, metadata_manifest_object, metadata_segment,
+        content_blob, extension_segment, hint, metadata_manifest_object, metadata_segment,
         metadata_segment_object_key, pin, probe_run_prefix, probe_runs_prefix, temporary_object,
         upload_outcome, upload_session, wal_object, wal_prefix,
     };
@@ -193,7 +231,8 @@ mod tests {
     };
     use loonfs_types::format::segment_blocks::BlockHandle;
     use loonfs_types::{
-        ContentId, ManifestNo, MetadataSegmentId, NamespaceId, PinId, ProbeRunId, UploadId, WalNo,
+        ContentId, ExtensionName, IndexSegmentId, ManifestNo, MetadataSegmentId, NamespaceId,
+        PinId, ProbeRunId, UploadId, WalNo,
     };
 
     const CONTENT_ID: &str = "con_5bsqqg28t5cy4tqkff04hmasw9";
@@ -268,8 +307,14 @@ mod tests {
             .expect("a temporary key ends in its id")
             .to_owned();
         // Each namespace placeholder has its own ID, so a builder that takes
-        // the wrong one fails the comparison.
-        let substitute = |pattern: &str| -> String {
+        // the wrong one fails the comparison. An extension segment's ID has
+        // its own prefix.
+        let substitute = |family: &str, pattern: &str| -> String {
+            let segment_id = if family == "Extension segments" {
+                "idx_00000000000000000000000001"
+            } else {
+                "seg_00000000000000000000000001"
+            };
             pattern
                 .replace("{namespace_id}", "ns-1")
                 .replace("{owner_namespace_id}", "owner-1")
@@ -280,7 +325,8 @@ mod tests {
                 .replace("{pin_id}", "pin_00000000000000000001-0000000000000001")
                 .replace("{job_id}", "cmp_00000000000000000000000001")
                 .replace("{group}", "bindings")
-                .replace("{segment_id}", "seg_00000000000000000000000001")
+                .replace("{extension_name}", "grep")
+                .replace("{segment_id}", segment_id)
                 .replace("{upload_id}", "upl_00000000000000000000000001")
                 .replace("{start:020}", "00000000000000000002")
                 .replace("{end:020}", "00000000000000000019")
@@ -298,6 +344,15 @@ mod tests {
             (
                 "Metadata segments",
                 metadata_segment(&owner_namespace_id(), &metadata_segment_id()),
+            ),
+            (
+                "Extension segments",
+                extension_segment(
+                    &owner_namespace_id(),
+                    &ExtensionName::parse("grep").expect("valid extension name"),
+                    &IndexSegmentId::parse("idx_00000000000000000000000001")
+                        .expect("valid index segment id"),
+                ),
             ),
             (
                 "Upload sessions",
@@ -325,7 +380,10 @@ mod tests {
             .collect();
         let actual: std::collections::BTreeMap<String, String> = patterns
             .into_iter()
-            .map(|(family, pattern)| (family, substitute(&pattern)))
+            .map(|(family, pattern)| {
+                let key = substitute(&family, &pattern);
+                (family, key)
+            })
             .collect();
         assert_eq!(
             actual, expected,

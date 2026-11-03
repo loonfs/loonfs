@@ -225,6 +225,8 @@ pub enum ObjectKeyKind {
     NamespaceManifest,
     /// Groups immutable metadata segments.
     MetadataSegment,
+    /// Groups immutable extension segments, such as the grep index's.
+    ExtensionSegment,
     /// Groups pins and retained-history floors consulted by garbage collection.
     GcControl,
     /// Groups unrecognized keys and coarse listing prefixes.
@@ -243,6 +245,7 @@ impl ObjectKeyKind {
             Self::WalObject => "wal_object",
             Self::NamespaceManifest => "namespace_manifest",
             Self::MetadataSegment => "metadata_segment",
+            Self::ExtensionSegment => "extension_segment",
             Self::GcControl => "gc_control",
             Self::Unknown => "unknown",
         }
@@ -712,6 +715,7 @@ fn classify_key(key: &str) -> ObjectKeyKind {
             ObjectKeyKind::NamespaceManifest
         }
         DurableObjectFamily::MetadataSegment => ObjectKeyKind::MetadataSegment,
+        DurableObjectFamily::ExtensionSegment => ObjectKeyKind::ExtensionSegment,
         DurableObjectFamily::Pin => ObjectKeyKind::GcControl,
         DurableObjectFamily::UploadSession | DurableObjectFamily::UploadOutcome => {
             ObjectKeyKind::Metadata
@@ -819,6 +823,7 @@ mod tests {
             ObjectKeyKind::WalObject,
             ObjectKeyKind::NamespaceManifest,
             ObjectKeyKind::MetadataSegment,
+            ObjectKeyKind::ExtensionSegment,
             ObjectKeyKind::GcControl,
             ObjectKeyKind::Unknown,
         ] {

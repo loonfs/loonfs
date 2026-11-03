@@ -177,7 +177,7 @@ impl AclPages {
         cursor: Option<String>,
         limit: u32,
     ) -> GrepResponse {
-        let reads = NamespaceReads::new(self.host.reader.namespace(&self.namespace_id))
+        let reads = NamespaceReads::new(self.host.reader.clone(), &self.namespace_id)
             .with_subject(subject(principal));
         self.host
             .service
@@ -359,13 +359,13 @@ async fn a_base_reorganization_of_an_acl_namespace_scans_as_the_service() {
             pages
                 .host
                 .worker
-                .manifest_state(&pages.namespace_id)
+                .entry(&pages.namespace_id)
                 .await
-                .expect("state")
-                .expect("manifest")
-                .segments()
+                .expect("entry")
+                .expect("an enabled index")
+                .runs()
                 .iter()
-                .map(|segment| segment.level),
+                .map(|run| run.level),
         );
     }
     assert!(

@@ -2,7 +2,7 @@
 
 use crate::error::Result;
 use crate::resolve::{Backend, ResolvedTarget};
-use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome};
+use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome, DEFAULT_GREP_PUBLISH_INTERVAL_MS};
 use loonfs_types::{ChangeSeq, GrepIndexStatus, MonotonicTimer, NamespaceId, StdMonotonicTimer};
 use std::future::Future;
 
@@ -13,21 +13,44 @@ impl ResolvedTarget {
         target_seq: ChangeSeq,
         budget: StepBudget,
     ) -> Result<GrepWaitProgress> {
-        wait_for_grep_index(
+        let read_published =
+            || async { Ok(self.client.get_grep_index(namespace_id).await?.status) };
+        let Backend::Embedded { host, .. } = &self.backend else {
+            return wait_for_grep_index(target_seq, budget, read_published, || async {
+                rest_between_status_checks().await;
+                Ok(GrepWaitOutcome::Continue)
+            })
+            .await;
+        };
+        // The steps' changes pend in memory between publications, so the
+        // wait reads the pending status, and each step keeps the run locked
+        // across its awaits.
+        let steps = tokio::sync::Mutex::new(
+            host.grep_worker
+                .steps(namespace_id, DEFAULT_GREP_PUBLISH_INTERVAL_MS),
+        );
+        let progress = wait_for_grep_index(
             target_seq,
             budget,
-            || async { Ok(self.client.get_grep_index(namespace_id).await?.status) },
             || async {
-                let Backend::Embedded { host, .. } = &self.backend else {
-                    rest_between_status_checks().await;
-                    return Ok(GrepWaitOutcome::Continue);
-                };
-                let outcome = host
-                    .grep_worker
-                    .build_step(namespace_id, GramIndexBuildPolicy::default())
+                let pending = steps
+                    .lock()
+                    .await
+                    .pending_status()
+                    .map(GrepIndexStatus::from);
+                match pending {
+                    Some(status) => Ok(status),
+                    None => read_published().await,
+                }
+            },
+            || async {
+                let outcome = steps
+                    .lock()
+                    .await
+                    .build_step(GramIndexBuildPolicy::default())
                     .await?;
                 Ok(match outcome {
-                    GrepBuildOutcome::Published { .. }
+                    GrepBuildOutcome::Indexed { .. }
                     | GrepBuildOutcome::BackfillRestarted { .. }
                     | GrepBuildOutcome::Superseded => GrepWaitOutcome::Continue,
                     GrepBuildOutcome::UpToDate { .. } | GrepBuildOutcome::NotEnabled => {
@@ -36,7 +59,18 @@ impl ResolvedTarget {
                 })
             },
         )
-        .await
+        .await;
+        // A one-shot run has no later tick to publish what's pending. A step
+        // changes the pending entry only once it succeeds, so the run
+        // publishes the steps before a failed one, and then reports the
+        // failure.
+        let published = steps.into_inner().publish().await;
+        let progress = progress?;
+        published?;
+        Ok(GrepWaitProgress {
+            reached: read_published().await?.is_built_through(target_seq),
+            ..progress
+        })
     }
 }
 

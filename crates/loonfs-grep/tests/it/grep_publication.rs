@@ -1,28 +1,53 @@
-//! Publication recovery must not clean up resources a manifest may name.
+//! Grep's publications in the namespace manifest: the steps of one interval
+//! publish once, a lost put is published over a manifest that copied grep's
+//! entry and publishes nothing over another change of the entry, and an
+//! unknown outcome keeps what the put may list.
 
-use crate::common::{collector_at, control, GrepHost};
-use loonfs::{LoonFs, SharedObjectStore};
-use loonfs_grep::keyspace::manifest_key;
-use loonfs_grep::manifest::{load_current_grep_manifest, GrepIndexStatus};
-use loonfs_grep::{GramIndexBuildPolicy, GREP_GC_GRACE_WINDOW_MS};
+use crate::common::{control, fold_wal_and_advance_retention, page_request, GrepHost};
+use loonfs::{LoonFs, SharedObjectStore, Writable};
+use loonfs_grep::entry::GrepIndexStatus;
+use loonfs_grep::{
+    GramIndexBuildPolicy, GrepBuildOutcome, GrepEnableOutcome, GrepError, GrepPublishOutcome,
+    GrepReorganizeOutcome,
+};
+use loonfs_objectstore::keys::metadata_manifest_prefix;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{
     BlockingStore, FailStore, InjectedError, KeyPredicate, OperationSelector,
 };
-use loonfs_types::{ErrorCode, ManifestNo};
+use loonfs_types::{ErrorCode, GrepRequest, GrepScope, ManifestNo, NamespaceId};
 use std::assert_matches;
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
 
-#[tokio::test]
-async fn a_collected_publication_does_not_abandon_a_successors_backfill_checkpoint() {
-    let directory = tempfile::tempdir().expect("directory");
-    let base: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
-    let namespace_id = namespace_id("publication-recovery");
-    let writer = LoonFs::builder_with_store(base.clone())
-        .writer_id(loonfs_test_support::ids::writer_id("publication-recovery"))
+fn needle() -> GrepRequest {
+    GrepRequest {
+        pattern: "needle".to_owned(),
+        case_insensitive: false,
+        scope: GrepScope::Namespace,
+        allow_stale: false,
+        allow_scan: false,
+    }
+}
+
+/// A build policy whose steps each examine one file.
+fn one_file_steps() -> GramIndexBuildPolicy {
+    GramIndexBuildPolicy {
+        max_files_per_step: NonZeroUsize::MIN,
+        ..GramIndexBuildPolicy::default()
+    }
+}
+
+/// Creates `namespace_id` over `store` with a file for each of `paths`, and
+/// returns the writer.
+async fn seed(
+    store: &SharedObjectStore,
+    namespace_id: &NamespaceId,
+    paths: &[&str],
+) -> LoonFs<Writable> {
+    let writer = LoonFs::builder_with_store(store.clone())
+        .writer_id(loonfs_test_support::ids::writer_id("publication-seed"))
         .config(loonfs::RuntimeConfig {
             min_publish_interval_ms: 0,
             ..loonfs::RuntimeConfig::default()
@@ -31,105 +56,431 @@ async fn a_collected_publication_does_not_abandon_a_successors_backfill_checkpoi
         .await
         .expect("writer");
     writer
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .create_namespace(namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("namespace");
-    let namespace = writer
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
-    for path in ["/first", "/second"] {
+    let namespace = writer.open_namespace(namespace_id).expect("open namespace");
+    for path in paths {
         namespace
             .put_file(path, b"needle\n", &loonfs_test_support::test_actor())
             .await
             .expect("file");
     }
-
-    let first_key = manifest_key(&namespace_id, &ManifestNo(1));
-    let failing = FailStore::new(
-        base.clone(),
-        KeyPredicate::exact(first_key.clone()),
-        OperationSelector::PutCreateIfAbsent,
-        InjectedError::Transport("lost enable acknowledgement".to_owned()),
-    )
-    .apply_then_fail();
-    failing.fail_next(1);
-    let blocking = Arc::new(BlockingStore::new(
-        failing,
-        KeyPredicate::exact(first_key.clone()),
-        OperationSelector::Get,
-    ));
-    let uncertain_store: SharedObjectStore = blocking.clone();
-    let uncertain = GrepHost::new(&uncertain_store, "uncertain-enable").await;
-    let successor = GrepHost::new(&base, "successor").await;
-    blocking.block_next();
-
-    let enable = uncertain.worker.enable(&namespace_id);
-    let advance = async {
-        blocking.wait_until_blocked().await;
-        successor
-            .worker
-            .build_step(
-                &namespace_id,
-                GramIndexBuildPolicy {
-                    max_files_per_step: NonZeroUsize::MIN,
-                    ..Default::default()
-                },
-            )
-            .await
-            .expect("publish a partial backfill");
-        let current =
-            load_current_grep_manifest(&base, &namespace_id, crate::common::observation())
-                .await
-                .expect("load successor")
-                .expect("enabled");
-        assert_eq!(current.manifest_no(), ManifestNo(2));
-        let pin_id = match current.manifest_state().status() {
-            GrepIndexStatus::Backfilling { pin_id, .. } => Some(pin_id.clone()),
-            _ => None,
-        }
-        .expect("the successor must still need its checkpoint");
-        let modified = base
-            .head(&manifest_key(&namespace_id, &ManifestNo(2)))
-            .await
-            .expect("head")
-            .expect("successor exists")
-            .last_modified_at_ms
-            .expect("timestamp");
-        let clock = Arc::new(ManualClock::new(modified + GREP_GC_GRACE_WINDOW_MS + 1));
-        collector_at(&base, clock)
-            .await
-            .gc_namespace(&namespace_id)
-            .await
-            .expect("collect the old manifest");
-        assert!(base.get(&first_key, None).await.expect("first").is_none());
-        blocking.release();
-        pin_id
-    };
-    let (outcome, pin_id) = tokio::join!(enable, advance);
-    assert!(
-        control::pin(&base, &namespace_id, &pin_id).await.is_some(),
-        "uncertain publication cleanup must preserve the successor's checkpoint"
-    );
-    assert_matches!(outcome, Err(error) if error.code() == ErrorCode::OutcomeUnknown);
+    writer
 }
 
+async fn manifest_no(store: &SharedObjectStore, namespace_id: &NamespaceId) -> ManifestNo {
+    control::metadata_manifest(store, namespace_id)
+        .await
+        .payload()
+        .manifest_no
+}
+
+/// Sets the namespace's retention window through another runtime, which
+/// publishes the next manifest.
+async fn publish_rival(store: &SharedObjectStore, namespace_id: &NamespaceId, window_ms: u64) {
+    let rival = LoonFs::builder_with_store(store.clone())
+        .writer_id(loonfs_test_support::ids::writer_id("rival"))
+        .build()
+        .await
+        .expect("rival");
+    rival
+        .maintenance(loonfs_test_support::ids::writer_id("rival"))
+        .set_retention_window(namespace_id, NonZeroU64::new(window_ms))
+        .await
+        .expect("the rival publishes");
+}
+
+/// Checks that the steps of a run publish once, when the run publishes, and
+/// that a query reads the index that its view's manifest lists, so the run's
+/// pending steps aren't searchable until then.
 #[tokio::test]
-async fn an_enable_whose_put_reads_back_absent_fails_and_keeps_its_checkpoint() {
+async fn the_steps_of_a_run_publish_once_and_a_query_reads_the_published_entry() {
+    let directory = tempfile::tempdir().expect("directory");
+    let store: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+    let namespace_id = namespace_id("one-publication");
+    let _writer = seed(&store, &namespace_id, &["/a", "/b", "/c"]).await;
+    let host = GrepHost::new(&store, "one-publication").await;
+    assert_matches!(
+        host.worker.enable(&namespace_id).await,
+        Ok(GrepEnableOutcome::Enabled { .. })
+    );
+    let enabled = manifest_no(&store, &namespace_id).await;
+
+    let mut steps = host.worker.steps(&namespace_id, u64::MAX);
+    let mut indexed = 0;
+    loop {
+        match steps.build_step(one_file_steps()).await.expect("step") {
+            GrepBuildOutcome::Indexed { .. } => indexed += 1,
+            GrepBuildOutcome::UpToDate { .. } => break,
+            other => panic!("unexpected build outcome {other:?}"),
+        }
+    }
+    assert!(indexed >= 3, "one step for each file");
+    assert_matches!(steps.pending_status(), Some(GrepIndexStatus::Active { .. }));
+    assert_eq!(manifest_no(&store, &namespace_id).await, enabled);
+    assert_matches!(
+        host.worker.lifecycle(&namespace_id).await,
+        Ok(GrepIndexStatus::Backfilling { .. })
+    );
+    assert_matches!(
+        host.grep(&namespace_id, &needle(), page_request(None, 10))
+            .await,
+        Err(GrepError::Backfilling)
+    );
+
+    assert_eq!(
+        steps.publish().await.expect("publish"),
+        GrepPublishOutcome::Published
+    );
+    assert_eq!(
+        manifest_no(&store, &namespace_id).await,
+        enabled.successor().expect("next")
+    );
+    assert_eq!(
+        steps.publish().await.expect("publish nothing"),
+        GrepPublishOutcome::NothingPending
+    );
+    let found = host
+        .grep(&namespace_id, &needle(), page_request(None, 10))
+        .await
+        .expect("query the published index");
+    assert_eq!(found.matches.len(), 3);
+}
+
+/// Checks that a rebootstrap and the backfill that it starts publish in one
+/// manifest when the backfill finishes within the publish interval, so the
+/// published entry follows its predecessor with a later build.
+#[tokio::test]
+async fn a_restart_and_its_finished_backfill_publish_together() {
+    let directory = tempfile::tempdir().expect("directory");
+    let store: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+    let namespace_id = namespace_id("restart-in-one-change");
+    let writer = seed(&store, &namespace_id, &["/a"]).await;
+    let host = GrepHost::new(&store, "restart-in-one-change").await;
+    host.enable_grep_index(&namespace_id).await.expect("enable");
+    let GrepIndexStatus::Active {
+        captured_seq: first_build,
+        ..
+    } = host.worker.lifecycle(&namespace_id).await.expect("status")
+    else {
+        panic!("the index is active");
+    };
+    writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace")
+        .put_file("/b", b"needle\n", &loonfs_test_support::test_actor())
+        .await
+        .expect("file");
+    fold_wal_and_advance_retention(&store, &host.maintenance, &namespace_id).await;
+
+    let mut steps = host.worker.steps(&namespace_id, u64::MAX);
+    assert_matches!(
+        steps.build_step(one_file_steps()).await,
+        Ok(GrepBuildOutcome::BackfillRestarted { .. }),
+        "the floor passed the watermark"
+    );
+    loop {
+        match steps.build_step(one_file_steps()).await.expect("step") {
+            GrepBuildOutcome::Indexed { .. } => {}
+            GrepBuildOutcome::UpToDate { .. } => break,
+            other => panic!("unexpected build outcome {other:?}"),
+        }
+    }
+    assert_eq!(
+        steps.publish().await.expect("publish"),
+        GrepPublishOutcome::Published
+    );
+    let GrepIndexStatus::Active {
+        captured_seq: second_build,
+        ..
+    } = host.worker.lifecycle(&namespace_id).await.expect("status")
+    else {
+        panic!("the restarted backfill finished");
+    };
+    assert!(second_build > first_build);
+    let found = host
+        .grep(&namespace_id, &needle(), page_request(None, 10))
+        .await
+        .expect("query the rebuilt index");
+    assert_eq!(found.matches.len(), 2);
+    assert_eq!(found.built_through_seq, found.head_seq);
+}
+
+/// Checks that a step whose publication loses its put to a manifest that
+/// copied grep's entry, such as a retention window change, is published over
+/// that manifest with the winner's other fields.
+#[tokio::test]
+async fn a_step_that_loses_its_put_to_a_copy_of_its_entry_is_published_over_it() {
+    let directory = tempfile::tempdir().expect("directory");
+    let base: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+    let namespace_id = namespace_id("rebuilt-step");
+    let _writer = seed(&base, &namespace_id, &["/a", "/b"]).await;
+    let gate = Arc::new(BlockingStore::new(
+        base.clone(),
+        KeyPredicate::prefix(metadata_manifest_prefix(&namespace_id)),
+        OperationSelector::PutCreateIfAbsent,
+    ));
+    let gated: SharedObjectStore = gate.clone();
+    let host = GrepHost::new(&gated, "rebuilt-step").await;
+    host.worker.enable(&namespace_id).await.expect("enable");
+
+    gate.block_next();
+    let (rebuilt, winner) = tokio::join!(
+        host.worker.build_step(&namespace_id, one_file_steps()),
+        async {
+            gate.wait_until_blocked().await;
+            publish_rival(&base, &namespace_id, 60_000).await;
+            let winner = manifest_no(&base, &namespace_id).await;
+            gate.release();
+            winner
+        }
+    );
+    assert_matches!(rebuilt, Ok(GrepBuildOutcome::Indexed { .. }));
+    assert_matches!(
+        host.worker.lifecycle(&namespace_id).await,
+        Ok(GrepIndexStatus::Backfilling {
+            cursor_inode_id: Some(_),
+            ..
+        })
+    );
+    let current = control::metadata_manifest(&base, &namespace_id).await;
+    assert_eq!(
+        current.payload().manifest_no,
+        winner.successor().expect("next")
+    );
+    assert_eq!(
+        current.payload().retention_window_ms,
+        NonZeroU64::new(60_000),
+        "grep's publications copy the winner's other fields"
+    );
+
+    host.enable_grep_index(&namespace_id)
+        .await
+        .expect("finish the build");
+    let found = host
+        .grep(&namespace_id, &needle(), page_request(None, 10))
+        .await
+        .expect("query");
+    assert_eq!(found.matches.len(), 2);
+}
+
+/// Checks that a step whose publication loses its put to another process's
+/// change of grep's entry publishes nothing, and that the next step plans
+/// from the manifest that won.
+#[tokio::test]
+async fn a_step_that_loses_its_put_to_another_change_of_its_entry_publishes_nothing() {
+    let directory = tempfile::tempdir().expect("directory");
+    let base: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+    let namespace_id = namespace_id("lost-step");
+    let _writer = seed(&base, &namespace_id, &["/a", "/b"]).await;
+    let gate = Arc::new(BlockingStore::new(
+        base.clone(),
+        KeyPredicate::prefix(metadata_manifest_prefix(&namespace_id)),
+        OperationSelector::PutCreateIfAbsent,
+    ));
+    let gated: SharedObjectStore = gate.clone();
+    let host = GrepHost::new(&gated, "lost-step").await;
+    let rival = GrepHost::new(&base, "lost-step-rival").await;
+    host.worker.enable(&namespace_id).await.expect("enable");
+
+    gate.block_next();
+    let (lost, ()) = tokio::join!(
+        host.worker.build_step(&namespace_id, one_file_steps()),
+        async {
+            gate.wait_until_blocked().await;
+            assert_matches!(
+                rival
+                    .worker
+                    .build_step(&namespace_id, one_file_steps())
+                    .await,
+                Ok(GrepBuildOutcome::Indexed { .. })
+            );
+            gate.release();
+        }
+    );
+    assert_matches!(lost, Ok(GrepBuildOutcome::Superseded));
+    let winner = control::metadata_manifest(&base, &namespace_id).await;
+    assert_eq!(
+        host.worker.entry(&namespace_id).await.expect("entry"),
+        control::grep_entry(&base, &namespace_id).await,
+        "the step published nothing over the rival's change"
+    );
+
+    let built = host
+        .enable_grep_index(&namespace_id)
+        .await
+        .expect("build from the winner");
+    assert!(built.status.is_built_through(winner.payload().head_seq));
+    let found = host
+        .grep(&namespace_id, &needle(), page_request(None, 10))
+        .await
+        .expect("query");
+    assert_eq!(found.matches.len(), 2);
+}
+
+/// Checks that a reorganization that starts in a change whose publication is
+/// rebuilt over a fold gets its run number when the change is published,
+/// after the run that the fold took the provisional number for.
+#[tokio::test]
+async fn a_reorganization_that_starts_in_a_rebuilt_change_gets_its_run_number_at_publication() {
+    let directory = tempfile::tempdir().expect("directory");
+    let store: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+    let namespace_id = namespace_id("rebuilt-reorganization");
+    let writer = seed(&store, &namespace_id, &["/a", "/b", "/c"]).await;
+    let host = GrepHost::new(&store, "rebuilt-reorganization").await;
+    let policy = GramIndexBuildPolicy {
+        max_delta_runs: NonZeroUsize::new(2).expect("two"),
+        max_decoded_input_rows_per_step: NonZeroUsize::MIN,
+        ..one_file_steps()
+    };
+    host.worker.enable(&namespace_id).await.expect("enable");
+    let mut steps = host.worker.steps(&namespace_id, u64::MAX);
+    while !matches!(
+        steps.build_step(policy).await.expect("step"),
+        GrepBuildOutcome::UpToDate { .. }
+    ) {}
+    assert_eq!(
+        steps.publish().await.expect("publish the build"),
+        GrepPublishOutcome::Published
+    );
+    let provisional = control::metadata_manifest(&store, &namespace_id)
+        .await
+        .payload()
+        .next_run_no;
+    assert_matches!(
+        steps.reorganize_step(policy).await,
+        Ok(GrepReorganizeOutcome::UnitWritten {
+            completed: false,
+            ..
+        })
+    );
+
+    writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace")
+        .put_file("/d", b"needle\n", &loonfs_test_support::test_actor())
+        .await
+        .expect("file");
+    writer
+        .maintenance(loonfs_test_support::ids::writer_id("publication-seed"))
+        .fold_wal(&namespace_id)
+        .await
+        .expect("a fold publishes over the change's basis");
+    let fold = control::metadata_manifest(&store, &namespace_id).await;
+    assert!(fold
+        .payload()
+        .runs
+        .iter()
+        .any(|run| run.run_no == provisional));
+    assert_eq!(
+        steps.publish().await.expect("publish the reorganization"),
+        GrepPublishOutcome::Published
+    );
+    let published = control::metadata_manifest(&store, &namespace_id).await;
+    let entry = control::grep_entry(&store, &namespace_id)
+        .await
+        .expect("grep's entry");
+    let reorganize = entry.reorganize().expect("the reorganization continues");
+    assert_eq!(reorganize.run_no, fold.payload().next_run_no);
+    let output = entry
+        .runs()
+        .iter()
+        .find(|run| run.run_no == reorganize.run_no)
+        .expect("the reorganization's output run");
+    assert_eq!(output.level, reorganize.output_level);
+    assert_eq!(
+        published.payload().next_run_no,
+        reorganize.run_no.successor().expect("run")
+    );
+
+    host.enable_grep_index(&namespace_id)
+        .await
+        .expect("index the fold's commit");
+    while !matches!(
+        host.worker
+            .reorganize_step(&namespace_id, policy)
+            .await
+            .expect("reorganize"),
+        GrepReorganizeOutcome::NotNeeded { .. }
+    ) {}
+    let found = host
+        .grep(&namespace_id, &needle(), page_request(None, 10))
+        .await
+        .expect("query");
+    assert_eq!(found.matches.len(), 4);
+}
+
+/// Checks that an enable whose publication loses its put to another
+/// process's enable deletes the backfill checkpoint it created, because no
+/// manifest lists it.
+#[tokio::test]
+async fn an_enable_that_loses_to_another_enable_deletes_its_checkpoint() {
+    let directory = tempfile::tempdir().expect("directory");
+    let base: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+    let namespace_id = namespace_id("lost-enable");
+    let writer = seed(&base, &namespace_id, &["/a"]).await;
+    writer
+        .maintenance(loonfs_test_support::ids::writer_id("publication-seed"))
+        .fold_wal(&namespace_id)
+        .await
+        .expect("fold, so the snapshot publishes no manifest");
+    let gate = Arc::new(BlockingStore::new(
+        base.clone(),
+        KeyPredicate::prefix(metadata_manifest_prefix(&namespace_id)),
+        OperationSelector::PutCreateIfAbsent,
+    ));
+    let gated: SharedObjectStore = gate.clone();
+    let host = GrepHost::new(&gated, "lost-enable").await;
+    let rival = GrepHost::new(&base, "lost-enable-rival").await;
+
+    gate.block_next();
+    let (lost, ()) = tokio::join!(host.worker.enable(&namespace_id), async {
+        gate.wait_until_blocked().await;
+        assert_matches!(
+            rival.worker.enable(&namespace_id).await,
+            Ok(GrepEnableOutcome::Enabled { .. })
+        );
+        gate.release();
+    });
+    assert_matches!(lost, Ok(GrepEnableOutcome::Superseded));
+    let Ok(GrepIndexStatus::Backfilling {
+        pin_id: rival_pin_id,
+        ..
+    }) = host.worker.lifecycle(&namespace_id).await
+    else {
+        panic!("the rival's enable is published");
+    };
+    let checkpoints = host
+        .maintenance
+        .list_checkpoints(&namespace_id)
+        .page()
+        .await
+        .expect("list checkpoints")
+        .checkpoints;
+    assert_eq!(
+        checkpoints
+            .iter()
+            .map(|checkpoint| &checkpoint.checkpoint_id)
+            .collect::<Vec<_>>(),
+        [&rival_pin_id],
+        "the lost enable deleted its own checkpoint"
+    );
+}
+
+/// Checks that an enable whose put has an unknown outcome returns
+/// `outcome_unknown` and keeps the backfill checkpoint, which the put may
+/// have listed.
+#[tokio::test]
+async fn an_enable_whose_put_has_an_unknown_outcome_fails_and_keeps_its_checkpoint() {
     let directory = tempfile::tempdir().expect("directory");
     let base: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
     let namespace_id = namespace_id("unknown-enable");
-    let writer = LoonFs::builder_with_store(base.clone())
-        .writer_id(loonfs_test_support::ids::writer_id("unknown-enable"))
-        .build()
-        .await
-        .expect("writer");
-    writer
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("namespace");
+    let writer = seed(&base, &namespace_id, &[]).await;
+    writer.shutdown().await.expect("shutdown");
     let failing = FailStore::new(
         base.clone(),
-        KeyPredicate::exact(manifest_key(&namespace_id, &ManifestNo(1))),
+        KeyPredicate::prefix(metadata_manifest_prefix(&namespace_id)),
         OperationSelector::PutCreateIfAbsent,
         InjectedError::Transport("lost enable request".to_owned()),
     );
@@ -140,12 +491,7 @@ async fn an_enable_whose_put_reads_back_absent_fails_and_keeps_its_checkpoint() 
     let outcome = host.worker.enable(&namespace_id).await;
 
     assert_matches!(outcome, Err(error) if error.code() == ErrorCode::OutcomeUnknown);
-    assert!(
-        load_current_grep_manifest(&base, &namespace_id, crate::common::observation())
-            .await
-            .expect("load")
-            .is_none()
-    );
+    assert_matches!(host.worker.entry(&namespace_id).await, Ok(None));
     let checkpoints = host
         .maintenance
         .list_checkpoints(&namespace_id)
@@ -156,6 +502,6 @@ async fn an_enable_whose_put_reads_back_absent_fails_and_keeps_its_checkpoint() 
     assert_eq!(
         checkpoints.len(),
         1,
-        "an unknown outcome must keep the backfill checkpoint the put may name"
+        "an unknown outcome must keep the backfill checkpoint the put may list"
     );
 }

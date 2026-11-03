@@ -42,6 +42,10 @@ validation_error!(
     BindingVersionValidationError,
     "invalid binding_version {value:?}: {reason}"
 );
+validation_error!(
+    ExtensionNameValidationError,
+    "invalid extension name {value:?}: {reason}"
+);
 
 /// Generates a project-standard opaque durable identifier.
 ///
@@ -452,6 +456,43 @@ string_id! {
     /// Durable id for one derived-index segment file.
     IndexSegmentId,
     prefix = "idx"
+}
+
+/// Most bytes one extension name may contain.
+pub const MAX_EXTENSION_NAME_BYTES: usize = 64;
+
+string_id! {
+    /// The name of an extension, such as `grep`, which keys the extension's entry in a
+    /// namespace manifest and is part of the key of each of the extension's objects.
+    ///
+    /// A name is 1 to 64 lowercase ASCII letters, digits, or underscores, and it starts with a
+    /// letter.
+    ExtensionName,
+    error = ExtensionNameValidationError,
+    validate = validate_extension_name
+}
+
+fn validate_extension_name(value: &str) -> Result<(), ExtensionNameValidationError> {
+    if value.len() > MAX_EXTENSION_NAME_BYTES {
+        return Err(ExtensionNameValidationError::new(
+            "",
+            format!("must be {MAX_EXTENSION_NAME_BYTES} bytes or fewer"),
+        ));
+    }
+    let mut bytes = value.bytes();
+    if !bytes.next().is_some_and(|first| first.is_ascii_lowercase()) {
+        return Err(ExtensionNameValidationError::new(
+            value,
+            "must start with a lowercase ASCII letter",
+        ));
+    }
+    if !bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_') {
+        return Err(ExtensionNameValidationError::new(
+            value,
+            "must contain only lowercase ASCII letters, digits, or `_`",
+        ));
+    }
+    Ok(())
 }
 
 string_id! {

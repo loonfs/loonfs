@@ -7,8 +7,8 @@
 use super::deletes::DeletedCounter;
 use crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS;
 use loonfs_objectstore::keys::{
-    content_prefix, metadata_manifest_prefix, metadata_segment_prefix, pin_prefix,
-    temporary_prefix, wal_prefix,
+    content_prefix, extensions_prefix, metadata_manifest_prefix, metadata_segment_prefix,
+    pin_prefix, temporary_prefix, wal_prefix,
 };
 use loonfs_objectstore::layout::{
     content_id_of, manifest_no_of, parse_object_key, DurableObjectFamily,
@@ -20,16 +20,19 @@ pub(super) enum CandidateFamily {
     Manifests,
     WalObjects,
     MetadataSegments,
+    /// The segments of every extension, which the extensions prefix lists.
+    ExtensionSegments,
     Pins,
     Content,
     Temporary,
 }
 
 impl CandidateFamily {
-    pub(super) const ALL: [Self; 6] = [
+    pub(super) const ALL: [Self; 7] = [
         Self::Manifests,
         Self::WalObjects,
         Self::MetadataSegments,
+        Self::ExtensionSegments,
         Self::Pins,
         Self::Content,
         Self::Temporary,
@@ -43,6 +46,7 @@ impl CandidateFamily {
             Self::Manifests => manifest_no_of(key).is_some(),
             Self::WalObjects => loonfs_objectstore::layout::wal_no_of(key).is_some(),
             Self::MetadataSegments => family == DurableObjectFamily::MetadataSegment,
+            Self::ExtensionSegments => family == DurableObjectFamily::ExtensionSegment,
             Self::Pins => family == DurableObjectFamily::Pin,
             Self::Content => content_id_of(key).is_some(),
             Self::Temporary => family == DurableObjectFamily::TemporaryObject,
@@ -55,7 +59,9 @@ impl CandidateFamily {
         match self {
             // A compaction may publish output that is exactly the minimum age
             // old, so a segment must be strictly older before it goes.
-            Self::MetadataSegments => UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1,
+            Self::MetadataSegments | Self::ExtensionSegments => {
+                UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1
+            }
             Self::Manifests | Self::WalObjects | Self::Pins | Self::Content | Self::Temporary => {
                 grace_window_ms
             }
@@ -69,6 +75,7 @@ impl CandidateFamily {
             Self::Manifests => |report| &mut report.deleted.manifests,
             Self::WalObjects => |report| &mut report.deleted.wal_objects,
             Self::MetadataSegments => |report| &mut report.deleted.metadata_segments,
+            Self::ExtensionSegments => |report| &mut report.deleted.extension_segments,
             Self::Content => |report| &mut report.deleted.content_objects,
             Self::Temporary => |report| &mut report.deleted.temporary_objects,
             Self::Pins => return None,
@@ -80,6 +87,7 @@ impl CandidateFamily {
             Self::Manifests => metadata_manifest_prefix(namespace_id),
             Self::WalObjects => wal_prefix(namespace_id),
             Self::MetadataSegments => metadata_segment_prefix(namespace_id),
+            Self::ExtensionSegments => extensions_prefix(namespace_id),
             Self::Pins => pin_prefix(namespace_id),
             Self::Content => content_prefix(namespace_id),
             Self::Temporary => temporary_prefix(namespace_id),

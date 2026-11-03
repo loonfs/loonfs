@@ -520,7 +520,6 @@ fn index_status_reports_each_lifecycle_status_in_its_own_terms() {
     let data = json_data(&disabled);
     assert_eq!(data["status"], "disabled");
     assert!(data.get("built_through_seq").is_none());
-    assert!(data.get("next_run_no").is_some());
 
     let disabled_again = harness.run(&["--json", "maintenance", "index", "disable"]);
     assert_success(&disabled_again);
@@ -659,14 +658,11 @@ fn index_status_and_enable_answer_the_same_over_the_remote_transport() {
 
     let collected = harness.run(&["--json", "maintenance", "gc"]);
     assert_success(&collected);
-    assert_eq!(
-        json_data(&collected)["extensions"]["grep"]["namespace_reaped"],
-        false
-    );
+    assert_eq!(json_data(&collected)["deleted"]["extension_segments"], 0);
 }
 
 #[test]
-fn gc_reports_grep_collection_counts_in_both_modes() {
+fn gc_counts_extension_segments_in_both_modes() {
     let harness = Harness::new();
     harness.add_embedded_profile("embedded");
     let remote_server = harness.start_external_server(harness.write_server_config_with(
@@ -689,36 +685,22 @@ fn gc_reports_grep_collection_counts_in_both_modes() {
         assert_success(&harness.run(&["use", "--profile", profile, "demo"]));
         assert_success(&harness.run(&["maintenance", "index", "enable", "--profile", profile]));
 
+        // The core pass collects the index's segments, so the report has
+        // no section of its own for grep.
         let collected = harness.run(&["--json", "maintenance", "gc", "--profile", profile]);
         assert_success(&collected);
         let data = json_data(&collected);
         assert_eq!(data["kind"], "gc");
         assert_eq!(data["namespace_id"], "demo");
-        assert!(data["listed_bytes"].as_u64().expect("listed bytes") > 0);
-        let grep = &data["extensions"]["grep"];
-        assert_eq!(grep["deleted_segments"], 0);
-        assert_eq!(grep["deleted_other_objects"], 0);
-        assert_eq!(grep["namespace_reaped"], false);
-        assert!(
-            grep["retained_candidates"]
-                .as_u64()
-                .expect("retained count")
-                > 0
-        );
-        assert!(grep["listed_bytes"].as_u64().expect("grep listed bytes") > 0);
-        assert_eq!(grep.as_object().expect("grep collection counts").len(), 5);
+        assert_eq!(data["deleted"]["extension_segments"], 0);
+        assert!(data.get("extensions").is_none());
 
         let human = harness.run(&["maintenance", "gc", "--profile", profile]);
         assert_success(&human);
-        assert_eq!(
-            stdout_string(&human).trim().lines().last(),
-            Some(
-                format!(
-                    "grep index gc deleted 0 segments, 0 other objects ({} retained)",
-                    grep["retained_candidates"]
-                )
-                .as_str()
-            )
+        assert!(
+            stdout_string(&human).contains(", 0 extension segments, "),
+            "{}",
+            stdout_string(&human)
         );
     }
 }

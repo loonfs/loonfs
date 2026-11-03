@@ -7,7 +7,6 @@ use loonfs::{
     DestinationBehavior, LoonFs, MaintainMetadataOptions, Maintenance, NamespaceId, PutFileOptions,
     ReadOnly, SharedObjectStore, Writable,
 };
-use loonfs_grep::manifest::load_current_grep_manifest;
 use loonfs_grep::GramIndexBuildPolicy;
 use loonfs_grep::{GrepBuildOutcome, GrepError, GrepReorganizeOutcome, GrepService, GrepWorker};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -38,13 +37,19 @@ struct ServiceHarness {
 
 impl ServiceHarness {
     async fn new(store: SharedObjectStore, namespace_id: NamespaceId) -> Self {
+        // The reader checks for a newer manifest on every read, so a query
+        // reads the grep entry that a step just published.
         let reader = LoonFs::builder_with_store(store.clone())
             .read_only()
+            .config(loonfs::RuntimeConfig {
+                manifest_revalidation_interval_ms: 0,
+                ..loonfs::RuntimeConfig::default()
+            })
             .build()
             .await
             .expect("build query reader");
         Self {
-            service: GrepService::new(default_block_cache(), reader.monotonic_timer()),
+            service: GrepService::new(default_block_cache()),
             store,
             namespace_id,
             reader,
@@ -202,14 +207,12 @@ async fn gram_segment_levels(
     store: &SharedObjectStore,
     namespace_id: &NamespaceId,
 ) -> BTreeSet<u32> {
-    load_current_grep_manifest(&**store, namespace_id, crate::common::observation())
+    crate::common::control::grep_entry(store, namespace_id)
         .await
-        .expect("load grep manifest")
-        .expect("grep manifest exists")
-        .manifest_state()
-        .segments()
+        .expect("grep entry exists")
+        .runs()
         .iter()
-        .map(|segment| segment.level)
+        .map(|run| run.level)
         .collect()
 }
 

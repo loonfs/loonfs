@@ -1,10 +1,11 @@
 //! The maintenance capability of a writable runtime: namespace diagnostics,
 //! operator checkpoints, WAL folds, metadata compaction, garbage
-//! collection, and retention.
+//! collection, retention, and the publications of an extension's entry.
 //!
-//! Derived indexes are not here and not in this crate: `loonfs-grep`
-//! builds and collects its own state through the runtime's public snapshot
-//! calls, and its hosts drive it.
+//! Derived indexes aren't in this module or this crate. `loonfs-grep` builds
+//! its own segments through the runtime's public reads and snapshot calls,
+//! publishes its entry through [`Maintenance::publish_extension`], and its
+//! hosts drive it.
 
 use crate::pagers::{decode_page_request, encode_next_cursor, CheckpointsPager};
 use crate::publisher::{NamespaceChange, PublisherRegistry};
@@ -17,8 +18,11 @@ use crate::{
 };
 use crate::{Error, Result};
 use loonfs_core::control::NamespaceStorageDiagnostics;
-use loonfs_core::{CheckpointPageCursor, MetadataCompactionCancellation};
-use loonfs_types::{u64_from_usize, PageRequest, WriterId};
+use loonfs_core::{
+    CheckpointPageCursor, ExtensionBasis, ExtensionPublication, MetadataCompactionCancellation,
+};
+use loonfs_types::format::manifest::ExtensionEntry;
+use loonfs_types::{u64_from_usize, ExtensionName, PageRequest, RunNo, WriterId};
 use std::num::NonZeroU64;
 use std::sync::Arc;
 
@@ -457,6 +461,82 @@ impl Maintenance {
                     .publisher
                     .finish_publication(namespace_id, result)
                     .await
+            },
+        )
+        .await
+    }
+
+    /// Loads the namespace's current manifest as the basis of an extension's
+    /// change, and starts the clock of the change's publication.
+    ///
+    /// The extension plans its change from the basis's entry, writes its
+    /// segments, and then publishes the change with
+    /// [`Self::publish_extension`]. Returns `namespace_deleted` for a deleted
+    /// namespace.
+    pub async fn load_extension_basis(&self, namespace_id: &NamespaceId) -> Result<ExtensionBasis> {
+        trace::in_operation(
+            operation_span!(self.compactor.core, "load_extension_basis", namespace_id),
+            async {
+                let _permit = self.compactor.core.read_permit().await;
+                self.compactor
+                    .engine(namespace_id)
+                    .load_extension_basis()
+                    .await
+                    .map_err(Error::from)
+            },
+        )
+        .await
+    }
+
+    /// Publishes a change to the entry of extension `name` in the manifest
+    /// after `basis`.
+    ///
+    /// `entry_at` returns the changed entry and the next run number, with the
+    /// change's new runs numbered from the run number it's called with,
+    /// which is the `next_run_no` of the manifest that the change is
+    /// published over. The publication changes nothing else and claims no
+    /// epoch, like a fold's. When another manifest follows `basis` first with
+    /// the same entry of `name`, such as a fold or a compaction, the change
+    /// is published over that manifest. When that manifest's entry differs,
+    /// the call publishes nothing and returns
+    /// [`ExtensionPublication::Superseded`], and the extension plans its next
+    /// change from the current manifest. After a publication, this runtime's
+    /// next read of the namespace starts from the published manifest or a
+    /// newer one. See
+    /// [Extensions](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#124-extensions).
+    pub async fn publish_extension(
+        &self,
+        basis: &ExtensionBasis,
+        name: &ExtensionName,
+        entry_at: impl FnMut(RunNo) -> (ExtensionEntry, RunNo),
+    ) -> Result<ExtensionPublication> {
+        let namespace_id = &basis.manifest().namespace_id;
+        trace::in_operation(
+            operation_span!(self.compactor.core, "publish_extension", namespace_id),
+            async {
+                let result = self
+                    .compactor
+                    .engine(namespace_id)
+                    .publish_extension(basis, name, entry_at)
+                    .await
+                    .map_err(Error::from);
+                let publication = self
+                    .compactor
+                    .publisher
+                    .finish_publication(namespace_id, result)
+                    .await;
+                // A runtime with no writer session for the namespace checks
+                // its cached head for a successor only once per
+                // `manifest_revalidation_interval_ms`, and an extension's
+                // readers read its entry from that head. So the publication
+                // drops the cached head, as a merge's fold does, and this
+                // runtime's next read finds the published entry.
+                if matches!(publication, Ok(ExtensionPublication::Published(_))) {
+                    self.compactor
+                        .core
+                        .invalidate_namespace_read_cache(namespace_id);
+                }
+                publication
             },
         )
         .await

@@ -7,14 +7,15 @@ use super::{
     MAX_GREP_VERIFIED_VALUES_PER_PAGE, SCAN_DIRECTORY_PAGE_ENTRIES, TAIL_FEED_PAGE_COMMITS,
 };
 use crate::codec::{lookup, ContentValue, Gram, IndexRow};
+use crate::entry::ChangeFeedResume;
 use crate::index_read::index_segment_corrupt;
-use crate::manifest::{ChangeFeedResume, GrepSegmentRef};
 use crate::query::GramQueryPlan;
 use crate::reads::{published_revision, NamespaceReadView};
 use crate::segments::GrepSegments;
 use crate::{GrepError, Result};
 use futures::{stream, StreamExt, TryFutureExt, TryStreamExt};
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::manifest::{ExtensionRunRef, ExtensionSegmentRef};
 use loonfs_types::format::segment_blocks::string_prefix_upper_bound;
 use loonfs_types::{
     EntryInodeKind, ErrorCode, InodeId, PathEntry, PathEntryKind, RevisionNo, RunNo, ROOT_INODE_ID,
@@ -46,7 +47,7 @@ pub(super) struct GrepCandidates {
 /// order.
 #[derive(Debug)]
 pub(super) struct RunCandidates {
-    segments: Vec<GrepSegmentRef>,
+    segments: Vec<ExtensionSegmentRef>,
     ordinals: Vec<u64>,
 }
 
@@ -208,28 +209,27 @@ impl<S: ObjectStore + ?Sized> GrepSegments<'_, S> {
     /// byte-level pattern verification preserves exact results.
     pub(super) async fn indexed_candidates(
         &self,
-        segments: &[GrepSegmentRef],
+        runs: &[ExtensionRunRef],
         plan: &GramQueryPlan,
     ) -> Result<Vec<RunCandidates>> {
-        let mut runs: BTreeMap<RunNo, Vec<&GrepSegmentRef>> = BTreeMap::new();
-        for segment in segments {
-            runs.entry(segment.run_no).or_default().push(segment);
-        }
         let mut intersections: Option<BTreeMap<RunNo, BTreeSet<u64>>> = None;
         for or_set in &plan.required {
             let lookups: Vec<GramLookup> =
                 or_set.iter().map(|gram| GramLookup::new(*gram)).collect();
-            let probes: Vec<(&GramLookup, &GrepSegmentRef)> = lookups
+            let probes: Vec<(&GramLookup, RunNo, &ExtensionSegmentRef)> = lookups
                 .iter()
                 .flat_map(|gram_lookup| {
-                    segments
-                        .iter()
-                        .filter(|descriptor| {
+                    runs.iter()
+                        .filter(|run| {
                             intersections
                                 .as_ref()
-                                .is_none_or(|runs| runs.contains_key(&descriptor.run_no))
+                                .is_none_or(|found| found.contains_key(&run.run_no))
                         })
-                        .map(move |descriptor| (gram_lookup, descriptor))
+                        .flat_map(move |run| {
+                            run.segments
+                                .iter()
+                                .map(move |descriptor| (gram_lookup, run.run_no, descriptor))
+                        })
                 })
                 .collect();
             // This union is the query's largest temporary allocation. In the worst
@@ -239,9 +239,9 @@ impl<S: ObjectStore + ?Sized> GrepSegments<'_, S> {
             let mut set_postings: BTreeMap<RunNo, BTreeSet<u64>> = BTreeMap::new();
             let mut batches = stream::iter(0..probes.len())
                 .map(|index| {
-                    let (gram_lookup, descriptor) = probes[index];
+                    let (gram_lookup, run_no, descriptor) = probes[index];
                     self.postings_for_gram(descriptor, gram_lookup)
-                        .map_ok(move |batch| (descriptor.run_no, batch))
+                        .map_ok(move |batch| (run_no, batch))
                 })
                 .buffered(GREP_READS_IN_FLIGHT);
             while let Some((run_no, batch)) = batches.try_next().await? {
@@ -273,10 +273,12 @@ impl<S: ObjectStore + ?Sized> GrepSegments<'_, S> {
             .unwrap_or_default()
             .into_iter()
             .map(|(run_no, ordinals)| RunCandidates {
-                segments: runs[&run_no]
+                segments: runs
                     .iter()
-                    .map(|segment| (*segment).clone())
-                    .collect(),
+                    .find(|run| run.run_no == run_no)
+                    .expect("a run with candidates should be one of the index's runs")
+                    .segments
+                    .clone(),
                 ordinals: ordinals.into_iter().collect(),
             })
             .collect())
@@ -307,7 +309,7 @@ impl<S: ObjectStore + ?Sized> GrepSegments<'_, S> {
     /// its filter admits the gram.
     async fn postings_for_gram(
         &self,
-        descriptor: &GrepSegmentRef,
+        descriptor: &ExtensionSegmentRef,
         gram_lookup: &GramLookup,
     ) -> Result<BTreeSet<u64>> {
         let range = self
@@ -328,11 +330,7 @@ impl<S: ObjectStore + ?Sized> GrepSegments<'_, S> {
                 continue;
             }
             let batch = row.ordinals().map_err(|error| {
-                index_segment_corrupt(
-                    &self.object_key(&descriptor.segment_id),
-                    "posting batch",
-                    &error,
-                )
+                index_segment_corrupt(&self.object_key(descriptor), "posting batch", &error)
             })?;
             postings.extend(batch);
         }
@@ -446,13 +444,17 @@ pub(super) enum TailScan {
 /// row are read and verified whatever their grams are.
 pub(super) async fn add_tail_files<S: ObjectStore + ?Sized>(
     segments: &GrepSegments<'_, S>,
-    descriptors: &[GrepSegmentRef],
+    runs: &[ExtensionRunRef],
     candidates: &mut GrepCandidates,
     tail: BTreeMap<InodeId, TailRevision>,
 ) -> Result<()> {
     let values: BTreeSet<ContentValue> = tail.values().map(|revision| revision.value).collect();
+    let descriptors: Vec<ExtensionSegmentRef> = runs
+        .iter()
+        .flat_map(|run| run.segments.iter().cloned())
+        .collect();
     let texts = segments
-        .text_rows(descriptors, &values, GREP_READS_IN_FLIGHT)
+        .text_rows(&descriptors, &values, GREP_READS_IN_FLIGHT)
         .await?;
     for (inode_id, revision) in tail {
         let files = match texts.get(&revision.value) {

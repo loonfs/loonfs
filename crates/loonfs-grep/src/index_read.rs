@@ -2,11 +2,11 @@
 
 use crate::cache::{DecodedGrepBlock, GrepBlockCache, GrepBlockCacheKey};
 use crate::codec::IndexRow;
-use crate::manifest::GrepSegmentRef;
 use crate::{GrepError, Result};
 use loonfs::engine::SegmentBlockKind;
 use loonfs_objectstore::ObjectStoreErrorKind;
 use loonfs_objectstore::{ByteRange, ObjectStore};
+use loonfs_types::format::manifest::ExtensionSegmentRef;
 use loonfs_types::format::segment_blocks::{
     decode_data_block_rows, decode_filter_block, decode_index_block, BlockHandle, DecodedDataBlock,
     SegmentFilter, SegmentIndexEntry,
@@ -68,7 +68,7 @@ async fn load_index_section_bytes<S: ObjectStore + ?Sized>(
         .await
         .map_err(|error| GrepError::store(object_key, &error))?
         .ok_or_else(|| GrepError::IndexCorrupt {
-            message: format!("manifest references missing index segment `{object_key}`"),
+            message: format!("grep's entry lists missing index segment `{object_key}`"),
         })?;
     if bytes.len() != handle.stored_bytes as usize {
         return Err(GrepError::StoreUnavailable {
@@ -89,7 +89,10 @@ struct WholeSegment {
     entries: Arc<Vec<SegmentIndexEntry>>,
 }
 
-pub(crate) fn segment_object_bytes(object_key: &str, descriptor: &GrepSegmentRef) -> Result<u64> {
+pub(crate) fn segment_object_bytes(
+    object_key: &str,
+    descriptor: &ExtensionSegmentRef,
+) -> Result<u64> {
     descriptor
         .index_block
         .offset
@@ -105,7 +108,7 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
     store: &S,
     cache: &GrepBlockCache,
     object_key: &str,
-    descriptor: &GrepSegmentRef,
+    descriptor: &ExtensionSegmentRef,
     object_bytes: u64,
 ) -> Result<WholeSegment> {
     let whole_handle = BlockHandle {
@@ -161,7 +164,7 @@ pub(crate) async fn load_filter_block<S: ObjectStore + ?Sized>(
     store: &S,
     cache: Option<&GrepBlockCache>,
     object_key: &str,
-    descriptor: &GrepSegmentRef,
+    descriptor: &ExtensionSegmentRef,
 ) -> Result<Arc<SegmentFilter>> {
     let handle = &descriptor.filter_block;
     let load = || async {
@@ -219,7 +222,7 @@ pub(crate) async fn load_index_block<S: ObjectStore + ?Sized>(
     store: &S,
     cache: Option<&GrepBlockCache>,
     object_key: &str,
-    descriptor: &GrepSegmentRef,
+    descriptor: &ExtensionSegmentRef,
 ) -> Result<Arc<Vec<SegmentIndexEntry>>> {
     let handle = &descriptor.index_block;
     let load = || async {

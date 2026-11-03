@@ -2,10 +2,10 @@
 //! namespace listing built on it.
 
 use crate::keys::{
-    namespace_prefix, CONTENT_DIRECTORY, HINT_NAME, MANIFEST_DIRECTORY, MANIFEST_SUFFIX,
-    NAMESPACES_DIRECTORY, PIN_DIRECTORY, PIN_SUFFIX, SEGMENT_DIRECTORY, SEGMENT_SUFFIX,
-    TEMPORARY_DIRECTORY, UPLOAD_DIRECTORY, UPLOAD_OUTCOME_SUFFIX, UPLOAD_SESSION_SUFFIX,
-    WAL_DIRECTORY, WAL_SUFFIX,
+    namespace_prefix, CONTENT_DIRECTORY, EXTENSIONS_DIRECTORY, HINT_NAME, MANIFEST_DIRECTORY,
+    MANIFEST_SUFFIX, NAMESPACES_DIRECTORY, PIN_DIRECTORY, PIN_SUFFIX, SEGMENT_DIRECTORY,
+    SEGMENT_SUFFIX, TEMPORARY_DIRECTORY, UPLOAD_DIRECTORY, UPLOAD_OUTCOME_SUFFIX,
+    UPLOAD_SESSION_SUFFIX, WAL_DIRECTORY, WAL_SUFFIX,
 };
 use crate::{ObjectStore, Result};
 use loonfs_types::{ContentId, EffectiveLimit, ManifestNo, NamespaceId, UploadId};
@@ -37,6 +37,8 @@ pub enum DurableObjectFamily {
     MetadataManifest,
     /// Classifies an immutable metadata segment.
     MetadataSegment,
+    /// Classifies an immutable segment that an extension entry lists.
+    ExtensionSegment,
     /// Classifies a pin to a numbered manifest.
     Pin,
     /// Classifies the record that starts an upload session.
@@ -64,8 +66,8 @@ impl<'a> ParsedObjectKey<'a> {
     }
 
     /// Returns the namespace whose prefix contains the key: the family root
-    /// for a content object or an upload record, the owner for a metadata
-    /// segment, and the namespace itself for every other family.
+    /// for a content object or an upload record, the owner for a metadata or
+    /// extension segment, and the namespace itself for every other family.
     pub fn prefix_namespace_id(&self) -> &'a str {
         self.prefix_namespace_id
     }
@@ -130,6 +132,15 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
             segment.strip_suffix(SEGMENT_SUFFIX).map(|identifier| {
                 parsed(
                     DurableObjectFamily::MetadataSegment,
+                    namespace,
+                    Some(identifier),
+                )
+            })
+        }
+        [NAMESPACES_DIRECTORY, namespace, EXTENSIONS_DIRECTORY, _, SEGMENT_DIRECTORY, segment] => {
+            segment.strip_suffix(SEGMENT_SUFFIX).map(|identifier| {
+                parsed(
+                    DurableObjectFamily::ExtensionSegment,
                     namespace,
                     Some(identifier),
                 )
@@ -302,11 +313,13 @@ mod tests {
 
     use super::{parse_object_key, DurableObjectFamily};
     use crate::keys::{
-        content_blob, hint, metadata_manifest_object, metadata_segment, metadata_segment_prefix,
-        pin, temporary_object, upload_outcome, upload_session, wal_object, wal_prefix,
+        content_blob, extension_segment, hint, metadata_manifest_object, metadata_segment,
+        metadata_segment_prefix, pin, temporary_object, upload_outcome, upload_session, wal_object,
+        wal_prefix,
     };
     use loonfs_types::{
-        ContentId, ManifestNo, MetadataSegmentId, NamespaceId, PinId, UploadId, WalNo,
+        ContentId, ExtensionName, IndexSegmentId, ManifestNo, MetadataSegmentId, NamespaceId,
+        PinId, UploadId, WalNo,
     };
 
     #[test]
@@ -346,6 +359,8 @@ mod tests {
         let pin_id = PinId::parse("pin_00000000000000000001-0000000000000001").expect("pin id");
         let upload_id = UploadId::parse("upl_00000000000000000000000001").expect("upload id");
         let content_id = ContentId::parse("con_5bsqqg28t5cy4tqkff04hmasw9").expect("content id");
+        let index_segment_id =
+            IndexSegmentId::parse("idx_00000000000000000000000001").expect("index segment id");
         let temporary = temporary_object(&namespace_id);
         let temporary_id = temporary.rsplit('/').next();
         let cases = [
@@ -364,6 +379,15 @@ mod tests {
                 metadata_segment(&namespace_id, &metadata_segment_id),
                 DurableObjectFamily::MetadataSegment,
                 Some(metadata_segment_id.as_str()),
+            ),
+            (
+                extension_segment(
+                    &namespace_id,
+                    &ExtensionName::parse("grep").expect("extension name"),
+                    &index_segment_id,
+                ),
+                DurableObjectFamily::ExtensionSegment,
+                Some(index_segment_id.as_str()),
             ),
             (
                 pin(&namespace_id, &pin_id),
@@ -471,6 +495,10 @@ mod tests {
             "../namespaces/ns-1/hint.json",
             "namespaces/ns-1/../hint.json",
             "namespaces/ns-1/content/nested/object",
+            "namespaces/ns-1/extensions/grep/hint.json",
+            "namespaces/ns-1/extensions/grep/manifests/00000000000000000001.json",
+            "namespaces/ns-1/extensions/grep/segments/idx_1.tmp",
+            "namespaces/ns-1/extensions/grep/segments/nested/idx_1.sst.zst",
         ] {
             assert!(
                 parse_object_key(key).is_none(),

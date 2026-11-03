@@ -193,7 +193,7 @@ impl<M> LoonFs<M> {
     /// the runtime's own traffic is.
     ///
     /// Server integrations that read LoonFS-owned objects outside the handle
-    /// surface, such as the grep manifest and the grep worker's keyspace, use
+    /// surface, such as the grep worker's segments, use
     /// this so their requests are measured like every other request instead
     /// of escaping instrumentation on a second, raw client.
     pub fn object_store(&self) -> SharedObjectStore {

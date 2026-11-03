@@ -16,8 +16,8 @@ use loonfs_types::format::control::{
 };
 use loonfs_types::format::envelope::EncodedEnvelope;
 use loonfs_types::format::manifest::{
-    encode_namespace_manifest_json, NamespaceManifestEnvelope, NamespaceManifestPayload,
-    MAX_NAMESPACE_MANIFEST_BYTES,
+    encode_namespace_manifest_json, ExtensionEntry, NamespaceManifestEnvelope,
+    NamespaceManifestPayload, MAX_NAMESPACE_MANIFEST_BYTES,
 };
 use loonfs_types::{ManifestNo, NamespaceId};
 use std::collections::HashSet;
@@ -477,7 +477,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
 }
 
 /// Returns whether `payload` references an object that this attempt created:
-/// a fork's source pin, or a segment that its predecessor doesn't list.
+/// a fork's source pin, or a metadata or extension segment that its
+/// predecessor doesn't list.
 ///
 /// Identical bytes prove authorship only for such a manifest. A rival can
 /// rebuild any other manifest byte for byte.
@@ -485,18 +486,34 @@ fn references_own_object(
     payload: &NamespaceManifestPayload,
     current: Option<&PublicationBasis>,
 ) -> bool {
-    let listed = current
+    let predecessor = current.map(|current| current.manifest.payload());
+    let listed = predecessor
         .iter()
-        .flat_map(|current| &current.manifest.payload().runs)
+        .flat_map(|predecessor| &predecessor.runs)
         .flat_map(|run| &run.segments)
-        .map(|segment| &segment.segment_id)
+        .map(|segment| segment.segment_id.as_str())
+        .chain(
+            predecessor
+                .iter()
+                .flat_map(|predecessor| predecessor.extensions.values())
+                .flat_map(ExtensionEntry::segments)
+                .map(|segment| segment.segment_id.as_str()),
+        )
         .collect::<HashSet<_>>();
     (payload.manifest_no == ManifestNo(1) && payload.fork_basis.is_some())
         || payload
             .runs
             .iter()
             .flat_map(|run| &run.segments)
-            .any(|segment| !listed.contains(&segment.segment_id))
+            .map(|segment| segment.segment_id.as_str())
+            .chain(
+                payload
+                    .extensions
+                    .values()
+                    .flat_map(ExtensionEntry::segments)
+                    .map(|segment| segment.segment_id.as_str()),
+            )
+            .any(|segment_id| !listed.contains(segment_id))
 }
 
 /// Asserts that `payload` is a legal successor of the current manifest, or a

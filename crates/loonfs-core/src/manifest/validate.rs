@@ -7,11 +7,12 @@ use crate::segment::runs::{
     runs_in_materialization_order, MetadataFamilyGroup, MetadataRunManifest,
 };
 use crate::segment::scan::ordered_manifest_segments;
-use loonfs_objectstore::keys::metadata_segment_object_key;
+use loonfs_objectstore::keys::{extension_segment_object_key, metadata_segment_object_key};
 use loonfs_types::format::manifest::{
     MetadataRow, MetadataRowFamily, MetadataSegmentRef, NamespaceManifestEnvelope,
     NamespaceManifestPayload, RunTier, METADATA_SEGMENT_ENCODING,
 };
+use loonfs_types::format::segment_blocks::BlockHandle;
 use loonfs_types::{ChangeSeq, ManifestNo, NamespaceId, RunNo};
 #[cfg(test)]
 use std::collections::BTreeSet;
@@ -69,6 +70,7 @@ pub(super) fn validate_manifest(
         });
     }
     validate_manifest_materialization_ranges(object_key, payload)?;
+    validate_extension_runs(object_key, payload)?;
     let runs = runs_in_materialization_order(payload);
     validate_one_base_run_per_family_group(object_key, &runs)?;
     validate_segment_block_layout(object_key, &runs)?;
@@ -97,8 +99,11 @@ pub(super) fn validate_manifest_materialization_ranges(
         });
     }
 
+    validate_unique_run_numbers(object_key, payload)?;
+    // An extension's publication can allocate run numbers before the first
+    // fold, so an empty manifest's next run number can be above zero.
     if payload.runs.is_empty() {
-        if payload.head_seq == ChangeSeq(0) && payload.next_run_no == RunNo(0) {
+        if payload.head_seq == ChangeSeq(0) {
             return Ok(());
         }
         return Err(ManifestLoadError::RunManifestMismatch {
@@ -108,7 +113,6 @@ pub(super) fn validate_manifest_materialization_ranges(
     }
 
     let mut saw_head_seq_run = false;
-    let mut seen_run_nos = HashSet::new();
     let mut seen_segment_ids = HashSet::new();
     for run in &payload.runs {
         if run.run_no >= payload.next_run_no {
@@ -118,12 +122,6 @@ pub(super) fn validate_manifest_materialization_ranges(
                     "metadata run `{}` is not below next run `{}`",
                     run.run_no, payload.next_run_no
                 ),
-            });
-        }
-        if !seen_run_nos.insert(run.run_no) {
-            return Err(ManifestLoadError::RunManifestMismatch {
-                object_key: object_key.to_owned(),
-                message: format!("duplicate metadata run number `{}`", run.run_no),
             });
         }
         if run.run_seq > payload.head_seq {
@@ -170,6 +168,131 @@ pub(super) fn validate_manifest_materialization_ranges(
     Ok(())
 }
 
+/// Checks that no two runs of the manifest share a number. One counter,
+/// `next_run_no`, allocates the numbers of the metadata runs and of every
+/// extension's runs, so a number identifies one run among all of them.
+fn validate_unique_run_numbers(
+    object_key: &str,
+    payload: &NamespaceManifestPayload,
+) -> Result<(), ManifestLoadError> {
+    let mut run_nos = HashSet::new();
+    let extension_runs = payload.extensions.values().flat_map(|entry| &entry.runs);
+    for run_no in payload
+        .runs
+        .iter()
+        .map(|run| run.run_no)
+        .chain(extension_runs.map(|run| run.run_no))
+    {
+        if !run_nos.insert(run_no) {
+            return Err(ManifestLoadError::RunManifestMismatch {
+                object_key: object_key.to_owned(),
+                message: format!("duplicate run number `{run_no}`"),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Checks the runs that each extension entry lists: a run number below the
+/// manifest's next run number, unique segment IDs, and segments with rows in
+/// a nonempty ascending key range and the block layout of a metadata
+/// segment. Core never reads an extension's rows, so these are the
+/// descriptors' own rules.
+fn validate_extension_runs(
+    object_key: &str,
+    payload: &NamespaceManifestPayload,
+) -> Result<(), ManifestLoadError> {
+    for (name, entry) in &payload.extensions {
+        if let Some(run) = entry
+            .runs
+            .iter()
+            .find(|run| run.run_no >= payload.next_run_no)
+        {
+            return Err(ManifestLoadError::RunManifestMismatch {
+                object_key: object_key.to_owned(),
+                message: format!(
+                    "extension `{name}` run `{}` is not below next run `{}`",
+                    run.run_no, payload.next_run_no
+                ),
+            });
+        }
+        let mut seen_segment_ids = HashSet::new();
+        for descriptor in entry.segments() {
+            let segment_key = extension_segment_object_key(name, descriptor);
+            let invalid = |message: String| {
+                Err(ManifestLoadError::SegmentDescriptorMismatch {
+                    object_key: segment_key.clone(),
+                    message,
+                })
+            };
+            if !seen_segment_ids.insert(&descriptor.segment_id) {
+                return Err(ManifestLoadError::RunManifestMismatch {
+                    object_key: object_key.to_owned(),
+                    message: format!(
+                        "extension `{name}` lists segment `{}` twice",
+                        descriptor.segment_id
+                    ),
+                });
+            }
+            if descriptor.row_count == 0
+                || descriptor.min_row_key.is_empty()
+                || descriptor.min_row_key > descriptor.max_row_key
+            {
+                return invalid(format!(
+                    "segment holds {} rows with key range `{}`..=`{}`; a segment must carry \
+                     rows in a non-empty ascending key range",
+                    descriptor.row_count, descriptor.min_row_key, descriptor.max_row_key
+                ));
+            }
+            if let Err(message) = check_block_layout(
+                descriptor.filter_block,
+                descriptor.index_block,
+                descriptor.filter_inline.as_deref(),
+            ) {
+                return invalid(message);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Checks that a segment's filter block directly precedes its index block
+/// within the address space, and that an inline filter has the filter
+/// block's stored length.
+fn check_block_layout(
+    filter_block: BlockHandle,
+    index_block: BlockHandle,
+    filter_inline: Option<&str>,
+) -> Result<(), String> {
+    for handle in [filter_block, index_block] {
+        if handle
+            .offset
+            .checked_add(u64::from(handle.stored_bytes))
+            .is_none()
+        {
+            return Err("section byte range exceeds address space".to_owned());
+        }
+    }
+    let filter_end = filter_block.offset + u64::from(filter_block.stored_bytes);
+    if filter_end != index_block.offset {
+        return Err(format!(
+            "filter block ends at {filter_end} but the index block starts at {}; the filter must directly precede the index",
+            index_block.offset
+        ));
+    }
+    if let Some(inline) = filter_inline {
+        let expected_hex_len = 2 * u64::from(filter_block.stored_bytes);
+        if inline.len() as u64 != expected_hex_len {
+            return Err(format!(
+                "inline filter is {} hex chars but the filter block stores {} bytes",
+                inline.len(),
+                filter_block.stored_bytes
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_segment_block_layout(
     object_key: &str,
     runs: &[MetadataRunManifest],
@@ -177,42 +300,17 @@ fn validate_segment_block_layout(
     for run in runs {
         for family_segments in ordered_manifest_segments(object_key, &run.segments)? {
             for descriptor in &family_segments.segments {
-                for handle in [descriptor.filter_block, descriptor.index_block] {
-                    if handle
-                        .offset
-                        .checked_add(u64::from(handle.stored_bytes))
-                        .is_none()
-                    {
-                        return Err(ManifestLoadError::SegmentDescriptorMismatch {
-                            object_key: metadata_segment_object_key(descriptor),
-                            message: "section byte range exceeds address space".to_owned(),
-                        });
-                    }
-                }
-                let filter_end = descriptor.filter_block.offset
-                    + u64::from(descriptor.filter_block.stored_bytes);
-                if filter_end != descriptor.index_block.offset {
-                    return Err(ManifestLoadError::SegmentDescriptorMismatch {
+                check_block_layout(
+                    descriptor.filter_block,
+                    descriptor.index_block,
+                    descriptor.filter_inline.as_deref(),
+                )
+                .map_err(|message| {
+                    ManifestLoadError::SegmentDescriptorMismatch {
                         object_key: metadata_segment_object_key(descriptor),
-                        message: format!(
-                            "filter block ends at {filter_end} but the index block starts at {}; the filter must directly precede the index",
-                            descriptor.index_block.offset
-                        ),
-                    });
-                }
-                if let Some(inline) = &descriptor.filter_inline {
-                    let expected_hex_len = 2 * u64::from(descriptor.filter_block.stored_bytes);
-                    if inline.len() as u64 != expected_hex_len {
-                        return Err(ManifestLoadError::SegmentDescriptorMismatch {
-                            object_key: metadata_segment_object_key(descriptor),
-                            message: format!(
-                                "inline filter is {} hex chars but the filter block stores {} bytes",
-                                inline.len(),
-                                descriptor.filter_block.stored_bytes
-                            ),
-                        });
+                        message,
                     }
-                }
+                })?;
             }
         }
     }

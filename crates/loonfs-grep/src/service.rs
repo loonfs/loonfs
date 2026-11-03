@@ -4,27 +4,22 @@ mod candidates;
 mod page_walk;
 mod value_files;
 
-use crate::cache::{DecodedGrepBlock, GrepBlockCache, GrepBlockCacheKey};
-use crate::keyspace::manifest_key;
-use crate::manifest::{
-    load_current_grep_manifest, ChangeFeedResume, GrepIndexStatus, GrepManifestState,
-};
+use crate::cache::GrepBlockCache;
+use crate::entry::{ChangeFeedResume, GrepEntry, GrepIndexStatus};
 use crate::query::{compile_pattern, CompiledPattern, GramPlanOutcome};
 use crate::reads::{NamespaceReadView, NamespaceReads};
 use crate::segments::GrepSegments;
 use crate::{GrepError, Result};
 use candidates::{add_tail_files, scan_candidate_files, tail_revisions, GrepCandidates, TailScan};
-use loonfs::engine::{Observation, SegmentBlockKind};
 use loonfs::CoreError;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::MonotonicTimer;
+use loonfs_types::format::manifest::ExtensionSegmentRef;
 use loonfs_types::{
-    decode_cursor, ChangeSeq, GrepPageCursor, GrepRequest, GrepResponse, GrepScope, NamespaceId,
-    PageRequest, PathEntry, MAX_PAGE_LIMIT,
+    decode_cursor, ChangeSeq, GrepPageCursor, GrepRequest, GrepResponse, GrepScope, PageRequest,
+    PathEntry, MAX_PAGE_LIMIT,
 };
 use page_walk::{walk_page, GrepResume};
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::Arc;
 
 /// Unindexed-tail revisions one query will scan exhaustively before
 /// failing with `index_lagging` (or skipping the tail under `allow_stale`).
@@ -77,143 +72,23 @@ pub(crate) const GREP_CONTENT_READS_IN_FLIGHT: usize = 32;
 #[derive(Debug)]
 pub struct GrepService {
     block_cache: Arc<GrepBlockCache>,
-    /// An insert removes the entries whose manifest was dropped once the map
-    /// contains more than twice the entries the last removal kept. Only the
-    /// block cache and the queries in progress keep a manifest alive, so the
-    /// map contains at most one more than twice the manifests those kept at the
-    /// last removal.
-    current_manifests: Mutex<CurrentManifests>,
-    timer: Arc<dyn MonotonicTimer>,
 }
 
-/// The newest manifest the service confirmed for each namespace it queried,
-/// and when it confirmed it.
-#[derive(Debug, Default)]
-struct CurrentManifests {
-    entries: BTreeMap<NamespaceId, (Weak<GrepManifestState>, Observation)>,
-    entries_after_prune: usize,
-}
-
-impl CurrentManifests {
-    /// Finds the namespace's confirmed manifest, and removes an entry whose
-    /// manifest was dropped.
-    fn find(
-        &mut self,
-        namespace_id: &NamespaceId,
-    ) -> Option<(Arc<GrepManifestState>, Observation)> {
-        let (state, checked) = self.entries.get(namespace_id)?;
-        let Some(state) = state.upgrade() else {
-            self.entries.remove(namespace_id);
-            return None;
-        };
-        Some((state, checked.clone()))
-    }
-
-    /// Records `state` as confirmed at `observed`, unless the entry has a
-    /// newer manifest.
-    fn insert(
-        &mut self,
-        namespace_id: &NamespaceId,
-        state: &Arc<GrepManifestState>,
-        observed: Observation,
-    ) {
-        if self
-            .entries
-            .get(namespace_id)
-            .and_then(|(cached, _)| cached.upgrade())
-            .is_some_and(|cached| cached.manifest_no() > state.manifest_no())
-        {
-            return;
-        }
-        self.entries
-            .insert(namespace_id.clone(), (Arc::downgrade(state), observed));
-        if self.entries.len() > self.entries_after_prune.saturating_mul(2) {
-            self.entries
-                .retain(|_, (state, _)| state.strong_count() > 0);
-            self.entries_after_prune = self.entries.len();
-        }
-    }
-}
-
+/// The index that a query reads: grep's entry in the manifest of the
+/// query's read view, which is active.
 #[derive(Debug, Clone)]
-struct MaterializedGrepIndexSnapshot {
+struct ActiveIndex {
     /// The sequence that the index's backfill captured, which identifies
     /// the build that a cursor records.
     captured_seq: ChangeSeq,
     resume: ChangeFeedResume,
-    state: Arc<GrepManifestState>,
+    entry: GrepEntry,
 }
 
 impl GrepService {
-    /// Creates a service over a host-composed process-wide grep block cache,
-    /// whose manifest checks run on `timer`, the runtime's monotonic timer.
-    pub fn new(block_cache: Arc<GrepBlockCache>, timer: Arc<dyn MonotonicTimer>) -> Self {
-        Self {
-            block_cache,
-            current_manifests: Mutex::new(CurrentManifests::default()),
-            timer,
-        }
-    }
-
-    async fn load_index_snapshot<S: ObjectStore + ?Sized>(
-        &self,
-        store: &S,
-        namespace_id: &NamespaceId,
-    ) -> Result<MaterializedGrepIndexSnapshot> {
-        let cached = self
-            .current_manifests
-            .lock()
-            .expect("grep manifest cache lock should not be poisoned")
-            .find(namespace_id)
-            .filter(|(_, checked)| checked.is_within_revalidation_bound());
-        let observed = Observation::now(Arc::clone(&self.timer));
-        let confirmed = match cached {
-            Some((state, checked)) => {
-                let successor_present = match state.manifest_no().successor() {
-                    Ok(next) => {
-                        let object_key = manifest_key(namespace_id, &next);
-                        store
-                            .head(&object_key)
-                            .await
-                            .map_err(|error| GrepError::store(object_key, &error))?
-                            .is_some()
-                    }
-                    Err(_) => false,
-                };
-                (!successor_present && checked.is_within_revalidation_bound()).then_some(state)
-            }
-            None => None,
-        };
-        let state = match confirmed {
-            Some(state) => state,
-            None => {
-                let current = load_current_grep_manifest(store, namespace_id, observed.clone())
-                    .await?
-                    .ok_or(GrepError::NotEnabled)?;
-                let state = Arc::new(current.manifest_state().clone());
-                let decoded_bytes = serde_json::to_vec(current.manifest_state())
-                    .expect("a decoded grep manifest state should encode")
-                    .len()
-                    .saturating_mul(2);
-                self.block_cache.insert(
-                    GrepBlockCacheKey {
-                        identity: manifest_key(namespace_id, &state.manifest_no()),
-                        block_kind: SegmentBlockKind::Manifest,
-                        block_offset: 0,
-                    },
-                    DecodedGrepBlock::Manifest {
-                        manifest: state.clone(),
-                        decoded_bytes,
-                    },
-                );
-                state
-            }
-        };
-        self.current_manifests
-            .lock()
-            .expect("grep manifest cache lock should not be poisoned")
-            .insert(namespace_id, &state, observed);
-        materialized_snapshot_from_state(state)
+    /// Creates a service over a host-composed process-wide grep block cache.
+    pub fn new(block_cache: Arc<GrepBlockCache>) -> Self {
+        Self { block_cache }
     }
 
     async fn plan_query<'a, S: ObjectStore>(
@@ -224,13 +99,12 @@ impl GrepService {
         store: &'a S,
     ) -> Result<QueryPlan<'a, S>> {
         validate_grep_request(request)?;
-        // The index loads before the read view, so the view's head is at or
-        // above every sequence that the index records, such as its build's
-        // capture and a reorganization's pruning floor.
-        let snapshot = self
-            .load_index_snapshot(store, namespace_reads.namespace_id())
-            .await?;
+        // The index is the entry in the view's manifest, which was published
+        // after every commit that the entry records, so the view's head is
+        // at or above every sequence that the entry records, such as its
+        // build's capture and a reorganization's pruning floor.
         let head = namespace_reads.read_view().await?;
+        let snapshot = active_index(head.grep_entry().await?)?;
         let head_seq = head.head_seq();
         let fingerprint = request.fingerprint();
         let (reads, resume, cursor_cut_seq, later) = match cursor {
@@ -299,7 +173,7 @@ impl GrepService {
         match gram_plan {
             GramPlanOutcome::Indexable(plan) => {
                 candidates.indexed = index
-                    .indexed_candidates(snapshot.state.segments(), &plan)
+                    .indexed_candidates(snapshot.entry.runs(), &plan)
                     .await?;
                 match cursor_cut_seq.filter(|cursor_cut_seq| *cursor_cut_seq < read_seq) {
                     // An earlier page of this stale search left out the
@@ -313,13 +187,8 @@ impl GrepService {
                     }
                     None => match tail_revisions(&reads, snapshot.resume).await? {
                         TailScan::Within(tail) => {
-                            add_tail_files(
-                                &index,
-                                snapshot.state.segments(),
-                                &mut candidates,
-                                tail,
-                            )
-                            .await?;
+                            add_tail_files(&index, snapshot.entry.runs(), &mut candidates, tail)
+                                .await?;
                         }
                         TailScan::OverBudget if request.allow_stale => {
                             tail_scanned = false;
@@ -359,7 +228,7 @@ impl GrepService {
             tail_scanned,
             cut_seq,
             index,
-            index_state: snapshot.state,
+            index_runs: snapshot.entry.segments().cloned().collect(),
         })
     }
 
@@ -414,12 +283,11 @@ fn validate_grep_request(request: &GrepRequest) -> Result<()> {
     Ok(())
 }
 
-fn materialized_snapshot_from_state(
-    state: Arc<GrepManifestState>,
-) -> Result<MaterializedGrepIndexSnapshot> {
-    // Queries require an active index and its watermark. Disabled and
-    // backfilling indexes return their corresponding errors.
-    let (captured_seq, resume) = match state.status() {
+/// Returns the active index of `entry`. A namespace that grep was never
+/// enabled on, and a disabled or backfilling index, return their errors.
+fn active_index(entry: Option<GrepEntry>) -> Result<ActiveIndex> {
+    let entry = entry.ok_or(GrepError::NotEnabled)?;
+    let (captured_seq, resume) = match entry.status() {
         GrepIndexStatus::Disabled {} => return Err(GrepError::NotEnabled),
         GrepIndexStatus::Backfilling { .. } => return Err(GrepError::Backfilling),
         status @ GrepIndexStatus::Active { captured_seq, .. } => (
@@ -429,10 +297,10 @@ fn materialized_snapshot_from_state(
                 .expect("an active grep status should have a watermark"),
         ),
     };
-    Ok(MaterializedGrepIndexSnapshot {
+    Ok(ActiveIndex {
         captured_seq,
         resume,
-        state,
+        entry,
     })
 }
 
@@ -463,7 +331,8 @@ struct QueryPlan<'a, S> {
     /// last commit that the index covers in full, if that's lower.
     cut_seq: ChangeSeq,
     index: GrepSegments<'a, S>,
-    index_state: Arc<GrepManifestState>,
+    /// The segments of the index that the page reads.
+    index_runs: Vec<ExtensionSegmentRef>,
 }
 
 /// The views of a page after the first, which reads at its cursor's
@@ -488,85 +357,5 @@ fn stale_cut_seq(resume: ChangeFeedResume) -> ChangeSeq {
     match resume.next_event_index() {
         0 => resume.built_through_seq(),
         _ => ChangeSeq(resume.built_through_seq().0.saturating_sub(1)),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn a_cached_manifest_checked_longer_ago_than_the_bound_is_discovered_again() {
-        use crate::manifest::{publish_grep_manifest, GrepIndexState};
-        use loonfs::engine::READ_REVALIDATION_BOUND_MS;
-        use loonfs_objectstore::local_fs_store::LocalFsStore;
-        use loonfs_test_support::clock::ManualClock;
-        use loonfs_types::StdMonotonicTimer;
-        use loonfs_types::{ManifestNo, RunNo};
-
-        let directory = tempfile::tempdir().expect("directory");
-        let store = LocalFsStore::new(directory.path()).expect("store");
-        let namespace_id = loonfs_test_support::ids::namespace_id("grep-revalidation");
-        let deadline =
-            loonfs::engine::OperationClock::start(0, Arc::new(StdMonotonicTimer::default()));
-        let manifest = |manifest_no| {
-            GrepManifestState::new(
-                namespace_id.clone(),
-                ManifestNo(manifest_no),
-                GrepIndexStatus::Active {
-                    captured_seq: ChangeSeq(0),
-                    built_through_seq: ChangeSeq(0),
-                    next_event_index: 0,
-                },
-                GrepIndexState {
-                    next_run_no: RunNo(0),
-                    reorganize: None,
-                },
-                Vec::new(),
-            )
-            .expect("manifest")
-        };
-        let mut current = publish_grep_manifest(&store, None, &manifest(1), &deadline)
-            .await
-            .expect("publish");
-        let service = GrepService::new(
-            Arc::new(GrepBlockCache::new(
-                loonfs::engine::DecodedBlockCacheConfig::new(
-                    crate::DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
-                ),
-            )),
-            Arc::new(StdMonotonicTimer::default()),
-        );
-        let snapshot = || async {
-            service
-                .load_index_snapshot(&store, &namespace_id)
-                .await
-                .expect("snapshot")
-                .state
-                .manifest_no()
-        };
-        assert_eq!(snapshot().await, ManifestNo(1));
-        for manifest_no in 2..=3 {
-            current =
-                publish_grep_manifest(&store, Some(&current), &manifest(manifest_no), &deadline)
-                    .await
-                    .expect("publish");
-        }
-        store
-            .delete(&manifest_key(&namespace_id, &ManifestNo(2)))
-            .await
-            .expect("collect");
-        assert_eq!(snapshot().await, ManifestNo(1));
-        let clock = Arc::new(ManualClock::new(0));
-        service
-            .current_manifests
-            .lock()
-            .expect("lock")
-            .entries
-            .get_mut(&namespace_id)
-            .expect("cached manifest")
-            .1 = Observation::now(clock.clone());
-        clock.advance_ms(READ_REVALIDATION_BOUND_MS);
-        assert_eq!(snapshot().await, ManifestNo(3));
     }
 }

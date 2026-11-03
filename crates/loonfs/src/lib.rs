@@ -127,13 +127,11 @@ pub mod engine {
         DecodedBlockKey, DecodedSegmentBlock, Recency, SegmentBlockKind, SegmentCacheKey,
     };
     pub use loonfs_core::limits::{
-        METADATA_PUBLICATION_BUDGET_MS, READ_REVALIDATION_BOUND_MS,
-        UNREFERENCED_SEGMENT_GRACE_WINDOW_MS,
+        READ_REVALIDATION_BOUND_MS, UNREFERENCED_SEGMENT_GRACE_WINDOW_MS,
     };
-    pub use loonfs_core::time::{Observation, OperationClock};
     pub use loonfs_core::{
-        grace_age, next_run_no_after, refill_iterators, select_next_iterator, GraceAge,
-        SegmentBlockLoader, SegmentRowIterator,
+        next_run_no_after, refill_iterators, select_next_iterator, ExtensionBasis,
+        ExtensionPublication, SegmentBlockLoader, SegmentRowIterator,
     };
 }
 

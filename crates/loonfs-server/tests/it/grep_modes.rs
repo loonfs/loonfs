@@ -5,7 +5,7 @@ use axum::body::{to_bytes, Body};
 use axum::http::{Method, Request, StatusCode};
 use axum::Router;
 use loonfs::{LoonFs, Writable};
-use loonfs_grep::manifest::{load_current_grep_manifest, GrepIndexStatus};
+use loonfs_grep::entry::{GrepEntry, GrepIndexStatus};
 use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome, GrepWorker};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
@@ -314,30 +314,21 @@ async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
     assert_eq!(caught_up.built_through_seq, caught_up.head_seq);
 
     // Disabling is one durable compare-and-swap; the sweep reads it.
+    let indexed = entry_of(&store, &namespace_id).await;
+    assert!(!indexed.runs().is_empty());
     let disabled_response = disable_grep(&router, &namespace_id).await;
     assert_eq!(
         disabled_response.status,
         loonfs_types::GrepIndexStatus::Disabled
     );
     assert!(!disabled_response.reorganize_pending);
-    let disabled = load_current_grep_manifest(&*store, &namespace_id, observation())
-        .await
-        .expect("load disabled manifest")
-        .expect("disabled manifest");
-    assert_matches!(
-        disabled.manifest_state().status(),
-        GrepIndexStatus::Disabled {}
-    );
+    let disabled = entry_of(&store, &namespace_id).await;
+    assert_matches!(disabled.status(), GrepIndexStatus::Disabled {});
     sweep(&server).await;
     assert_matches!(
-        load_current_grep_manifest(&*store, &namespace_id, observation())
-            .await
-            .expect("reload disabled manifest")
-            .expect("disabled manifest")
-            .manifest_state()
-            .status(),
+        entry_of(&store, &namespace_id).await.status(),
         GrepIndexStatus::Disabled {},
-        "no step may resurrect a manifest the operator disabled"
+        "no step may resurrect an index the operator disabled"
     );
 
     let response = send(
@@ -353,14 +344,16 @@ async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
         panic!("expected garbage collection, got {gc:?}");
     };
     assert_eq!(collected.namespace_id, namespace_id);
-    let grep_counts = collected
-        .extensions
-        .grep
-        .expect("a deployment that maintains the index collects it in a `gc` run");
-    assert_eq!(grep_counts.deleted_segments, 0);
-    assert_eq!(grep_counts.deleted_other_objects, 0);
-    assert!(!grep_counts.namespace_reaped);
-    assert!(grep_counts.retained_candidates > 0);
+    // The disabled index's segments are younger than the segment minimum
+    // age, so the run keeps them.
+    assert_eq!(collected.deleted.extension_segments, 0);
+    for segment in indexed.segments() {
+        let key = loonfs_objectstore::keys::extension_segment_object_key(
+            &loonfs_grep::entry::grep_extension_name(),
+            segment,
+        );
+        assert!(store.head(&key).await.expect("head").is_some(), "{key}");
+    }
 
     assert_eq!(enable_grep(&router, &namespace_id).await, StatusCode::OK);
     sweep(&server).await;
@@ -443,14 +436,8 @@ async fn one_sweep_after_restart_resumes_stale_and_mid_backfill_namespaces() {
         )
         .await
         .expect("leave mid-backfill manifest");
-    let manifest = load_current_grep_manifest(&*store, &backfill, observation())
-        .await
-        .expect("load manifest")
-        .expect("backfill manifest");
-    assert_matches!(
-        manifest.manifest_state().status(),
-        GrepIndexStatus::Backfilling { .. }
-    );
+    let manifest = entry_of(&store, &backfill).await;
+    assert_matches!(manifest.status(), GrepIndexStatus::Backfilling { .. });
     writer.shutdown().await.expect("shutdown writer");
     drop(writer);
     drop(worker);
@@ -687,16 +674,10 @@ async fn maintain_only_keeps_the_index_built_without_serving_searches() {
     assert_eq!(enable_grep(&router, &namespace_id).await, StatusCode::OK);
     sweep(&server).await;
     assert_eq!(watermark(&store, &namespace_id).await, ChangeSeq(1));
-    let manifest = load_current_grep_manifest(&*store, &namespace_id, observation())
-        .await
-        .expect("load manifest")
-        .expect("maintained manifest");
-    assert_matches!(
-        manifest.manifest_state().status(),
-        GrepIndexStatus::Active { .. }
-    );
+    let manifest = entry_of(&store, &namespace_id).await;
+    assert_matches!(manifest.status(), GrepIndexStatus::Active { .. });
     assert!(
-        !manifest.manifest_state().segments().is_empty(),
+        !manifest.runs().is_empty(),
         "the index this deployment maintains holds real segments"
     );
     server
@@ -840,13 +821,17 @@ async fn watermark(store: &SharedObjectStore, namespace_id: &NamespaceId) -> Cha
 
 /// This namespace's durable grep lifecycle, read where an operator reads it.
 async fn lifecycle_of(store: &SharedObjectStore, namespace_id: &NamespaceId) -> GrepIndexStatus {
-    load_current_grep_manifest(&**store, namespace_id, observation())
+    entry_of(store, namespace_id).await.status().clone()
+}
+
+/// This namespace's grep entry in its current manifest.
+async fn entry_of(store: &SharedObjectStore, namespace_id: &NamespaceId) -> GrepEntry {
+    grep_worker(store, "entry-reader")
         .await
-        .expect("load grep manifest")
-        .expect("an enabled namespace has a grep manifest")
-        .manifest_state()
-        .status()
-        .clone()
+        .entry(namespace_id)
+        .await
+        .expect("load the grep entry")
+        .expect("an enabled namespace has a grep entry")
 }
 
 /// This deployment's capability document, checked for well-formedness on
@@ -1011,10 +996,12 @@ async fn grep_worker(store: &SharedObjectStore, actor: &str) -> GrepWorker<Share
         .build()
         .await
         .expect("build writer");
+    let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id(actor));
     GrepWorker::new(
         store.clone(),
         reader,
         writer,
+        maintenance,
         loonfs_grep::GrepPassBudget::default(),
     )
 }
@@ -1065,8 +1052,4 @@ fn grep_limits() -> [&'static str; 2] {
         LIMIT_QUERY_GREP_SCAN_BUDGET_FILES,
         LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
     ]
-}
-
-fn observation() -> loonfs::engine::Observation {
-    loonfs::engine::Observation::now(Arc::new(loonfs_types::StdMonotonicTimer::default()))
 }

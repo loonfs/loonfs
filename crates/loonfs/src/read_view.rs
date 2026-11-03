@@ -16,8 +16,11 @@ use crate::{
     RevisionNo, SharedObjectStore, StatOptions,
 };
 use loonfs_core::RuntimeReadContext;
+use loonfs_types::format::manifest::ExtensionEntry;
 use loonfs_types::options::CommitSplitting;
-use loonfs_types::{AbsolutePath, ChangeFeedPosition, EffectiveLimit, ListPageCursor, PageRequest};
+use loonfs_types::{
+    AbsolutePath, ChangeFeedPosition, EffectiveLimit, ExtensionName, ListPageCursor, PageRequest,
+};
 use std::sync::Arc;
 
 /// A captured namespace state that related reads share.
@@ -235,6 +238,26 @@ impl ReadView {
             view.read(view.pinned.retained_revisions_page(request))
                 .await
         })
+    }
+
+    /// Returns the entry of extension `name` in the manifest this view reads
+    /// above, or `None` when that manifest has none.
+    ///
+    /// An extension's state is as current as the view's manifest, so the
+    /// view's head can be ahead of the commits that the entry describes.
+    pub async fn find_extension_entry(
+        &self,
+        name: &ExtensionName,
+    ) -> Result<Option<ExtensionEntry>> {
+        let _permit = self.core.read_permit().await;
+        self.read(async {
+            Ok(self
+                .pinned
+                .engine
+                .find_extension_entry(&self.pinned.context, name)
+                .await?)
+        })
+        .await
     }
 
     pub(crate) async fn changes_page(

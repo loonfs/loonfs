@@ -5,30 +5,26 @@
 use super::index_rows::IndexRows;
 use super::reorganize::INDEX_GRAMS_DELTA_LEVEL;
 use super::{
-    next_index_run_no, next_manifest_no, rebootstrap_required, GramIndexBuildPolicy,
-    GrepBuildOutcome, GrepWorker, GREP_WORKER_REQUESTS_IN_FLIGHT,
+    rebootstrap_required, GramIndexBuildPolicy, GrepBuildOutcome, GrepSteps,
+    GREP_WORKER_REQUESTS_IN_FLIGHT,
 };
 use crate::cache::GrepBlockCache;
 use crate::codec::{
     extract_grams, is_indexable_text_content, ContentValue, Gram, IndexRow,
     MAX_INDEX_GRAMS_FILE_BYTES,
 };
-use crate::manifest::{
-    publish_grep_manifest, ChangeFeedResume, GrepIndexState, GrepIndexStatus, GrepManifestState,
-    GrepSegmentRef, LoadedGrepManifest,
-};
+use crate::entry::{ChangeFeedResume, GrepEntry, GrepIndexStatus};
 use crate::reads::{page_limit, published_revision, NamespaceReads};
 use crate::segments::GrepSegments;
 use crate::value_table::ValueTable;
 use crate::{GrepError, Result};
 use futures::{stream, StreamExt, TryFutureExt, TryStreamExt};
-use loonfs::engine::{DecodedBlockCacheConfig, OperationClock};
+use loonfs::engine::DecodedBlockCacheConfig;
 use loonfs::{CheckpointFilesPageCursor, CoreError};
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::manifest::{ExtensionRunRef, ExtensionSegmentRef};
 use loonfs_types::format::segment_blocks::DEFAULT_TARGET_BLOCK_BYTES;
-use loonfs_types::{
-    ChangeSeq, ContentRef, InodeId, NamespaceId, PinId, RevisionNo, MAX_PAGE_LIMIT,
-};
+use loonfs_types::{ChangeSeq, ContentRef, InodeId, PinId, RevisionNo, MAX_PAGE_LIMIT};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Decoded bytes of the block cache that one build step reads index segments
@@ -38,19 +34,17 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(super) const GREP_STEP_BLOCK_CACHE_DECODED_BYTES: usize =
     256 * DEFAULT_TARGET_BLOCK_BYTES.get();
 
-impl<S: ObjectStore + Clone> GrepWorker<S> {
-    /// Runs one bounded checkpoint-backfill or incremental build unit.
+impl<S: ObjectStore + Clone> GrepSteps<'_, S> {
+    /// Runs one bounded checkpoint-backfill or incremental build unit, from
+    /// the entry that the run's earlier steps left pending.
     ///
     /// The step first reads the checkpoint listing or the change feed to
     /// learn what content it needs. Only then does it wait for a step permit,
-    /// which it keeps while it reads that content and until it publishes. A
+    /// which it keeps while it reads that content and writes its run. A
     /// step that finds the index up to date, or that restarts the backfill,
-    /// takes no permit.
-    pub async fn build_step(
-        &self,
-        namespace_id: &NamespaceId,
-        policy: GramIndexBuildPolicy,
-    ) -> Result<GrepBuildOutcome> {
+    /// takes no permit. The step ends by publishing the run's pending change
+    /// when it's due.
+    pub async fn build_step(&mut self, policy: GramIndexBuildPolicy) -> Result<GrepBuildOutcome> {
         if policy.max_files_per_step.get() > MAX_PAGE_LIMIT as usize {
             return Err(loonfs::Error::InvalidRequest {
                 message: format!("max_files_per_step must be at most {MAX_PAGE_LIMIT}"),
@@ -58,100 +52,102 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             }
             .into());
         }
-        let deadline = OperationClock::start(self.now_ms(), self.timer());
-        let Some(current) = self.load_enabled(namespace_id, &deadline).await? else {
+        let Some(entry) = self.pending().await?.enabled_entry().cloned() else {
             return Ok(GrepBuildOutcome::NotEnabled);
         };
-        let reads = self.reads(namespace_id);
-        reads.head().await?;
-        let planned = match current.manifest_state().status() {
+        let reads = self.worker.reads(&self.namespace_id);
+        let planned = match entry.status() {
             GrepIndexStatus::Backfilling {
                 captured_seq,
                 cursor_inode_id,
                 pin_id,
-            } => match plan_backfill_unit(&reads, pin_id, *captured_seq, *cursor_inode_id, policy)
-                .await
-            {
-                Ok(planned) => planned,
-                Err(error) if rebootstrap_required(&error) => {
-                    return self
-                        .restart_backfill(namespace_id, &current, &deadline)
-                        .await;
-                }
-                Err(error) => return Err(error),
-            },
+            } => plan_backfill_unit(&reads, pin_id, *captured_seq, *cursor_inode_id, policy).await,
             status @ GrepIndexStatus::Active { .. } => {
                 let resume = status
                     .active_watermark()
                     .expect("an active grep status should have a watermark");
                 match plan_incremental_unit(&reads, resume, policy).await {
-                    Ok(IncrementalWork::Unit(planned)) => planned,
+                    Ok(IncrementalWork::Unit(planned)) => Ok(planned),
                     Ok(IncrementalWork::UpToDate(resume)) => {
-                        return Ok(GrepBuildOutcome::UpToDate {
-                            built_through_seq: resume.built_through_seq(),
-                        });
-                    }
-                    Err(error) if rebootstrap_required(&error) => {
                         return self
-                            .restart_backfill(namespace_id, &current, &deadline)
+                            .finish_step(
+                                GrepBuildOutcome::UpToDate {
+                                    built_through_seq: resume.built_through_seq(),
+                                },
+                                GrepBuildOutcome::Superseded,
+                            )
                             .await;
                     }
-                    Err(error) => return Err(error),
+                    Err(error) => Err(error),
                 }
             }
             GrepIndexStatus::Disabled {} => return Ok(GrepBuildOutcome::NotEnabled),
         };
-        let _permit = self.step_budget.permit().await;
+        let planned = match planned {
+            Ok(planned) => planned,
+            Err(error) if rebootstrap_required(&error) => {
+                let Some(checkpoint) = self.start_backfill(Some(&entry)).await? else {
+                    return Ok(GrepBuildOutcome::Superseded);
+                };
+                return self
+                    .finish_step(
+                        GrepBuildOutcome::BackfillRestarted {
+                            captured_seq: checkpoint.captured_seq,
+                        },
+                        GrepBuildOutcome::Superseded,
+                    )
+                    .await;
+            }
+            Err(error) => return Err(error),
+        };
+        let _permit = self.worker.step_budget.permit().await;
         let block_cache = GrepBlockCache::new(DecodedBlockCacheConfig::new(
             GREP_STEP_BLOCK_CACHE_DECODED_BYTES,
         ));
         let index = GrepSegments {
-            store: &self.store,
-            namespace_id,
+            store: &self.worker.store,
+            namespace_id: &self.namespace_id,
             block_cache: Some(&block_cache),
         };
-        let unit = index_planned_unit(&reads, &index, current.manifest_state().segments(), planned)
-            .await?;
-        self.publish_build_unit(namespace_id, current, unit, policy, &deadline)
+        let examined: Vec<ExtensionSegmentRef> = entry.segments().cloned().collect();
+        let unit = index_planned_unit(&reads, &index, &examined, planned).await?;
+        let outcome = self.write_build_unit(&entry, unit, policy).await?;
+        self.finish_step(outcome, GrepBuildOutcome::Superseded)
             .await
     }
 
-    async fn publish_build_unit(
-        &self,
-        namespace_id: &NamespaceId,
-        current: LoadedGrepManifest,
+    /// Writes a build unit's run, if the unit has rows, and records the run
+    /// and the unit's progress in the pending entry.
+    async fn write_build_unit(
+        &mut self,
+        entry: &GrepEntry,
         unit: CollectedIndexUnit,
         policy: GramIndexBuildPolicy,
-        deadline: &OperationClock,
     ) -> Result<GrepBuildOutcome> {
         let CollectedIndexUnit {
             rows,
             stats,
             progress,
         } = unit;
-        let current_run_no = current.manifest_state().index().next_run_no;
-        let next_run_no = if rows.is_empty() {
-            current_run_no
-        } else {
-            next_index_run_no(current_run_no)?
-        };
-        let manifest_no = next_manifest_no(Some(&current))?;
-        let segments = GrepSegments {
-            store: &self.store,
-            namespace_id,
-            block_cache: None,
-        };
-        let new_segments = segments
-            .write_run(
-                current_run_no,
-                INDEX_GRAMS_DELTA_LEVEL,
-                rows,
-                policy.max_rows_per_segment,
-            )
-            .await?;
-        let segments_written = new_segments.len() as u64;
-        let mut manifest_segments = current.manifest_state().segments().to_vec();
-        manifest_segments.extend(new_segments);
+        let mut runs = entry.runs().to_vec();
+        let mut segments_written = 0;
+        if !rows.is_empty() {
+            let run_no = self.pending().await?.allocate_run_no()?;
+            let segments = GrepSegments {
+                store: &self.worker.store,
+                namespace_id: &self.namespace_id,
+                block_cache: None,
+            };
+            let new_segments = segments
+                .write_run(rows, policy.max_rows_per_segment)
+                .await?;
+            segments_written = new_segments.len() as u64;
+            runs.push(ExtensionRunRef {
+                run_no,
+                level: INDEX_GRAMS_DELTA_LEVEL,
+                segments: new_segments,
+            });
+        }
         // A completed backfill is current through the sequence captured by
         // its checkpoint. The change feed resumes after that sequence.
         let (status, completed_pin_id, built_through_seq) = match progress {
@@ -184,8 +180,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 next_event_index,
             } => (
                 GrepIndexStatus::Active {
-                    captured_seq: current
-                        .manifest_state()
+                    captured_seq: entry
                         .status()
                         .active_captured_seq()
                         .expect("an incremental unit should continue an active grep status"),
@@ -196,32 +191,20 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 built_through_seq,
             ),
         };
-        let next = GrepManifestState::new(
-            namespace_id.clone(),
-            manifest_no,
-            status,
-            GrepIndexState {
-                reorganize: current.manifest_state().index().reorganize.clone(),
-                next_run_no,
-            },
-            manifest_segments,
-        )
-        .expect("a successor of a grep manifest that decoding validated should be valid");
-        match publish_grep_manifest(&self.store, Some(&current), &next, deadline).await {
-            Ok(_) => {
-                if let Some(pin_id) = completed_pin_id {
-                    self.delete_pin_if_present(namespace_id, &pin_id).await;
-                }
-                Ok(GrepBuildOutcome::Published {
-                    built_through_seq,
-                    indexed_revisions: stats.indexed_revisions,
-                    skipped_revisions: stats.skipped_revisions,
-                    segments_written,
-                })
-            }
-            Err(GrepError::PublicationConflict { .. }) => Ok(GrepBuildOutcome::Superseded),
-            Err(error) => Err(error),
+        let pending = self.pending().await?;
+        if let Some(pin_id) = completed_pin_id {
+            pending.record_released_pin(pin_id);
         }
+        pending.set_entry(
+            GrepEntry::new(status, entry.reorganize().cloned(), runs)
+                .expect("a build step's entry should keep a valid entry valid"),
+        );
+        Ok(GrepBuildOutcome::Indexed {
+            built_through_seq,
+            indexed_revisions: stats.indexed_revisions,
+            skipped_revisions: stats.skipped_revisions,
+            segments_written,
+        })
     }
 }
 
@@ -340,7 +323,7 @@ async fn plan_backfill_unit(
         if page.captured_seq != captured_seq {
             return Err(GrepError::IndexCorrupt {
                 message: format!(
-                    "checkpoint `{pin_id}` pins sequence `{}` but the grep manifest is \
+                    "checkpoint `{pin_id}` pins sequence `{}` but the grep entry is \
                  backfilling sequence `{captured_seq}`",
                     page.captured_seq
                 ),
@@ -369,8 +352,8 @@ async fn plan_backfill_unit(
             break;
         }
         if page_exhausted_family {
-            // Every file the checkpoint pins is indexed; the next published
-            // manifest leaves backfill for the change feed.
+            // Every file the checkpoint pins is indexed, so the entry leaves
+            // backfill for the change feed.
             next_cursor = None;
             break;
         }
@@ -479,7 +462,7 @@ struct PendingRevisionContent {
 async fn index_planned_unit<S: ObjectStore + ?Sized>(
     reads: &NamespaceReads,
     index: &GrepSegments<'_, S>,
-    segments: &[GrepSegmentRef],
+    segments: &[ExtensionSegmentRef],
     planned: PlannedIndexUnit,
 ) -> Result<CollectedIndexUnit> {
     let PlannedIndexUnit { pending, progress } = planned;

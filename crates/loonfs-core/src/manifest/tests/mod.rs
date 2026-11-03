@@ -10,6 +10,7 @@ mod cas_recovery;
 mod directory_bindings;
 mod expired_deletion_rows;
 mod expired_subtrees;
+pub(crate) mod extensions;
 mod family_roots;
 mod fold_races;
 mod index_parity;
@@ -956,6 +957,7 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
         retention_floor_seq: source.retention_floor_seq,
         acknowledged_floor_seq: head.basis_floor_seq,
         runs,
+        extensions: Default::default(),
     })
     .map(|encoded| encoded.into_envelope())
     .expect("a test namespace manifest should encode"))
@@ -1082,6 +1084,7 @@ pub(super) async fn publish_manifest_with_segments<S: ObjectStore + ?Sized>(
             tier: RunTier::Base,
             segments,
         }],
+        extensions: Default::default(),
     })
     .expect("manifest envelope")
     .into_envelope();

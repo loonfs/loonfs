@@ -144,12 +144,13 @@ pub(super) fn checkpoint_owner_label(owner: &CheckpointOwner) -> String {
     }
 }
 
-fn gc_deleted_counts(report: &GcResponse) -> [(&'static str, u64); 9] {
+fn gc_deleted_counts(report: &GcResponse) -> [(&'static str, u64); 10] {
     let deleted = &report.deleted;
     let checkpoints = &report.deleted_checkpoints_by_owner;
     [
         ("wal objects", deleted.wal_objects),
         ("metadata segments", deleted.metadata_segments),
+        ("extension segments", deleted.extension_segments),
         ("manifests", deleted.manifests),
         ("fork checkpoints", checkpoints.fork),
         ("snapshots", checkpoints.user),
@@ -177,15 +178,6 @@ pub(super) fn gc_summary(report: &GcResponse) -> String {
         report.retained.total()
     );
     push_top_retention_reason(&mut summary, report);
-    if let Some(grep) = report.extensions.grep {
-        summary.push_str(&format!(
-            "\ngrep index gc deleted {} segments, {} other objects ({} retained)",
-            grep.deleted_segments, grep.deleted_other_objects, grep.retained_candidates
-        ));
-        if grep.namespace_reaped {
-            summary.push_str("; the namespace's grep state was reaped");
-        }
-    }
     if let Some(deadline) = report.reclaimable_at_ms {
         summary.push_str(&format!(
             "\nnamespace can be reclaimed at or after {} after pin cleanup; only fork pins can hold it beyond this deadline",

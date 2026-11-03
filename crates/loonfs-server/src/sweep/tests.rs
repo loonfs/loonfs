@@ -6,7 +6,7 @@ use crate::config::{GrepConfig, JobMode, ServerConfig};
 use futures::TryStreamExt as _;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue, MetricsRecorder};
 use loonfs::{LoonFs, Maintenance, Namespace, NamespaceId, SharedObjectStore, Writable};
-use loonfs_grep::manifest::GrepIndexStatus;
+use loonfs_grep::entry::{grep_extension_name, GrepIndexStatus};
 use loonfs_grep::{GrepWorker, GrepWorkerConfig};
 use loonfs_http::{HeldNamespace, Namespaces, WriterSessions};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -89,6 +89,7 @@ impl SweepServer {
                 runtime.object_store(),
                 runtime.read_only(),
                 runtime.clone(),
+                maintenance.clone(),
                 loonfs_grep::GrepPassBudget::default(),
             )
         });
@@ -421,7 +422,8 @@ async fn grep_gc_runs_in_a_sweep() {
         GrepIndexStatus::Active { .. }
     );
     worker.disable(&namespace_id).await.expect("disable grep");
-    let segments_prefix = loonfs_grep::keyspace::segments_prefix(&namespace_id);
+    let segments_prefix =
+        loonfs_objectstore::keys::extension_segment_prefix(&namespace_id, &grep_extension_name());
     assert!(!keys_under(store.as_ref(), &segments_prefix)
         .await
         .is_empty());
@@ -994,9 +996,9 @@ enum Grep {
 /// garbage, then one that does, and how many of the latter are lists. The
 /// docs quote these numbers.
 const IDLE_VISIT_REQUESTS: [(Grep, usize, usize, usize); 3] = [
-    (Grep::NotMaintained, 14, 30, 10),
-    (Grep::Maintained, 15, 40, 12),
-    (Grep::Enabled, 29, 58, 12),
+    (Grep::NotMaintained, 14, 31, 11),
+    (Grep::Maintained, 18, 35, 11),
+    (Grep::Enabled, 19, 37, 11),
 ];
 
 #[tokio::test]
@@ -1042,6 +1044,21 @@ async fn an_idle_pass_costs_one_listing_per_page_and_a_fixed_number_of_requests_
         // below find nothing to collect and nothing inside its grace.
         sweep
             .run_pass(GarbageCollection::Collect)
+            .await
+            .expect("list namespaces");
+        // The first pass publishes each index's build, and a runtime raises a
+        // namespace's hint at most once a second, so the passes below start
+        // from hints at the current manifests, as the seed's do.
+        for namespace_id in &names {
+            loonfs_core::test_support::namespace_store(base.as_ref(), namespace_id)
+                .raise_hint_to_current_manifest()
+                .await;
+        }
+        // An index's publication drops the runtime's cached head, so this
+        // pass loads each head again, and the passes below find it cached,
+        // as an idle namespace's visits do.
+        sweep
+            .run_pass(GarbageCollection::Skip)
             .await
             .expect("list namespaces");
 
@@ -1125,9 +1142,8 @@ async fn a_stray_child_of_the_namespace_prefix_is_not_a_failed_visit() {
         .filter(|operation| operation.key().starts_with("namespaces/stray/"))
         .collect();
     // The metadata call, the grep build, the acknowledgment of the floor, the
-    // retention advance, and collection each read the hint once. Grep
-    // collection reads the hint and lists its own prefix.
-    assert_eq!(stray.len(), 7, "{stray:?}");
+    // retention advance, and collection each read the hint once.
+    assert_eq!(stray.len(), 5, "{stray:?}");
     for call in [
         "metadata",
         "grep_index",

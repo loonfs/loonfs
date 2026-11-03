@@ -93,19 +93,13 @@ async fn grams_built_through_seq(
     store: &SharedObjectStore,
     namespace_id: &NamespaceId,
 ) -> ChangeSeq {
-    loonfs_grep::manifest::load_current_grep_manifest(
-        &**store,
-        namespace_id,
-        crate::common::observation(),
-    )
-    .await
-    .expect("load grep manifest")
-    .expect("grep manifest exists")
-    .manifest_state()
-    .status()
-    .active_watermark()
-    .expect("an active grep manifest has a watermark")
-    .built_through_seq()
+    crate::common::control::grep_entry(store, namespace_id)
+        .await
+        .expect("grep entry exists")
+        .status()
+        .active_watermark()
+        .expect("an active grep manifest has a watermark")
+        .built_through_seq()
 }
 
 #[tokio::test]
@@ -395,7 +389,7 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
         .expect("first bounded build");
     assert_matches!(
         first,
-        GrepBuildOutcome::Published {
+        GrepBuildOutcome::Indexed {
             indexed_revisions,
             ..
         } if indexed_revisions == FILES_PER_STEP as u64
@@ -409,16 +403,10 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
          {max_content_bytes_per_step}-byte budget"
     );
 
-    let partial = loonfs_grep::manifest::load_current_grep_manifest(
-        &*store,
-        &namespace_id,
-        crate::common::observation(),
-    )
-    .await
-    .expect("load partial grep manifest")
-    .expect("partial grep manifest");
+    let partial = crate::common::control::grep_entry(&store, &namespace_id)
+        .await
+        .expect("partial grep manifest");
     let partial_resume = partial
-        .manifest_state()
         .status()
         .active_watermark()
         .expect("the partial manifest is active");
@@ -428,9 +416,7 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
         "the first step must stop within the atomic commit"
     );
     let prefix_segment_ids: BTreeSet<_> = partial
-        .manifest_state()
         .segments()
-        .iter()
         .map(|segment| segment.segment_id.clone())
         .collect();
 
@@ -468,7 +454,7 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
         .expect("resumed bounded build");
     assert_matches!(
         second,
-        GrepBuildOutcome::Published {
+        GrepBuildOutcome::Indexed {
             indexed_revisions,
             ..
         } if indexed_revisions == FILES_PER_STEP as u64
@@ -489,25 +475,17 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
     );
     assert_eq!(first_keys.len() + second_keys.len(), FILES);
 
-    let complete = loonfs_grep::manifest::load_current_grep_manifest(
-        &*store,
-        &namespace_id,
-        crate::common::observation(),
-    )
-    .await
-    .expect("load complete grep manifest")
-    .expect("complete grep manifest");
+    let complete = crate::common::control::grep_entry(&store, &namespace_id)
+        .await
+        .expect("complete grep manifest");
     let complete_resume = complete
-        .manifest_state()
         .status()
         .active_watermark()
         .expect("the complete manifest is active");
     assert_eq!(complete_resume.built_through_seq(), commit.committed_seq);
     assert_eq!(complete_resume.next_event_index(), 0);
     let complete_segment_ids: BTreeSet<_> = complete
-        .manifest_state()
         .segments()
-        .iter()
         .map(|segment| segment.segment_id.clone())
         .collect();
     assert!(
@@ -620,20 +598,10 @@ async fn grep_answers_identically_across_tiered_reorganizations() {
     }
 
     // The premise of the test: the rounds really did tier the layout.
-    let manifest = loonfs_grep::manifest::load_current_grep_manifest(
-        &*store,
-        &namespace_id,
-        crate::common::observation(),
-    )
-    .await
-    .expect("load grep manifest")
-    .expect("grep manifest exists");
-    let grams_levels: Vec<u32> = manifest
-        .manifest_state()
-        .segments()
-        .iter()
-        .map(|segment| segment.level)
-        .collect();
+    let manifest = crate::common::control::grep_entry(&store, &namespace_id)
+        .await
+        .expect("grep entry exists");
+    let grams_levels: Vec<u32> = manifest.runs().iter().map(|run| run.level).collect();
     assert!(
         grams_levels.contains(&1),
         "ten one-delta rounds must reorganize at least once into a mid run, got levels {grams_levels:?}"
@@ -1025,7 +993,7 @@ async fn reorganization_does_not_warm_the_query_cache() {
         .expect("partial reorganization");
     assert_matches!(
         reorganization,
-        GrepReorganizeOutcome::UnitPublished {
+        GrepReorganizeOutcome::UnitWritten {
             completed: false,
             ..
         }
@@ -1099,7 +1067,7 @@ async fn a_cold_reorganization_fans_out_its_segment_opens_within_the_io_cap() {
                 .build_step(&namespace_id, policy)
                 .await
                 .expect("grep build step"),
-            GrepBuildOutcome::Published { .. }
+            GrepBuildOutcome::Indexed { .. }
         );
     }
 
@@ -1117,7 +1085,7 @@ async fn a_cold_reorganization_fans_out_its_segment_opens_within_the_io_cap() {
             .reorganize_step(&namespace_id, policy)
             .await
             .expect("grep reorganization step"),
-        GrepReorganizeOutcome::UnitPublished {
+        GrepReorganizeOutcome::UnitWritten {
             completed: true,
             ..
         }
@@ -1134,20 +1102,10 @@ async fn a_cold_reorganization_fans_out_its_segment_opens_within_the_io_cap() {
     );
 
     // Confirm that the observed reads produced a mid-level run.
-    let manifest = loonfs_grep::manifest::load_current_grep_manifest(
-        &*store,
-        &namespace_id,
-        crate::common::observation(),
-    )
-    .await
-    .expect("load grep manifest")
-    .expect("grep manifest exists");
-    let grams: Vec<u32> = manifest
-        .manifest_state()
-        .segments()
-        .iter()
-        .map(|segment| segment.level)
-        .collect();
+    let manifest = crate::common::control::grep_entry(&store, &namespace_id)
+        .await
+        .expect("grep entry exists");
+    let grams: Vec<u32> = manifest.runs().iter().map(|run| run.level).collect();
     assert!(
         grams.contains(&1),
         "the observed reorganization must have left a mid run behind, got {grams:?}"

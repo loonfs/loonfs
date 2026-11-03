@@ -16,7 +16,7 @@ pub enum GrepError {
     // Both messages name the capability key clients gate on (`query.grep`),
     // the same one capability discovery advertises and the `feature` field
     // of a `not_supported` response includes.
-    /// The namespace has no active grep manifest.
+    /// The namespace's manifest has no enabled grep entry.
     #[error("feature `query.grep` is not enabled on this namespace")]
     NotEnabled,
     /// The namespace's grep backfill has not completed.
@@ -57,18 +57,11 @@ pub enum GrepError {
     /// Grep's rebuildable derived state failed validation.
     #[error("grep index is corrupt: {message}; disable and re-enable grep to rebuild it")]
     IndexCorrupt {
-        /// Hint, manifest, or segment validation failure.
+        /// Entry or segment validation failure.
         message: String,
     },
-    /// A grep manifest publication lost to another publisher.
-    #[error("grep manifest publication conflict for `{object_key}`; retry")]
-    PublicationConflict {
-        /// Object key whose manifest publication raced.
-        object_key: String,
-    },
     /// A genuine runtime failure encountered while grep read or wrote
-    /// through the filesystem handles, or a core collector failure in a
-    /// `gc` job that also runs grep's collector.
+    /// through the filesystem handles, or published its entry.
     #[error(transparent)]
     Runtime(#[from] loonfs::Error),
 }
@@ -132,7 +125,6 @@ impl GrepError {
             Self::IndexLagging { .. } => ErrorCode::IndexLagging,
             Self::StoreUnavailable { kind, .. } => loonfs::classify_store_failure(*kind),
             Self::IndexCorrupt { .. } => ErrorCode::IndexCorrupt,
-            Self::PublicationConflict { .. } => ErrorCode::StaleHead,
             Self::Runtime(error) => error.code(),
         }
     }
@@ -142,9 +134,6 @@ impl GrepError {
         match self {
             Self::StoreUnavailable { kind, .. } => kind.public_message(),
             Self::Runtime(error) => error.public_message(),
-            Self::PublicationConflict { .. } => {
-                std::borrow::Cow::Borrowed("grep index publication conflict; retry")
-            }
             _ => std::borrow::Cow::Owned(self.to_string()),
         }
     }
@@ -168,7 +157,7 @@ mod tests {
             (ObjectStoreErrorKind::Other, ErrorCode::ServerError),
         ] {
             let error = GrepError::StoreUnavailable {
-                object_key: "namespaces/demo/extensions/grep/hint.json".to_owned(),
+                object_key: "namespaces/demo/extensions/grep/segments/idx_00000000000000000000000001.sst.zst".to_owned(),
                 message: "provider failure".to_owned(),
                 kind,
             };

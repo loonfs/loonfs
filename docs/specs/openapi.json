@@ -1174,6 +1174,12 @@
             "minimum": 0,
             "type": "integer"
           },
+          "extension_segments": {
+            "description": "The unreferenced extension segments, such as the grep index's segments, that the pass\ndeleted.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
           "manifests": {
             "description": "The unreferenced manifests that the pass deleted.",
             "format": "int64",
@@ -1214,6 +1220,7 @@
         "required": [
           "wal_objects",
           "metadata_segments",
+          "extension_segments",
           "manifests",
           "upload_sessions",
           "content_objects",
@@ -1606,16 +1613,6 @@
         "required": [
           "ttl_ms"
         ],
-        "type": "object"
-      },
-      "ExtensionGcReports": {
-        "description": "The reports from the extension collectors that one `gc` run ran, with one optional field for\neach extension.\n\nEach extension reports its collector under its own name here. A deployment that doesn't\nmaintain an extension's state leaves that extension's field out, and a client ignores a name\nit doesn't know.",
-        "properties": {
-          "grep": {
-            "$ref": "#/components/schemas/GrepGcReport",
-            "description": "The counts from the grep index's collector, present when the deployment maintains a grep\nindex."
-          }
-        },
         "type": "object"
       },
       "FileRevision": {
@@ -2802,47 +2799,6 @@
         ],
         "type": "object"
       },
-      "GrepGcReport": {
-        "description": "The counts from one pass of the grep index's collector over one namespace.",
-        "properties": {
-          "deleted_other_objects": {
-            "description": "The other unreferenced grep objects that the pass deleted after the grace window.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "deleted_segments": {
-            "description": "The unreferenced grep segments that the pass deleted because they were older than the\nminimum segment age.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "listed_bytes": {
-            "description": "The bytes of every grep object that the pass listed under the namespace, before the pass's\ndeletes.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "namespace_reaped": {
-            "description": "Whether the pass deleted the grep extension state of a namespace that is missing or\ndeleted.",
-            "type": "boolean"
-          },
-          "retained_candidates": {
-            "description": "The candidates that the pass kept because they were referenced, too young, or\nunrecognized.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          }
-        },
-        "required": [
-          "deleted_segments",
-          "deleted_other_objects",
-          "namespace_reaped",
-          "retained_candidates",
-          "listed_bytes"
-        ],
-        "type": "object"
-      },
       "GrepIndex": {
         "description": "The maintenance status of a namespace's grep index.",
         "discriminator": {
@@ -2882,10 +2838,6 @@
             "minimum": 0,
             "type": "integer"
           },
-          "next_run_no": {
-            "$ref": "#/components/schemas/RunNo",
-            "description": "The next run number that the index allocates."
-          },
           "reorganize_pending": {
             "description": "Whether a partitioned segment reorganization is in progress.",
             "type": "boolean"
@@ -2902,7 +2854,6 @@
           "next_event_index",
           "status",
           "namespace_id",
-          "next_run_no",
           "reorganize_pending"
         ],
         "type": "object"
@@ -2926,10 +2877,6 @@
             "$ref": "#/components/schemas/NamespaceId",
             "description": "The namespace that the status describes."
           },
-          "next_run_no": {
-            "$ref": "#/components/schemas/RunNo",
-            "description": "The next run number that the index allocates."
-          },
           "reorganize_pending": {
             "description": "Whether a partitioned segment reorganization is in progress.",
             "type": "boolean"
@@ -2946,7 +2893,6 @@
           "checkpoint_id",
           "status",
           "namespace_id",
-          "next_run_no",
           "reorganize_pending"
         ],
         "type": "object"
@@ -2957,10 +2903,6 @@
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
             "description": "The namespace that the status describes."
-          },
-          "next_run_no": {
-            "$ref": "#/components/schemas/RunNo",
-            "description": "The next run number that the index allocates."
           },
           "reorganize_pending": {
             "description": "Whether a partitioned segment reorganization is in progress.",
@@ -2976,7 +2918,6 @@
         "required": [
           "status",
           "namespace_id",
-          "next_run_no",
           "reorganize_pending"
         ],
         "type": "object"
@@ -4317,10 +4258,6 @@
             "$ref": "#/components/schemas/DeletedCheckpointsByOwner",
             "description": "The checkpoint records that the pass deleted, counted by owner."
           },
-          "extensions": {
-            "$ref": "#/components/schemas/ExtensionGcReports",
-            "description": "The reports from the extension collectors, each under its extension's name, left out when\nno extension collector ran.\n\nAfter the core collector, a `gc` run runs the collector of each extension whose state the\ndeployment maintains. For example, a deployment that advertises `maintenance.grep.index`\nreports the counts of the grep index's collector in `extensions.grep`."
-          },
           "kind": {
             "enum": [
               "gc"
@@ -4481,13 +4418,6 @@
           "kind"
         ],
         "type": "object"
-      },
-      "RunNo": {
-        "description": "The number of one run among the runs that a manifest lists. A run is the set of segments that one producer wrote together.",
-        "format": "int64",
-        "maximum": 9007199254740991,
-        "minimum": 0,
-        "type": "integer"
       },
       "SignUploadPartsRequest": {
         "additionalProperties": false,
@@ -5498,7 +5428,7 @@
     },
     "/v0/maintenance/namespaces/{namespace_id}/grep/index/disable": {
       "post": {
-        "description": "Disables the namespace's grep index by publishing a manifest with the next number and no segment references. Index maintenance stops when a step reads the disabled manifest, and an explicit grep garbage collection run reclaims the segments later. Repeating the request has the same result. A deployment that doesn't maintain the grep index returns `not_supported`.",
+        "description": "Disables the namespace's grep index by publishing a namespace manifest whose grep entry lists no segments. Index maintenance stops when a step reads the disabled entry, and garbage collection reclaims the segments later. Repeating the request has the same result. A deployment that doesn't maintain the grep index returns `not_supported`.",
         "operationId": "disable_grep_index",
         "parameters": [
           {
@@ -5560,7 +5490,7 @@
                 }
               }
             },
-            "description": "Another publisher changed the grep manifest first. Retry the request."
+            "description": "Another publication changed the namespace manifest first. Retry the request."
           },
           "500": {
             "content": {
@@ -5663,7 +5593,7 @@
                 }
               }
             },
-            "description": "Another publisher changed the grep manifest first. Retry the request."
+            "description": "Another publication changed the namespace manifest first. Retry the request."
           },
           "500": {
             "content": {
@@ -5704,7 +5634,7 @@
     },
     "/v0/maintenance/namespaces/{namespace_id}/runs": {
       "post": {
-        "description": "Runs one maintenance job for the namespace. The body's `kind` selects the job, which is one of `metadata`, `gc`, `retention`, `retention_window`, or `recover_administrator`. The response includes the same `kind` and the job's result. A deleted namespace accepts only `gc`. A `metadata` job folds the WAL tail and compacts metadata until nothing is due, or until it publishes 16 compaction units. A compaction unit can take minutes, so the call can too. When the result's `outcome` is `due`, another `metadata` run continues the work. A `gc` job reads the current manifest, lists the pins, and then sweeps every object family to the end. Each listing starts at the beginning, and the job doesn't keep a position to continue from. When the deployment maintains a grep index, the job then deletes aged, unreferenced grep index objects, and the result includes their counts in `extensions.grep`. A `retention` job advances the retention floor to the folded manifest head, or to the one target that `to_seq` or `cutoff_at_ms` sets. A `retention_window` job sets the namespace's retention window to `retention_window_ms`, or clears it when the body doesn't include that field.",
+        "description": "Runs one maintenance job for the namespace. The body's `kind` selects the job, which is one of `metadata`, `gc`, `retention`, `retention_window`, or `recover_administrator`. The response includes the same `kind` and the job's result. A deleted namespace accepts only `gc`. A `metadata` job folds the WAL tail and compacts metadata until nothing is due, or until it publishes 16 compaction units. A compaction unit can take minutes, so the call can too. When the result's `outcome` is `due`, another `metadata` run continues the work. A `gc` job reads the current manifest, lists the pins, and then sweeps every object family to the end, including the segments of extensions such as the grep index. Each listing starts at the beginning, and the job doesn't keep a position to continue from. A `retention` job advances the retention floor to the folded manifest head, or to the one target that `to_seq` or `cutoff_at_ms` sets. A `retention_window` job sets the namespace's retention window to `retention_window_ms`, or clears it when the body doesn't include that field.",
         "operationId": "run_maintenance",
         "parameters": [
           {

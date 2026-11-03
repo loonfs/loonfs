@@ -352,6 +352,7 @@ impl ResolvedTarget {
             runtime.object_store(),
             runtime.read_only(),
             runtime.clone(),
+            maintenance.clone(),
             GrepPassBudget::default(),
         );
         let host = MaintenanceHost {
@@ -359,11 +360,8 @@ impl ResolvedTarget {
             maintenance,
             grep_worker,
         };
-        let client = crate::backend::client(
-            &host,
-            GrepService::new(grep_block_cache, host.runtime.monotonic_timer()),
-            transient_retry,
-        )?;
+        let client =
+            crate::backend::client(&host, GrepService::new(grep_block_cache), transient_retry)?;
         Ok(Self {
             client,
             backend: Backend::Embedded {

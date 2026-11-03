@@ -225,13 +225,16 @@ async fn cancelled_index_work_and_a_lifecycle_change_during_a_build_stay_dirty()
     for cancel in [false, true] {
         let directory = tempdir().expect("tempdir");
         let namespace_id = namespace_id("index-during-visit");
+        // The gate holds the manifest that publishes the build's steps.
         let store = Arc::new(BlockingStore::new(
             RecordingStore::new(
                 LocalFsStore::new(directory.path()).expect("store"),
                 KeyPredicate::any(),
             ),
-            KeyPredicate::prefix(loonfs_grep::keyspace::grep_prefix(&namespace_id)),
-            OperationSelector::Any,
+            KeyPredicate::prefix(loonfs_objectstore::keys::metadata_manifest_prefix(
+                &namespace_id,
+            )),
+            OperationSelector::PutCreateIfAbsent,
         ));
         let config = sweep_config(Some(loonfs_grep::GrepWorkerConfig::default()));
         let server = SweepServer::start(store.clone(), &config, 0).await;
@@ -243,8 +246,12 @@ async fn cancelled_index_work_and_a_lifecycle_change_during_a_build_stay_dirty()
         server.enable_index(&namespace_id).await;
         store.block_next();
         let mut tick = Box::pin(server.sweep.tick());
-        assert!(futures::poll!(tick.as_mut()).is_pending());
-        store.wait_until_blocked().await;
+        // The tick reads the store before it publishes, so it runs until the
+        // gate holds its put.
+        tokio::select! {
+            () = tick.as_mut() => panic!("the tick finished without publishing"),
+            () = store.wait_until_blocked() => {}
+        }
         if cancel {
             drop(tick);
             store.release();

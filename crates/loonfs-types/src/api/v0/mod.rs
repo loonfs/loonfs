@@ -29,8 +29,8 @@ pub use downloads::{
 };
 pub use errors::{ActiveWriter, CommittedReceipt, ErrorDetails, ErrorResponse};
 pub use gc::{
-    DeletedCheckpointsByOwner, DeletedObjectCounts, ExtensionGcReports, GcRequest, GcResponse,
-    GrepGcReport, RetainedCandidates, RetainedReason,
+    DeletedCheckpointsByOwner, DeletedObjectCounts, GcRequest, GcResponse, RetainedCandidates,
+    RetainedReason,
 };
 pub use maintenance::{
     AdvanceRetentionRequest, AdvanceRetentionResponse, MetadataMaintenanceOutcome,

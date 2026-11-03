@@ -4,12 +4,11 @@
 
 use crate::cache::GrepBlockCache;
 use crate::codec::{lookup, ContentValue, IndexRow, ValueRow};
+use crate::entry::grep_extension_name;
 use crate::index_read::{
     index_segment_corrupt, load_data_block, load_data_block_span, load_filter_block,
     load_index_block,
 };
-use crate::keyspace::segment_key;
-use crate::manifest::GrepSegmentRef;
 use crate::service::GREP_READS_IN_FLIGHT;
 use crate::worker::GREP_WORKER_REQUESTS_IN_FLIGHT;
 use crate::{GrepError, Result};
@@ -19,14 +18,16 @@ use futures::stream::FuturesUnordered;
 use futures::{stream, FutureExt, StreamExt, TryFutureExt, TryStreamExt};
 use loonfs::engine::SegmentBlockLoader;
 use loonfs::MAX_PENDING_SEGMENT_BYTES;
+use loonfs_objectstore::keys::extension_segment_object_key;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::hex::hex_decode_bytes;
 use loonfs_types::format::manifest::lookup_keys::after_row_key;
+use loonfs_types::format::manifest::ExtensionSegmentRef;
 use loonfs_types::format::segment_blocks::{
     decode_filter_block, index_blocks_for_key_range, key_range_may_intersect, DecodedDataBlock,
     SegmentBlocksBuilder, SegmentIndexEntry, DEFAULT_TARGET_SEGMENT_BYTES,
 };
-use loonfs_types::{IndexSegmentId, NamespaceId, RunNo};
+use loonfs_types::{IndexSegmentId, NamespaceId};
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::num::NonZeroUsize;
@@ -54,7 +55,7 @@ struct TextLookup<'a> {
     row_key: String,
     /// The exclusive bound just after `row_key`.
     upper_bound: String,
-    descriptor: &'a GrepSegmentRef,
+    descriptor: &'a ExtensionSegmentRef,
 }
 
 /// The rows of one segment in a key range, and the key that a bounded read
@@ -67,8 +68,9 @@ pub(crate) struct RangeRows {
     pub(crate) read_through: Option<String>,
 }
 
-/// One namespace's grep segments in one store, read through `block_cache`
-/// when it is set.
+/// The grep segments that one namespace reads, which it or a fork source
+/// owns, and the segments that it writes under its own prefix, read through
+/// `block_cache` when it is set.
 pub(crate) struct GrepSegments<'a, S: ?Sized> {
     pub(crate) store: &'a S,
     pub(crate) namespace_id: &'a NamespaceId,
@@ -76,22 +78,21 @@ pub(crate) struct GrepSegments<'a, S: ?Sized> {
 }
 
 impl<S: ObjectStore + ?Sized> GrepSegments<'_, S> {
-    /// Returns the object key of the segment `segment_id`.
-    pub(crate) fn object_key(&self, segment_id: &IndexSegmentId) -> String {
-        segment_key(self.namespace_id, segment_id)
+    /// Returns the object key of `descriptor`'s segment, under its owner's
+    /// prefix.
+    pub(crate) fn object_key(&self, descriptor: &ExtensionSegmentRef) -> String {
+        extension_segment_object_key(&grep_extension_name(), descriptor)
     }
 
-    /// Writes `rows`, which are in key order, as one run of segments at
-    /// `level` through a [`RunWriter`], and returns the segments'
-    /// descriptors in key order.
+    /// Writes `rows`, which are in key order, as the segments of one run
+    /// through a [`RunWriter`], and returns the segments' descriptors in key
+    /// order.
     pub(crate) async fn write_run(
         &self,
-        run_no: RunNo,
-        level: u32,
         rows: Vec<IndexRow>,
         max_rows_per_segment: NonZeroUsize,
-    ) -> Result<Vec<GrepSegmentRef>> {
-        let mut writer = RunWriter::new(self, run_no, level, max_rows_per_segment);
+    ) -> Result<Vec<ExtensionSegmentRef>> {
+        let mut writer = RunWriter::new(self, max_rows_per_segment);
         for row in &rows {
             writer.push(row).await?;
         }
@@ -103,10 +104,10 @@ impl<S: ObjectStore + ?Sized> GrepSegments<'_, S> {
     /// from the segment's filter block.
     pub(crate) async fn filter_admits(
         &self,
-        descriptor: &GrepSegmentRef,
+        descriptor: &ExtensionSegmentRef,
         probe: &str,
     ) -> Result<bool> {
-        let object_key = self.object_key(&descriptor.segment_id);
+        let object_key = self.object_key(descriptor);
         match &descriptor.filter_inline {
             Some(inline) => {
                 let filter_bytes =
@@ -138,7 +139,7 @@ impl<S: ObjectStore + ?Sized> GrepSegments<'_, S> {
     /// returns them in key order.
     pub(crate) async fn rows_in_range(
         &self,
-        descriptor: &GrepSegmentRef,
+        descriptor: &ExtensionSegmentRef,
         probe: Option<&str>,
         lower_bound: &str,
         upper_bound: Option<&str>,
@@ -162,7 +163,7 @@ impl<S: ObjectStore + ?Sized> GrepSegments<'_, S> {
                 return Ok(range_rows);
             }
         }
-        let object_key = self.object_key(&descriptor.segment_id);
+        let object_key = self.object_key(descriptor);
         let entries =
             load_index_block(self.store, self.block_cache, &object_key, descriptor).await?;
         let mut range = index_blocks_for_key_range(&entries, lower_bound, upper_bound);
@@ -206,7 +207,7 @@ impl<S: ObjectStore + ?Sized> GrepSegments<'_, S> {
     /// corruption.
     pub(crate) async fn text_rows(
         &self,
-        segments: &[GrepSegmentRef],
+        segments: &[ExtensionSegmentRef],
         values: &BTreeSet<ContentValue>,
         in_flight: usize,
     ) -> Result<BTreeMap<ContentValue, bool>> {
@@ -248,7 +249,7 @@ impl<S: ObjectStore + ?Sized> GrepSegments<'_, S> {
                     return Err(GrepError::IndexCorrupt {
                         message: format!(
                             "index segment `{}` has a row of another family under a `texts` key",
-                            self.object_key(&descriptor.segment_id)
+                            self.object_key(descriptor)
                         ),
                     });
                 };
@@ -271,7 +272,7 @@ impl<S: ObjectStore + ?Sized> GrepSegments<'_, S> {
     /// blocks that the segment's index lists for those keys.
     async fn rows_at_keys(
         &self,
-        descriptor: &GrepSegmentRef,
+        descriptor: &ExtensionSegmentRef,
         keys: &BTreeSet<String>,
     ) -> Result<Vec<IndexRow>> {
         let (Some(first), Some(last)) = (keys.first(), keys.last()) else {
@@ -286,7 +287,7 @@ impl<S: ObjectStore + ?Sized> GrepSegments<'_, S> {
         ) {
             return Ok(Vec::new());
         }
-        let object_key = self.object_key(&descriptor.segment_id);
+        let object_key = self.object_key(descriptor);
         let entries =
             load_index_block(self.store, self.block_cache, &object_key, descriptor).await?;
         let blocks: BTreeSet<usize> = keys
@@ -326,7 +327,7 @@ impl<S: ObjectStore + ?Sized> GrepSegments<'_, S> {
     /// posting refers to it.
     pub(crate) async fn table_values(
         &self,
-        run: &[GrepSegmentRef],
+        run: &[ExtensionSegmentRef],
         ordinals: &BTreeSet<u64>,
     ) -> Result<BTreeMap<u64, ContentValue>> {
         let keys: BTreeSet<String> = ordinals
@@ -339,7 +340,7 @@ impl<S: ObjectStore + ?Sized> GrepSegments<'_, S> {
         let mut values = BTreeMap::new();
         let object_key = run
             .first()
-            .map(|segment| self.object_key(&segment.segment_id))
+            .map(|segment| self.object_key(segment))
             .unwrap_or_default();
         while let Some(rows) = reads.try_next().await? {
             for row in value_rows(&object_key, rows)? {
@@ -361,19 +362,17 @@ impl<S: ObjectStore + ?Sized> GrepSegments<'_, S> {
     }
 }
 
-/// Finishes the segment that `builder` has the rows of, and returns its
-/// descriptor and its bytes.
+/// Finishes the segment that `builder` has the rows of, which `owner` stores
+/// under its own prefix, and returns its descriptor and its bytes.
 fn prepare_segment(
-    run_no: RunNo,
-    level: u32,
+    owner: &NamespaceId,
     builder: SegmentBlocksBuilder,
-) -> (GrepSegmentRef, Bytes) {
+) -> (ExtensionSegmentRef, Bytes) {
     let built = builder.build().expect("a grep index segment should encode");
     let filter_inline = built.inline_filter_hex();
-    let descriptor = GrepSegmentRef {
+    let descriptor = ExtensionSegmentRef {
+        owner_namespace_id: owner.clone(),
         segment_id: IndexSegmentId::generate(),
-        run_no,
-        level,
         row_count: built.row_count,
         min_row_key: built.min_row_key,
         max_row_key: built.max_row_key,
@@ -384,20 +383,25 @@ fn prepare_segment(
     (descriptor, Bytes::from(built.bytes))
 }
 
-impl<S: ObjectStore + ?Sized> SegmentBlockLoader<IndexRow, GrepSegmentRef> for GrepSegments<'_, S> {
+impl<S: ObjectStore + ?Sized> SegmentBlockLoader<IndexRow, ExtensionSegmentRef>
+    for GrepSegments<'_, S>
+{
     type Error = GrepError;
 
-    async fn load_index(&self, segment: GrepSegmentRef) -> Result<Arc<Vec<SegmentIndexEntry>>> {
-        let object_key = self.object_key(&segment.segment_id);
+    async fn load_index(
+        &self,
+        segment: ExtensionSegmentRef,
+    ) -> Result<Arc<Vec<SegmentIndexEntry>>> {
+        let object_key = self.object_key(&segment);
         load_index_block(self.store, self.block_cache, &object_key, &segment).await
     }
 
     async fn load_data_blocks(
         &self,
-        segment: GrepSegmentRef,
+        segment: ExtensionSegmentRef,
         entries: Vec<SegmentIndexEntry>,
     ) -> Result<Vec<Arc<DecodedDataBlock<IndexRow>>>> {
-        let object_key = self.object_key(&segment.segment_id);
+        let object_key = self.object_key(&segment);
         load_data_block_span(
             self.store,
             self.block_cache,
@@ -417,11 +421,9 @@ impl<S: ObjectStore + ?Sized> SegmentBlockLoader<IndexRow, GrepSegmentRef> for G
 /// [`MAX_PENDING_SEGMENT_BYTES`] of segment bodies in flight.
 pub(crate) struct RunWriter<'s, 'a, S: ?Sized> {
     segments: &'s GrepSegments<'a, S>,
-    run_no: RunNo,
-    level: u32,
     max_rows_per_segment: NonZeroUsize,
     builder: SegmentBlocksBuilder,
-    written: Vec<GrepSegmentRef>,
+    written: Vec<ExtensionSegmentRef>,
     /// The puts in flight, each of which returns its body's size.
     pending: FuturesUnordered<BoxFuture<'a, Result<usize>>>,
     pending_bytes: usize,
@@ -430,14 +432,10 @@ pub(crate) struct RunWriter<'s, 'a, S: ?Sized> {
 impl<'s, 'a, S: ObjectStore + ?Sized> RunWriter<'s, 'a, S> {
     pub(crate) fn new(
         segments: &'s GrepSegments<'a, S>,
-        run_no: RunNo,
-        level: u32,
         max_rows_per_segment: NonZeroUsize,
     ) -> Self {
         Self {
             segments,
-            run_no,
-            level,
             max_rows_per_segment,
             builder: SegmentBlocksBuilder::default(),
             written: Vec::new(),
@@ -476,7 +474,7 @@ impl<'s, 'a, S: ObjectStore + ?Sized> RunWriter<'s, 'a, S> {
 
     /// Writes the last segment, waits for every put, and returns the run's
     /// segments in key order.
-    pub(crate) async fn finish(mut self) -> Result<Vec<GrepSegmentRef>> {
+    pub(crate) async fn finish(mut self) -> Result<Vec<ExtensionSegmentRef>> {
         if self.builder.row_count() > 0 {
             self.write_segment().await?;
         }
@@ -488,9 +486,11 @@ impl<'s, 'a, S: ObjectStore + ?Sized> RunWriter<'s, 'a, S> {
 
     async fn write_segment(&mut self) -> Result<()> {
         self.wait_for_capacity(0).await?;
-        let (descriptor, bytes) =
-            prepare_segment(self.run_no, self.level, std::mem::take(&mut self.builder));
-        let object_key = self.segments.object_key(&descriptor.segment_id);
+        let (descriptor, bytes) = prepare_segment(
+            self.segments.namespace_id,
+            std::mem::take(&mut self.builder),
+        );
+        let object_key = self.segments.object_key(&descriptor);
         self.written.push(descriptor);
         let byte_count = bytes.len();
         self.wait_for_capacity(byte_count).await?;

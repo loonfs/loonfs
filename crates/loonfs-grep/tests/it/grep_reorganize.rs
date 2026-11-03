@@ -2,27 +2,24 @@
 
 use crate::common::GrepHost;
 use bytes::Bytes;
-use loonfs::engine::{OperationClock, SegmentBlockKind};
+use loonfs::engine::SegmentBlockKind;
 use loonfs::SharedObjectStore;
 use loonfs_grep::codec::{ContentValue, Gram, IndexRow};
-use loonfs_grep::keyspace::{segment_key, segments_prefix};
-use loonfs_grep::manifest::{
-    load_current_grep_manifest, publish_grep_manifest, GrepIndexState, GrepIndexStatus,
-    GrepManifestState, GrepSegmentRef,
-};
+use loonfs_grep::entry::{grep_extension_name, GrepEntry, GrepIndexStatus};
 use loonfs_grep::{
     DecodedGrepBlock, GramIndexBuildPolicy, GrepBlockCacheKey, GrepReorganizeOutcome,
 };
+use loonfs_objectstore::keys::{extension_segment, extension_segment_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectStore, PutMode};
 use loonfs_test_support::ids::nonzero_usize;
 use loonfs_test_support::stores::{ConcurrencyWatchStore, KeyPredicate, RecordingStore};
+use loonfs_types::format::manifest::{ExtensionRunRef, ExtensionSegmentRef};
 use loonfs_types::format::segment_blocks::{
     decode_data_block_rows, decode_index_block, index_blocks_for_key_range,
     string_prefix_upper_bound, BuiltSegmentBlocks, SegmentBlocksBuilder,
 };
-use loonfs_types::StdMonotonicTimer;
-use loonfs_types::{ChangeSeq, ContentId, IndexSegmentId, ManifestNo, NamespaceId, RunNo};
+use loonfs_types::{ChangeSeq, ContentId, IndexSegmentId, NamespaceId, RunNo};
 use std::assert_matches;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -83,7 +80,10 @@ async fn reorganization_reads_one_span_per_refill_and_preserves_rows() {
 async fn reorganize_with_cache(warm_cache: bool) -> usize {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("grep-span-refills").expect("namespace id");
-    let keys = KeyPredicate::prefix(segments_prefix(&namespace_id));
+    let keys = KeyPredicate::prefix(extension_segment_prefix(
+        &namespace_id,
+        &grep_extension_name(),
+    ));
     let watched = Arc::new(ConcurrencyWatchStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
         keys.clone(),
@@ -111,16 +111,15 @@ async fn reorganize_with_cache(warm_cache: bool) -> usize {
         let segment_id = IndexSegmentId::parse(format!("idx_{run:026}")).expect("segment id");
         store
             .put(
-                &segment_key(&namespace_id, &segment_id),
+                &extension_segment(&namespace_id, &grep_extension_name(), &segment_id),
                 Bytes::from(built.bytes.clone()),
                 PutMode::CreateIfAbsent,
             )
             .await
             .expect("write input");
-        segments.push(GrepSegmentRef {
+        segments.push(ExtensionSegmentRef {
+            owner_namespace_id: namespace_id.clone(),
             segment_id,
-            run_no: RunNo(run),
-            level: 0,
             row_count: built.row_count,
             min_row_key: built.min_row_key.clone(),
             max_row_key: built.max_row_key.clone(),
@@ -129,30 +128,31 @@ async fn reorganize_with_cache(warm_cache: bool) -> usize {
             filter_inline: built.inline_filter_hex(),
         });
     }
-    let state = GrepManifestState::new(
-        namespace_id.clone(),
-        ManifestNo(1),
+    let host = GrepHost::new(&store, "grep-span-refills").await;
+    host.writer
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("create the namespace");
+    let entry = GrepEntry::new(
         GrepIndexStatus::Active {
             captured_seq: ChangeSeq(0),
             built_through_seq: ChangeSeq(0),
             next_event_index: 0,
         },
-        GrepIndexState {
-            next_run_no: RunNo(8),
-            reorganize: None,
-        },
-        segments.clone(),
-    )
-    .expect("valid manifest");
-    publish_grep_manifest(
-        &store,
         None,
-        &state,
-        &OperationClock::start(0, Arc::new(StdMonotonicTimer::default())),
+        segments
+            .iter()
+            .zip(0..)
+            .map(|(segment, run_no)| ExtensionRunRef {
+                run_no: RunNo(run_no),
+                level: 0,
+                segments: vec![segment.clone()],
+            })
+            .collect(),
     )
-    .await
-    .expect("publish inputs");
-    let host = GrepHost::new(&store, "grep-span-refills").await;
+    .expect("valid entry");
+    crate::common::publish_grep_entry(&host.maintenance, &namespace_id, entry.encode(), RunNo(8))
+        .await;
     if warm_cache {
         for (position, segment) in segments.iter().enumerate() {
             if position % 2 == 0 {
@@ -216,7 +216,7 @@ async fn reorganize_with_cache(warm_cache: bool) -> usize {
     // step reads whole and replaces with the output's table.
     assert_matches!(
         outcome,
-        GrepReorganizeOutcome::UnitPublished {
+        GrepReorganizeOutcome::UnitWritten {
             merged_rows,
             completed: true,
             ..
@@ -243,7 +243,7 @@ async fn reorganize_with_cache(warm_cache: bool) -> usize {
         "each input's index, value table blocks, and data span"
     );
     for segment in segments {
-        let key = segment_key(&namespace_id, &segment.segment_id);
+        let key = extension_segment(&namespace_id, &grep_extension_name(), &segment.segment_id);
         let mut ranges: Vec<_> = gets
             .iter()
             .filter(|(object_key, _)| object_key == &key)
@@ -263,15 +263,17 @@ async fn reorganize_with_cache(warm_cache: bool) -> usize {
         assert_eq!(ranges, expected);
     }
 
-    let current = load_current_grep_manifest(&store, &namespace_id, crate::common::observation())
+    let current = crate::common::control::grep_entry(&store, &namespace_id)
         .await
-        .expect("load output manifest")
         .expect("output manifest");
     let mut actual_rows = Vec::new();
-    for segment in current.manifest_state().segments() {
-        assert_eq!(segment.level, 1);
+    assert!(current.runs().iter().all(|run| run.level == 1));
+    for segment in current.segments() {
         let bytes = store
-            .get(&segment_key(&namespace_id, &segment.segment_id), None)
+            .get(
+                &extension_segment(&namespace_id, &grep_extension_name(), &segment.segment_id),
+                None,
+            )
             .await
             .expect("read output")
             .expect("output exists");

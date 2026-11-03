@@ -2,7 +2,7 @@
 
 use super::*;
 use loonfs_objectstore::keys::{
-    content_prefix, pin, temporary_prefix, upload_outcome, upload_session_prefix,
+    content_prefix, extensions_prefix, pin, temporary_prefix, upload_outcome, upload_session_prefix,
 };
 use loonfs_test_support::stores::RecordedOperation;
 use loonfs_types::format::control::UploadOutcome;
@@ -94,6 +94,7 @@ async fn one_pass_deletes_an_aged_upload_and_every_expired_snapshot_among_many_p
             metadata_manifest_prefix(&namespace_id),
             wal_prefix(&namespace_id),
             metadata_segment_prefix(&namespace_id),
+            extensions_prefix(&namespace_id),
             pin_prefix(&namespace_id),
             format!("{}con_", content_prefix(&namespace_id)),
             temporary_prefix(&namespace_id),

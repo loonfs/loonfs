@@ -106,7 +106,7 @@ pub(super) async fn grep(
     // request in this process is measured on; its filesystem reads go
     // through the same runtime the core API groups serve from.
     let store = state.runtime.object_store();
-    let reads = NamespaceReads::new(state.runtime.namespace(&namespace_id));
+    let reads = NamespaceReads::new(state.runtime.read_only(), &namespace_id);
     let reads = match subject {
         Some(subject) => reads.with_subject(subject),
         None => reads,
@@ -186,7 +186,7 @@ pub(super) async fn grep_index_not_maintained() -> ApiResponseError {
             (status = 400, description = "Invalid namespace ID", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace not found", body = ErrorResponse),
-            (status = 409, description = "Another publisher changed the grep manifest first. Retry the request.", body = ErrorResponse),
+            (status = 409, description = "Another publication changed the namespace manifest first. Retry the request.", body = ErrorResponse),
             (status = 501, description = "This deployment doesn't maintain the grep index", body = ErrorResponse),
             (status = 500, description = "The grep index is corrupt or its backing store is unavailable", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
@@ -263,14 +263,14 @@ async fn read_grep_index_status(
         path = "/v0/maintenance/namespaces/{namespace_id}/grep/index/disable",
         tag = "maintenance",
         summary = "Disable the grep index",
-        description = "Disables the namespace's grep index by publishing a manifest with the next number and no segment references. Index maintenance stops when a step reads the disabled manifest, and an explicit grep garbage collection run reclaims the segments later. Repeating the request has the same result. A deployment that doesn't maintain the grep index returns `not_supported`.",
+        description = "Disables the namespace's grep index by publishing a namespace manifest whose grep entry lists no segments. Index maintenance stops when a step reads the disabled entry, and garbage collection reclaims the segments later. Repeating the request has the same result. A deployment that doesn't maintain the grep index returns `not_supported`.",
         params(("namespace_id" = String, Path, description = "The namespace ID.")),
         responses(
             (status = 200, description = "Grep index disabled or already disabled", body = GrepIndex),
             (status = 400, description = "Invalid namespace ID", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace not found", body = ErrorResponse),
-            (status = 409, description = "Another publisher changed the grep manifest first. Retry the request.", body = ErrorResponse),
+            (status = 409, description = "Another publication changed the namespace manifest first. Retry the request.", body = ErrorResponse),
             (status = 501, description = "This deployment doesn't maintain the grep index", body = ErrorResponse),
             (status = 500, description = "The grep index is corrupt or its backing store is unavailable", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses

@@ -7,7 +7,7 @@ use crate::error::{CoreError, Result};
 use crate::namespace::store::NamespaceStore;
 use crate::pin::record::load_pin_at_key;
 use crate::time::OperationClock;
-use loonfs_objectstore::{ObjectStore, ObjectStoreError};
+use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::{ForkBasis, PinOwner, PinPayload};
 use loonfs_types::{NamespaceId, RetainedReason};
 
@@ -144,7 +144,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
 
 /// Where one unreferenced candidate stands against the grace window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GraceAge {
+pub(crate) enum GraceAge {
     /// The window has passed over the object.
     Aged,
     /// Younger than the window by its own provider timestamp.
@@ -152,13 +152,11 @@ pub enum GraceAge {
     /// The provider reported no last-modified time, so the object's age is
     /// unknown and it is treated as young (rule 1).
     Unknown,
-    /// The object is not there any more.
-    Gone,
 }
 
 impl GraceAge {
     /// Compares a listed modification time with the pass's grace window.
-    pub fn of(last_modified_at_ms: Option<u64>, grace_window_ms: u64, now_ms: u64) -> Self {
+    pub(crate) fn of(last_modified_at_ms: Option<u64>, grace_window_ms: u64, now_ms: u64) -> Self {
         match last_modified_at_ms {
             None => Self::Unknown,
             Some(modified) if now_ms.saturating_sub(modified) < grace_window_ms => Self::Young,
@@ -167,30 +165,12 @@ impl GraceAge {
     }
 
     /// The retention reason this outcome is, for a caller reporting why a
-    /// pass kept what it kept. `None` for the two outcomes that retained
-    /// nothing.
-    pub fn retained_reason(self) -> Option<RetainedReason> {
+    /// pass kept what it kept. `None` for the outcome that retained nothing.
+    pub(crate) fn retained_reason(self) -> Option<RetainedReason> {
         match self {
-            Self::Aged | Self::Gone => None,
+            Self::Aged => None,
             Self::Young => Some(RetainedReason::WithinGraceWindow),
             Self::Unknown => Some(RetainedReason::NoProviderTimestamp),
         }
     }
-}
-
-/// Reads where one object stands against the grace window by its provider timestamp.
-pub async fn grace_age<S: ObjectStore + ?Sized>(
-    store: &S,
-    key: &str,
-    grace_window_ms: u64,
-    now_ms: u64,
-) -> std::result::Result<GraceAge, ObjectStoreError> {
-    let Some(metadata) = store.head(key).await? else {
-        return Ok(GraceAge::Gone);
-    };
-    Ok(GraceAge::of(
-        metadata.last_modified_at_ms,
-        grace_window_ms,
-        now_ms,
-    ))
 }

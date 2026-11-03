@@ -8,9 +8,9 @@ use loonfs::{
     SharedObjectStore, Writable,
 };
 use loonfs_grep::codec::{ContentRevisionRow, ContentValue, IndexRow};
-use loonfs_grep::keyspace::segment_key;
-use loonfs_grep::manifest::{load_current_grep_manifest, GrepManifestState};
+use loonfs_grep::entry::{grep_extension_name, GrepEntry};
 use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome, GrepReorganizeOutcome};
+use loonfs_objectstore::keys::extension_segment_object_key;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::{first_page, nonzero_usize};
@@ -145,17 +145,10 @@ impl ContentFixture {
             .expect("grep reorganize step")
     }
 
-    pub(crate) async fn manifest(&self) -> GrepManifestState {
-        load_current_grep_manifest(
-            &*self.store,
-            &self.namespace_id,
-            crate::common::observation(),
-        )
-        .await
-        .expect("load grep manifest")
-        .expect("grep manifest exists")
-        .manifest_state()
-        .clone()
+    pub(crate) async fn manifest(&self) -> GrepEntry {
+        crate::common::control::grep_entry(&self.store, &self.namespace_id)
+            .await
+            .expect("grep's entry exists")
     }
 
     /// Returns every row of the index's current segments.
@@ -195,10 +188,19 @@ impl ContentFixture {
     /// Returns every row of the index's current segments, with its run.
     async fn run_rows(&self) -> Vec<(RunNo, IndexRow)> {
         let mut rows = Vec::new();
-        for segment in self.manifest().await.segments() {
+        let manifest = self.manifest().await;
+        let segments = manifest.runs().iter().flat_map(|run| {
+            run.segments
+                .iter()
+                .map(move |segment| (run.run_no, segment))
+        });
+        for (run_no, segment) in segments {
             let bytes = self
                 .store
-                .get(&segment_key(&self.namespace_id, &segment.segment_id), None)
+                .get(
+                    &extension_segment_object_key(&grep_extension_name(), segment),
+                    None,
+                )
                 .await
                 .expect("read segment")
                 .expect("segment exists");
@@ -212,7 +214,7 @@ impl ContentFixture {
                     &entry.block,
                 )
                 .expect("decode data block");
-                rows.extend(block.rows.into_iter().map(|row| (segment.run_no, row)));
+                rows.extend(block.rows.into_iter().map(|row| (run_no, row)));
             }
         }
         rows
@@ -337,7 +339,7 @@ async fn a_build_step_skips_a_value_that_texts_records() {
 
     assert_matches!(
         fixture.build_step().await,
-        GrepBuildOutcome::Published {
+        GrepBuildOutcome::Indexed {
             built_through_seq,
             indexed_revisions: 0,
             skipped_revisions: 1,
@@ -386,7 +388,7 @@ async fn a_restore_and_a_copy_by_reference_are_found_without_reindexing() {
         .expect("restore a");
     assert_matches!(
         fixture.build_step().await,
-        GrepBuildOutcome::Published {
+        GrepBuildOutcome::Indexed {
             indexed_revisions: 0,
             skipped_revisions: 1,
             ..
@@ -505,7 +507,7 @@ async fn a_base_reorganization_drops_a_dead_value_and_keeps_a_referenced_one() {
     }
 
     let manifest = fixture.manifest().await;
-    assert!(manifest.segments().iter().all(|segment| segment.level == 2));
+    assert!(manifest.runs().iter().all(|run| run.level == 2));
     assert!(
         fixture.text_rows(&dead).await.is_empty(),
         "the dead value's row is dropped"
@@ -556,7 +558,7 @@ async fn the_re_reference_check_abandons_a_reorganization_whose_dropped_value_co
     };
     assert_matches!(
         fixture.reorganize_step(to_mid).await,
-        GrepReorganizeOutcome::UnitPublished {
+        GrepReorganizeOutcome::UnitWritten {
             completed: true,
             ..
         }
@@ -568,7 +570,7 @@ async fn the_re_reference_check_abandons_a_reorganization_whose_dropped_value_co
     };
     assert_matches!(
         fixture.reorganize_step(to_base).await,
-        GrepReorganizeOutcome::UnitPublished {
+        GrepReorganizeOutcome::UnitWritten {
             completed: false,
             ..
         }
@@ -576,9 +578,7 @@ async fn the_re_reference_check_abandons_a_reorganization_whose_dropped_value_co
     let pruning = fixture
         .manifest()
         .await
-        .index()
-        .reorganize
-        .clone()
+        .reorganize()
         .and_then(|reorganize| reorganize.pruning);
     assert!(
         pruning.is_some(),
@@ -590,7 +590,7 @@ async fn the_re_reference_check_abandons_a_reorganization_whose_dropped_value_co
     fixture.put_reference("/b.txt", &first).await;
     assert_matches!(
         fixture.build_step().await,
-        GrepBuildOutcome::Published {
+        GrepBuildOutcome::Indexed {
             indexed_revisions: 0,
             skipped_revisions: 1,
             ..
@@ -600,7 +600,7 @@ async fn the_re_reference_check_abandons_a_reorganization_whose_dropped_value_co
     for _ in 0..64 {
         if !matches!(
             outcome,
-            GrepReorganizeOutcome::UnitPublished {
+            GrepReorganizeOutcome::UnitWritten {
                 completed: false,
                 ..
             }
@@ -611,8 +611,8 @@ async fn the_re_reference_check_abandons_a_reorganization_whose_dropped_value_co
     }
     assert_eq!(outcome, GrepReorganizeOutcome::Abandoned);
     let manifest = fixture.manifest().await;
-    assert!(manifest.index().reorganize.is_none());
-    assert!(manifest.segments().iter().all(|segment| segment.level != 2));
+    assert!(manifest.reorganize().is_none());
+    assert!(manifest.runs().iter().all(|run| run.level != 2));
     // The appended file still contains the needle in its longer value.
     assert_eq!(
         fixture
