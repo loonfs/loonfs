@@ -1124,9 +1124,25 @@ async fn an_idle_pass_costs_one_listing_per_page_and_a_fixed_number_of_requests_
         // than a second apart, so the runtime raises each hint to the build's
         // manifest when that second ends, and the passes below start from
         // hints at the current manifests, as the seed's do.
+        store.reset();
         server.clock.advance_ms(HINT_RAISE_INTERVAL_MS);
         for namespace_id in &names {
             wait_for_current_hint(base.as_ref(), namespace_id).await;
+            if grep == Grep::Enabled {
+                // The hint is visible before its put finishes syncing and
+                // the recording store records it. Wait for that completion
+                // before measuring the next pass.
+                let hint = loonfs_objectstore::keys::hint(namespace_id);
+                loonfs_test_support::clock::bounded(Duration::from_secs(10), async {
+                    while !store.snapshot().iter().any(|operation| {
+                        matches!(operation, RecordedOperation::Put { key, .. } if key == &hint)
+                    }) {
+                        tokio::time::advance(Duration::from_millis(1)).await;
+                    }
+                })
+                .await
+                .expect("the trailing hint put finishes");
+            }
         }
         // An index's publication drops the runtime's cached head, so this
         // pass loads each head again, and the passes below find it cached,
