@@ -11,7 +11,7 @@ use futures::future::BoxFuture;
 use loonfs_core::MergeRequest;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{namespace_id, writer_id};
-use loonfs_types::{DeleteDirectoryBehavior, MergeConflictKind};
+use loonfs_types::{DeleteDirectoryBehavior, ManifestNo, MergeConflictKind};
 use std::assert_matches;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -96,6 +96,20 @@ impl Family {
             )
             .await
             .expect("delete the directory in the fork");
+    }
+
+    /// Returns the current manifest numbers of `main` and the fork.
+    async fn manifest_nos(&self) -> Vec<Option<ManifestNo>> {
+        let maintenance = self.main.maintenance();
+        let mut numbers = Vec::new();
+        for namespace in [&self.main, &self.fork] {
+            let diagnostics = maintenance
+                .diagnostics(namespace.id())
+                .await
+                .expect("diagnostics");
+            numbers.push(diagnostics.current_manifest_no);
+        }
+        numbers
     }
 
     /// Commits a file in `main` that no merge here touches.
@@ -282,6 +296,37 @@ async fn a_retry_of_a_merge_in_flight_finds_the_slot_taken() {
         .await
         .expect("the retry");
     assert_eq!(retried, merged);
+}
+
+/// Checks that a retry of a merge that committed returns the merge and folds
+/// neither namespace. `main` and the fork each have a later commit in their
+/// WAL tails when the retry runs, and neither publishes a manifest.
+#[tokio::test]
+async fn a_retry_of_a_committed_merge_folds_nothing() {
+    let family = family().await;
+    let options = MergeForkOptions {
+        commit_id: Some(CommitId::parse("merge").expect("commit id")),
+        ..MergeForkOptions::default()
+    };
+    let merged = family
+        .main
+        .merge_fork_with_options(family.fork.id(), &actor(), &options)
+        .await
+        .expect("the merge");
+    family.write_main("/later.txt").await;
+    family
+        .fork
+        .put_file("/c.txt", b"c", &actor())
+        .await
+        .expect("a later commit in the fork");
+    let before = family.manifest_nos().await;
+    let retried = family
+        .main
+        .merge_fork_with_options(family.fork.id(), &actor(), &options)
+        .await
+        .expect("the retry");
+    assert_eq!(retried, merged);
+    assert_eq!(family.manifest_nos().await, before);
 }
 
 /// Checks that a merge's delete of a file expects the file's revision. `main`
