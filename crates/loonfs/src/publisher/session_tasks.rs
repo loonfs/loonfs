@@ -1,6 +1,6 @@
-//! The tasks that a writer session runs beside its queue: the worker, the
-//! WAL-tail fold, and the metadata compaction that a fold starts, and the
-//! waits for them.
+//! The tasks that a writer session runs beside its queue (the worker, the
+//! WAL-tail fold, and the metadata compaction that a fold starts), the waits
+//! for them, and the fold that the fold task and the session's callers run.
 
 use super::registry::PositionChange;
 use super::PublisherRegistry;
@@ -8,7 +8,7 @@ use super::{FoldTrigger, NamespacePublisher, NamespacePublisherState};
 use crate::maintenance::{Compactor, TailFold};
 use crate::trace::{phase_event, phase_span};
 use crate::MaintainMetadataOptions;
-use crate::{Error, FoldWalOutcome, MetadataMaintenanceOutcome, Result};
+use crate::{Error, FoldWalOutcome, MetadataMaintenanceOutcome, Result, SharedObjectStore};
 use futures::FutureExt;
 use loonfs_core::limits::FOLD_AT_WAL_OBJECTS;
 use loonfs_core::publish::NamespaceCommitEngine;
@@ -19,6 +19,29 @@ use std::sync::Arc;
 use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 use tracing::Instrument;
+
+/// Which WAL tails a fold of a writer session folds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FoldRule {
+    /// A tail at the fold trigger. The session's fold task uses this rule
+    /// after a publish.
+    AtTrigger,
+    /// A tail at the fold trigger, or any tail once this session's last
+    /// publication has reached the runtime's idle fold age. A host's
+    /// metadata step uses this rule.
+    WhenDue,
+    /// Any tail with at least one WAL object. A merge or a rebase of the
+    /// namespace uses this rule.
+    Any,
+}
+
+/// Returns the WAL objects and the inline content bytes of the tail that
+/// `engine`'s position shows, or `None` when the engine has no position.
+fn position_tail(engine: &NamespaceCommitEngine<SharedObjectStore>) -> Option<(u64, usize)> {
+    engine
+        .wal_tail_objects()
+        .zip(engine.wal_tail_inline_bytes())
+}
 
 /// The worker that drains a session's queue.
 pub(super) struct WorkerHandle {
@@ -85,12 +108,23 @@ impl NamespacePublisher {
             // after each fold that published. Each pass after the first folds
             // commits published during the pass before it.
             loop {
-                match AssertUnwindSafe(publisher.run_fold()).catch_unwind().await {
-                    Ok(true) => {
-                        publisher.fold_published.send_replace(());
-                        publisher.start_compaction();
+                match AssertUnwindSafe(publisher.fold(FoldRule::AtTrigger))
+                    .catch_unwind()
+                    .await
+                {
+                    Ok(Ok(true)) => publisher.start_compaction(),
+                    Ok(Ok(false)) => return,
+                    Ok(Err(error)) => {
+                        phase_event!(
+                            publisher.context.runtime_core,
+                            Phase::WalFold,
+                            publisher.namespace_id,
+                            tracing::Level::WARN,
+                            error = %error.public_message(),
+                            "WAL-tail fold failed"
+                        );
+                        return;
                     }
-                    Ok(false) => return,
                     Err(_) => {
                         publisher.record_panic();
                         return;
@@ -105,23 +139,57 @@ impl NamespacePublisher {
         Some(start)
     }
 
+    /// Whether the session's engine has a position.
+    pub(super) async fn has_position(&self) -> bool {
+        self.lock_engine()
+            .await
+            .engine
+            .as_ref()
+            .and_then(position_tail)
+            .is_some()
+    }
+
     /// Whether the engine's position shows its tail over the fold trigger.
     /// Without a position the tail is unknown, and the next publish reads
     /// the tail and starts the fold.
     async fn position_fold_is_due(&self) -> bool {
         let slot = self.lock_engine().await;
         slot.engine.as_ref().is_some_and(|engine| {
-            engine
-                .wal_tail_objects()
-                .zip(engine.wal_tail_inline_bytes())
-                .is_some_and(|(objects, inline_bytes)| {
-                    FoldTrigger::new(self.context.runtime_core.config()).fold_is_due(
-                        FOLD_AT_WAL_OBJECTS.get(),
-                        objects,
-                        inline_bytes,
-                    )
-                })
+            position_tail(engine).is_some_and(|(objects, inline_bytes)| {
+                self.fold_is_due(FoldRule::AtTrigger, objects, inline_bytes)
+            })
         })
+    }
+
+    /// Returns whether `rule` applies to a tail of `objects` WAL objects
+    /// and `inline_bytes` bytes of inline content.
+    fn fold_is_due(&self, rule: FoldRule, objects: u64, inline_bytes: usize) -> bool {
+        let at_trigger = FoldTrigger::new(self.context.runtime_core.config()).fold_is_due(
+            FOLD_AT_WAL_OBJECTS.get(),
+            objects,
+            inline_bytes,
+        );
+        match rule {
+            FoldRule::AtTrigger => at_trigger,
+            FoldRule::WhenDue => {
+                let now_ms = self.context.runtime_core.timer().monotonic_now_ms();
+                at_trigger
+                    || (objects > 0
+                        && self
+                            .idle_fold_due_at_ms()
+                            .is_some_and(|due_at_ms| now_ms >= due_at_ms))
+            }
+            FoldRule::Any => objects > 0,
+        }
+    }
+
+    /// Returns when this session's last publication reaches the runtime's
+    /// idle fold age, on the runtime's monotonic clock, or `None` before the
+    /// session's first publication or when the runtime doesn't fold idle
+    /// tails.
+    pub(super) fn idle_fold_due_at_ms(&self) -> Option<u64> {
+        let published_at_ms = self.lock_state().last_published?.at_ms;
+        FoldTrigger::new(self.context.runtime_core.config()).idle_fold_due_at_ms(published_at_ms)
     }
 
     /// Starts the session's metadata compaction unless one is running or the
@@ -153,10 +221,17 @@ impl NamespacePublisher {
     }
 
     /// Runs the maintenance loop over this session's namespace without its
-    /// fold step, so folding stays with [`Self::run_fold`].
+    /// fold step, so folding stays with [`Self::fold`].
     async fn run_compaction(&self) {
         let Some(compactor) = self.compactor() else {
             return;
+        };
+        // A session that stops admitting work never compacts again, so a
+        // close doesn't wait for a caller's compaction to release the turn.
+        let _turn = tokio::select! {
+            biased;
+            () = self.compaction_cancellation.cancelled() => return,
+            turn = self.compaction_turn.lock() => turn,
         };
         let seq = self.lock_state().last_published.map(|last| last.seq);
         let result = compactor
@@ -185,7 +260,7 @@ impl NamespacePublisher {
 
     /// The runtime's compaction loop, acting as this session's writer.
     /// `None` once the writer or the session table is gone.
-    fn compactor(&self) -> Option<Compactor> {
+    pub(super) fn compactor(&self) -> Option<Compactor> {
         let writer = self.context.writer.upgrade()?;
         let publisher = PublisherRegistry {
             shared: self.shared.upgrade()?,
@@ -199,35 +274,36 @@ impl NamespacePublisher {
         ))
     }
 
-    /// Folds the tail under a fold permit. Returns whether the fold published
-    /// a manifest.
-    async fn run_fold(&self) -> bool {
+    /// Folds the session's WAL tail if `rule` applies to it, and returns
+    /// whether the fold published a manifest.
+    ///
+    /// The fold waits for the session's fold turn (`fold_turn`) and then for
+    /// a fold permit. Waiting for the turn means that the fold reads the
+    /// position that the session's previous fold left. A session without a
+    /// position loads its tail from the store and folds it, except under
+    /// [`FoldRule::WhenDue`], which can't tell the age of a tail that it
+    /// hasn't read. A fold that publishes wakes the commits that wait at the
+    /// write stop. A fold that fails leaves the position where it was.
+    pub(super) async fn fold(&self, rule: FoldRule) -> Result<bool> {
         let Some(_writer) = self.context.writer.upgrade() else {
-            return false;
+            return Ok(false);
         };
+        let _turn = self.fold_turn.lock().await;
         let _permit = self.context.runtime_core.fold_permit().await;
         let input = {
             let slot = self.lock_engine().await;
-            if slot.engine.as_ref().is_some_and(|engine| {
-                engine
-                    .wal_tail_objects()
-                    .zip(engine.wal_tail_inline_bytes())
-                    .is_some_and(|(objects, inline_bytes)| {
-                        !FoldTrigger::new(self.context.runtime_core.config()).fold_is_due(
-                            FOLD_AT_WAL_OBJECTS.get(),
-                            objects,
-                            inline_bytes,
-                        )
-                    })
-            }) {
-                return false;
+            let engine = slot.engine.as_ref();
+            let due = match engine.and_then(position_tail) {
+                Some((objects, inline_bytes)) => self.fold_is_due(rule, objects, inline_bytes),
+                None => rule != FoldRule::WhenDue,
+            };
+            if !due {
+                return Ok(false);
             }
-            slot.engine
-                .as_ref()
-                .and_then(NamespaceCommitEngine::writer_position)
+            engine.and_then(NamespaceCommitEngine::writer_position)
         };
         let started_at_ms = self.context.runtime_core.timer().monotonic_now_ms();
-        let result = self
+        let folded = self
             .context
             .runtime_core
             .namespace_store(&self.namespace_id)
@@ -243,45 +319,29 @@ impl NamespacePublisher {
                 Phase::WalFold,
                 self.namespace_id
             ))
-            .await;
+            .await
+            .map_err(Error::from);
         self.context
             .runtime_core
             .instruments()
             .publisher
             .wal_fold_duration(self.elapsed_ms_since(started_at_ms));
+        let folded = folded?;
         // The fold moves the position onto the manifest that covers its tail,
-        // whether it published that manifest or found it current. A fold
-        // that failed leaves the position where it was.
-        if let Ok(folded) = &result {
-            self.change_position(PositionChange::Move(folded.manifest.clone()))
-                .await;
-        }
-        match result {
-            Ok(folded) => {
-                let published = folded.response.outcome == FoldWalOutcome::Published;
-                if published {
-                    self.context.runtime_core.instruments().publisher.wal_fold();
-                    if let Some(shared) = self.shared.upgrade() {
-                        shared
-                            .raise_hint(&self.namespace_id, folded.response.manifest_no)
-                            .await;
-                    }
-                }
-                published
+        // whether it published that manifest or found it current.
+        self.change_position(PositionChange::Move(folded.manifest.clone()))
+            .await;
+        let published = folded.response.outcome == FoldWalOutcome::Published;
+        if published {
+            self.context.runtime_core.instruments().publisher.wal_fold();
+            if let Some(shared) = self.shared.upgrade() {
+                shared
+                    .raise_hint(&self.namespace_id, folded.response.manifest_no)
+                    .await;
             }
-            Err(error) => {
-                let error = Error::from(error);
-                phase_event!(
-                    self.context.runtime_core,
-                    Phase::WalFold,
-                    self.namespace_id,
-                    tracing::Level::WARN,
-                    error = %error.public_message(),
-                    "WAL-tail fold failed"
-                );
-                false
-            }
+            self.fold_published.send_replace(());
         }
+        Ok(published)
     }
 
     /// Spawns `work` as the session's worker, whose exit the drain and close

@@ -5,7 +5,8 @@ use crate::publisher::{NamespaceSession, NamespaceSessionStatus};
 use crate::runtime_core::RuntimeCore;
 use crate::trace::{self, operation_span};
 use crate::{
-    ChangeSeq, LoonFs, MetadataMaintenanceOutcome, Mode, NamespaceId, ReadOnly, Result, Writable,
+    ChangeSeq, LoonFs, MaintenanceCancellation, MetadataMaintenanceOutcome,
+    MetadataMaintenanceResponse, Mode, NamespaceId, ReadOnly, Result, Writable,
 };
 use loonfs_core::NamespaceWriterEngine;
 use loonfs_types::Subject;
@@ -174,6 +175,46 @@ impl Namespace<Writable> {
     /// maintenance sweep, such as the `loonfs-server` sweep.
     pub fn idle_fold_due_at_ms(&self) -> Option<u64> {
         self.session().idle_fold_due_at_ms()
+    }
+
+    /// Folds this session's WAL tail when a fold is due, and then runs
+    /// compaction units while compaction is due, with the bounds and the
+    /// cancellation of
+    /// [`Maintenance::maintain_metadata_while_due`](crate::Maintenance::maintain_metadata_while_due).
+    ///
+    /// A fold is due once the tail reaches the fold trigger, or once this
+    /// session's last publication reaches the runtime's idle fold age (see
+    /// [`Self::idle_fold_due_at_ms`]). A session without a writer position
+    /// reads its tail from the store, and measures the idle fold age from
+    /// the tail's newest commit. The session folds after any fold that it's
+    /// already running, and compacts after any compaction that it's already
+    /// running, so the call never repeats a fold or a compaction unit that
+    /// the session is running. A close or a delete of the session stops the
+    /// call at its compaction unit in progress. When the session is fenced, the
+    /// call maintains the namespace with
+    /// [`Maintenance::maintain_metadata_while_due`](crate::Maintenance::maintain_metadata_while_due),
+    /// as for a namespace that has no session in this runtime. This is a
+    /// hook for a host that runs its own maintenance sweep, such as the
+    /// `loonfs-server` sweep.
+    pub async fn maintain_metadata_while_due(
+        &self,
+        cancellation: &MaintenanceCancellation,
+    ) -> Result<MetadataMaintenanceResponse> {
+        trace::in_operation(
+            operation_span!(self.core, "maintain_metadata_while_due", self.namespace_id),
+            async {
+                if self.session_status() == NamespaceSessionStatus::Fenced {
+                    return self
+                        .maintenance()
+                        .maintain_metadata_while_due(&self.namespace_id, cancellation)
+                        .await;
+                }
+                self.session()
+                    .maintain_metadata_while_due(cancellation.metadata_compaction())
+                    .await
+            },
+        )
+        .await
     }
 
     /// Records a host's metadata result only if no newer commit has published.

@@ -54,7 +54,11 @@
 //! starts no other maintenance by itself. A host that wants more, such as
 //! folding idle tails, finishing compaction a session left due after its
 //! last fold, or collecting garbage, calls the operations on
-//! [`LoonFs::maintenance`] on a schedule of its own.
+//! [`LoonFs::maintenance`] on a schedule of its own. For a namespace that
+//! the host keeps a session open for, the host runs metadata maintenance
+//! through [`Namespace::maintain_metadata_while_due`] instead, so that the
+//! host's calls don't repeat a fold or a compaction that the session is
+//! already running.
 
 #![warn(missing_docs)]
 

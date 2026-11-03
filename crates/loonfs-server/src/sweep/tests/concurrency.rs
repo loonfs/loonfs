@@ -29,7 +29,9 @@ async fn a_daily_pass_and_a_tick_never_visit_the_same_namespace_together() {
         OperationSelector::Any,
     ));
     let mut config = sweep_config(None);
-    config.idle_fold_after_ms = Some(0);
+    // Each visit's metadata call folds the session's tail, so the gate parks
+    // the visit at the fold's first request.
+    config.idle_fold_after_ms = Some(1);
     let server = SweepServer::start(store.clone(), &config, 0).await;
     server
         .runtime
@@ -107,7 +109,9 @@ async fn a_publish_during_metadata_maintenance_stays_due() {
         OperationSelector::Any,
     ));
     let mut config = sweep_config(None);
-    config.idle_fold_after_ms = Some(0);
+    // The visit's metadata call folds the session's tail, so the gate parks
+    // the visit at the fold's first request.
+    config.idle_fold_after_ms = Some(1);
     let server = SweepServer::start(store.clone(), &config, 0).await;
     server
         .runtime
@@ -165,7 +169,9 @@ async fn ticks_share_slots_with_a_parked_daily_pass_and_continue_when_a_slot_is_
         let mut config = sweep_config(None);
         config.max_concurrent_maintenance =
             std::num::NonZeroUsize::new(slots).expect("a nonzero slot count");
-        config.idle_fold_after_ms = Some(0);
+        // The tick's metadata call folds the held session's tail, so a tick
+        // that runs sends requests.
+        config.idle_fold_after_ms = Some(1);
         let server = SweepServer::start(store.clone(), &config, 0).await;
         server
             .runtime

@@ -51,8 +51,10 @@ impl Sweep {
         self.finish_visit(visit).await;
     }
 
-    /// Makes one metadata call. Unfinished work, or a failure, leaves the
-    /// call due again after `maintenance_interval_ms`.
+    /// Makes one metadata call, through the namespace's writer session when
+    /// the namespace is held, so the call never folds or compacts what the
+    /// session is already folding or compacting. Unfinished work, or a
+    /// failure, leaves the call due again after `maintenance_interval_ms`.
     pub(super) async fn maintain_metadata(
         &self,
         namespace_id: &NamespaceId,
@@ -60,11 +62,18 @@ impl Sweep {
         seq: Option<ChangeSeq>,
     ) {
         let inner = &self.inner;
-        let result = contain(
-            inner
+        let call = match entry {
+            Some(entry) => {
+                let handle = lock(entry).handle.clone();
+                async move { handle.maintain_metadata_while_due(&inner.stop).await }.boxed()
+            }
+            None => inner
                 .maintenance
                 .maintain_metadata_while_due(namespace_id, &inner.stop)
-                .map(|result| result.map_err(|error| CallFailure::error(error.code(), error))),
+                .boxed(),
+        };
+        let result = contain(
+            call.map(|result| result.map_err(|error| CallFailure::error(error.code(), error))),
         )
         .await;
         let outcome = result

@@ -27,6 +27,7 @@ mod inline_content;
 pub(crate) mod metrics;
 mod queue;
 mod registry;
+mod session_maintenance;
 mod session_tasks;
 mod worker;
 
@@ -98,6 +99,17 @@ struct NamespacePublisher {
     /// at the write stop wakes once that fold frees room, even when the fold
     /// task goes on to fold again.
     fold_published: watch::Sender<()>,
+    /// The lock that each fold of this session takes before it reads the
+    /// tail and releases after it has moved the position, so that a fold
+    /// that a caller asks for and a fold by the fold task never fold the
+    /// same tail. It's a `tokio` mutex because a fold keeps it locked across
+    /// its store requests.
+    fold_turn: Arc<AsyncMutex<()>>,
+    /// The lock that each run of this session's metadata compaction takes,
+    /// so that a run that a caller asks for and a run by the compaction task
+    /// never plan the same units. It's a `tokio` mutex for the same reason
+    /// as `fold_turn`.
+    compaction_turn: Arc<AsyncMutex<()>>,
 }
 
 /// Commit engine and writer session retained by one namespace publisher.
@@ -258,6 +270,8 @@ impl NamespacePublisher {
             shared: Arc::downgrade(shared),
             compaction_cancellation: MetadataCompactionCancellation::default(),
             fold_published: watch::Sender::new(()),
+            fold_turn: Arc::new(AsyncMutex::new(())),
+            compaction_turn: Arc::new(AsyncMutex::new(())),
         }
     }
 

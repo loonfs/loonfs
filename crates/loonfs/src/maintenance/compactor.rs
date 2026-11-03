@@ -16,6 +16,7 @@ use crate::{
 };
 use loonfs_core::control::NamespaceStorageDiagnostics;
 use loonfs_core::control::{LoadedManifest, NamespaceReadAnchor, PublicationBasis};
+use loonfs_core::limits::FOLD_AT_WAL_OBJECTS;
 use loonfs_core::{CoreError, MetadataCompactionCancellation, Phase};
 use loonfs_types::{CompactorEpoch, WriterId};
 use std::sync::Arc;
@@ -42,6 +43,13 @@ pub(crate) enum TailFold {
     /// fold. The session's position stores the tail, so a step reads only the
     /// current manifest.
     Never,
+    /// Leaves the tail to the caller, which folded it with
+    /// [`Compactor::fold_when_due`] before the call. A step reads only the
+    /// current manifest, and reports metadata caught up only when
+    /// `tail_caught_up` says that the caller's fold left the tail caught up.
+    /// A writer session without a position compacts this way, because it has
+    /// no position to read the tail from.
+    Folded { tail_caught_up: bool },
 }
 
 impl TailFold {
@@ -262,7 +270,9 @@ impl Compactor {
     /// within the revalidation bound, and otherwise it loads only the current
     /// manifest, without the WAL tail. A tail that the position shows
     /// unfolded leaves metadata due for the session's fold task or the host's
-    /// idle fold.
+    /// idle fold, unless it's under the fold trigger and the runtime doesn't
+    /// fold idle tails. `TailFold::Folded` reads the same state, and takes
+    /// whether the tail leaves metadata caught up from the caller.
     async fn fold_if_due(
         &self,
         namespace_id: &NamespaceId,
@@ -302,12 +312,30 @@ impl Compactor {
                     "the current manifest is older than the writer position's manifest"
                 );
             }
+            // In a runtime that doesn't fold idle tails, no fold runs for a
+            // tail under the fold trigger until the next commit, so that tail
+            // leaves metadata caught up, as `TailFold::WhenDue` reports it.
+            let trigger = FoldTrigger::new(self.core.config());
+            let tail_waits = position.as_ref().map(|position| {
+                let objects = position.wal_tail_objects();
+                objects > 0
+                    && (trigger.folds_idle_tails()
+                        || trigger.fold_is_due(
+                            FOLD_AT_WAL_OBJECTS.get(),
+                            objects,
+                            position.wal_tail_inline_bytes(),
+                        ))
+            });
+            let tail_caught_up = match tail_fold {
+                TailFold::Folded { tail_caught_up } => tail_caught_up,
+                TailFold::WhenDue { .. } | TailFold::Never => tail_waits == Some(false),
+            };
             let objects = position.map(|position| position.wal_tail_objects());
             return Ok((
                 Some(manifest),
                 objects,
                 WalFoldStepOutcome::NotNeeded,
-                objects == Some(0) && behind.is_none(),
+                tail_caught_up && behind.is_none(),
             ));
         };
         let anchor = self.load_live_anchor(namespace_id).await?;
@@ -355,6 +383,21 @@ impl Compactor {
         };
         let folded = matches!(wal_fold, WalFoldStepOutcome::Folded { .. });
         Ok((None, Some(status.wal_tail_objects), wal_fold, folded))
+    }
+
+    /// Folds the WAL tail when the fold trigger or the idle fold age makes a
+    /// fold due, as a metadata step with `TailFold::WhenDue` does, and
+    /// returns whether the tail that it leaves keeps metadata caught up.
+    ///
+    /// The decision reads the tail from the store, so it suits a writer
+    /// session that has no position, which then compacts with
+    /// `TailFold::Folded`.
+    pub(crate) async fn fold_when_due(&self, namespace_id: &NamespaceId) -> Result<bool> {
+        let tail_fold = TailFold::WhenDue {
+            max_wal_tail_objects: FOLD_AT_WAL_OBJECTS.get(),
+        };
+        let (_, _, _, caught_up) = self.fold_if_due(namespace_id, tail_fold).await?;
+        Ok(caught_up)
     }
 
     /// Runs metadata steps while compaction is due, and `tail_fold` determines

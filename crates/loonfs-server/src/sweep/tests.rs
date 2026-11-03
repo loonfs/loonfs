@@ -765,6 +765,9 @@ async fn a_failing_metadata_call_waits_the_later_of_its_interval_and_its_backoff
     );
     // Keeps collection from coming due while the clock runs for hours.
     config.gc_interval_ms = 30 * DAY_MS;
+    // The tail is due from the first tick, so each metadata call folds it
+    // and reaches the failing store.
+    config.idle_fold_after_ms = Some(1);
     let (store, server, namespace_id, held) =
         held_failing_server(directory.path(), &config, OperationSelector::Any).await;
     store.fail_all();
@@ -824,6 +827,9 @@ async fn an_idle_session_with_a_failing_call_closes_once_its_backoff_reaches_the
     let mut config = sweep_config(None);
     // Keeps collection from coming due while the clock runs for hours.
     config.gc_interval_ms = 30 * DAY_MS;
+    // The tail is due from the first tick, so each metadata call folds it
+    // and reaches the failing store.
+    config.idle_fold_after_ms = Some(1);
     let (store, server, namespace_id, held) =
         held_failing_server(directory.path(), &config, OperationSelector::Any).await;
     let namespaces = &server.sweep.inner.namespaces;

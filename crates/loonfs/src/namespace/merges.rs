@@ -300,13 +300,12 @@ impl Namespace<Writable> {
         if remaining_ms == 0 {
             return;
         }
-        let maintenance = self.maintenance();
         // When the budget runs out first, the dropped fold leaves the segments
         // that it wrote unlisted by any manifest, and garbage collection
         // removes them, as it does the output of an abandoned compaction
         // unit.
         tokio::select! {
-            folded = maintenance.fold_wal(&self.namespace_id) => {
+            folded = self.fold(&self.namespace_id) => {
                 if let Err(error) = folded {
                     tracing::warn!(
                         namespace_id = %self.namespace_id,
@@ -322,6 +321,10 @@ impl Namespace<Writable> {
     /// Folds the WAL tail of `namespace_id`, and returns a strong read of
     /// it at the fold's manifest or a newer one.
     ///
+    /// When this runtime has a writer session for the namespace, the
+    /// session folds the tail after any fold that it's already running, so
+    /// no commit in the tail is folded twice (see [`Self::fold`]).
+    ///
     /// A strong read confirms a namespace's head, but the manifest that the
     /// read starts from is the cached head's, which a runtime checks for a
     /// successor only once per
@@ -334,11 +337,22 @@ impl Namespace<Writable> {
     /// would quietly merge a shorter range. So the fold drops the
     /// namespace's cached head before the read, whether or not it published.
     pub(crate) async fn fold_and_read(&self, namespace_id: &NamespaceId) -> Result<PinnedRead> {
-        self.maintenance().fold_wal(namespace_id).await?;
+        self.fold(namespace_id).await?;
         self.core.invalidate_namespace_read_cache(namespace_id);
         self.core
             .pinned_read(namespace_id, Consistency::Strong)
             .await
+    }
+
+    /// Folds the WAL tail of `namespace_id` through the namespace's writer
+    /// session in this runtime, after any fold that the session is already
+    /// running, or as a maintenance call when this runtime has no session
+    /// for the namespace or the session is fenced.
+    async fn fold(&self, namespace_id: &NamespaceId) -> Result<()> {
+        match self.mode.publisher.fold_through_session(namespace_id).await {
+            Some(folded) => folded,
+            None => self.maintenance().fold_wal(namespace_id).await.map(drop),
+        }
     }
 
     /// Returns a maintenance value that folds as this runtime's writer.

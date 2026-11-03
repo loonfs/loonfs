@@ -1,17 +1,22 @@
 //! Metadata retry, collection, and close costs for held sessions.
 
 use super::{
-    held_ids, idle_fold_after_ms, seed_unfolded_tail, seed_writer, sweep_config, SweepServer,
-    DAY_MS,
+    held_ids, idle_fold_after_ms, seed_unfolded_tail, seed_writer, sweep_config, visit_held,
+    SweepServer, DAY_MS,
 };
+use crate::sweep::retries::SweepCall;
 use crate::sweep::GarbageCollection;
 use loonfs::SharedObjectStore;
 use loonfs_grep::GrepWorkerConfig;
 use loonfs_http::WriterSessions as _;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{namespace_id, writer_id};
-use loonfs_test_support::stores::{KeyPredicate, RecordedOperation, RecordingStore};
+use loonfs_test_support::stores::{
+    BlockingStore, KeyPredicate, MemoryStore, OperationSelector, RecordedOperation, RecordingStore,
+};
 use loonfs_test_support::test_actor;
+use loonfs_types::ChecksumAlgorithm;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -64,15 +69,28 @@ async fn ticks_leave_active_sessions_alone_and_fold_idle_tails_then_cost_nothing
             store.take().is_empty(),
             "a publish less than one tick old stays active"
         );
+        let retry_at_ms = || server.retry(&namespace_id, SweepCall::Metadata).retry_at_ms;
         server.tick_after(config.tick_interval_ms).await;
         assert!(
-            !store.take().is_empty(),
-            "the first tick observes the waiting tail"
+            store.take().is_empty(),
+            "the first tick reads the waiting tail from the session's position"
         );
+        let first_retry_at_ms = retry_at_ms();
         server.tick_after(config.maintenance_interval_ms - 1).await;
-        assert!(store.take().is_empty(), "metadata waits for its retry time");
+        assert_eq!(
+            retry_at_ms(),
+            first_retry_at_ms,
+            "metadata waits for its retry time"
+        );
         server.tick_after(1).await;
-        assert!(!store.take().is_empty(), "unfinished metadata is retried");
+        assert!(
+            retry_at_ms() > first_retry_at_ms,
+            "unfinished metadata is retried"
+        );
+        assert!(
+            store.take().is_empty(),
+            "the retry reads the session's position too"
+        );
         assert!(server.wal_tail_objects(&namespace_id).await > 0);
         server.tick_after(idle_fold_after_ms(&config)).await;
         assert_eq!(server.wal_tail_objects(&namespace_id).await, 0);
@@ -149,6 +167,173 @@ async fn a_tick_leaves_a_tail_below_the_configured_inline_fold_size_until_it_is_
     );
     server.tick_after(idle_fold_after_ms(&config)).await;
     assert_eq!(server.wal_tail_objects(&namespace_id).await, 0);
+    server.runtime.shutdown().await.expect("shutdown");
+}
+
+/// Checks that a tick's metadata step on a held namespace waits for the
+/// fold that the namespace's session is running, instead of folding the same
+/// tail at the same time. The session's fold is parked at its first content
+/// write while the tick runs. Afterward, each content object of the tail has
+/// been written once, and no manifest put has failed its precondition.
+#[tokio::test]
+async fn a_tick_waits_for_the_sessions_fold_instead_of_folding_the_tail_again() {
+    const FILES: usize = 8;
+    const FILE_BYTES: usize = 1024;
+    // The memory store responds at once, so a second fold that ran
+    // alongside the parked one would write its content before the release.
+    let blocking = Arc::new(BlockingStore::new(
+        MemoryStore::new(ChecksumAlgorithm::Crc64nvme),
+        KeyPredicate::content_blob(),
+        OperationSelector::Put,
+    ));
+    let store = Arc::new(RecordingStore::new(blocking.clone(), KeyPredicate::any()));
+    let mut config = sweep_config(None);
+    config.inline_content.inline_content_fold_at_bytes = FILES * FILE_BYTES;
+    let server = SweepServer::start(store.clone(), &config, 0).await;
+    let namespace_id = namespace_id("held-folding");
+    server
+        .runtime
+        .create_namespace(&namespace_id, &test_actor())
+        .await
+        .expect("create");
+    let held = server
+        .sweep
+        .inner
+        .namespaces
+        .open(&namespace_id)
+        .await
+        .expect("open");
+    store.reset();
+    blocking.block_next();
+    for index in 0..FILES {
+        let fill = b'a' + u8::try_from(index).expect("a small index");
+        held.put_file(
+            &format!("/file-{index}"),
+            &[fill; FILE_BYTES],
+            &test_actor(),
+        )
+        .await
+        .expect("publish");
+    }
+    blocking.wait_until_blocked().await;
+    let release = async {
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+        blocking.release();
+    };
+    tokio::join!(server.tick_after(config.tick_interval_ms), release);
+
+    let operations = store.take();
+    let put_keys = |keys: KeyPredicate| -> Vec<String> {
+        operations
+            .iter()
+            .filter(|operation| {
+                matches!(
+                    operation,
+                    RecordedOperation::Put { .. }
+                        | RecordedOperation::PutStreamed { .. }
+                        | RecordedOperation::Assemble { .. }
+                )
+            })
+            .map(RecordedOperation::key)
+            .filter(|key| keys.matches(key))
+            .map(str::to_owned)
+            .collect()
+    };
+    let content_puts = put_keys(KeyPredicate::content_blob());
+    assert_eq!(content_puts.len(), FILES, "{content_puts:#?}");
+    assert_eq!(
+        content_puts.iter().collect::<BTreeSet<_>>().len(),
+        FILES,
+        "{content_puts:#?}"
+    );
+    let manifest_puts = put_keys(KeyPredicate::manifest(&namespace_id));
+    assert_eq!(
+        manifest_puts.iter().collect::<BTreeSet<_>>().len(),
+        manifest_puts.len(),
+        "{manifest_puts:#?}"
+    );
+    assert_eq!(server.wal_tail_objects(&namespace_id).await, 0);
+    assert!(held.metadata_caught_up());
+    server.runtime.shutdown().await.expect("shutdown");
+}
+
+/// Checks that a daily pass leaves a held session that never published
+/// caught up, though its engine has no position, and that the session then
+/// closes once it's idle.
+#[tokio::test]
+async fn a_held_session_that_never_published_closes_after_a_daily_pass() {
+    let directory = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+    let config = sweep_config(None);
+    let server = SweepServer::start(store, &config, 0).await;
+    let namespaces = &server.sweep.inner.namespaces;
+    let namespace_id = namespace_id("never-published");
+    server
+        .runtime
+        .create_namespace(&namespace_id, &test_actor())
+        .await
+        .expect("create");
+    drop(namespaces.open(&namespace_id).await.expect("open"));
+    server
+        .sweep
+        .run_pass(GarbageCollection::Skip)
+        .await
+        .expect("daily pass");
+    assert_eq!(
+        visit_held(namespaces, &namespace_id, |held| held
+            .handle
+            .metadata_caught_up()),
+        Some(true)
+    );
+    server
+        .tick_after(config.idle_session_close_after_ms + 1)
+        .await;
+    assert!(held_ids(namespaces).is_empty(), "the idle session closes");
+    server.runtime.shutdown().await.expect("shutdown");
+}
+
+/// Checks that a held session reaches Quiet after a fork of its namespace,
+/// which folds the session's tail and drops the session's position.
+#[tokio::test]
+async fn a_held_source_is_quiet_after_a_fork_drops_its_position() {
+    let directory = tempdir().expect("tempdir");
+    let store = Arc::new(RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    ));
+    let config = sweep_config(None);
+    let server = SweepServer::start(store.clone(), &config, 0).await;
+    let source = namespace_id("forked-source");
+    server
+        .runtime
+        .create_namespace(&source, &test_actor())
+        .await
+        .expect("create");
+    let held = server
+        .sweep
+        .inner
+        .namespaces
+        .open(&source)
+        .await
+        .expect("open");
+    held.put_file("/note", b"data", &test_actor())
+        .await
+        .expect("publish");
+    server
+        .runtime
+        .fork_namespace(&source, &namespace_id("forked-copy"), &test_actor())
+        .await
+        .expect("fork");
+    assert!(!held.metadata_caught_up());
+    server.tick_after(config.tick_interval_ms).await;
+    assert!(held.metadata_caught_up());
+    store.reset();
+    for _ in 0..20 {
+        server.tick_after(config.tick_interval_ms).await;
+    }
+    assert!(store.take().is_empty(), "a Quiet session costs no requests");
     server.runtime.shutdown().await.expect("shutdown");
 }
 
@@ -251,8 +436,13 @@ async fn ticks_finish_more_than_sixteen_metadata_units_without_another_publish()
     server.runtime.shutdown().await.expect("shutdown");
 }
 
+/// Checks that a session whose compactor another runtime has claimed runs
+/// one compaction unit from its own position, which doesn't show the claim.
+/// The unit reads its inputs and writes its outputs, and then its manifest
+/// put fails. The session waits for the metadata retry interval before it
+/// tries again.
 #[tokio::test]
-async fn a_fenced_compactor_costs_six_requests_and_waits_for_the_retry_interval() {
+async fn a_fenced_compactor_costs_one_unit_and_waits_for_the_retry_interval() {
     let directory = tempdir().expect("tempdir");
     let store = Arc::new(RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
@@ -305,9 +495,34 @@ async fn a_fenced_compactor_costs_six_requests_and_waits_for_the_retry_interval(
     loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)
         .raise_hint_to_current_manifest()
         .await;
+    let current = server
+        .maintenance
+        .diagnostics(&namespace_id)
+        .await
+        .expect("diagnostics")
+        .current_manifest_no;
     store.reset();
     server.tick_after(config.tick_interval_ms).await;
-    assert_eq!(store.take().len(), 6);
+    let manifests = loonfs_objectstore::keys::metadata_manifest_prefix(&namespace_id);
+    let manifest_puts = store
+        .take()
+        .into_iter()
+        .filter(|operation| {
+            matches!(operation, RecordedOperation::Put { key, .. } if key.starts_with(&manifests))
+        })
+        .count();
+    assert_eq!(manifest_puts, 1, "the unit's one manifest put fails");
+    assert_eq!(
+        server
+            .maintenance
+            .diagnostics(&namespace_id)
+            .await
+            .expect("diagnostics")
+            .current_manifest_no,
+        current,
+        "the fenced unit publishes nothing"
+    );
+    store.reset();
     assert!(!held.metadata_caught_up());
     for _ in 0..59 {
         server.tick_after(config.tick_interval_ms).await;

@@ -2,18 +2,19 @@
 //! the publisher make to a namespace.
 
 use super::admission::{AdmissionPermit, PublicationAdmission};
-use super::{lock_state, FoldTrigger, NamespacePublisher, PublisherContext};
+use super::{lock_state, NamespacePublisher, PublisherContext};
 use crate::publish::CommitCandidate;
 use crate::runtime_core::{HeadPositions, ReadPositionSlot, RuntimeCore};
 use crate::trace::phase_event;
 use crate::{
     CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, Error, ErrorCode,
-    MetadataMaintenanceOutcome, Result, SharedObjectStore, WriterState,
+    MetadataMaintenanceOutcome, MetadataMaintenanceResponse, Result, SharedObjectStore,
+    WriterState,
 };
 use futures::future::BoxFuture;
 use loonfs_core::limits::HINT_RAISE_INTERVAL_MS;
 use loonfs_core::publish::{NamespaceCommitEngine, WriterPosition};
-use loonfs_core::{Phase, PublicationReport, PublishedManifest};
+use loonfs_core::{MetadataCompactionCancellation, Phase, PublicationReport, PublishedManifest};
 use loonfs_types::Commit;
 use loonfs_types::{ChangeSeq, ManifestNo, NamespaceId};
 use std::collections::hash_map::Entry;
@@ -207,9 +208,7 @@ impl NamespaceSession {
     }
 
     pub(crate) fn idle_fold_due_at_ms(&self) -> Option<u64> {
-        let published_at_ms = self.last_published_at_ms()?;
-        FoldTrigger::new(self.publisher.context.runtime_core.config())
-            .idle_fold_due_at_ms(published_at_ms)
+        self.publisher.idle_fold_due_at_ms()
     }
 
     pub(crate) fn record_metadata_maintenance(
@@ -223,6 +222,18 @@ impl NamespaceSession {
 
     pub(crate) async fn wait_for_fold(&self) -> Result<()> {
         self.publisher.wait_for_fold().await
+    }
+
+    /// Folds this session's WAL tail when a fold is due, and then runs
+    /// compaction units while compaction is due (see
+    /// [`NamespacePublisher::maintain_metadata_while_due`]).
+    pub(crate) async fn maintain_metadata_while_due(
+        &self,
+        cancellation: &MetadataCompactionCancellation,
+    ) -> Result<MetadataMaintenanceResponse> {
+        self.publisher
+            .maintain_metadata_while_due(cancellation)
+            .await
     }
 
     /// Refuses new work from every handle that shares this session, cancels
@@ -527,6 +538,20 @@ impl PublisherRegistry {
         let publisher = self.live_publisher(namespace_id)?;
         let slot = publisher.lock_engine().await;
         slot.wal_tail_inline_bytes()
+    }
+
+    /// Folds any WAL tail of `namespace_id` through the namespace's writer
+    /// session, after any fold that the session is already running, or
+    /// returns `None` when this runtime has no session for the namespace or
+    /// the session is fenced.
+    pub(crate) async fn fold_through_session(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Option<Result<()>> {
+        let publisher = self
+            .live_publisher(namespace_id)
+            .filter(|publisher| !publisher.session_is_fenced())?;
+        Some(publisher.fold_any_tail().await)
     }
 
     /// Returns the namespace's writer position that reads in this runtime
