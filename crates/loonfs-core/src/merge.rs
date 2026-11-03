@@ -18,8 +18,9 @@ use crate::error::{CoreError, MergeBound, MergeHistory, Result};
 use crate::limits::DIRECT_TRANSFER_URL_TTL_MS;
 use crate::namespace::state::NamespaceReadState;
 use crate::path::read::LoadedMetadataView;
-use crate::path::write::{merge_fingerprint, CommitIntent};
+use crate::path::write::{merge_fingerprint, CommitIntent, PublishPlanningSession};
 use crate::storage::content_admission::PreparedContent;
+use crate::storage::tail_content::ContentWrites;
 use classify::Classifier;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::MergeRecord;
@@ -197,6 +198,15 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// because the move off the temporary name finds the inode and its new
     /// directory by path, and another writer can rename a directory on
     /// either path without changing a row that those preconditions cover.
+    ///
+    /// In a namespace with ACLs, the plan also plans the merge's commit as
+    /// the writer does, against the head that the plan read, and returns the
+    /// writer's error. The writer checks the subject's rights on each
+    /// operation, and it returns `inode_not_found` for an inode on which the
+    /// subject has no rights, the code that it returns for an inode that a
+    /// deletion hid. So a subject's missing rights fail the plan, and the
+    /// commit's `inode_not_found` means that this namespace changed after
+    /// the plan.
     pub async fn plan_merge<F>(
         &self,
         context: &RuntimeReadContext,
@@ -295,11 +305,49 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         )
         .with_merge(record.clone(), fork_point_seq, created_inode_ids)
         .with_temporary_moves(temporary_moves);
+        if conflict.is_none() {
+            self.check_merge_rights(&main, &candidate, prepared_at_ms)
+                .await?;
+        }
         Ok(MergePlan {
             candidate,
             record,
             conflict,
         })
+    }
+
+    /// Plans `candidate` as the writer does, against `main`, in a namespace
+    /// with ACLs, and returns the writer's error. The writer checks the
+    /// subject's rights on each operation against the state that the
+    /// earlier operations leave, so the plan runs the writer's planning
+    /// instead of a copy of its checks. A namespace without ACLs checks no
+    /// rights, so its plan skips this.
+    async fn check_merge_rights(
+        &self,
+        main: &LoadedMetadataView<'_, S>,
+        candidate: &CommitCandidate,
+        prepared_at_ms: u64,
+    ) -> Result<()> {
+        let head = main.head();
+        let authorizer =
+            Authorizer::for_request(&head.namespace_id, &head.access, candidate.authority())?;
+        if matches!(authorizer, Authorizer::Unrestricted) {
+            return Ok(());
+        }
+        PublishPlanningSession::new(
+            head,
+            &main.wal_tail,
+            main.metadata_view(),
+            ContentWrites::new(&self.namespace.store, &self.namespace.content_writes, head),
+            prepared_at_ms,
+        )
+        .prepare_commit(
+            candidate,
+            authorizer,
+            candidate.semantic_identity(&head.namespace_id),
+        )
+        .await
+        .map(drop)
     }
 
     /// Checks that `fork`, read at `fork_context`, is a fork of this

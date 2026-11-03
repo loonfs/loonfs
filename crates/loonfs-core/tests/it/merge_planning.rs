@@ -770,6 +770,54 @@ async fn the_merges_subject_has_to_read_the_forks_change() {
         .expect("an administrator can read it");
 }
 
+/// Checks that the plan checks the merge's subject's rights in `main` as the
+/// writer does, and returns the writer's error itself, so a commit's
+/// `inode_not_found` means a change since the plan. `main` closes `/docs`
+/// to `prn_team` after the fork point, and the fork sets an attribute on
+/// `/docs`. A subject that can merge the rest of the fork has no rights on
+/// `/docs` in `main`, so its plan returns `inode_not_found` for the
+/// attribute update, and an administrator's merge commits.
+#[tokio::test]
+async fn the_plan_returns_the_writers_error_for_the_subjects_missing_rights() {
+    let family = Family::acl().await;
+    family
+        .commit(
+            &family.main,
+            update_access(
+                "/docs",
+                true,
+                grants(&[("prn_other", &[AccessRight::Read])]),
+            ),
+        )
+        .await
+        .expect("close /docs in main");
+    family
+        .commit(&family.fork, set_attribute("/docs", "ours"))
+        .await
+        .expect("fork");
+
+    let team = subject("team", &["prn_team"]);
+    let main = family.engine(&family.main, Some(&team));
+    let fork = family.engine(&family.fork, Some(&team));
+    fork.fold_wal().await.expect("fold the fork");
+    let error = main
+        .plan_merge(
+            &read_context(&family.store, &family.main).await,
+            &fork,
+            &read_context(&family.store, &family.fork).await,
+            &family.request("hidden", None),
+            family.writer.now_ms,
+            family.allowance,
+        )
+        .await
+        .expect_err("the plan checks the subject's rights");
+    assert_eq!(error.code(), ErrorCode::InodeNotFound);
+    family
+        .merge("administrator", None)
+        .await
+        .expect("an administrator merges it");
+}
+
 /// Checks that a merge that would exceed one WAL object fails with
 /// `merge_too_large` before the conflict check, so the error isn't
 /// `merge_conflict` although a create's name conflicts.

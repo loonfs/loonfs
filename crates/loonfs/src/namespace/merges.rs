@@ -280,7 +280,9 @@ impl Namespace<Writable> {
 ///   undeletes.
 ///
 /// A later plan reports a changed row that isn't the fork's own as
-/// `merge_conflict`, such as a `name` conflict for a taken name.
+/// `merge_conflict`, such as a `name` conflict for a taken name. In a
+/// namespace with ACLs, the plan checks the subject's rights as the commit
+/// does, so the commit's `inode_not_found` isn't a subject's missing rights.
 fn is_stale_plan(code: ErrorCode) -> bool {
     matches!(
         code,
