@@ -344,3 +344,65 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
         }
     }
 }
+
+/// Checks that a merge's bound includes the layout that its revision delta
+/// records for each content reference, from the merge's proofs, so the bound
+/// is the merge's planned WAL bytes.
+#[test]
+fn a_merges_bound_includes_the_layouts_of_its_proofs() {
+    let main = NamespaceId::parse("main").expect("namespace");
+    let fork = NamespaceId::parse("main-fork").expect("namespace");
+    let content_ref = ContentRef::blob_v1(
+        ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff").expect("content id"),
+        b"merged",
+        loonfs_types::ChecksumAlgorithm::Crc64nvme,
+    );
+    let layout = loonfs_types::ContentLayout {
+        creator_namespace_id: fork.clone(),
+        extents: (0..3)
+            .map(|offset| loonfs_types::ContentExtent {
+                content_id: content_ref.content_id.clone(),
+                object: loonfs_types::ExtentObject::Whole,
+                offset,
+                length: 1,
+            })
+            .collect(),
+    };
+    let intent = crate::path::write::CommitIntent::single(
+        CommitId::parse("merge").expect("commit id"),
+        loonfs_test_support::test_actor(),
+        None,
+        FilesystemOperation::CreateFileByInode {
+            parent_inode_id: ROOT_INODE_ID,
+            display_name: DisplayName::parse("merged.txt").expect("name"),
+            content: loonfs_types::FileContent::Ref {
+                content_ref: content_ref.clone(),
+                source_namespace_id: None,
+            },
+        },
+    );
+    let merge = |proofs| {
+        CommitCandidate::prepared(intent.clone(), proofs).with_merge(
+            MergeRecord {
+                source_namespace_id: fork.clone(),
+                source_after_seq: ChangeSeq(3),
+                source_through_seq: ChangeSeq(7),
+            },
+            ChangeSeq(3),
+            BTreeMap::from([(
+                0,
+                InodeId::generate(ChangeSeq(4), std::num::NonZeroU32::MIN),
+            )]),
+        )
+    };
+    let proof = crate::storage::content_admission::PreparedContent::for_family_member(
+        main,
+        content_ref,
+        layout,
+        u64::MAX,
+    );
+    assert_eq!(
+        merge(vec![proof]).wal_record_bytes_upper_bound(),
+        merge(Vec::new()).wal_record_bytes_upper_bound() + layout_bytes(3)
+    );
+}

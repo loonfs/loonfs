@@ -96,13 +96,14 @@ pub(crate) struct MemorySizing {
     pub(crate) grep: MemoryTerm,
     pub(super) read_working: MemoryTerm,
     pub(super) admitted: MemoryTerm,
+    pub(super) merge: MemoryTerm,
     pub(super) compaction_input: MemoryTerm,
     compactions: usize,
     serves_grep: bool,
 }
 
 impl MemorySizing {
-    fn terms(&self) -> [(&MemoryTerm, usize); 9] {
+    fn terms(&self) -> [(&MemoryTerm, usize); 10] {
         [
             (&self.segment, 1),
             (&self.manifest, 1),
@@ -112,6 +113,7 @@ impl MemorySizing {
             (&self.grep, usize::from(self.serves_grep)),
             (&self.read_working, 1),
             (&self.admitted, 1),
+            (&self.merge, 1),
             (&self.compaction_input, self.compactions),
         ]
     }
@@ -223,7 +225,9 @@ impl ServerConfig {
         });
         // The budgets of manifests and heads aren't shares of managed memory,
         // because the memory that those entries need depends on the
-        // namespaces, not on the host.
+        // namespaces, not on the host. Nor is the merge allowance, because the
+        // memory that a merge needs depends on the size of the merges that
+        // callers make, not on the host.
         let manifest = MemoryTerm::new(
             "metadata_cache.max_manifest_bytes",
             self.metadata_cache.max_manifest_bytes,
@@ -236,8 +240,18 @@ impl ServerConfig {
             None,
             loonfs::DEFAULT_MAX_HEAD_BYTES,
         );
+        let merge = MemoryTerm::new(
+            "max_merge_bytes",
+            self.max_merge_bytes,
+            None,
+            loonfs::DEFAULT_MAX_MERGE_BYTES,
+        );
         let managed = (limit.unwrap_or(0) as u128).saturating_sub(
-            fixed_bytes + headroom as u128 + manifest.bytes as u128 + head.bytes as u128,
+            fixed_bytes
+                + headroom as u128
+                + manifest.bytes as u128
+                + head.bytes as u128
+                + merge.bytes as u128,
         ) as usize;
         let share =
             |percent: usize| limit.map(|_| (managed as u128 * percent as u128 / 100) as usize);
@@ -292,6 +306,7 @@ impl ServerConfig {
                 share(10),
                 64 * MIB,
             ),
+            merge,
             compaction_input: MemoryTerm::new(
                 "max_compaction_input_bytes",
                 self.max_compaction_input_bytes,

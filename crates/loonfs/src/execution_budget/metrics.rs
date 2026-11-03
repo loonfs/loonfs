@@ -34,6 +34,11 @@ impl ExecutionBudgetInstruments {
                     "Estimated retained bytes of publication requests admitted and not yet settled",
                     &[],
                 ),
+                merges: recorder.register_gauge(
+                    "loonfs.execution_budget.admitted_merges",
+                    "Merges admitted and not yet settled, at most one",
+                    &[],
+                ),
                 rejections: recorder.register_counter(
                     "loonfs.execution_budget.admission_rejections",
                     "Publication requests refused because an admitted total was full",
@@ -103,14 +108,16 @@ impl ExecutionBudgetInstruments {
 pub(crate) struct AdmissionInstruments {
     requests: Arc<dyn GaugeHandle>,
     bytes: Arc<dyn GaugeHandle>,
+    merges: Arc<dyn GaugeHandle>,
     rejections: Arc<dyn CounterHandle>,
 }
 
 impl AdmissionInstruments {
-    pub(crate) fn report(&self, requests: usize, bytes: usize) {
+    pub(crate) fn report(&self, requests: usize, bytes: usize, merges: usize) {
         self.requests
             .set(i64::try_from(requests).unwrap_or(i64::MAX));
         self.bytes.set(i64::try_from(bytes).unwrap_or(i64::MAX));
+        self.merges.set(i64::try_from(merges).unwrap_or(i64::MAX));
     }
 
     pub(crate) fn rejection(&self) {

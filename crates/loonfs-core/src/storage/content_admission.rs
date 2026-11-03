@@ -230,6 +230,17 @@ impl PreparedContent {
         }
     }
 
+    /// Returns the number of extents in the layout that a revision of the
+    /// prepared reference records, or `None` for inline content, whose
+    /// revision records no layout.
+    pub(crate) fn revision_layout_extents(&self) -> Option<usize> {
+        match &self.kind {
+            PreparedContentKind::Inline(_) => None,
+            PreparedContentKind::Staged { .. } => Some(1),
+            PreparedContentKind::Shared { layout, .. } => Some(layout.extents.len()),
+        }
+    }
+
     /// Returns the reference fixed during preparation.
     pub fn content_ref(&self) -> &ContentRef {
         match &self.kind {

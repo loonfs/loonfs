@@ -6,7 +6,7 @@ use loonfs_types::format::wal::{
     cbor_map_bytes, cbor_string_bytes, MergeRecord, WalCommitDelta, WalInlineContent,
 };
 use loonfs_types::{
-    AbsolutePath, AccessRight, ActorId, CommitId, FilesystemOperation,
+    AbsolutePath, AccessRight, ActorId, CommitId, ContentRef, FilesystemOperation,
     MAX_ACCESS_GRANTS_PRINCIPAL_BYTES, MAX_ACCESS_GRANT_ENTRIES, MAX_ACTOR_ID_BYTES,
     MAX_ATTRIBUTES_TOTAL_BYTES, MAX_ATTRIBUTE_ENTRIES, MAX_DISPLAY_NAME_BYTES, MAX_ID_BYTES,
     MAX_NAME_KEY_BYTES,
@@ -141,12 +141,17 @@ fn carried_layout_bytes(deltas: &[WalCommitDelta]) -> usize {
             loonfs_types::format::wal::WalDelta::AppendFileRevision {
                 layout: Some(layout),
                 ..
-            } => bytes
-                .saturating_add(cbor_string_bytes("layout".len()))
-                .saturating_add(LAYOUT_BYTES)
-                .saturating_add(layout.extents.len().saturating_mul(EXTENT_BYTES)),
+            } => bytes.saturating_add(layout_bytes(layout.extents.len())),
             _ => bytes,
         })
+}
+
+/// Bounds a layout of `extents` extents that a revision delta records, with
+/// its field name.
+pub(crate) fn layout_bytes(extents: usize) -> usize {
+    cbor_string_bytes("layout".len())
+        .saturating_add(LAYOUT_BYTES)
+        .saturating_add(extents.saturating_mul(EXTENT_BYTES))
 }
 
 const ATTRIBUTES_BYTES: usize = delta_bytes(
@@ -277,6 +282,39 @@ pub(crate) fn estimated_wal_record_bytes(
         fixed_bytes.saturating_add(inline_bytes),
         |bytes, operation| bytes.saturating_add(operation_bytes(operation)),
     )
+}
+
+/// Bounds a merge's WAL record: its fields, and each operation with the
+/// layout that the operation's revision delta records. `layout_extents`
+/// returns the number of extents in a content reference's layout. A merge
+/// has no inline content or appended bytes, so this is the bound that
+/// [`planned_wal_record_bytes`] computes for the merge, without the deltas.
+pub(crate) fn merge_wal_record_bytes(
+    request: &CommitIntent,
+    merge: &MergeRecord,
+    layout_extents: impl Fn(&ContentRef) -> Option<usize>,
+) -> usize {
+    request.operations.iter().fold(
+        commit_fields_bytes(
+            &request.commit_id,
+            &request.actor_id,
+            request.message.as_deref(),
+            Some(merge),
+        ),
+        |bytes, operation| {
+            let extents = operation.content_ref().and_then(&layout_extents);
+            bytes.saturating_add(merge_operation_bytes(operation, extents))
+        },
+    )
+}
+
+/// Bounds one operation of a merge, with the layout of `layout_extents`
+/// extents that its revision delta records.
+pub(crate) fn merge_operation_bytes(
+    operation: &FilesystemOperation,
+    layout_extents: Option<usize>,
+) -> usize {
+    operation_bytes(operation).saturating_add(layout_extents.map_or(0, layout_bytes))
 }
 
 pub(crate) fn planned_wal_record_bytes(

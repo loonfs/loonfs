@@ -521,15 +521,32 @@ impl CommitCandidate {
     }
 
     /// Bounds the request after inline selection, before carried layouts.
+    /// A merge's bound includes the layout that each of its revision deltas
+    /// records, from the merge's proofs, so it's the merge's planned WAL
+    /// bytes. One WAL object stores the merge alone, and the merge allowance
+    /// is charged a multiple of these bytes.
     pub fn wal_record_bytes_upper_bound_with_inline_content(
         &self,
         inline_content: &[InlineContent],
     ) -> usize {
-        super::super::wal_size::estimated_wal_record_bytes(
-            self.intent(),
-            self.merge.as_ref().map(|merge| &merge.record),
-            inline_content,
-        )
+        let intent = self.intent();
+        match &self.merge {
+            Some(merge) => {
+                let proofs = self.proofs_by_reference();
+                super::super::wal_size::merge_wal_record_bytes(
+                    intent,
+                    &merge.record,
+                    |content_ref| {
+                        proofs
+                            .get(content_ref)
+                            .and_then(|proof| proof.revision_layout_extents())
+                    },
+                )
+            }
+            None => {
+                super::super::wal_size::estimated_wal_record_bytes(intent, None, inline_content)
+            }
+        }
     }
 
     /// Bounds the planned WAL record, which can include layouts that the

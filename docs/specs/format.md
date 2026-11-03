@@ -2479,7 +2479,7 @@ A direct multipart upload is also subject to the provider's transfer limits. The
 
 Attribute limits count the original UTF-8 strings, before JSON escaping or CBOR encoding. Path limits apply to canonical request paths.
 
-A [merge](glossary.md#merge) isn't held to the API's request limits on the number of operations, preconditions, content tokens, and content references, because LoonFS plans a merge itself instead of reading it from a request body. `MAX_WAL_OBJECT_BYTES` bounds a merge instead: LoonFS checks the merge's planned WAL record against it, as it does for every commit, and a merge that exceeds it fails with `merge_too_large`. The reference server's limit on the total estimated bytes of the commit requests it has admitted (`max_admitted_bytes`) bounds a merge too, as the `merge_too_large` row in the API's [Standard error contract](api.md#3-standard-error-contract) describes.
+A [merge](glossary.md#merge) isn't held to the API's request limits on the number of operations, preconditions, content tokens, and content references, because LoonFS plans a merge itself instead of reading it from a request body. `MAX_WAL_OBJECT_BYTES` bounds a merge instead. LoonFS checks the merge's planned WAL record against it, as it does for every commit, and a merge that exceeds it fails with `merge_too_large`. The reference server's merge allowance (`max_merge_bytes`) bounds a merge too. The allowance limits the estimated peak memory of publishing the one merge that the server admits at a time, which the server estimates as three times the merge's planned WAL record, as the `merge_too_large` row in the API's [Standard error contract](api.md#3-standard-error-contract) describes.
 
 ### C.4 Reference-implementation sizing and admission defaults
 

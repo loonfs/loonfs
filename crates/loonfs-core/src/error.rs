@@ -79,7 +79,7 @@ pub enum CoreError {
         max_bytes: usize,
     },
     /// A merge's estimated bytes exceed the WAL object's size or the
-    /// publisher's admitted-bytes total, so no retry can admit it. The caller
+    /// publisher's merge allowance, so no retry can admit it. The caller
     /// merges the fork's commits in smaller ranges.
     #[error("merge is too large: estimated {estimated_bytes} bytes exceeds the limit of {max_bytes} bytes")]
     MergeTooLarge {
