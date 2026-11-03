@@ -2,11 +2,13 @@
 //! retention, and statistics.
 //!
 //! A namespace manifest references the immutable metadata segment runs for one
-//! namespace state. Folding, compaction, and retention publish manifests. The
+//! namespace state, and each extension's entry. Folding, compaction,
+//! retention, and extensions publish manifests. The
 //! segments themselves are in [`crate::segment`], and compaction is in
 //! [`crate::compaction`].
 
 pub(crate) mod error;
+pub(crate) mod extension;
 pub(crate) mod fold;
 pub(crate) mod load;
 pub(crate) mod publish;
@@ -18,6 +20,7 @@ pub(crate) mod tests;
 pub(crate) mod validate;
 
 pub use self::error::ManifestLoadError;
+pub use self::extension::{ExtensionBasis, ExtensionPublication};
 pub use self::fold::{next_run_no_after, FoldWalOutcome, FoldWalResponse, FoldedWalTail};
 pub use self::load::load_position_basis;
 pub(crate) use self::published::same_head;

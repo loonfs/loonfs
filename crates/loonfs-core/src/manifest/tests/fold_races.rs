@@ -23,6 +23,7 @@ enum Rival {
     CompactorClaim,
     Compaction,
     RetentionAdvance,
+    ExtensionPublication,
     Fold(Box<WriterPosition>),
 }
 
@@ -79,6 +80,14 @@ impl Rival {
                 .advance_retention_floor(RetentionTarget::Head)
                 .await
                 .expect("advance the floor");
+            }
+            Self::ExtensionPublication => {
+                let fixture = crate::test_support::NamespaceFixture::new(
+                    store,
+                    namespace_id,
+                    &crate::test_support::writer_at("test-writer", 0),
+                );
+                super::extensions::publish_entry(&fixture, "active").await;
             }
             Self::Fold(input) => {
                 let folded = crate::test_support::namespace_store(store, namespace_id)
@@ -291,6 +300,7 @@ async fn a_fold_that_loses_to_a_compaction_reads_no_wal_object() {
         Rival::Compaction,
         Rival::CompactorClaim,
         Rival::RetentionAdvance,
+        Rival::ExtensionPublication,
     ] {
         let mut writer = Writer::open().await;
         writer

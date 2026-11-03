@@ -357,14 +357,14 @@ namespaces/{namespace_id}/
 ├── uploads/{upload_id}.outcome.json
 ├── content/
 ├── temporary/{temporary_id}
-└── extensions/{extension_name}/...
+└── extensions/{extension_name}/segments/{segment_id}.sst.zst
 ```
 
-Content objects and upload records are stored under the family root's prefix (see [File contents and ownership](#15-file-contents-and-ownership)), so a fork's `content/` and `uploads/` prefixes are empty. Metadata segments stay with the namespace that wrote them. A segment that a fork inherited stays under its owner's prefix, and its descriptor records the owner (`owner_namespace_id`), so readers never substitute the reading namespace into the key. Every newly written segment, including compaction output, is stored under the writing namespace's `segments/` prefix.
+Content objects and upload records are stored under the family root's prefix (see [File contents and ownership](#15-file-contents-and-ownership)), so a fork's `content/` and `uploads/` prefixes are empty. Metadata segments stay with the namespace that wrote them. A segment that a fork inherited stays under its owner's prefix, and its descriptor records the owner (`owner_namespace_id`), so readers never substitute the reading namespace into the key. Every newly written segment, including compaction output, is stored under the writing namespace's `segments/` prefix. An [extension's](#124-extensions) segments follow the same rule under the writing namespace's `extensions/{extension_name}/segments/` prefix.
 
 On providers that build a new object by composing whole objects (such as GCS), an assembly writes temporary objects for the parts it can't compose directly: a range of a source object, new bytes, or an intermediate result. The assembly deletes them when it finishes (see [Immutable writes and retries](#32-immutable-writes-and-retries)).
 
-The key layout is part of the format. Other objects MUST NOT use keys in these families. Core readers and garbage collection don't interpret keys under an extension's prefix.
+The key layout is part of the format. Other objects MUST NOT use keys in these families. Core readers don't read an extension's segments, and garbage collection keeps every key under an extension's prefix other than a segment key.
 
 ### 2.2 Object roles and mutability
 
@@ -374,6 +374,7 @@ The key layout is part of the format. Other objects MUST NOT use keys in these f
 | WAL object | Commits, or a writer fence, after the materialized boundary | A new WAL object is created at the next number. |
 | Hint | A recent manifest number, where discovery starts | Compare-and-swap. The number never decreases. |
 | Metadata segment | Sorted metadata rows that a manifest references | A new immutable object is written. |
+| Extension segment | Sorted rows of an extension's state, which an extension entry in a manifest lists | A new immutable object is written. |
 | Pin | A reference that keeps one manifest for a user or a fork | Created and deleted. A user pin's expiry time can be extended by compare-and-swap. |
 | Upload session | One transfer and its completed content, until a commit uses it or cleanup removes it | A session record and an outcome record, each created once with put-if-absent. |
 | Content object (whole or span) | A range of chain bytes, along with the provider's stored checksum of the whole object | Immutable. |
@@ -474,7 +475,7 @@ To discover a namespace's current state, a reader:
 
 If a successor appeared, or the check in step 4 happened `READ_REVALIDATION_BOUND_MS` or more after the manifest probe, the reader reloads the manifest and starts again. A missing or invalid WAL object also makes the reader reload the manifest, and if the manifest number hasn't changed, the store is corrupt (see [Resolving the metadata basis](#41-resolving-the-metadata-basis) and [Replaying the visible WAL](#42-replaying-the-visible-wal)).
 
-Garbage collection deletes WAL objects at or below the current manifest's `folded_wal_no`, and unpinned manifests below the hint value it observed. It deletes each one only after the object's provider age reaches the reclamation grace (see [Reference roots](#112-reference-roots) and [Candidate and age rules](#113-candidate-and-age-rules)). It keeps a superseded manifest, and every segment in its runs, until the manifest's successor is one grace old. It deletes a metadata segment once no current, pinned, or kept superseded manifest lists it, and the segment is more than 24 hours old.
+Garbage collection deletes WAL objects at or below the current manifest's `folded_wal_no`, and unpinned manifests below the hint value it observed. It deletes each one only after the object's provider age reaches the reclamation grace (see [Reference roots](#112-reference-roots) and [Candidate and age rules](#113-candidate-and-age-rules)). It keeps a superseded manifest, and every segment it lists, until the manifest's successor is one grace old. It deletes a metadata or extension segment once no current, pinned, or kept superseded manifest lists it, and the segment is more than 24 hours old.
 
 Every numbered put has a time budget. A publisher starts each numbered put within a budget of the observation it planned against, and it treats a put that returns after the budget as having an unknown outcome. The reclamation grace is at least the longest budget, plus the provider request bound, plus the clock allowance. Under the provider requirement in [Required operations](#31-required-operations), an object can therefore be deleted only after the provider has applied or rejected every put planned against an observation older than the object (see [Clock and operation assumptions](#114-clock-and-operation-assumptions) and [Publication and collection timing](#c1-publication-and-collection-timing)). Readers have a matching bound. A reader trusts that a manifest has no successor only within `READ_REVALIDATION_BOUND_MS` of the probe that confirmed it (see [Replaying the visible WAL](#42-replaying-the-visible-wal)).
 
@@ -644,7 +645,7 @@ The reader also runs discovery again if an answer to either probe arrives `READ_
 
 An `eventual` warm read (see [Read consistency](api.md#read-consistency)) reads the cached view without a WAL probe or a successor probe while the cached tip was confirmed less than the read's maximum staleness ago. The tip's confirmation time is taken before the WAL probe or the load that confirmed the tip is sent, so the read sees every commit that was acknowledged before then. The read also requires the previous successor probe to be less than `READ_REVALIDATION_BOUND_MS` old. After that, an `eventual` read runs the probes the way a `strong` read does. The reference runtime replaces a cached view only with a newer one, so an `eventual` read never reads an older head than a read that completed before it. When the runtime makes or learns of a change whose effect on the head it can't identify (it creates, forks, or deletes the namespace, a mutation's outcome is unknown, or it finds its writer session fenced), it drops the cached view, and the next read loads the namespace by discovery. A load that started before the drop doesn't install its result, because it might have read the namespace before the change.
 
-In a runtime with an open writer session for the namespace, reads start from the session's [writer position](glossary.md#writer-position) instead of a cached view. The runtime moves the position to each commit before it acknowledges the commit, and to each manifest that it publishes itself (a fold, a compaction, a pin, or a retention advance). A read from the position sends no WAL probe, because another writer has to publish a claim manifest before it can write a WAL object. Instead, the session checks the position with the successor probe. An `eventual` read starts from the position without a probe while the previous successor probe is younger than the read's maximum staleness, and after that it waits for the session's probe. A `strong` read always waits for the session's probe. A probe counts for a read only if it was sent after the read started, and the session runs one probe at a time, so a read that finds a probe running waits for it and then for the next one, which every read that arrives during the first probe shares. The previous successor probe of a new position is the writer's last confirmation of its manifest (see [Publication and group commit](#63-publication-and-group-commit)), or a later probe of the session. If the probe finds a successor, the reader loads the manifests above the position's manifest. While the newest is an active manifest with the position's writer epoch (a fold, a compaction, a pin, or a retention advance, whether this runtime or another process published it), each describes the head the session wrote, so the position moves onto them the way it moves onto the manifests this runtime publishes, and the read starts from the position. The walk that ends on the newest manifest is that manifest's successor probe, so a position that moved onto it records the probe. A manifest with a later writer epoch is another writer's claim, and a tombstone ends the namespace, so the walk stops at either one. The reader then drops the position and runs discovery, and the session's next publish runs discovery too. The reader does the same when the walk finds more than eight manifests above the position's. A read doesn't start from a position whose previous successor probe is `READ_REVALIDATION_BOUND_MS` old or older. The reader drops the position and runs discovery instead, because a probe's answer couldn't confirm the position then. A runtime without the namespace's writer session, or a session that's fenced, closed, or hasn't published yet, reads from a cached view. When a session's position is dropped or the session ends, the position becomes the runtime's cached view of the namespace, so the next read starts from a head at least as new as the reads from the position returned. If the position was dropped because its probe found a successor, or because the session was fenced, the runtime drops that cached view too, and the next read runs discovery.
+In a runtime with an open writer session for the namespace, reads start from the session's [writer position](glossary.md#writer-position) instead of a cached view. The runtime moves the position to each commit before it acknowledges the commit, and to each manifest that it publishes itself (a fold, a compaction, a pin, a retention advance, or an [extension's](#124-extensions) publication). A read from the position sends no WAL probe, because another writer has to publish a claim manifest before it can write a WAL object. Instead, the session checks the position with the successor probe. An `eventual` read starts from the position without a probe while the previous successor probe is younger than the read's maximum staleness, and after that it waits for the session's probe. A `strong` read always waits for the session's probe. A probe counts for a read only if it was sent after the read started, and the session runs one probe at a time, so a read that finds a probe running waits for it and then for the next one, which every read that arrives during the first probe shares. The previous successor probe of a new position is the writer's last confirmation of its manifest (see [Publication and group commit](#63-publication-and-group-commit)), or a later probe of the session. If the probe finds a successor, the reader loads the manifests above the position's manifest. While the newest is an active manifest with the position's writer epoch (a fold, a compaction, a pin, a retention advance, or an extension's publication, whether this runtime or another process published it), each describes the head the session wrote, so the position moves onto them the way it moves onto the manifests this runtime publishes, and the read starts from the position. The walk that ends on the newest manifest is that manifest's successor probe, so a position that moved onto it records the probe. A manifest with a later writer epoch is another writer's claim, and a tombstone ends the namespace, so the walk stops at either one. The reader then drops the position and runs discovery, and the session's next publish runs discovery too. The reader does the same when the walk finds more than eight manifests above the position's. A read doesn't start from a position whose previous successor probe is `READ_REVALIDATION_BOUND_MS` old or older. The reader drops the position and runs discovery instead, because a probe's answer couldn't confirm the position then. A runtime without the namespace's writer session, or a session that's fenced, closed, or hasn't published yet, reads from a cached view. When a session's position is dropped or the session ends, the position becomes the runtime's cached view of the namespace, so the next read starts from a head at least as new as the reads from the position returned. If the position was dropped because its probe found a successor, or because the session was fenced, the runtime drops that cached view too, and the next read runs discovery.
 
 For example, after another writer takes over the namespace, an `eventual` read in the old writer's runtime that starts within its maximum staleness of the position's last successor probe returns the old writer's head. The first `eventual` read after that waits for the session's probe, finds the new writer's claim manifest, and returns the new writer's commits, including any access changes. A `strong` read waits for the probe too, so it finds the claim and returns the new writer's commits on that read.
 
@@ -951,7 +952,7 @@ A writer whose cached tip is more than `WAL_PUBLISH_BUDGET_MS` old confirms the 
 
 After a WAL put whose outcome is unknown, or a publication that's cancelled after its put might have been sent, the writer drops its position. The put might have succeeded, so the position might be missing the writer's own commit. The writer's next publication runs discovery, which finds that commit, and a retry with the same commit ID returns the original result from the commit's receipt (see [Commit identity and retries](#65-commit-identity-and-retries)).
 
-Why check for a manifest successor at all? The check stops a successor that garbage collection already deleted from looking absent. Any successor created after the previous confirmation is kept for at least the revalidation bound, under the grace and clock allowance in [Clock and operation assumptions](#114-clock-and-operation-assumptions). Another writer has to publish a claim manifest before it can write the next WAL number, and a compaction by another process also publishes a successor, so the manifest probe finds both, and the writer runs discovery. A manifest this runtime publishes itself (a fold, a compaction, a pin, or a retention advance) moves the session to it, so the probe doesn't find it as a successor.
+Why check for a manifest successor at all? The check stops a successor that garbage collection already deleted from looking absent. Any successor created after the previous confirmation is kept for at least the revalidation bound, under the grace and clock allowance in [Clock and operation assumptions](#114-clock-and-operation-assumptions). Another writer has to publish a claim manifest before it can write the next WAL number, and a compaction by another process also publishes a successor, so the manifest probe finds both, and the writer runs discovery. A manifest this runtime publishes itself (a fold, a compaction, a pin, a retention advance, or an extension's publication) moves the session to it, so the probe doesn't find it as a successor.
 
 A manifest publication that builds on a manifest it already has relies on the same bound (see [Publishing a materialized file set](#72-publishing-a-materialized-file-set)). If garbage collection had deleted that manifest's successor, the publication's put at the next number would create the deleted number again, beside the newer manifests. If the publication confirmed its manifest less than the bound ago, every manifest after it was published less than a grace ago, so garbage collection still keeps each manifest from the confirmed one upward, a put that succeeds proves that the manifest had no successor, and a missing number above it is the end of the sequence. A publication whose manifest was confirmed longer ago discovers the current manifest through the hint, because garbage collection keeps every manifest at or above the hint value it observed.
 
@@ -1063,9 +1064,9 @@ A namespace manifest describes one complete set of metadata files through `head_
 
 A "run" is the set of segments produced together. Its `run_no` is allocated from the manifest's `next_run_no`, which advances when the run is published. A WAL fold allocates one run number across all the families it writes, and a compaction allocates one run number for its selected family group.
 
-Each run records `run_seq`, `tier`, and its segment descriptors. The manifest's `base_seq` is derived as the smallest `run_seq` among runs with segments, or `head_seq` when no run has segments. A non-empty manifest MUST have a non-empty run at `head_seq`, and no run's sequence can be higher than `head_seq`. An empty manifest describes a new, empty namespace. Within one run, each family's segments follow list order and have strictly separated, ascending key ranges, and every segment contains at least one row. Different runs can overlap, because a later run can contain more rows for the same inode, name slot, or revision history.
+Each run records `run_seq`, `tier`, and its segment descriptors. The manifest's `base_seq` is derived as the smallest `run_seq` among runs with segments, or `head_seq` when no run has segments. A non-empty manifest MUST have a non-empty run at `head_seq`, and no run's sequence can be higher than `head_seq`. An empty manifest describes a new, empty namespace. (Its next run number can be above zero, because an [extension](#124-extensions) can allocate run numbers before the first fold.) Within one run, each family's segments follow list order and have strictly separated, ascending key ranges, and every segment contains at least one row. Different runs can overlap, because a later run can contain more rows for the same inode, name slot, or revision history.
 
-A manifest MUST NOT contain duplicate run numbers, or a run number at or above `next_run_no`. A family's segment ranges MUST NOT overlap or descend, and a metadata producer MUST NOT write the same logical row key twice within one run.
+A manifest MUST NOT contain two runs with the same number, or a run number at or above `next_run_no`. The rule covers the metadata runs and every [extension's](#124-extensions) runs together, because `next_run_no` allocates all of their numbers. A family's segment ranges MUST NOT overlap or descend, and a metadata producer MUST NOT write the same logical row key twice within one run.
 
 Metadata rows describe immutable facts at specific positions. Reads combine those rows and apply the visibility rules, instead of choosing between conflicting values for one row key. The two directory binding indexes (by parent and name, and by child) contain the same binding events in different orders, and the slot index also contains summary rows. Manifest validation checks that each run's slot index has at least as many rows as its child index, and compaction checks that the binding events of its selected input runs agree row by row. The `commits` and `commit_receipts` families contain one row each per retained commit, and manifest validation checks that each run has the same number of rows in both.
 
@@ -1088,6 +1089,7 @@ The first manifest of a namespace has these values:
 | Head sequence, retention floor, and acknowledged floor | 0 | The pinned source sequence |
 | Base sequence | 0 | Derived from the inherited runs |
 | Next run number | 0 | The source's |
+| Extensions | None | The pinned source manifest's |
 
 A fold works in these steps:
 
@@ -1097,13 +1099,13 @@ A fold works in these steps:
 4. Write new metadata segments for the WAL objects after `folded_wal_no`, including the new layout rows. A fence is folded even when the sequence doesn't change, and an ordinary fold writes a run at the head when it materializes new state.
 5. Publish the next manifest, with `folded_wal_no` set to the tip it captured and `acknowledged_floor_seq` raised to the highest `basis_floor_seq` of the objects it folds (see [Advancing the retention floor](#101-advancing-the-retention-floor)), using put-if-absent at the predecessor's `manifest_no + 1`.
 
-A fold is a publication by the namespace's "maintainer", the role that folds, compacts, advances the retention floor, and collects garbage, while the writer session commits and deletes the namespace. A fold publishes under the current compactor epoch without claiming it, and it copies the predecessor's writer and compactor epochs forward, so it doesn't need a writer epoch, and any process can run one. One `METADATA_PUBLICATION_BUDGET_MS` deadline covers the whole call, including rebuilds.
+A fold is a publication by the namespace's "maintainer", the role that folds, compacts, advances the retention floor, publishes an extension's entry, and collects garbage, while the writer session commits and deletes the namespace. A fold publishes under the current compactor epoch without claiming it, and it copies the predecessor's writer and compactor epochs forward, so it doesn't need a writer epoch, and any process can run one. One `METADATA_PUBLICATION_BUDGET_MS` deadline covers the whole call, including rebuilds.
 
 Every manifest publication builds on a manifest it has, its "basis". A publication whose basis was confirmed current less than `READ_REVALIDATION_BOUND_MS` ago puts its manifest at the basis's number plus one with put-if-absent, with no request before the put. (A writer session's own fold, compaction, or deletion builds on the manifest of the session's [writer position](glossary.md#writer-position), a fold call builds on the manifest that its discovery found, and a compaction or a retention advance builds on the manifest it planned from.) A put that succeeds proves that the basis had no successor, because within the bound garbage collection hasn't deleted any manifest above it (see [Publication and group commit](#63-publication-and-group-commit)). If the put loses, the publication finds the manifest that won by probing above its basis, the way discovery probes above the hint (see [A summary of the log protocol](#26-a-summary-of-the-log-protocol)), without reading the hint, and the next attempt builds on the winner with the losing attempt's confirmation. The manifest that won was published after that confirmation, so it also had no successor at that time.
 
 A publication without a basis, or whose basis was confirmed `READ_REVALIDATION_BOUND_MS` ago or longer, or whose probe answers arrive that long after the confirmation, discovers the current manifest through the hint (see [Resolving the metadata basis](#41-resolving-the-metadata-basis)). Each publication attempt records the time before its first request as the confirmation of the manifest it finds. For example, a session's fold whose position is on manifest 40, confirmed a second ago, puts manifest 41 with no request first. If another process has published 41 and 42, the put loses, the fold finds 42 by probing above 40, and it builds on 42.
 
-A fold builds on its basis, finds the current manifest again if its put loses, and then checks whether its work is already covered. The fold is covered if the current manifest's `folded_wal_no` is at least the fold's captured tip, and the current manifest's head sequence and manifest number are at least the fold's own. A covered fold is finished (coverage includes the WAL position, not just the sequence). Otherwise, the fold rebuilds against the new predecessor, and it uses that predecessor's epochs. The rebuild can keep the WAL tail the fold already read when the new predecessor is different from the fold's own only in its number, compactor epoch, retention floor, retention window, runs, and next run number, and it has runs exactly when the fold's own predecessor has runs. A compactor claim, a compaction, a retention advance, and a retention window change publish that kind of manifest. After any other manifest, the rebuild reads the tail again, above the new `folded_wal_no`. (A compaction that loses its put also requires its selected inputs to still be valid.)
+A fold builds on its basis, finds the current manifest again if its put loses, and then checks whether its work is already covered. The fold is covered if the current manifest's `folded_wal_no` is at least the fold's captured tip, and the current manifest's head sequence and manifest number are at least the fold's own. A covered fold is finished (coverage includes the WAL position, not just the sequence). Otherwise, the fold rebuilds against the new predecessor, and it uses that predecessor's epochs. The rebuild can keep the WAL tail the fold already read when the new predecessor is different from the fold's own only in its number, compactor epoch, retention floor, retention window, runs, next run number, and extension entries, and it has runs exactly when the fold's own predecessor has runs. A compactor claim, a compaction, a retention advance, a retention window change, and an [extension's](#124-extensions) publication publish that kind of manifest. After any other manifest, the rebuild reads the tail again, above the new `folded_wal_no`. (A compaction that loses its put also requires its selected inputs to still be valid.)
 
 A fold that rebuilds after another writer's claim folds the new writer's log. The old writer session's [writer position](glossary.md#writer-position) doesn't move onto that fold's manifest, as described in [Replaying the visible WAL](#42-replaying-the-visible-wal), and the old session finds that it's fenced at its next commit.
 
@@ -1192,7 +1194,7 @@ A fork inherits the source manifest's segment descriptors, so its footprint valu
 
 To meter usage, an application compares two observations of the same namespace, and it keeps its own billing cursors and policy. The counters are public integers, within the bound in the API specification. Exceeding that bound is an error, and a counter that decreases is corruption.
 
-Grep reports its own referenced segment bytes (see [Appendix D](#appendix-d-grep-extension-format)), and its manifest and indexing position are separate from the core observation. A new fork starts without an index, and a failed index read MUST NOT be reported as zero bytes.
+Extension segments aren't metadata segments, so neither footprint value counts them, and `segments_by_family` doesn't list them. An extension's position, such as grep's indexing position, is recorded in its entry (see [Extensions](#124-extensions)).
 
 ## 8. Pins
 
@@ -1244,7 +1246,7 @@ A read through a pin takes the manifest number from the ID, confirms that the pi
 
 Explicit deletion looks up the pin and deletes a user pin. Deleting an ID with no pin succeeds without a write, so a retried deletion returns the same result as the first one. Fork pins can't be deleted explicitly, and their IDs return `snapshot_not_found`. [Reference roots](#112-reference-roots) defines which pins protect manifests from garbage collection, and [Retirement](#95-retirement) defines when a deleted namespace can be retired.
 
-Why can a read use a fork pin? A fork pin keeps the source's manifest at the fork point for as long as the fork exists, even after the source's retention floor passes the fork point, so a read through it sees the state that the fork started from. A [rebase](glossary.md#rebase) reads the source through its new fork's pin. So does the program that resolves the rebase's conflicts, to read the version of each conflicting file that the replayed fork started from. A fork pin can't be forked or extended, because only a snapshot has a lifetime that a caller controls.
+Why can a read use a fork pin? A fork pin keeps the source's manifest at the fork point for as long as the fork exists, even after the source's retention floor passes the fork point, so a read through it sees the state that the fork started from. A [rebase](glossary.md#rebase) reads the source through its new fork's pin. So does the program that resolves the rebase's conflicts, to read the version of each conflicting file that the replayed fork started from, and so does grep, to read the source's commits that a fork's inherited index doesn't cover (see [Index lifecycle](#d2-index-lifecycle)). A fork pin can't be forked or extended, because only a snapshot has a lifetime that a caller controls.
 
 ### 8.4 Extending a pin
 
@@ -1272,7 +1274,7 @@ A fork starts its own history from the source's retained metadata. To create one
 
 1. Loads the target's current manifest before it writes a source pin, and continues only if the target doesn't exist. It then creates a verified source pin whose owner is the target namespace, either from the source's head or from an unexpired user pin (see [Creating and verifying a pin](#82-creating-and-verifying-a-pin)).
 2. Loads and verifies the pinned manifest.
-3. Copies the pinned manifest's run references, head sequence, next run number, access configuration, family root, and retention window. The inherited runs determine the same base sequence. The fork's retention floor and acknowledged floor are both the pinned manifest's head sequence (see [Advancing the retention floor](#101-advancing-the-retention-floor)). Every segment keeps its owner. The fork basis is set to the pinned manifest reference and the source pin's ID. The fork basis of a fork that a [rebase](glossary.md#rebase) creates also records `rebased_from`, as described below.
+3. Copies the pinned manifest's run references, head sequence, next run number, access configuration, family root, retention window, and [extension](#124-extensions) entries. The inherited runs determine the same base sequence. The fork's retention floor and acknowledged floor are both the pinned manifest's head sequence (see [Advancing the retention floor](#101-advancing-the-retention-floor)). Every segment keeps its owner. The fork basis is set to the pinned manifest reference and the source pin's ID. The fork basis of a fork that a [rebase](glossary.md#rebase) creates also records `rebased_from`, as described below.
 4. Builds the rest of the first manifest's fields (see [Publishing a materialized file set](#72-publishing-a-materialized-file-set)) and installs it (see [Creating a namespace](#91-creating-a-namespace)).
 
 The fork copies no file bytes or metadata segments. Its first commit is one sequence above its initial head. The fork can itself be forked right away, because its manifest already lists its inherited runs.
@@ -1288,8 +1290,8 @@ A losing manifest 1 put goes back to the existing-state checks in [Creating a na
 A confirmed precondition failure is a conflict. After a put with an unknown transport outcome, the publisher reads the manifest at that number:
 
 - Another manifest there is a conflict.
-- Identical bytes confirm the attempt's own success only when the manifest refers to an object that's unique to that attempt. A fork's first manifest refers to its source pin, and a manifest that lists a segment its predecessor doesn't list refers to a segment that this attempt wrote.
-- Every other manifest (a plain create, a compactor claim, a writer acquisition, or a namespace tombstone) can be rebuilt byte for byte by another publisher. Identical bytes count as the current manifest, and the attempt retries from it.
+- Identical bytes confirm the attempt's own success only when the manifest refers to an object that's unique to that attempt. A fork's first manifest refers to its source pin, and a manifest that lists a metadata or extension segment that its predecessor doesn't list refers to a segment that this attempt wrote. (An [extension's](#124-extensions) publication usually lists a segment it wrote.)
+- Every other manifest (a plain create, a compactor claim, a writer acquisition, a namespace tombstone, or an extension's publication that lists no new segment) can be rebuilt byte for byte by another publisher. Identical bytes count as the current manifest, and the attempt retries from it, but an extension's publication publishes nothing more, because that manifest's entry is no longer the one that the change built on (see [Extensions](#124-extensions)).
 - Identical bytes count only if the read-back returns within the publication budget (see [Clock and operation assumptions](#114-clock-and-operation-assumptions)). Identical bytes read back after the budget, or a number that's still missing, end the call with an unknown outcome, and a later call starts from the current state.
 
 Why don't identical bytes always prove success? Two publishers can build exactly the same manifest from the same predecessor (for example, two plain creates with the same request), so finding identical bytes doesn't show which one wrote them. Only a manifest that refers to something this attempt created, such as a new pin or a new segment, proves that the attempt succeeded.
@@ -1542,7 +1544,7 @@ A garbage collection pass first establishes the roots. It:
 
 If the namespace's own current manifest is invalid or unreadable, the pass stops before anything is deleted. If another member's current manifest is invalid or unreadable, only the fork family's content sweep stops, and the rest of the pass continues (see [Content roots](#119-content-roots)). An absent namespace has nothing for core garbage collection to delete.
 
-A pass on a fork collects its manifests, WAL objects, segments, pins, and temporary objects. Content objects and upload records are stored under the family root's prefix, so the pass on the family root collects them for the whole fork family, with roots gathered from every member (see [Content roots](#119-content-roots)).
+A pass on a fork collects its manifests, WAL objects, metadata and extension segments, pins, and temporary objects. Content objects and upload records are stored under the family root's prefix, so the pass on the family root collects them for the whole fork family, with roots gathered from every member (see [Content roots](#119-content-roots)).
 
 The pass then lists each candidate family completely, from the beginning. Unless its shared base filter would be larger than its limit (see [Content roots](#119-content-roots)), it sweeps content one ID shard at a time, where a shard is the content IDs whose first characters after `con_` are the same. The exact sets of content roots use read working memory for one shard, plus the tail and session IDs. Shared base keys use a Bloom filter, with its own 64 MiB limit. The pass stores no durable progress, run, phase, reference table, or cursor. The complete pin and session listings that establish the roots are separate from the later sweeps that determine which records can be deleted.
 
@@ -1552,12 +1554,14 @@ Every age decision in a pass uses the same `now_ms`, captured when the pass star
 
 | Evidence captured for the pass | Objects protected |
 | --- | --- |
-| The current active manifest | The manifest, and every segment in its runs. |
-| The current deleted manifest (the namespace tombstone) | The tombstone, and every segment in its runs. |
+| The current active manifest | The manifest, and every segment it lists. |
+| The current deleted manifest (the namespace tombstone) | The tombstone, and every segment it lists. |
 | Every recognized pin key in the complete listing | The manifest numbered in its ID, and every segment in that manifest. |
-| Every manifest below the current one whose immediate successor is younger than the ordinary grace `T` | The manifest, and every segment in its runs. |
+| Every manifest below the current one whose immediate successor is younger than the ordinary grace `T` | The manifest, and every segment it lists. |
 | The hint's observed manifest number | Every manifest number at or above it, so discovery can probe forward. (This root doesn't protect their runs.) |
 | The current active manifest's folded boundary | Every WAL number above `folded_wal_no`. |
+
+The segments that a manifest lists are the segments of its runs and the extension segments of its `extensions` entries (see [Extensions](#124-extensions)). A tombstone's entries list no segments.
 
 Pin bodies aren't needed to identify these roots, because the manifest number is part of the pin key. Bodies are normally read later, for owner and expiry decisions. If a pin's manifest is missing, the collector reads the pin and applies the same owner and grace rules as pin cleanup. An absent or collectable pin doesn't require that missing basis, which allows recovery from a failed installation cleanup or a concurrent pin removal. A retained pin that refers to a missing manifest is corruption, and invalid or unreadable manifests still fail the pass. Each listed pin whose manifest is present protects its files for the whole pass, even if that pass deletes the pin.
 
@@ -1567,7 +1571,7 @@ The tombstone keeps its runs, so an import from a deleted namespace can still be
 
 A retention floor can move past a pinned manifest's head sequence, and that doesn't remove the pin's protection. Reads through the pin use the pinned file set directly.
 
-Why keep a superseded manifest for one grace? A reader or writer confirms its view with a successor check that finds the next manifest number missing, so that successor is created no earlier than the check. The view's manifest, and every segment in its runs, therefore stay for at least one grace after the check. A reader revalidates within `READ_REVALIDATION_BOUND_MS` of its previous check, and the writer confirms its basis at least once per `WAL_PUBLISH_BUDGET_MS` (see [Replaying the visible WAL](#42-replaying-the-visible-wal) and [Publication and group commit](#63-publication-and-group-commit)). Both bounds are below the grace, and the clock allowance in [Clock and operation assumptions](#114-clock-and-operation-assumptions) is the margin. The writer can use its basis for up to twice `WAL_PUBLISH_BUDGET_MS` after confirming it, because a batch planned when the basis is a budget old can still start its put up to a budget later, and twice the budget plus the provider request bound and the clock allowance is also below the grace.
+Why keep a superseded manifest for one grace? A reader or writer confirms its view with a successor check that finds the next manifest number missing, so that successor is created no earlier than the check. The view's manifest, and every segment it lists, therefore stay for at least one grace after the check. A reader revalidates within `READ_REVALIDATION_BOUND_MS` of its previous check, and the writer confirms its basis at least once per `WAL_PUBLISH_BUDGET_MS` (see [Replaying the visible WAL](#42-replaying-the-visible-wal) and [Publication and group commit](#63-publication-and-group-commit)). Both bounds are below the grace, and the clock allowance in [Clock and operation assumptions](#114-clock-and-operation-assumptions) is the margin. The writer can use its basis for up to twice `WAL_PUBLISH_BUDGET_MS` after confirming it, because a batch planned when the basis is a budget old can still start its put up to a budget later, and twice the budget plus the provider request bound and the clock allowance is also below the grace.
 
 ### 11.3 Candidate and age rules
 
@@ -1578,7 +1582,7 @@ Being unreferenced makes an object a candidate for deletion, but it doesn't make
 | Namespace manifest | Below the observed hint, not a root (see [Reference roots](#112-reference-roots)), and a provider age of at least `T`. |
 | WAL object in an active namespace | At or below `folded_wal_no`, and a provider age of at least `T`. |
 | WAL object in a deleted namespace | A provider age of at least `T` (no current WAL object is protected). |
-| Metadata segment | No root lists it, and its provider age is strictly greater than 24 hours. |
+| Metadata or extension segment | No root lists it, and its provider age is strictly greater than 24 hours. |
 | Pin record | The owner-specific rules in [Pin cleanup](#117-pin-cleanup). |
 | Upload session | The status-specific rules in [Upload-session cleanup](#116-upload-session-cleanup). |
 | Content object under a family root's prefix | No content root in the fork family refers to it (see [Content roots](#119-content-roots)), and a provider age of at least `T`. |
@@ -1618,7 +1622,7 @@ A collector protects every WAL number above its captured folded boundary. Writer
 
 Readers have the matching obligation. A cold discovery trusts a missing successor only if the answer arrives within `READ_REVALIDATION_BOUND_MS` of its manifest probe, and a cached view trusts its probe answers only if they arrive within that bound of its previous successor probe (see [Replaying the visible WAL](#42-replaying-the-visible-wal)). Metadata segments have the matching guarantee. A view that revalidates within its bound never lists a deleted segment, because its manifest was current at its last successor check, and it stays a root for at least one grace after its successor appeared (see [Reference roots](#112-reference-roots)).
 
-New metadata segments are protected by their minimum age while a publisher writes and verifies them. Streaming compaction MUST start its publication before its budget expires, and every compaction checks its epoch and its selected inputs. These rules apply to output that isn't yet listed by a root the pass captured earlier.
+New metadata and extension segments are protected by their minimum age while a publisher writes and verifies them. Streaming compaction MUST start its publication before its budget expires, and every compaction checks its epoch and its selected inputs. These rules apply to output that isn't yet listed by a root the pass captured earlier.
 
 A failed read of a required root stops garbage collection, and an uncertain read of a fork's target keeps that pin. Each cleanup operation MUST keep the durable evidence it needs to retry after a failure.
 
@@ -1803,7 +1807,7 @@ Versions work like this:
 - A metadata segment is a separate object. Its descriptor's `encoding` is the segment's own version, and it covers both the block layout ([Block-segment encoding](#a7-block-segment-encoding)) and the row-kind schema ([Metadata rows and row keys](#a6-metadata-rows-and-row-keys)). Each segment has its own encoding, so one manifest can list segments of different encodings, and compaction migrates the rows it rewrites to the encoding of the segments it writes. The encoding isn't a version of the manifest payload (the manifest's version governs the descriptor itself).
 - A `commit` row contains the deltas of its WAL commit record, so the `commits` family's encoding changes whenever the WAL delta vocabulary changes.
 - A reader rejects a manifest that refers to an encoding it doesn't support, before it opens any segment.
-- Grep segments are interpreted under the version of the grep manifest that references them.
+- An extension's segments are interpreted under the `version` of the extension entry that lists them (see [Extensions](#124-extensions)).
 - A name such as `blob_v1` identifies a closed content strategy, and it isn't permission to ignore the owning family's version.
 
 After the stable format is released, a change to a field's name, presence, type, tag, encoding, or governed meaning requires a new version of the owning family. A change to the garbage collection protocol can require a version gate, even when most stored fields stay the same. An implementation MUST NOT operate on a newer protocol just because it can deserialize some of its fields. This rule applies to every role that changes durable state: publishing a successor manifest or WAL object, compacting, creating or changing pins, advancing retention, garbage collection, and maintaining an extension. Each of those roles loads the current manifest before it publishes, or is fenced by the epoch that a newer binary claims when it first publishes, and an unsupported version is rejected when it's loaded. So a process that was running when a newer version was published stops changing durable state at its next publication attempt, and a garbage collection pass stops at its next start.
@@ -1816,15 +1820,34 @@ Golden fixtures pin the reference encodings in `crates/loonfs-types/tests/golden
 
 ### 12.4 Extensions
 
-An optional derived subsystem, such as grep, stores its objects under:
+This section describes how an extension stores its state in a namespace and in the namespace's manifests.
+
+An "extension" is an optional subsystem that keeps state derived from a namespace's committed metadata and content, such as the grep index. An extension's state needs the same three mechanisms as metadata runs: publishing a new version of the state, keeping the version that a pin or a fork refers to, and collecting the objects that no version lists. The core manifest already provides all three for metadata runs, so an extension lists its state in the core manifest instead of keeping manifests of its own.
+
+The manifest's `extensions` member maps each extension's name to the extension's "entry". A name is 1 to 64 lowercase ASCII letters, digits, or underscores, and it starts with a letter (for example, `grep`). An entry is a JSON object, and core reads two of its members:
+
+- `version` is the version of the extension's format, which governs the entry's other members and the rows of the extension's segments.
+- `runs` lists the extension's runs, each with its run number, its level, and its segment descriptors (see [Control and manifest payloads](#a4-control-and-manifest-payloads)).
+
+Core copies the entry's other members unchanged, as JSON values that it doesn't interpret, and the extension's own specification defines them. An extension's segments are stored under the prefix of the namespace that wrote them:
 
 ```text
-namespaces/{namespace_id}/extensions/{name}/
+namespaces/{owner_namespace_id}/extensions/{extension_name}/segments/{segment_id}.sst.zst
 ```
 
-An extension defines its own object grammar, versions, discovery and publication rules, and garbage collection rules. Core manifests contain no generic extension registry and no extension-state fields. Core reads don't require support for an extension's encoding, and core garbage collection doesn't delete extension objects.
+Core handles an entry like this:
 
-An extension MUST stay rebuildable from authoritative core state, and its absence can't make the core namespace unreadable. [Appendix D](#appendix-d-grep-extension-format) specifies the grep extension, including its manifest, tokenizer, postings, and garbage collection.
+- **Publication.** Every publication copies the `extensions` map forward unchanged, except a namespace tombstone, which copies each entry with its `runs` emptied. An extension publishes a change to its entry in a manifest of its own, which changes only that entry and `next_run_no`. The publication is a maintainer publication under the current compactor epoch, without a claim (see [Publishing a materialized file set](#72-publishing-a-materialized-file-set)). The change's new runs are numbered from the `next_run_no` of the manifest that the change is published over, as a compaction's run is. If another publication puts a manifest at the next number first, and that manifest's entry for the extension is the one that the change built on, the change is rebuilt over that manifest. Two manifests without an entry for the extension count as having the same entry. If the entry changed, the change publishes nothing, and the extension plans its next change from the current manifest.
+- **Validation.** Core checks that each run's number is below the manifest's `next_run_no` and differs from the number of every other run in the manifest, metadata or extension. Core also checks that an entry's segment IDs are unique, and that each segment descriptor has rows, a key range, and the block layout of a metadata segment descriptor. Core never reads an extension's segments.
+- **Collection.** Garbage collection applies the segment rule to extension segments, so an extension segment is collected once no current, pinned, or kept superseded manifest lists it, and it's more than 24 hours old (see [Candidate and age rules](#113-candidate-and-age-rules)). Garbage collection keeps every other key under an extension's prefix.
+
+A fork's first manifest copies the pinned manifest's `extensions` map, as it copies the runs, without reading an entry. Each inherited segment keeps its owner, so it stays in the source's prefix, and the fork pin protects it until the fork is retired, as the pin protects an inherited metadata segment. The extension's specification defines what an inherited entry means in the fork.
+
+An extension MUST stay rebuildable from authoritative core state, and its absence can't make the core namespace unreadable. A core reader doesn't read an extension's segments, so it doesn't need to support the extension's version. [Appendix D](#appendix-d-grep-extension-format) specifies the grep extension, including its entry, tokenizer, and postings.
+
+Why is a change that lost its put rebuilt over the manifest that won only when the entry is the one it built on? The change was planned from the extension's entry in the manifest that it built on. A fold, a compaction, a claim, or a retention advance copies that entry unchanged, so the change is still valid over the manifest that won. Core's own publishers rebuild over a winner in the same way when their work is still valid. The change's new runs are numbered from the winner's `next_run_no`, so they can't share a number with a run that the winner lists. If the entry changed, another process planned a change from a different state. A change rebuilt over that entry would publish a state that the extension didn't plan, so the change publishes nothing, and the next change is planned from the winner.
+
+Why does a tombstone empty an entry's runs? A deleted namespace has no reads that need the extension's state, so the extension's segments become unlisted objects that later garbage collection passes collect once they're more than 24 hours old. The entry's other members stay, so the tombstone still records the extension's last state. The extension doesn't read a tombstone's entry, so those members needn't stay valid together without the runs. A pin on an earlier manifest keeps the segments that the pinned manifest lists.
 
 ### 12.5 Reserved functionality
 
@@ -1868,9 +1891,7 @@ There are four kinds of control object: `hint`, `pin`, `upload_session`, and `up
 | Upload session record | `upload_session` | Uncompressed JSON | 1 |
 | Upload outcome record | `upload_outcome` | Uncompressed JSON | 1 |
 | Content object | No envelope | Immutable extent bytes | Not versioned. A layout lists the whole and span objects for a `blob_v1` chain prefix. |
-| Grep hint | `grep_hint` | Uncompressed JSON | 1 |
-| Grep manifest | `grep_manifest` | Uncompressed JSON | 2 |
-| Grep segment | No envelope | Block sections with grep rows | Governed by grep manifest version 2 |
+| Grep segment | No envelope | Block sections with grep rows | 2, given by the grep entry's `version` |
 
 ### A.2 Envelope layout
 
@@ -1983,6 +2004,7 @@ A namespace manifest contains:
 | `retention_floor_seq` | The earliest sequence covered by incremental replay and row retention. |
 | `acknowledged_floor_seq` | The highest `basis_floor_seq` of the WAL objects folded into the manifest, at most `retention_floor_seq` (see [Advancing the retention floor](#101-advancing-the-retention-floor)). |
 | `runs` | The complete list of materialized metadata runs. |
+| `extensions?` | Each [extension's](#124-extensions) entry, under the extension's name, left out when the manifest has none. |
 
 A run contains `run_no`, `run_seq`, `tier`, and `segments`, and its tier is `delta` or `base`. A segment descriptor contains:
 
@@ -1997,7 +2019,18 @@ A run contains `run_no`, `run_seq`, `tier`, and `segments`, and its tier is `del
 | `index_block`, `filter_block` | The index and filter handles. |
 | `filter_inline?` | The exact stored filter bytes, as lowercase hexadecimal. |
 
-`base_seq` is the oldest non-empty run's sequence, or `head_seq` when there's no such run, and it isn't stored. Segments follow their list order within each family. The owner and segment ID determine the object key, and the descriptor stores no separate path or compaction-job identity.
+An extension entry contains `version`, `runs`, and the members that the extension's specification defines, which core copies without interpreting them. The entry's `runs` lists the extension's runs in list order. A run contains `run_no`, which is allocated from the manifest's `next_run_no`, `level`, which only the extension interprets, and `segments`, the run's segment descriptors in list order. An extension segment descriptor contains:
+
+| Field | Meaning |
+| --- | --- |
+| `owner_namespace_id` | The namespace that stores the segment. |
+| `segment_id` | The segment's immutable generated identity, with the `idx_` prefix. |
+| `row_count` | A positive number of stored rows. |
+| `min_row_key`, `max_row_key` | The inclusive key range. |
+| `index_block`, `filter_block` | The index and filter handles. |
+| `filter_inline?` | The exact stored filter bytes, as lowercase hexadecimal. |
+
+`base_seq` is the oldest non-empty run's sequence, or `head_seq` when there's no such run, and it isn't stored. Extension runs don't count toward it. Segments follow their list order within each family. The owner and segment ID determine the object key, and the descriptor stores no separate path or compaction-job identity.
 
 `MAX_NAMESPACE_MANIFEST_BYTES` is 512 MiB (536,870,912 bytes) for the complete decompressed manifest document, including its envelope. Readers refuse larger documents, and a publication whose manifest document would be larger fails before its put. A manifest lists every segment of its namespace, so this limit also caps how much metadata a namespace can have. (A namespace of one million files has a manifest document of about 193 KiB, so the limit is reached at about 2.7 billion files.) This is a format constraint, because every published manifest MUST stay readable with bounded decompression.
 
@@ -2179,7 +2212,7 @@ A segment is a concatenation of independently readable sections:
 
 There's no segment header or footer. The manifest descriptor provides the filter and index handles, and the index provides the data-block handles, so a segment can't be opened from its own bytes without the descriptor.
 
-A metadata segment descriptor's `encoding` is the version of this layout and of the rows its data blocks contain. Grep segments take their version from the grep manifest that references them.
+A metadata segment descriptor's `encoding` is the version of this layout and of the rows its data blocks contain. Grep segments take their version from the grep entry that lists them.
 
 Each handle is an encoded object with these fields:
 
@@ -2257,6 +2290,7 @@ These patterns define the core object families. A segment's owner can be differe
 | Namespace manifests | `namespaces/{namespace_id}/manifests/{manifest_no:020}.json.zst` |
 | Pin records | `namespaces/{namespace_id}/pins/{pin_id}.json` |
 | Metadata segments | `namespaces/{owner_namespace_id}/segments/{segment_id}.sst.zst` |
+| Extension segments | `namespaces/{owner_namespace_id}/extensions/{extension_name}/segments/{segment_id}.sst.zst` |
 | Upload sessions | `namespaces/{family_root_id}/uploads/{upload_id}.json` |
 | Upload outcomes | `namespaces/{family_root_id}/uploads/{upload_id}.outcome.json` |
 | Hint | `namespaces/{namespace_id}/hint.json` |
@@ -2526,55 +2560,48 @@ A decoder can't use the target block or segment sizes as hard allocation limits.
 
 ## Appendix D. Grep extension format
 
-Grep is derived from authoritative file content and namespace history. It's optional, and it's stored separately. Core manifests contain no grep pointer, index watermark, or segment references, and a new fork has no grep index until the extension builds one for it.
+Grep is an [extension](#124-extensions) that indexes a namespace's file content. Its state is the `grep` entry in the namespace manifest, and its segments are stored under `namespaces/{owner_namespace_id}/extensions/grep/segments/`. The index is derived from authoritative file content and namespace history, so it can be rebuilt from a new backfill.
 
-### D.1 Objects and publication
+### D.1 The entry and its publication
 
-```text
-namespaces/{namespace_id}/extensions/grep/
-├── hint.json
-├── manifests/{manifest_no:020}.json
-└── segments/{segment_id}.sst.zst
-```
+This section describes grep's entry in a namespace manifest and how grep publishes a change to it.
 
-The `grep_hint` version 1 JSON payload contains `namespace_id` and `manifest_no`. Enabling grep writes a hint that points to manifest 1, and then creates manifest 1 with put-if-absent. A hint collision is allowed, and the manifest put determines which installation succeeds. Later publications use the next number.
+Grep's entry has these members:
 
-A `grep_manifest` version 2 payload contains `namespace_id`, `manifest_no`, `status`, `index`, and `segments`, and its namespace and number MUST match the key. Both envelopes verify their stored payload checksum, and they reject unknown kinds, versions, fields, and invalid nested state. The hint contains no separate manifest checksum.
+| Member | Meaning |
+| --- | --- |
+| `version` | The grep format's version, which is 2. |
+| `status` | The index's lifecycle state and its position fields (see [Index lifecycle](#d2-index-lifecycle)). |
+| `reorganize?` | The in-progress reorganization, if there is one. |
+| `runs` | The index's runs in list order, each with its run number, its level, and its segment descriptors (see [Control and manifest payloads](#a4-control-and-manifest-payloads)). |
 
-Version 2 differs from version 1 in the active status and the index's row families, and a reader doesn't read a version 1 index. A version 1 index has to be removed (its whole `extensions/grep/` prefix deleted), and then grep has to be enabled again, which builds a version 2 index from a new backfill.
+Grep decodes `status` and `reorganize`, and it rejects any other version, a member that it doesn't define, and invalid nested state. A namespace whose manifest has no `grep` entry has no index, and enabling grep builds one.
 
-`index_stored_bytes` is the sum of `index_block.offset + index_block.stored_bytes` for the manifest's referenced segments, computed with checked arithmetic, so it doesn't need any segment reads. It's reported with the grep manifest number and the full indexing status, including any partial-commit position. Confirmed absence means zero referenced index bytes, and a read failure stays an error.
+A grep "step" is one bounded unit of work: a backfill step, a build step, or a reorganization step. A host runs steps in a "run of steps", such as the steps of one sweep visit. A step starts from the entry that the earlier steps of its run of steps left pending (the "pending entry"), writes its segments, and records its change in the pending entry. A run that a step writes has a provisional number in the pending entry, which differs from every run number that the change's basis lists. The change's publication assigns each new run its number from the `next_run_no` of the manifest that the change is published over, as a compaction assigns its run's number. A change publishes the pending entry and `next_run_no` in a manifest of its own, which is a maintainer publication under the current compactor epoch, without a claim, and it changes nothing else (see [Extensions](#124-extensions)).
 
-Grep discovery works like core discovery:
+Grep publishes the pending change of a run of steps once the change is a tick interval old, and when the run of steps ends. The reference server's tick interval is five seconds by default, and a host without a tick, such as the CLI, uses the same five seconds. So a sweep visit's steps are published in one or a few manifests instead of one for each step, and a crash loses at most the steps of one interval, whose segments are left to the collector.
 
-1. Load the hinted manifest, and probe the following numbers until one returns not found. A missing hint, or a missing manifest 1, means grep isn't enabled. A missing higher hinted manifest is corruption.
-2. After any not-found result, read the hint again, because garbage collection might have deleted manifests below a newer hint. Start again from that hint when it points to a later manifest, or when its answer arrives `READ_REVALIDATION_BOUND_MS` or more after a time read before discovery loaded the hint it started from.
+To publish a change, grep:
 
-A successor manifest MUST have the same `namespace_id` and the next manifest number, and it MUST NOT lower `next_run_no` or the indexing position in `status`. A backfill can reset its inode cursor only when it restarts from a new user pin. An active successor MUST keep the `captured_seq` of the active manifest or the backfill that it follows. Disabling grep keeps `next_run_no` and drops the rest of the index state, and enabling it starts a new backfill.
+1. Loads the current manifest before the change's first step writes a segment. The publication budget (`METADATA_PUBLICATION_BUDGET_MS`) runs from this load (see [Publishing a materialized file set](#72-publishing-a-materialized-file-set)).
+2. Runs the change's steps from that manifest's entry.
+3. Puts the next manifest at the loaded manifest's number plus one with put-if-absent. The manifest lists the pending entry with its new runs numbered from the loaded manifest's `next_run_no`, and a `next_run_no` above them.
+4. If another manifest has that number, compares that manifest's grep entry with the loaded manifest's. If the two entries are the same, or neither manifest has one, grep puts the change over that manifest, with its new runs numbered from that manifest's `next_run_no`, and repeats this step if that put loses too.
+5. If the entries differ, publishes nothing. The change's new segments are left to the collector, and a user pin that the change created for a backfill is deleted. The next step loads the current manifest and plans from its entry.
 
-A query validates a cached manifest with a HEAD request for its successor:
+If a put has an unknown outcome and the manifest at its number is identical to the one that the put sent, the put succeeded when the manifest lists a segment that the change wrote, or a backfill pin that the change created, because no other publisher can list either. Core applies the segment test (see [Conflicting and unknown installations](#93-conflicting-and-unknown-installations)), and grep applies the pin test itself, by comparing the current manifest's entry with its own. If the number is missing, the outcome stays unknown, and grep keeps the backfill pin that the put might list. A step that starts a backfill creates its pin before it loads the manifest, because pinning a head with an unfolded WAL tail publishes the manifest that folds the tail. A change that's already pending is published before the pin is created, so that its put doesn't lose to that manifest.
 
-- It runs discovery again when the successor is present, or when the answer arrives `READ_REVALIDATION_BOUND_MS` or more after the cached manifest's previous check.
-- A query whose previous check is already that old runs discovery without the HEAD.
-- The query reads the time before it sends the HEAD, and that time becomes the previous check only after a not-found answer arrives within the bound.
+Each step's change to grep's entry MUST keep the `captured_seq` of the build it follows or start a later build from a new user pin, and within a build it MUST NOT move the indexing position in `status` back. A manifest's entry can therefore describe a later build than the entry before it, when a backfill restarted within the publication. A backfill can reset its inode cursor only when it restarts from a new user pin. Disabling grep empties the entry's runs and drops its reorganization, and enabling it starts a new backfill. A backfill that restarts after a rebootstrap keeps the entry's runs and its reorganization (see [Index lifecycle](#d2-index-lifecycle)).
 
-A manifest loaded by discovery is dated by a time read before discovery began, and decoded manifests can be cached by namespace and number.
+A query reads grep's entry from the manifest of its read view, so the index is as current as that manifest. The view's manifest was published after every commit that its entry records, so the view's head is at or above every sequence that the entry records, such as a backfill's captured sequence and the sequences that a reorganization's `pruning` records. An index watermark can still be ahead of the sequence that a page reads at, for example on a later page of a search. The page then still uses the index, and it leaves out the index's rows of commits above its read sequence (see [Querying the index](#d6-querying-the-index)).
 
-A query loads the grep manifest before it takes its read view, so the view's head is at or above every sequence that the manifest records, such as a backfill's captured sequence and the sequences that a reorganization's `pruning` records. An index watermark can still be ahead of the sequence that a page reads at, for example on a later page of a search. The page then still uses the index, and it leaves out the index's rows of commits above its read sequence (see [Querying the index](#d6-querying-the-index)).
+Why does a run of steps publish once for each tick interval? If each step published its own manifest, a sweep visit's sixteen build steps would publish sixteen manifests. A writer whose position walk finds more than eight new manifests drops its position and rediscovers it with a tail replay (see [Replaying the visible WAL](#42-replaying-the-visible-wal)), and every cached reader's successor probe would find a successor and run discovery. Publishing once for each interval keeps grep to about one manifest every five seconds.
 
-A step writes segments first, and then it publishes the next manifest with put-if-absent. A step whose put loses ends without publishing anything: it returns `superseded`, it deletes a user pin that it created for a backfill, and its segments are left to the collector. The next step loads the winning manifest and plans its own work from that manifest's state. If a manifest put ends with an unknown outcome, the publisher reads the manifest at the number it tried:
-
-- If that manifest has an identical payload and the publication budget hasn't expired, the publication succeeded.
-- If it has another payload, the publisher lost, the same as when a put fails its precondition.
-- If the number is missing, the outcome stays unknown. The publisher returns `outcome_unknown`, and it keeps the backfill's user pin that the step created, because the put might still succeed and refer to it.
-
-A put that succeeds after the budget has expired also has an unknown outcome (see [Clock and operation assumptions](#114-clock-and-operation-assumptions)). A successful publisher raises the hint with CAS, taking the greater number, at most once per second for each namespace. A hint read or write that returns no compare token is a store error, and a failed hint raise doesn't undo the publication.
-
-Every step that publishes a manifest MUST start that publication within `METADATA_PUBLICATION_BUDGET_MS`, measured from before it loads the grep manifest it builds on, and it writes no manifest after that bound. Grep uses bounded steps instead of core compaction's epoch claim. Conditional numbered publication and input revalidation control competing steps.
+Why does a step start from the pending entry instead of the manifest's? The earlier steps of its run of steps wrote `texts` rows that aren't published yet. A step that started from the manifest's entry would index the earlier steps' range again.
 
 ### D.2 Index lifecycle
 
-The manifest's `status` contains the position fields for its lifecycle state:
+The entry's `status` contains the position fields for its lifecycle state:
 
 | Kind | Status fields |
 | --- | --- |
@@ -2582,23 +2609,30 @@ The manifest's `status` contains the position fields for its lifecycle state:
 | `active` | `captured_seq`, `built_through_seq`, `next_event_index` |
 | `disabled` | No other status fields |
 
-Backfill's `captured_seq` is the user pin's captured sequence, and its cursor resumes strictly after the last inode ID. An active index keeps the `captured_seq` of the backfill that built it, which identifies that build of the index. A rebuild after a rebootstrap, or after grep is disabled and enabled again, starts from a backfill at a later sequence. An active index's `next_event_index` is zero at a commit boundary. A disabled index contains no segments and no reorganization work.
+A backfill's `captured_seq` is the user pin's captured sequence, and its cursor resumes strictly after the last inode ID. An active index keeps the `captured_seq` of the backfill that built it, which identifies that build of the index. A rebuild after a rebootstrap, or after grep is disabled and enabled again, starts from a backfill at a later sequence. An active index's `next_event_index` is zero at a commit boundary. A disabled index lists no segments and no reorganization.
 
-The nested `index` contains `next_run_no` and an optional `reorganize`. Reorganization contains `input_segment_ids`, `output_segment_ids`, `row_key_cursor`, `output_level`, and `run_no`, and its cursor is inclusive. A reorganization into the base level also contains `pruning`, which identifies the revisions whose content values the reorganization keeps. The reorganization's first step records `pruning` (see [Pruning the index](#d5-pruning-the-index)). Input and output segment IDs MUST be unique, disjoint, and present in the manifest's segment list, and each output MUST have the recorded level and run number. The extension can rebuild its state from a fresh user pin.
+A rebootstrap happens when a step's change feed or backfill pin no longer reaches the index's position, such as when the retention floor passes the watermark. The step starts a backfill from a new user pin on the head, with its cursor at the beginning, and the backfill keeps the entry's runs and its reorganization, because the index's postings refer to content values, which stay valid. Each value that the kept runs' `texts` rows record costs the backfill a lookup instead of a read. Only disabling grep empties the runs.
 
-Grep segments follow list order, and each descriptor has a positive row count. The complete descriptor fields are `segment_id`, `run_no`, `level`, `row_count`, `min_row_key`, `max_row_key`, `index_block`, `filter_block`, and an optional `filter_inline`. The block handles and checksums use the same representation as metadata segment descriptors.
+A fork's first manifest copies its source's grep entry (see [Forking a namespace](#92-forking-a-namespace)), and the fork's first step handles the entry by its state:
 
-Grep uses a numeric `level` instead of the core's base and delta tiers:
+- An `active` entry is the source's index as of the pinned manifest, so a query in the fork uses it immediately, and the fork's own commits are the unindexed tail. The index's watermark can be below the fork point, because the source's index can lag its head. The fork's change feed starts at the fork point. So a step reads the source's commits above the watermark and at or below the fork point (the "gap") from the source's change feed, with the fork pin as the snapshot (see [Reads, deletion, and expiry](#83-reads-deletion-and-expiry)), and then continues in the fork's own feed. If the source can't serve the gap, because its retention floor was above the watermark when the fork was made, or because the source or the fork pin is gone, the step rebootstraps the fork's index.
+- A `backfilling` entry refers to a user pin in the source, which the fork can't read, so the fork's first step rebootstraps the index from a pin on the fork's head and keeps the inherited runs.
+- An inherited `reorganize` is the source's, and the source owns its outputs, so the fork's first change drops it and keeps every segment that the entry lists. Grep recognizes an inherited reorganization by its outputs' owner. The fork's own reorganizations then start from the inherited runs, and reorganizing inputs whose outputs the fork also inherited is harmless, because a reorganization takes the union of its inputs.
+- A `disabled` entry stays disabled.
+
+The entry's optional `reorganize` contains `input_segment_ids`, `output_segment_ids`, `row_key_cursor`, `output_level`, and `run_no`, and its cursor is inclusive. A reorganization into the base level also contains `pruning`, which identifies the revisions whose content values the reorganization keeps. The reorganization's first step records `pruning` (see [Pruning the index](#d5-pruning-the-index)). Input and output segment IDs MUST be unique, disjoint, and present in the entry's runs. Each output MUST be a segment of the run with the recorded run number, and that run MUST have the recorded level. The run number MUST be below the manifest's `next_run_no`. Grep can rebuild its state from a new user pin.
+
+Grep's runs, and each run's segments, follow list order. Grep uses a run's `level` instead of the core's base and delta tiers:
 
 - Level 0 is delta output.
 - Level 1 is intermediate reorganization output.
 - Level 2 is the base.
 
-In-progress reorganization records the output level and run number, so resumed steps continue the same run. Every descriptor and in-progress output run number MUST be below `next_run_no`.
+An in-progress reorganization records the output level and run number, so resumed steps continue the same run. A reorganization that starts in a change has a provisional run number until the change is published, like the change's other new runs (see [The entry and its publication](#d1-the-entry-and-its-publication)).
 
 ### D.3 Tokenization and postings
 
-Content is eligible for the version 2 gram index when it's at most 8 MiB, and its first 8 KiB contain no NUL byte and pass the text check. The sample MUST be valid UTF-8, except that an incomplete final character is accepted when it follows a nonempty valid prefix. This only checks the sample, so the bytes after it don't have to be UTF-8.
+Content is eligible for the version 2 gram index when it's at most 8 MiB, and its first 8 KiB contain no NUL byte and pass the text check. The sample MUST be valid UTF-8, except that an incomplete final character is accepted when it follows a nonempty valid prefix. The check reads only the sample, so the bytes after it don't have to be UTF-8.
 
 For eligible content, the tokenizer folds ASCII letters to lowercase and takes every overlapping three-byte window. Grams are bytes, not Unicode characters, and this folding is different from the Unicode rule that's used to compare file names.
 
@@ -2633,13 +2667,13 @@ gap             (unsigned LEB128, at least 1)
 
 For example, the batch of ordinals 7, 8, and 300 is the bytes `03 07 01 a4 02`. Empty batches, a zero gap, an ordinal above 2^64 - 1, trailing bytes after the declared batch, and an ordinal that the run's table doesn't list are invalid.
 
-A reorganization writes a new run, and the run's table lists the union of its input runs' values, less the values that a reorganization into the base level drops (see [Pruning the index](#d5-pruning-the-index)). Its postings refer to the new table's ordinals, which each step translates from the inputs' ordinals through the two tables. The reorganization's first step writes the whole table, so every output that a manifest lists can be read.
+A reorganization writes a new run, and the run's table lists the union of its input runs' values, less the values that a reorganization into the base level drops (see [Pruning the index](#d5-pruning-the-index)). Its postings refer to the new table's ordinals, which each step translates from the inputs' ordinals through the two tables. The reorganization's first step writes the whole table, so every output that an entry lists can be read.
 
 Why do postings refer to ordinals instead of content IDs? A content ID is 16 random bytes, so a posting that included a content ID wouldn't compress, and the postings would be most of the index. The gap between two ordinals in one gram's batch usually fits in one byte, and the run's table stores each content ID once.
 
 The segment framing is exactly the data, filter, and index format in Appendix A, with grep CBOR rows instead of metadata rows, and per-block CRCs verify ranged reads.
 
-Grep manifest version 2 governs the tokenizer, the posting representation, and the meaning of row keys. They aren't implementation choices that can change while an existing index is read under the same version.
+Grep's version 2 governs the tokenizer, the posting representation, and the meaning of row keys. They aren't implementation choices that can change while an existing index is read under the same version.
 
 ### D.4 The `texts` and `content_revisions` families
 
@@ -2652,7 +2686,7 @@ text-{content_id_body}-{size_bytes:020}
 text-{content_id_body}
 ```
 
-Before a grep step reads a value's bytes, it looks up the value's `texts` row in the segments that its manifest lists, and it skips a value that has a row. A step that examines a value writes the value's `texts` row in the same run as the value's postings, and lists the value in the run's value table, whether or not the value is eligible. It records a value above the size cap as ineligible without reading it. Eligibility depends only on the bytes, so two rows for one value MUST agree, and a reorganization merges them into one row.
+Before a grep step reads a value's bytes, it looks up the value's `texts` row in the segments that its pending entry lists, and it skips a value that has a row. A step that examines a value writes the value's `texts` row in the same run as the value's postings, and lists the value in the run's value table, whether or not the value is eligible. It records a value above the size cap as ineligible without reading it. Eligibility depends only on the bytes, so two rows for one value MUST agree, and a reorganization merges them into one row.
 
 The `content_revisions` family has one row for each file revision that a grep step indexed. A `content_revision` row's fields after `kind` are `content_id`, `size_bytes`, `inode_id`, `revision_no`, and `committed_seq`, the sequence of the commit that published the revision. The inode ID is a 16-byte byte string (see [Field conventions](#121-field-conventions)). Its row key and filter key are:
 
@@ -2676,22 +2710,22 @@ A reorganization into the base level keeps the content values and `content_revis
 
 The reorganization keeps every file revision at or below `filter_seq` that's newer than `retention_floor_seq`, and each file's newest revision at or below `retention_floor_seq`, including the revisions of deleted files. The first step scans the namespace's revisions at `filter_seq`, including the commits in the WAL tail, and builds two Bloom filters from the revisions that the reorganization keeps: one of their content values, and one of their `(inode_id, revision_no)` pairs. Then:
 
-1. The first step writes the revision filter, and then decides the output run's value table in one pass over the input tables in content order: the table lists each input value that the value filter contains. The step writes each table row as it decides it, in segments of the output run that hold the filter and the table.
+1. The first step writes the revision filter, and then decides the output run's value table in one pass over the input tables in content order. The table lists each input value that the value filter contains. The step writes each table row as it decides it, in segments of the output run that contain the filter and the table.
 2. Every later step reads the revision filter back from the reorganization's outputs, so the reorganization scans the namespace once, and it reads the output's table back beside the input tables in the same kind of pass.
 3. Every step translates each input posting's ordinal to the output's ordinal of the same value, through a list for each input run that the pass builds (both tables are in content order). A posting whose value the output's table doesn't list translates to nothing and is dropped. A run's `n`th `texts` row is the `n`th value of its table, so the step translates a `texts` row's value the same way, and it keeps the `texts` row of each value that the output's table lists. So a value's postings and its `texts` row are dropped together.
 4. Every step drops each `content_revisions` row whose `(inode_id, revision_no)` pair isn't in the revision filter.
 
 The revision filter is stored as `filter` rows, whose fields after `kind` are `chunk` and `payload`. The payloads, in chunk order, form the payload of a filter block (see [Block-segment encoding](#a7-block-segment-encoding)) over one key for each kept revision, `{inode_id_body}-{revision_no:020}`, and each row's payload is at most 32 KiB. The row key is `filter-{chunk:020}`, and every `filter` row has the filter key `filter`. A reader finds the rows by key range, and a reorganization doesn't copy an input's `filter` rows to its output. A filter is sized at ten bits for each of the inputs' rows, up to 64 MiB, and a larger namespace fills it more densely, so it keeps more rows.
 
-A step reads the tables a block at a time, so it keeps four bytes for each input value, the translation lists, plus the filters, whatever the size of the tables. A Bloom filter can err only toward keeping a row, and a later reorganization drops what a filter kept. If the retention floor passes `filter_seq` before the reorganization finishes, the reorganization is abandoned.
+A step reads the tables a block at a time, so it keeps the translation lists, four bytes for each input value, plus the filters, whatever the size of the tables. A Bloom filter can err only toward keeping a row, and a later reorganization drops what a filter kept. If the retention floor passes `filter_seq` before the reorganization finishes, the reorganization is abandoned.
 
-Before the last step of the reorganization publishes, it runs a "re-reference check". It reads the change feed from `filter_seq` to the head, and if a `file_created` or `content_changed` event refers to a value that an input run's table lists and the run's translation drops, the reorganization is abandoned. A publication then removes the reorganization and its outputs from the manifest and keeps its inputs, and the outputs are left to the collector.
+Before the reorganization's last step records its change, it runs a "re-reference check". It reads the change feed from `filter_seq` to the head, and if a `file_created` or `content_changed` event refers to a value that an input run's table lists and the run's translation drops, the reorganization is abandoned. The step then removes the reorganization and its outputs from the pending entry and keeps its inputs, and the outputs are left to the collector.
 
 Why are a value's postings and its `texts` row dropped together? A build step skips a value that has a `texts` row. If the postings were dropped and the `texts` row kept, a file that refers to the value later would never be indexed, and grep would never find the file.
 
 Why does the check abandon the reorganization? Suppose that the value filter doesn't contain a value, and then a merge or a restore commits a file with the value. A build step finds the value's `texts` row in the inputs, skips the value, and advances the watermark past the commit. If the reorganization then published, the value's postings and `texts` row would be dropped from the index, and grep would never find the file, with no indexing work left to do. Abandoning keeps the inputs listed, and the next reorganization builds filters that keep the value.
 
-Why does the first step write the table and the revision filter? A scan reads every retained revision of the namespace, so a scan in every step would cost the reorganization one scan for each step. Writing the filter in the output run lets the later steps prune without a scan, and the table that the first step writes lists the kept values for every step, so no step keeps a value's postings while another drops its `texts` row. The rows are stored in the run that the manifest lists, so they're kept as long as the reorganization's outputs are.
+Why does the first step write the table and the revision filter? A scan reads every retained revision of the namespace, so a scan in every step would cost the reorganization one scan for each step. Writing the filter in the output run lets the later steps prune without a scan, and the table that the first step writes lists the kept values for every step, so no step keeps a value's postings while another drops its `texts` row. The rows are stored in the run that the entry lists, so they're kept as long as the reorganization's outputs are.
 
 Why does the scan apply the rule at the floor instead of keeping every revision that it finds? A revision that a later revision replaced at or below the floor can't be read at any retained sequence, but the metadata lists it until a base compaction of `revisions` drops it. The rule leaves such a revision out, as that compaction does, and `pruning` records the retention floor that the filters describe.
 
@@ -2711,27 +2745,15 @@ The cut is usually the read sequence, so a row of a commit above the read sequen
 
 A later page uses the lower of its cursor's cut and the last commit that its own index covers in full. When that cut is below the read sequence, the page doesn't scan the tail, and it reports `tail_scanned: false`. So a stale search is one cut across its pages, and a page that runs after the index has moved past the read sequence still leaves out what the first page left out.
 
-The unindexed tail is the files with a revision committed after the watermark and at or below the read sequence. The query looks up the `texts` row of each tail file's value. It reads and verifies a value without a row, whatever its grams are. A value with an eligible row is a candidate only if the posting intersection produced it, and the walk checks that when it reaches the value. The query skips a value with an ineligible row. A tail file is ordered with the other files of its value.
+The unindexed tail is the files with a revision committed after the watermark and at or below the read sequence. In a fork whose watermark is below the fork point, the tail begins with the gap, which the query reads from the source through the fork pin, as a step does (see [Index lifecycle](#d2-index-lifecycle)). The query reads the gap with no subject, as it reads the fork's own change feed, and it checks the subject's rights on each matching file in the fork, as it does for any tail file. The query looks up the `texts` row of each tail file's value. It reads and verifies a value without a row, whatever its grams are. A value with an eligible row is a candidate only if the posting intersection produced it, and the walk checks that when it reaches the value. The query skips a value with an ineligible row. A tail file is ordered with the other files of its value.
 
 Matches are ordered by content value (content ID, then size), then by inode, and then by byte offset. A page reads the bytes of a bounded number of values and checks the state of a bounded number of files, so a page can stop inside one value's files. The cursor records the content value, the inode, and the position in the file where the page stopped, together with the read sequence, the page's cut, the active index's `captured_seq`, and the request's fingerprint. The next page reads the value's rows after that inode. A page served by an index whose `captured_seq` differs from the cursor's returns `invalid_request`, and the client issues the search again from its first page.
 
-Why does the cursor record the index's `captured_seq`? A later page reads at the first page's sequence, and an index rebuilt after that sequence has `content_revisions` rows only for the files that were current when its backfill started, and for later commits. If a file's revision at the cursor's read sequence was replaced before the backfill started, the rebuilt index has no row for that revision, so a page that resumed the cursor would leave the file out, and the client would have no way to tell.
+Why does the cursor record the index's `captured_seq`? A later page reads at the first page's sequence, and an index rebuilt after that sequence (such as an index rebuilt after grep is disabled and enabled again) can have `content_revisions` rows only for the files that were current when its backfill started, and for later commits. If a file's revision at the cursor's read sequence was replaced before the backfill started, the rebuilt index has no row for that revision, so a page that resumed the cursor would leave the file out, and the client would have no way to tell.
 
 ### D.7 Grep collection
 
-Each explicit call discovers the current grep manifest, builds its live segment set, and lists `manifests/` and `segments/` completely, using one supplied `now_ms`. The collector stores no durable progress cursor.
-
-The current manifest protects all the segments it lists, including pending reorganization inputs and outputs. Manifest numbers at or above the observed hint stay available for discovery. A manifest below the current one, and every segment it lists, stays while its immediate successor is younger than the ordinary grep grace, whether it's above or below the observed hint. A successor without a provider timestamp counts as young. The collector applies this rule from the current manifest downward, and it stops at the first successor that's missing or whose provider age meets the grace. A query confirms its cached manifest within `READ_REVALIDATION_BOUND_MS` of its previous check (see [Objects and publication](#d1-objects-and-publication)), and that bound is below the grace, so a query never lists a deleted segment. An invalid or unreadable current or kept manifest stops the call before anything is deleted.
-
-| Candidate in a live namespace | Rule |
-| --- | --- |
-| A manifest below the observed hint | Keep it while its immediate successor is younger than the ordinary grep grace. Otherwise, its own provider age MUST meet the ordinary grep grace. |
-| A segment outside the live set | Its provider age MUST be strictly greater than 24 hours. |
-| Unknown age, or an unrecognized key | Keep it. |
-
-The ordinary grep grace is one hour in the reference implementation. The output publication budget plus the minimum garbage collection grace fits inside the segment minimum age, using the same provider and clock assumptions as core garbage collection.
-
-For an absent or deleted core namespace, an explicit grep garbage collection call can remove the entire extension prefix after the ordinary grace, including its hint. Core garbage collection never deletes extension objects. Grep never lists namespaces, so callers and hosts choose which namespace to maintain.
+Core garbage collection collects grep segments under the segment rule (see [Extensions](#124-extensions) and [Candidate and age rules](#113-candidate-and-age-rules)). A segment stays while a current, pinned, or kept superseded manifest lists it in grep's entry, including an in-progress reorganization's inputs and outputs, and an unlisted segment is deleted once it's more than 24 hours old. A segment that a lost or crashed change wrote is unlisted from the start. Disabling grep, and a namespace tombstone, empty the entry's runs, so the segments become unlisted. A segment that a fork inherited is listed by the fork's manifests and by the source's manifest that the fork pin keeps, so it stays in the source's prefix until neither lists it.
 
 [api-spec]: api.md
 [provider-spec]: object-storage-providers.md

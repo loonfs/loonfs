@@ -118,8 +118,8 @@ routes! {
     "/v0/namespaces/{namespace_id}/filesystem/downloads" => { POST create_download },
     // Searching an index and keeping one built are separate jobs, so they
     // are separately deployable: the query route exists where this server
-    // serves grep, and the three routes that mutate a grep manifest exist
-    // where it maintains one.
+    // serves grep, and the three routes that change grep's entry in a
+    // namespace manifest exist where it maintains the index.
     "/v0/namespaces/{namespace_id}/grep" => {
         GET grep = gated(state.grep.service().cloned(), get(grep), get(grep_queries_not_served)),
     },

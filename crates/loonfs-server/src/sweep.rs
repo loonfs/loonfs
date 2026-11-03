@@ -92,7 +92,7 @@ pub(crate) struct SweepRetry {
 /// Whether a sweep pass also collects each namespace's garbage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GarbageCollection {
-    /// Collect each namespace's garbage and its grep garbage.
+    /// Collect each namespace's garbage.
     Collect,
     /// Make the visit's other calls without collecting garbage.
     Skip,
@@ -243,7 +243,7 @@ impl Sweep {
 
     /// Visits every namespace the store lists once. With
     /// [`GarbageCollection::Collect`], each visit also collects the
-    /// namespace's garbage and its grep garbage. Each visit also acknowledges
+    /// namespace's garbage. Each visit also acknowledges
     /// the namespace's retention floor and then advances it under its
     /// retention window.
     ///

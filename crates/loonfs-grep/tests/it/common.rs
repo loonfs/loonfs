@@ -3,20 +3,19 @@
 //! Nothing in `loonfs` knows about grep, so these tests wire it the way the
 //! reference server and the CLI do: runtime handles for the filesystem, one
 //! service holding the query-side block cache, and a worker over grep's own
-//! keyspace.
+//! segments.
 
 use loonfs::publish::{CommitCandidate, CommitIntent, FilesystemOperation};
 use loonfs::{
     CommitId, DestinationBehavior, LoonFs, MaintainMetadataOptions, Maintenance, ReadOnly,
     SharedObjectStore, Writable,
 };
-use loonfs_grep::manifest::GrepIndexStatus;
+use loonfs_grep::entry::GrepIndexStatus;
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepBlockCache, GrepBuildOutcome, GrepDisableOutcome, GrepEnableOutcome,
     GrepError, GrepPassBudget, GrepService, GrepWorker, NamespaceReads,
     DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
 };
-use loonfs_test_support::clock::ManualClock;
 use loonfs_types::GrepIndex;
 use loonfs_types::{AbsolutePath, ChangeSeq, GrepRequest, GrepResponse, NamespaceId, PageRequest};
 use std::sync::Arc;
@@ -38,15 +37,26 @@ impl GrepHost {
     }
 
     /// `configure` adjusts the reader the service and worker read through.
+    ///
+    /// The reader checks for a newer manifest on every read, so a query
+    /// reads the grep entry that a step just published. (A reader with the
+    /// default interval reads it within a second.)
     pub(crate) async fn with_reader(
         store: &SharedObjectStore,
         actor: &str,
         configure: impl FnOnce(loonfs::LoonFsBuilder<ReadOnly>) -> loonfs::LoonFsBuilder<ReadOnly>,
     ) -> Self {
-        let reader = configure(LoonFs::builder_with_store(store.clone()).read_only())
-            .build()
-            .await
-            .expect("build reader");
+        let reader = configure(
+            LoonFs::builder_with_store(store.clone())
+                .read_only()
+                .config(loonfs::RuntimeConfig {
+                    manifest_revalidation_interval_ms: 0,
+                    ..loonfs::RuntimeConfig::default()
+                }),
+        )
+        .build()
+        .await
+        .expect("build reader");
         let writer = LoonFs::builder_with_store(store.clone())
             .writer_id(loonfs_test_support::ids::writer_id(actor))
             .build()
@@ -57,12 +67,13 @@ impl GrepHost {
         Self {
             store: store.clone(),
             reader: reader.clone(),
-            maintenance,
-            service: GrepService::new(Arc::clone(&block_cache), reader.monotonic_timer()),
+            maintenance: maintenance.clone(),
+            service: GrepService::new(Arc::clone(&block_cache)),
             worker: GrepWorker::new(
                 store.clone(),
                 reader,
                 writer.clone(),
+                maintenance.clone(),
                 GrepPassBudget::default(),
             ),
             writer,
@@ -104,16 +115,14 @@ impl GrepHost {
                 state
             }
             GrepEnableOutcome::Superseded => {
-                return Err(GrepError::PublicationConflict {
-                    object_key: loonfs_grep::keyspace::hint_key(namespace_id),
-                })
+                panic!("enabling grep lost its publication, which a test must arrange on purpose")
             }
         };
         let captured_seq = match &lifecycle {
             GrepIndexStatus::Disabled {} => None,
             GrepIndexStatus::Backfilling { captured_seq, .. } => Some(*captured_seq),
             GrepIndexStatus::Active { .. } => Some(
-                NamespaceReads::new(self.reader.namespace(namespace_id))
+                NamespaceReads::new(self.reader.clone(), namespace_id)
                     .head()
                     .await?
                     .head_seq,
@@ -142,7 +151,7 @@ impl GrepHost {
                 .build_step(namespace_id, GramIndexBuildPolicy::default())
                 .await?
             {
-                GrepBuildOutcome::Published { .. }
+                GrepBuildOutcome::Indexed { .. }
                 | GrepBuildOutcome::BackfillRestarted { .. }
                 | GrepBuildOutcome::Superseded => {}
                 // Nothing this loop does next would move the index, so the
@@ -162,9 +171,9 @@ impl GrepHost {
             GrepDisableOutcome::Disabled | GrepDisableOutcome::NotEnabled => {
                 self.worker.get_grep_index(namespace_id).await
             }
-            GrepDisableOutcome::Superseded => Err(GrepError::PublicationConflict {
-                object_key: loonfs_grep::keyspace::hint_key(namespace_id),
-            }),
+            GrepDisableOutcome::Superseded => {
+                panic!("disabling grep lost its publication, which a test must arrange on purpose")
+            }
         }
     }
 }
@@ -210,6 +219,20 @@ pub(crate) mod control {
             .expect("current manifest")
     }
 
+    /// Returns grep's entry in the namespace's current manifest, or `None`
+    /// where grep was never enabled.
+    pub(crate) async fn grep_entry(
+        store: &SharedObjectStore,
+        namespace_id: &NamespaceId,
+    ) -> Option<loonfs_grep::entry::GrepEntry> {
+        metadata_manifest(store, namespace_id)
+            .await
+            .payload()
+            .extensions
+            .get(&loonfs_grep::entry::grep_extension_name())
+            .map(|entry| loonfs_grep::entry::GrepEntry::decode(entry).expect("decode grep's entry"))
+    }
+
     pub(crate) async fn pin(
         store: &SharedObjectStore,
         namespace_id: &NamespaceId,
@@ -224,24 +247,31 @@ pub(crate) mod control {
     }
 }
 
-/// Returns a worker over `store` whose writer reads `clock` as its wall
-/// clock, so a collection pass measures object ages at the clock's reading.
-pub(crate) async fn collector_at(
-    store: &SharedObjectStore,
-    clock: Arc<ManualClock>,
-) -> GrepWorker<SharedObjectStore> {
-    let reader = LoonFs::builder_with_store(store.clone())
-        .read_only()
-        .build()
+/// Publishes `entry` as grep's entry in the namespace's next manifest, with
+/// `next_run_no` as the next run number, whatever grep would make of it.
+pub(crate) async fn publish_grep_entry(
+    maintenance: &Maintenance,
+    namespace_id: &NamespaceId,
+    entry: loonfs_types::format::manifest::ExtensionEntry,
+    next_run_no: loonfs_types::RunNo,
+) {
+    let basis = maintenance
+        .load_extension_basis(namespace_id)
         .await
-        .expect("build the collector's reader");
-    let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id("grep-collector"))
-        .wall_clock(clock)
-        .build()
+        .expect("load the basis");
+    let published = maintenance
+        .publish_extension(&basis, &loonfs_grep::entry::grep_extension_name(), |_| {
+            (entry.clone(), next_run_no)
+        })
         .await
-        .expect("build the collector's writer");
-    GrepWorker::new(store.clone(), reader, writer, GrepPassBudget::default())
+        .expect("publish grep's entry");
+    assert!(
+        matches!(
+            published,
+            loonfs::engine::ExtensionPublication::Published(_)
+        ),
+        "no other publication races a test's own"
+    );
 }
 
 /// Returns an empty grep block cache with the default budget.
@@ -261,12 +291,8 @@ pub(crate) async fn grep_with(
     request: &GrepRequest,
     page: PageRequest<String>,
 ) -> Result<GrepResponse, GrepError> {
-    let reads = NamespaceReads::new(reader.namespace(namespace_id));
+    let reads = NamespaceReads::new(reader.clone(), namespace_id);
     service.query(request, page, &reads, store).await
-}
-
-pub(crate) fn observation() -> loonfs::engine::Observation {
-    loonfs::engine::Observation::now(Arc::new(loonfs_types::StdMonotonicTimer::default()))
 }
 
 /// Returns the page of at most `matches` matches at `cursor`, or the first

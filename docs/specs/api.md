@@ -127,14 +127,14 @@ This section defines every feature key and the operations it gates. The registry
 
 | Feature key | Gates | Notes |
 | --- | --- | --- |
-| `maintenance.grep.index` | Maintaining a namespace's grep index: `GET /v0/maintenance/namespaces/{ns}/grep/index` and its `enable` and `disable` routes, and the grep collection in a `gc` run. | The maintenance half of the grep capability. It's independent of `query.grep`. Searching an index and keeping one built can be deployed separately, so a deployment can advertise either key alone. A deployment that doesn't maintain an index returns `not_supported`, with this key in its `feature` field, for these routes. Its `gc` runs return the core collector's result without an `extensions.grep` report. |
+| `maintenance.grep.index` | Maintaining a namespace's grep index: `GET /v0/maintenance/namespaces/{ns}/grep/index` and its `enable` and `disable` routes. | The maintenance half of the grep capability. It's independent of `query.grep`. Searching an index and keeping one built can be deployed separately, so a deployment can advertise either key alone. A deployment that doesn't maintain an index returns `not_supported`, with this key in its `feature` field, for these routes. Every deployment's `gc` runs collect the index's unreferenced segments. |
 | `filesystem.changes.split_commits` | The `split_commits` and `event_index` query parameters of `GET /v0/namespaces/{ns}/changes` and `GET /v0/namespaces/{ns}/diff`, and the `next_event_index` field of their responses. | A page with `split_commits=true` can end inside a commit that alone exceeds the page budget, and the next request resumes the commit at an event (see [`GET /changes`](#611-get-changes)). Without the parameter, both routes return each commit whole. |
 | `filesystem.commits.inline_content` | Sending file content in a `put_file`, `create_file_by_inode`, or `put_file_revision_by_inode` commit operation. | A deployment advertises this key when inline writes are enabled. The per-file limit is `commit.max_inline_content_bytes_per_operation`. Without this feature, a client uploads the content before committing. |
 | `filesystem.merges` | Merging a fork into a namespace (`POST /v0/namespaces/{ns}/merges`), and rebasing a fork (`POST /v0/namespaces/{ns}/rebases`). | The server plans the fork's net change since its previous merge and commits it as one commit, or refuses it with `merge_conflict` (see [`POST /merges`](#614-post-merges)). A rebase replays the fork's unmerged commits into a new fork and reports the changes that conflict (see [`POST /rebases`](#615-post-rebases)). A deployment advertises this key only when merges are enabled (in the reference server, when `max_merge_bytes` isn't zero). A deployment with merges disabled returns `not_supported`, with this key in its `feature` field, for the merge and rebase routes. |
 | `filesystem.uploads.direct_put` | Starting presigned `direct_put` upload sessions (`POST /v0/namespaces/{ns}/uploads`). | The server returns a short-lived, create-only presigned PUT capability for the exact content object. The provider MUST report a durable whole-object checksum after the write. A deployment advertises the key only on an endpoint that the live conformance suite has run against. The key is independent of `filesystem.uploads.direct_multipart`, so a provider can offer this feature and no multipart API at all. Raw object keys and caller-managed object-store writes aren't part of this feature. |
 | `filesystem.uploads.direct_multipart` | Starting presigned `direct_multipart` upload sessions (`POST /v0/namespaces/{ns}/uploads`) and signing their parts (`POST /v0/namespaces/{ns}/uploads/{upload_id}/parts`). | The server opens the provider's multipart upload and returns one short-lived, checksum-bound capability for each part. This feature needs an S3-style multipart API in addition to the signing that the other keys need, so a deployment whose provider has no multipart API leaves out this key and can still advertise the others. |
 | `filesystem.downloads.direct_get` | Requesting path or inode download grants (`POST /v0/namespaces/{ns}/filesystem/downloads`, `POST /v0/namespaces/{ns}/inodes/{inode_id}/downloads`, and `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads`). | The server returns a short-lived presigned GET capability for the selected content object. Any deployment that offers a direct write also advertises this key, because a deployment that lets a client create an object larger than `download.service_proxied.max_content_bytes` has to be able to return that object. Raw object keys aren't part of this feature. |
-| `query.grep` | Content search (`GET /v0/namespaces/{ns}/grep`). | A data-dependent capability (see [Data-dependent features](#23-data-dependent-features)). A grep request also requires a materialized, active grep manifest, and a namespace without one returns `not_supported` whatever this key's value is. |
+| `query.grep` | Content search (`GET /v0/namespaces/{ns}/grep`). | A data-dependent capability (see [Data-dependent features](#23-data-dependent-features)). A grep request also requires an active grep index in the namespace's manifest, and a namespace without one returns `not_supported` whatever this key's value is. |
 
 `maintenance.grep.index` is the only feature key in `maintenance/v0`, and splitting commits across pages, inline commit content, merges, and the three direct transfers are the only features in `filesystem/v0`. Every other operation in those two API groups is required, including creating, forking, and deleting namespaces and the snapshot routes.
 
@@ -142,7 +142,7 @@ Listing namespaces isn't supported in v0, so callers MUST address namespaces by 
 
 ### 2.3 Data-dependent features
 
-The capability document describes a deployment. Whether something is materialized for a namespace's data (for example, whether a derived index is ready for a namespace) is recorded in the owning extension's keyspace (see [Extensions](format.md#124-extensions)), not in the namespace manifest.
+The capability document describes a deployment. Whether something is materialized for a namespace's data (for example, whether a derived index is ready for a namespace) is recorded in the owning extension's entry in the namespace manifest (see [Extensions](format.md#124-extensions)), not in the capability document.
 
 A data-dependent operation succeeds only when both of these are true:
 
@@ -776,9 +776,9 @@ This section describes the grep index routes, and the jobs that `run_maintenance
 
 #### Grep index
 
-A `gc` run also collects the namespace's grep index objects, as described in [Garbage collection runs](#garbage-collection-runs).
+A `gc` run also collects the grep index's unreferenced segments, as described in [Garbage collection runs](#garbage-collection-runs).
 
-The status, enable, and disable routes all return the same flat grep index object. It contains `namespace_id`, the lifecycle fields for its `status`, `next_run_no`, and `reorganize_pending`. No two lifecycle statuses share a sequence field:
+The status, enable, and disable routes all return the same flat grep index object. It contains `namespace_id`, the lifecycle fields for its `status`, and `reorganize_pending`. No two lifecycle statuses share a sequence field:
 
 | `status` | Fields | Means |
 | --- | --- | --- |
@@ -789,14 +789,14 @@ The status, enable, and disable routes all return the same flat grep index objec
 For example:
 
 ```json
-{"namespace_id":"demo","status":"active","built_through_seq":12,"next_event_index":0,"next_run_no":3,"reorganize_pending":false}
+{"namespace_id":"demo","status":"active","built_through_seq":12,"next_event_index":0,"reorganize_pending":false}
 ```
 
 ```json
-{"namespace_id":"demo","status":"backfilling","captured_seq":12,"cursor_inode_id":"ino_000000j000000tz7yc2z8ypbmf","checkpoint_id":"pin_00000000000000000009-0000000000000009","next_run_no":1,"reorganize_pending":false}
+{"namespace_id":"demo","status":"backfilling","captured_seq":12,"cursor_inode_id":"ino_000000j000000tz7yc2z8ypbmf","checkpoint_id":"pin_00000000000000000009-0000000000000009","reorganize_pending":false}
 ```
 
-So a backfilling index never reports a `built_through_seq`, and an active index never reports a `captured_seq`. `next_run_no` is the run number that the index allocates next, and `reorganize_pending` reports whether a partitioned segment reorganization is in progress. A client that waits for the index to catch up captures one sequence before it starts waiting, and it stops waiting when the index reaches that sequence, instead of waiting for a head that keeps moving.
+So a backfilling index never reports a `built_through_seq`, and an active index never reports a `captured_seq`. `reorganize_pending` reports whether a partitioned segment reorganization is in progress. The routes read the index from the namespace's current manifest, so the status reports the index's last publication. (The maintenance sweep publishes an index's progress about once per tick interval, five seconds by default, and when a visit ends.) A client that waits for the index to catch up captures one sequence before it starts waiting, and it stops waiting when the index reaches that sequence, instead of waiting for a head that keeps moving.
 
 #### Jobs and outcomes
 
@@ -805,7 +805,7 @@ A maintenance run request body identifies exactly one job with `kind`:
 | `kind` | Fields | Result |
 | --- | --- | --- |
 | `metadata` | Optional `max_wal_tail_objects` | `outcome` and `compaction_units` |
-| `gc` | Optional `grace_window_ms` | The collection result, which includes the grep collector's counts in `extensions.grep` when the deployment maintains a grep index |
+| `gc` | Optional `grace_window_ms` | The collection result |
 | `retention` | Optional `to_seq` or `cutoff_at_ms` | `retention_floor_seq` |
 | `retention_window` | Optional `retention_window_ms` | `retention_window_ms`, when the namespace has a window. The job sets the namespace's retention window, or clears it when the request doesn't include `retention_window_ms`. |
 | `recover_administrator` | `principal_id` | `commit_id`, `committed_seq`, and the root row's new `access_revision_no`. The job grants `admin` on the root row to the principal and keeps every other root grant. It makes the grant through a commit that doesn't check a subject and is attributed to the request's `Loonfs-Actor`. The job is meant for an ACL namespace that has lost every administrator. |
@@ -888,11 +888,11 @@ Upload cleanup times include the lease plus grace, the abort grace, and the comp
 
 A GC response also includes `reclaimable_at_ms` when the current manifest is deleted. It's the deadline defined in [Retirement](format.md#95-retirement), and it's included even when pins still block reclamation. It's absent for an active namespace.
 
-A GC response includes `listed_bytes`: the bytes of every object that the pass listed under the namespace, each object once, as the provider reported them, before the pass's deletes. The core collector lists every object family that it sweeps. A fork's prefix stores no content objects or upload records, so a fork's pass lists neither. The pass on the fork's [family root](glossary.md#family-root) lists the content objects and upload records of the whole fork family. When a family root's pass doesn't sweep the content (because the shared base filter would exceed its byte cap, or because the pass couldn't read every member's roots), it lists the content prefix once to measure the content. So the value is the storage under the namespace's prefix at the time of the pass, except the hint and extension objects. Each extension collector reports its own `listed_bytes` under `extensions`. An application that meters storage samples the two on each pass.
+A GC response includes `listed_bytes`: the bytes of every object that the pass listed under the namespace, each object once, as the provider reported them, before the pass's deletes. The core collector lists every object family that it sweeps. A fork's prefix stores no content objects or upload records, so a fork's pass lists neither. The pass on the fork's [family root](glossary.md#family-root) lists the content objects and upload records of the whole fork family. When a family root's pass doesn't sweep the content (because the shared base filter would exceed its byte cap, or because the pass couldn't read every member's roots), it lists the content prefix once to measure the content. So the value is the storage under the namespace's prefix at the time of the pass, except the hint and any extension object that isn't a segment. An application that meters storage samples it on each pass.
 
 A GC response groups related counts:
 
-- `deleted` contains `wal_objects`, `metadata_segments`, `manifests`, `upload_sessions`, `content_objects`, `retired_content_objects`, and `temporary_objects`.
+- `deleted` contains `wal_objects`, `metadata_segments`, `extension_segments`, `manifests`, `upload_sessions`, `content_objects`, `retired_content_objects`, and `temporary_objects`. `extension_segments` counts the extension segments (such as the grep index's segments) that no retained manifest lists (see [Extensions](format.md#124-extensions)).
 - `deleted_checkpoints_by_owner` contains `user` and `fork` counts for the pins deleted in the pass. `user` counts snapshots. Their sum is the total number of pins deleted.
 
 Each deletion is counted once. When a fork's target namespace deletes its source pin, the deletion counts toward `fork` if the pin was present before the deletion, and repeating that deletion on an absent pin adds nothing. Every count field is present, including fields whose value is zero.
@@ -915,15 +915,11 @@ Each pass counts the candidates that it examined and kept, not the objects in th
 
 [Candidate and age rules](format.md#113-candidate-and-age-rules) defines which objects are candidates for deletion, and when each one is old enough to delete.
 
-When the deployment maintains a grep index (it advertises `maintenance.grep.index`), a `gc` run then runs the grep index's collector, which completes one pass over the namespace's grep manifests and segments. The response reports each extension's collector under the extension's name in an `extensions` object, so the grep pass's counts are in `extensions.grep`, which contains `deleted_segments`, `deleted_other_objects`, `namespace_reaped`, `retained_candidates`, and `listed_bytes`. A run that runs no extension collector leaves `extensions` out, and a client ignores an extension name it doesn't know. For example, a run that deletes three WAL objects and two grep segments returns this result:
+For example, a run that deletes three WAL objects and two grep segments returns this result:
 
 ```json
-{"kind":"gc","namespace_id":"demo","deleted":{"wal_objects":3,"metadata_segments":0,"manifests":0,"upload_sessions":0,"content_objects":0,"retired_content_objects":0,"temporary_objects":0},"deleted_checkpoints_by_owner":{"user":0,"fork":0},"retained":{"referenced":12,"within_grace_window":4,"no_provider_timestamp":0,"unrecognized_key":0,"checkpoint_not_deletable":0,"upload_session_window":0,"upload_session_undecided":0},"listed_bytes":1048576,"extensions":{"grep":{"deleted_segments":2,"deleted_other_objects":0,"namespace_reaped":false,"retained_candidates":14,"listed_bytes":65536}}}
+{"kind":"gc","namespace_id":"demo","deleted":{"wal_objects":3,"metadata_segments":0,"extension_segments":2,"manifests":0,"upload_sessions":0,"content_objects":0,"retired_content_objects":0,"temporary_objects":0},"deleted_checkpoints_by_owner":{"user":0,"fork":0},"retained":{"referenced":12,"within_grace_window":4,"no_provider_timestamp":0,"unrecognized_key":0,"checkpoint_not_deletable":0,"upload_session_window":0,"upload_session_undecided":0},"listed_bytes":1048576}
 ```
-
-The grep collector keeps its own age rules, so `grace_window_ms` doesn't change them. [Grep extension format](format.md#appendix-d-grep-extension-format) defines those rules. If a grep root is unreadable or invalid, the grep collector fails before it deletes anything. For a deleted namespace, the grep collector deletes the namespace's aged grep prefix, and `namespace_reaped` reports whether it deleted any of it. The grep collector's `listed_bytes` counts the grep manifests and segments that it listed, or every object under the grep prefix when it collects a deleted or missing namespace.
-
-The two collectors delete separate objects, so the grep collector runs even when the core collector fails. A run that fails returns the core collector's error if there is one, and otherwise the grep collector's. For example, a `gc` run on a namespace that doesn't exist deletes the namespace's aged grep prefix, if any is left, and then returns `namespace_not_found`. A deployment that doesn't maintain a grep index leaves out `extensions.grep`.
 
 ### Snapshots
 

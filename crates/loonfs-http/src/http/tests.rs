@@ -31,9 +31,8 @@ use loonfs::{
     ConfiguredObjectStoreKind, DeleteOptions, LoonFs, PutFileOptions, TraceMode, Writable,
 };
 use loonfs_client::{Client, ClientConfig, ClientError, MoveOptions, NamespacePath};
-use loonfs_grep::keyspace::{hint_key as grep_hint_key, manifest_key as grep_manifest_key};
-use loonfs_grep::manifest::{encode_grep_hint, GrepHint};
-use loonfs_grep::GrepWorker;
+use loonfs_grep::entry::grep_extension_name;
+use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome, GrepWorker};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError, PutMode};
 use loonfs_types::{
@@ -519,8 +518,8 @@ use loonfs_test_support::provider_detail::{
     assert_provider_markers_absent, POISON_PROVIDER_DETAIL,
 };
 use loonfs_test_support::stores::{
-    delegate_object_store, replace_object, BufferWatchStore, FailStore, InjectedError,
-    KeyPredicate, OperationContext, OperationKind, OperationSelector,
+    delegate_object_store, replace_object, BlockingStore, BufferWatchStore, FailStore,
+    InjectedError, KeyPredicate, OperationContext, OperationKind, OperationSelector,
 };
 use std::assert_matches;
 use std::sync::Arc;
@@ -883,12 +882,16 @@ async fn grep_error_store_outage_is_provider_failure_and_core_reads_survive() {
     let namespace_id = namespace_id("grep-error-store");
     let fault_store = Arc::new(FailStore::new(
         LocalFsStore::new(temp_dir.path()).expect("construct local store"),
-        KeyPredicate::exact(grep_hint_key(&namespace_id)),
-        OperationSelector::GetWithMetadata,
-        InjectedError::Transport("injected grep manifest outage".to_owned()),
+        KeyPredicate::prefix(loonfs_objectstore::keys::extension_segment_prefix(
+            &namespace_id,
+            &grep_extension_name(),
+        )),
+        OperationSelector::Read,
+        InjectedError::Transport("injected grep segment outage".to_owned()),
     ));
     let store = fault_store.clone() as SharedObjectStore;
     let writer = seed_grep_error_namespace(&store, &namespace_id).await;
+    build_active_grep_index(&writer, &store, &namespace_id).await;
     writer.shutdown().await.expect("shutdown writer");
 
     let harness = start_grep_error_server(store, temp_dir.path(), "store-server").await;
@@ -908,75 +911,72 @@ async fn grep_error_store_outage_is_provider_failure_and_core_reads_survive() {
     harness.server.abort();
 }
 
+/// Checks that a grep entry this build can't read, and a segment whose bytes
+/// are corrupt, return `index_corrupt` to a query, and that core reads, which
+/// never read grep's entry or segments, still work.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn grep_error_unreadable_manifests_are_index_corrupt_and_core_reads_survive() {
+async fn grep_error_unreadable_entries_and_segments_are_index_corrupt_and_core_reads_survive() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
-    let corrupt_pointer = namespace_id("grep-error-pointer");
-    let missing_manifest = namespace_id("grep-error-missing-manifest");
-    let corrupt_manifest = namespace_id("grep-error-manifest");
-    let identity_mismatch = namespace_id("grep-error-identity");
+    let newer_version = namespace_id("grep-error-version");
+    let unknown_member = namespace_id("grep-error-member");
+    let corrupt_segment = namespace_id("grep-error-segment");
 
     let writer = test_runtime(store.clone(), "grep-error-seed").await;
-    for namespace_id in [
-        &corrupt_pointer,
-        &missing_manifest,
-        &corrupt_manifest,
-        &identity_mismatch,
-    ] {
+    for namespace_id in [&newer_version, &unknown_member, &corrupt_segment] {
         seed_grep_error_namespace_on(&writer, namespace_id).await;
     }
-
-    replace_object(
-        &store,
-        &grep_hint_key(&corrupt_pointer),
-        Bytes::from_static(b"corrupt grep pointer"),
-    )
-    .await
-    .expect("write corrupt grep pointer");
-
-    write_grep_hint(
-        &*store,
-        &missing_manifest,
-        missing_manifest.clone(),
-        loonfs_types::ManifestNo(11),
-    )
-    .await;
-
-    let manifest_no = loonfs_types::ManifestNo(12);
-    replace_object(
-        &store,
-        &grep_manifest_key(&corrupt_manifest, &manifest_no),
-        Bytes::from_static(b"corrupt grep manifest"),
-    )
-    .await
-    .expect("write corrupt grep manifest");
-    write_grep_hint(
-        &*store,
-        &corrupt_manifest,
-        corrupt_manifest.clone(),
-        manifest_no,
+    let state = |members: serde_json::Value| {
+        members
+            .as_object()
+            .cloned()
+            .expect("an entry's members are an object")
+    };
+    let active = serde_json::json!({
+        "kind": "active", "captured_seq": 1, "built_through_seq": 1, "next_event_index": 0
+    });
+    publish_grep_entry(
+        &writer,
+        &newer_version,
+        loonfs_types::format::manifest::ExtensionEntry::new(
+            3,
+            Vec::new(),
+            state(serde_json::json!({ "status": active })),
+        ),
     )
     .await;
-
-    write_grep_hint(
-        &*store,
-        &identity_mismatch,
-        NamespaceId::parse("different-grep-identity").expect("different namespace id"),
-        loonfs_types::ManifestNo(13),
+    publish_grep_entry(
+        &writer,
+        &unknown_member,
+        loonfs_types::format::manifest::ExtensionEntry::new(
+            2,
+            Vec::new(),
+            state(serde_json::json!({ "status": active, "watermark": 1 })),
+        ),
     )
     .await;
-
+    // Each byte flips, so every block fails its checksum and the object
+    // keeps its length.
+    for segment in build_active_grep_index(&writer, &store, &corrupt_segment).await {
+        let key = loonfs_objectstore::keys::extension_segment_object_key(
+            &grep_extension_name(),
+            &segment,
+        );
+        let bytes = store
+            .get(&key, None)
+            .await
+            .expect("read grep segment")
+            .expect("a listed grep segment exists");
+        let flipped: Vec<u8> = bytes.iter().map(|byte| byte ^ 0xff).collect();
+        replace_object(&store, &key, Bytes::from(flipped))
+            .await
+            .expect("write corrupt grep segment");
+    }
     writer.shutdown().await.expect("shutdown writer");
 
     let harness = start_grep_error_server(store, temp_dir.path(), "index-corrupt-server").await;
     let client = &harness.client;
-    for namespace_id in [
-        corrupt_pointer,
-        missing_manifest,
-        corrupt_manifest,
-        identity_mismatch,
-    ] {
+    for namespace_id in [newer_version, unknown_member, corrupt_segment] {
         let result = client
             .grep(&namespace_id, &grep_error_request())
             .page()
@@ -994,38 +994,52 @@ async fn grep_error_unreadable_manifests_are_index_corrupt_and_core_reads_surviv
     harness.server.abort();
 }
 
+/// Checks that an enable whose publication another process's enable beat
+/// returns `stale_head`, and that core reads still work.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn grep_error_publication_conflict_is_stale_head_and_core_reads_survive() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("grep-error-conflict");
-    let manifest_key = grep_manifest_key(&namespace_id, &loonfs_types::ManifestNo(1));
-    let fault_store = Arc::new(FailStore::matching(
+    let gate = Arc::new(BlockingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("construct local store"),
-        move |context: &OperationContext<'_>| {
-            context.key() == manifest_key
-                && matches!(
-                    context.kind(),
-                    OperationKind::Put {
-                        mode: PutMode::CreateIfAbsent,
-                        ..
-                    }
-                )
-        },
-        InjectedError::PreconditionFailed,
+        KeyPredicate::prefix(loonfs_objectstore::keys::metadata_manifest_prefix(
+            &namespace_id,
+        )),
+        OperationSelector::PutCreateIfAbsent,
     ));
-    let store = fault_store.clone() as SharedObjectStore;
+    let store = gate.clone() as SharedObjectStore;
     let writer = seed_grep_error_namespace(&store, &namespace_id).await;
+    // With the tail folded, the enable's publication is its only manifest
+    // put.
+    writer
+        .maintenance(loonfs_test_support::ids::writer_id("grep-error-seed"))
+        .fold_wal(&namespace_id)
+        .await
+        .expect("fold the seed");
     writer.shutdown().await.expect("shutdown writer");
 
     let harness =
         start_grep_maintenance_error_server(store, temp_dir.path(), "conflict-server").await;
-    fault_store.fail_next(1);
+    let rival_store =
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("rival store")) as SharedObjectStore;
+    let rival = grep_worker(&rival_store, "grep-error-rival").await;
+    gate.block_next();
     let client = &harness.client;
-    let result = client.enable_grep_index(&namespace_id);
+    let (result, ()) = futures::join!(client.enable_grep_index(&namespace_id), async {
+        gate.wait_until_blocked().await;
+        assert!(matches!(
+            rival
+                .enable(&namespace_id)
+                .await
+                .expect("the rival publishes first"),
+            loonfs_grep::GrepEnableOutcome::Enabled { .. }
+        ));
+        gate.release();
+    });
     assert_grep_api_error_and_core_read(
         client,
         &namespace_id,
-        result.await,
+        result,
         409,
         ErrorCode::StaleHead,
         "publication conflict",
@@ -2636,10 +2650,12 @@ async fn grep_worker(store: &SharedObjectStore, actor: &str) -> GrepWorker<Share
         .build()
         .await
         .expect("build writer");
+    let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id(actor));
     GrepWorker::new(
         store.clone(),
         reader,
         writer,
+        maintenance,
         loonfs_grep::GrepPassBudget::default(),
     )
 }
@@ -2654,24 +2670,67 @@ fn grep_error_request() -> GrepRequest {
     }
 }
 
-async fn write_grep_hint(
-    store: &dyn ObjectStore,
-    stored_namespace_id: &NamespaceId,
-    hint_namespace_id: NamespaceId,
-    manifest_no: loonfs_types::ManifestNo,
+/// Enables grep on `namespace_id` with a file whose bytes contain the
+/// requests' pattern, so a query reads the index's segments, and builds the
+/// index until it's active. Returns the index's segments.
+async fn build_active_grep_index(
+    writer: &LoonFs<Writable>,
+    store: &SharedObjectStore,
+    namespace_id: &NamespaceId,
+) -> Vec<loonfs_types::format::manifest::ExtensionSegmentRef> {
+    writer
+        .open_namespace(namespace_id)
+        .expect("open namespace")
+        .put_file(
+            "/needle.txt",
+            b"a needle in the index",
+            &loonfs_test_support::test_actor(),
+        )
+        .await
+        .expect("write an indexed file");
+    let worker = grep_error_worker(store).await;
+    worker.enable(namespace_id).await.expect("enable grep");
+    loop {
+        match worker
+            .build_step(namespace_id, GramIndexBuildPolicy::default())
+            .await
+            .expect("build step")
+        {
+            GrepBuildOutcome::UpToDate { .. } => break,
+            GrepBuildOutcome::Indexed { .. } => {}
+            other => panic!("unexpected build outcome {other:?}"),
+        }
+    }
+    worker
+        .entry(namespace_id)
+        .await
+        .expect("grep entry")
+        .expect("an enabled index has an entry")
+        .segments()
+        .cloned()
+        .collect()
+}
+
+/// Publishes `entry` as grep's entry in the namespace's next manifest,
+/// whatever grep would make of it.
+async fn publish_grep_entry(
+    writer: &LoonFs<Writable>,
+    namespace_id: &NamespaceId,
+    entry: loonfs_types::format::manifest::ExtensionEntry,
 ) {
-    let envelope = encode_grep_hint(GrepHint {
-        namespace_id: hint_namespace_id,
-        manifest_no,
-    })
-    .expect("build grep pointer");
-    replace_object(
-        &store,
-        &grep_hint_key(stored_namespace_id),
-        Bytes::from(envelope.into_bytes()),
-    )
-    .await
-    .expect("write grep pointer");
+    let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("grep-error-seed"));
+    let basis = maintenance
+        .load_extension_basis(namespace_id)
+        .await
+        .expect("load the basis");
+    let published = maintenance
+        .publish_extension(&basis, &grep_extension_name(), |base| (entry.clone(), base))
+        .await
+        .expect("publish the entry");
+    assert!(matches!(
+        published,
+        loonfs::engine::ExtensionPublication::Published(_)
+    ));
 }
 
 /// A deployment that answers searches over an index it does not maintain:
@@ -2687,7 +2746,7 @@ async fn start_grep_error_server(
     start_server_with_config(store, config).await
 }
 
-/// Administering a grep manifest belongs to a deployment that maintains one.
+/// Administering a grep index belongs to a deployment that maintains one.
 async fn start_grep_maintenance_error_server(
     store: SharedObjectStore,
     root: &Path,

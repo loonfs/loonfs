@@ -692,6 +692,7 @@ async fn manifest_run_rejects_rows_after_run_seq() {
                 segments: flatten_manifest_segments(metadata_segments),
             },
         ],
+        extensions: Default::default(),
     })
     .expect("build malformed manifest")
     .into_envelope();

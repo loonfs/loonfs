@@ -31,8 +31,8 @@ The host runs maintenance on two schedules, a frequent tick over open sessions a
 Every `tick_interval_ms` (5000 ms by default), `Sweep::tick` walks the IDs of the open sessions without cloning their handles. Once a session has gone one tick without a commit, the tick runs the first step that's due for it:
 
 1. **Metadata.** While metadata isn't caught up (including when a tail is waiting for its idle fold age), the tick makes one `maintain_metadata_while_due` call. A call publishes at most 16 compaction units. If the call leaves work unfinished, the entry waits `maintenance_interval_ms` (300000 ms by default) before another metadata call, and if the call fails, the entry waits for the longer of that interval and the call's failure backoff (described after this list). When the tail reaches the idle fold age, one earlier attempt is allowed unless the call is failing, and an unsuccessful attempt after that age uses the retry delay.
-2. **Index.** This step runs when the host maintains grep, and the entry is dirty or its indexed sequence number is older than its published sequence number. A visit runs up to 16 build steps, and then a reorganization step. An unfinished, failed, or cancelled build leaves the entry dirty, even without a published sequence number. An index change during a build also leaves the entry dirty. After a failed build, the ticks wait for the index call's failure backoff before the next index step.
-3. **Collection.** This step runs core garbage collection, and grep garbage collection when the host maintains grep. It runs when the published sequence number has moved since the last successful collection, and `gc_interval_ms` (3600000 ms by default) has elapsed. For a newly opened entry, this clock starts when the session is opened. After a failed collection, the ticks wait for the collection call's failure backoff before they collect again.
+2. **Index.** This step runs when the host maintains grep, and the entry is dirty or its indexed sequence number is older than its published sequence number. A visit runs up to 16 build steps, and then a reorganization step. The steps' changes to grep's entry are published once a tick interval has passed since the first of them, and again when the visit ends, so a visit publishes one or a few manifests. An unfinished, failed, or cancelled build leaves the entry dirty, even without a published sequence number. An index change during a build also leaves the entry dirty. After a failed build, the ticks wait for the index call's failure backoff before the next index step.
+3. **Collection.** This step runs core garbage collection, which also collects the grep index's unreferenced segments. It runs when the published sequence number has moved since the last successful collection, and `gc_interval_ms` (3600000 ms by default) has elapsed. For a newly opened entry, this clock starts when the session is opened. After a failed collection, the ticks wait for the collection call's failure backoff before they collect again.
 4. **Close.** This step runs when the entry is Quiet, its last open was more than `idle_session_close_after_ms` (1800000 ms by default) ago, and no caller has its handle. The sequence number and exclusive ownership are checked together under the table lock. An open that arrives during the close waits for the drain and gets a fresh session. It doesn't receive `writer_session_closed` from this close path. A session with a failing call stays open, so that the ticks keep retrying the call, until the call's failure backoff reaches its cap. Then the session can close, and the next daily pass retries the call.
 
 When a call fails, the entry records the failure, and the ticks wait for the call's failure backoff before they make that call again. The backoff is one tick interval after the first failure, and each failure in a row doubles it, up to one hour. A success ends the backoff, and a call that panics counts as a failure.
@@ -86,8 +86,8 @@ A daily pass costs one namespace listing per page, plus these requests for each 
 
 | Pass | Grep not maintained | Grep maintained, index not enabled | Grep index enabled |
 | --- | --- | --- | --- |
-| Does not collect | 6 GET or HEAD | 7 GET or HEAD | 26 GET or HEAD |
-| Collects | 12 GET or HEAD and 10 LIST | 20 GET or HEAD and 12 LIST | 38 GET or HEAD and 12 LIST |
+| Does not collect | 14 GET or HEAD | 18 GET or HEAD | 19 GET or HEAD |
+| Collects | 20 GET or HEAD and 11 LIST | 24 GET or HEAD and 11 LIST | 26 GET or HEAD and 11 LIST |
 
 Objects that are still inside their grace windows, and work that's due, add more requests. Deleted namespaces are still listed, because their tombstone manifests are still stored.
 
@@ -100,10 +100,9 @@ After a restart, each kind of work starts again from durable state:
 | WAL fold | The current manifest and the numbered WAL tail. |
 | Metadata compaction | The current manifest, the selected input descriptors, and a new runtime epoch claim. |
 | Core garbage collection | Fresh discovery of the current manifest, and complete listings of upload sessions and pins. |
-| Grep indexing | The current grep manifest and its build or reorganization cursor. |
-| Grep garbage collection | Fresh discovery of the grep manifest, and complete candidate listings. |
+| Grep indexing | Grep's entry in the current manifest, with its build or reorganization cursor. |
 
-A grep build records its progress durably in its manifest. A core compaction or garbage collection pass has no equivalent durable cursor, so the next attempt repeats it from the start.
+A grep build records its progress durably in grep's entry, and steps whose changes hadn't been published when the process stopped run again. A core compaction or garbage collection pass has no equivalent durable cursor, so the next attempt repeats it from the start.
 
 ## Compaction after a worker stops
 

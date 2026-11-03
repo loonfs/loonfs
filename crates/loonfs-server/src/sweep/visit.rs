@@ -12,11 +12,14 @@ use crate::sweep::SweepInner;
 use crate::sweep::SweepState;
 use crate::sweep::MAX_GREP_BUILD_STEPS_PER_VISIT;
 use futures::FutureExt as _;
+use loonfs::SharedObjectStore;
 use loonfs::{
     AdvanceRetentionFloorOptions, ChangeSeq, GcOptions, MetadataMaintenanceOutcome, NamespaceId,
     RetentionTarget,
 };
-use loonfs_grep::{GrepBuildOutcome, GrepError, GrepReorganizeOutcome};
+use loonfs_grep::{
+    GrepBuildOutcome, GrepError, GrepPublishOutcome, GrepReorganizeOutcome, GrepSteps,
+};
 use loonfs_http::HeldNamespace;
 
 use std::collections::hash_map::Entry;
@@ -98,8 +101,11 @@ impl Sweep {
             entry,
             caught_up: false,
         };
+        // Boxed so the spawned sweep's `Send` check does not recurse through
+        // every engine future the index steps await.
         let result = contain(
             self.build_index(grep, namespace_id)
+                .boxed()
                 .map(|result| result.map_err(|error| CallFailure::error(error.code(), error))),
         )
         .await;
@@ -173,13 +179,10 @@ impl Sweep {
         }
         let options = GcOptions::default();
         let result = contain(
-            loonfs_http::gc_namespace(
-                &inner.maintenance,
-                inner.grep.as_ref().map(|grep| &grep.worker),
-                namespace_id,
-                &options,
-            )
-            .map(|result| result.map_err(|error| CallFailure::error(error.code(), error))),
+            inner
+                .maintenance
+                .gc_with_options(namespace_id, &options)
+                .map(|result| result.map_err(|error| CallFailure::error(error.code(), error))),
         )
         .await;
         let collected = self.record_call(namespace_id, entry, SweepCall::Gc, result, 0);
@@ -250,32 +253,52 @@ impl Sweep {
         self.record_call(namespace_id, entry, SweepCall::Retention, result, 0);
     }
 
-    /// Runs build steps while each one publishes, at most
+    /// Runs build steps while each one indexes something, at most
     /// [`MAX_GREP_BUILD_STEPS_PER_VISIT`], then one reorganize step once the
-    /// index is up to date. Returns whether the index has nothing left to
-    /// build for now.
+    /// index is up to date, and publishes what the steps left pending.
+    /// Returns whether the index has nothing left to build for now.
+    ///
+    /// The steps' changes are published at most once per tick interval, and
+    /// once more when the visit ends, so a visit's sixteen steps are published
+    /// in one or a few manifests instead of sixteen. A stopping sweep
+    /// publishes what's pending too.
     async fn build_index(
         &self,
         grep: &GrepIndexing,
         namespace_id: &NamespaceId,
     ) -> Result<bool, GrepError> {
+        let mut steps = grep
+            .worker
+            .steps(namespace_id, self.inner.config.tick_interval_ms);
+        // A step changes the pending entry only once it succeeds, so the
+        // visit publishes the steps before a failed one, and then reports
+        // the failure.
+        let caught_up = self.run_index_steps(grep, &mut steps).await;
+        let published = steps.publish().await;
+        Ok(caught_up? && published? != GrepPublishOutcome::Superseded)
+    }
+
+    async fn run_index_steps(
+        &self,
+        grep: &GrepIndexing,
+        steps: &mut GrepSteps<'_, SharedObjectStore>,
+    ) -> Result<bool, GrepError> {
         for _ in 0..MAX_GREP_BUILD_STEPS_PER_VISIT {
             if self.inner.stop.is_cancelled() {
                 return Ok(false);
             }
-            match grep.worker.build_step(namespace_id, grep.policy).await? {
-                GrepBuildOutcome::Published { .. } | GrepBuildOutcome::BackfillRestarted { .. } => {
+            match steps.build_step(grep.policy).await? {
+                GrepBuildOutcome::Indexed { .. } | GrepBuildOutcome::BackfillRestarted { .. } => {
                     continue
                 }
                 GrepBuildOutcome::UpToDate { .. } => {
                     return Ok(matches!(
-                        grep.worker
-                            .reorganize_step(namespace_id, grep.policy)
-                            .await?,
+                        steps.reorganize_step(grep.policy).await?,
                         GrepReorganizeOutcome::NotNeeded { .. } | GrepReorganizeOutcome::NotEnabled
                     ));
                 }
-                GrepBuildOutcome::NotEnabled | GrepBuildOutcome::Superseded => return Ok(true),
+                GrepBuildOutcome::NotEnabled => return Ok(true),
+                GrepBuildOutcome::Superseded => return Ok(false),
             }
         }
         Ok(false)

@@ -275,8 +275,14 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let head_seq = projection.head.seq;
         let tail_state = projection.tail_state.merged_rows();
         // A WAL fold keeps existing runs and writes the WAL delta as one new delta
-        // run. Compaction rewrites delta runs into the base separately.
-        //
+        // run. Compaction rewrites delta runs into the base separately. The
+        // manifest that first lists a run allocates its number, and an
+        // extension's publication can allocate numbers before the first fold.
+        let run_no = projection
+            .manifest_segments
+            .manifest()
+            .payload()
+            .next_run_no;
         let (runs, next_run_no) = if projection
             .manifest_segments
             .manifest()
@@ -284,7 +290,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .runs
             .is_empty()
         {
-            let run_no = RunNo(0);
             (
                 vec![MetadataRunRef {
                     run_no,
@@ -298,9 +303,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
             )
         } else {
             let previous_manifest = projection.manifest_segments.manifest();
-            // The manifest that first names a run allocates its number. A fold
-            // takes one number for its delta, or none when the head is unchanged.
-            let run_no = previous_manifest.payload().next_run_no;
+            // A fold takes one number for its delta, or none when the head is
+            // unchanged.
             let mut runs = previous_manifest.payload().runs.clone();
             let mut next_run_no = run_no;
             if previous_manifest.payload().head_seq < head_seq {

@@ -11,23 +11,21 @@ use super::pruning::{first_step_filters, re_reference_check_fails, RetainedRefer
 use super::tables::{
     decide_output_table, read_translations, run_filter, table_ordinal, TableReader, Translation,
 };
-use super::{next_index_run_no, next_manifest_no, GramIndexBuildPolicy, GrepReorganizeOutcome};
+use super::{GramIndexBuildPolicy, GrepReorganizeOutcome, GrepSteps};
 use crate::codec::{lookup, IndexRow, TextRow};
-use crate::manifest::{
-    publish_grep_manifest, GrepIndexState, GrepManifestState, GrepReorganizeState, GrepSegmentRef,
-    LoadedGrepManifest,
-};
+use crate::entry::{GrepEntry, GrepReorganizeState};
 use crate::segments::{GrepSegments, RunWriter};
-use crate::{GrepError, GrepWorker, Result};
+use crate::{GrepError, Result};
 use loonfs::engine::{
-    refill_iterators, select_next_iterator, OperationClock, SegmentBlockLoader, SegmentRowIterator,
+    refill_iterators, select_next_iterator, SegmentBlockLoader, SegmentRowIterator,
 };
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::lookup_keys::after_row_key;
+use loonfs_types::format::manifest::{ExtensionRunRef, ExtensionSegmentRef};
 use loonfs_types::format::segment_blocks::{
     DecodedDataBlock, SegmentIndexEntry, DEFAULT_MAX_COMPACTION_INPUT_BYTES,
 };
-use loonfs_types::{IndexSegmentId, NamespaceId, RunNo};
+use loonfs_types::{IndexSegmentId, RunNo};
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -39,22 +37,24 @@ pub(super) const INDEX_GRAMS_BASE_LEVEL: u32 = 2;
 /// The reorganization one step continues or starts, or the run counts that
 /// call for none.
 enum ReorganizePlan {
-    Run {
-        reorganize: GrepReorganizeState,
-        next_run_no: RunNo,
-    },
+    Continue(GrepReorganizeState),
+    /// A new reorganization, whose provisional run number the step takes
+    /// from the pending change.
+    Start(GrepReorganizeState),
     NotNeeded {
         delta_runs: usize,
         mid_runs: usize,
     },
 }
 
-impl<S: ObjectStore + Clone> GrepWorker<S> {
-    /// Runs one partitioned delta-to-mid or mid-plus-base reorganize step.
+impl<S: ObjectStore + Clone> GrepSteps<'_, S> {
+    /// Runs one partitioned delta-to-mid or mid-plus-base reorganize step,
+    /// from the entry that the run's earlier steps left pending.
     ///
     /// A step that has runs to reorganize waits for a step permit before it reads
-    /// index segments, and keeps it until it publishes. A step with nothing
-    /// to reorganize takes no permit.
+    /// index segments, and keeps it until it writes its output. A step with
+    /// nothing to reorganize takes no permit. The step ends by publishing the
+    /// run's pending change when it's due.
     ///
     /// Each step translates the inputs' posting ordinals to the output run's
     /// ordinals, through one pass over the input runs' value tables beside
@@ -69,61 +69,43 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     /// reorganization when a commit since the filters' sequence brings back
     /// a value that it drops.
     pub async fn reorganize_step(
-        &self,
-        namespace_id: &NamespaceId,
+        &mut self,
         policy: GramIndexBuildPolicy,
     ) -> Result<GrepReorganizeOutcome> {
-        let deadline = OperationClock::start(self.now_ms(), self.timer());
-        let Some(current) = self.load_enabled(namespace_id, &deadline).await? else {
+        let pending = self.pending().await?;
+        let Some(entry) = pending.enabled_entry().cloned() else {
             return Ok(GrepReorganizeOutcome::NotEnabled);
         };
-        let (mut reorganize, next_run_no) = match plan_reorganize(current.manifest_state(), policy)?
-        {
-            ReorganizePlan::Run {
-                reorganize,
-                next_run_no,
-            } => (reorganize, next_run_no),
+        let mut reorganize = match plan_reorganize(&entry, policy) {
+            ReorganizePlan::Continue(reorganize) => reorganize,
+            ReorganizePlan::Start(start) => GrepReorganizeState {
+                run_no: pending.allocate_run_no()?,
+                ..start
+            },
             ReorganizePlan::NotNeeded {
                 delta_runs,
                 mid_runs,
             } => {
-                return Ok(GrepReorganizeOutcome::NotNeeded {
-                    delta_runs,
-                    mid_runs,
-                })
+                return self
+                    .finish_step(
+                        GrepReorganizeOutcome::NotNeeded {
+                            delta_runs,
+                            mid_runs,
+                        },
+                        GrepReorganizeOutcome::Superseded,
+                    )
+                    .await
             }
         };
-        let inputs = reorganize
-            .input_segment_ids
-            .iter()
-            .map(|segment_id| {
-                current
-                    .manifest_state()
-                    .segments()
-                    .iter()
-                    .find(|segment| &segment.segment_id == segment_id)
-                    .cloned()
-                    .ok_or_else(|| GrepError::IndexCorrupt {
-                        message: format!(
-                            "grep reorganization input segment `{segment_id}` is missing from the manifest"
-                        ),
-                    })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let _permit = self.step_budget.permit().await;
+        let input_runs = input_runs(&entry, &reorganize);
+        let inputs: Vec<ExtensionSegmentRef> = input_runs.values().flatten().cloned().collect();
+        let _permit = self.worker.step_budget.permit().await;
         let segments = GrepSegments {
-            store: &self.store,
-            namespace_id,
-            block_cache: Some(&self.reorganize_blocks),
+            store: &self.worker.store,
+            namespace_id: &self.namespace_id,
+            block_cache: Some(&self.worker.reorganize_blocks),
         };
-        let mut input_runs: BTreeMap<RunNo, Vec<GrepSegmentRef>> = BTreeMap::new();
-        for segment in &inputs {
-            input_runs
-                .entry(segment.run_no)
-                .or_default()
-                .push(segment.clone());
-        }
-        let reads = self.reads(namespace_id);
+        let reads = self.worker.reads(&self.namespace_id);
         let base = reorganize.output_level == INDEX_GRAMS_BASE_LEVEL;
         let first_step = reorganize.row_key_cursor.is_empty();
         let mut new_segments = Vec::new();
@@ -136,12 +118,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             // The first step writes the output run's filter and value table
             // in segments of their own as it decides them, so it keeps
             // neither table.
-            let mut writer = RunWriter::new(
-                &segments,
-                reorganize.run_no,
-                reorganize.output_level,
-                policy.max_rows_per_segment,
-            );
+            let mut writer = RunWriter::new(&segments, policy.max_rows_per_segment);
             for row in filters
                 .as_ref()
                 .map(RetainedReferences::filter_rows)
@@ -154,10 +131,8 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             new_segments = writer.finish().await?;
             (translations, filters)
         } else {
-            let outputs: Vec<GrepSegmentRef> = current
-                .manifest_state()
+            let outputs: Vec<ExtensionSegmentRef> = entry
                 .segments()
-                .iter()
                 .filter(|segment| reorganize.output_segment_ids.contains(&segment.segment_id))
                 .cloned()
                 .collect();
@@ -180,7 +155,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         };
         let merged = segments
             .merge_range(
-                &inputs,
+                &input_runs,
                 &reorganize.row_key_cursor,
                 policy.max_decoded_input_rows_per_step.get(),
                 &MergeTables {
@@ -193,158 +168,163 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         if completed
             && re_reference_check_fails(&reads, &reorganize, &segments, &translations).await?
         {
+            self.abandon_reorganization(&entry).await?;
             return self
-                .abandon_reorganization(namespace_id, &current, &deadline)
+                .finish_step(
+                    GrepReorganizeOutcome::Abandoned,
+                    GrepReorganizeOutcome::Superseded,
+                )
                 .await;
         }
-        let manifest_no = next_manifest_no(Some(&current))?;
         new_segments.extend(
             segments
-                .write_run(
-                    reorganize.run_no,
-                    reorganize.output_level,
-                    merged.rows.into_rows(),
-                    policy.max_rows_per_segment,
-                )
+                .write_run(merged.rows.into_rows(), policy.max_rows_per_segment)
                 .await?,
         );
         let segments_written = new_segments.len() as u64;
-        let mut manifest_segments = current.manifest_state().segments().to_vec();
         reorganize.output_segment_ids.extend(
             new_segments
                 .iter()
                 .map(|segment| segment.segment_id.clone()),
         );
-        manifest_segments.extend(new_segments);
+        let mut runs = entry.runs().to_vec();
+        match runs.iter_mut().find(|run| run.run_no == reorganize.run_no) {
+            Some(output) => output.segments.extend(new_segments),
+            None if new_segments.is_empty() => {}
+            None => runs.push(ExtensionRunRef {
+                run_no: reorganize.run_no,
+                level: reorganize.output_level,
+                segments: new_segments,
+            }),
+        }
         let reorganize = if completed {
             let input_ids: BTreeSet<&IndexSegmentId> =
                 reorganize.input_segment_ids.iter().collect();
-            manifest_segments.retain(|segment| !input_ids.contains(&segment.segment_id));
+            without_segments(&mut runs, &input_ids);
             None
         } else {
             reorganize.row_key_cursor = merged.next_cursor;
             Some(reorganize)
         };
-        let next = GrepManifestState::new(
-            namespace_id.clone(),
-            manifest_no,
-            current.manifest_state().status().clone(),
-            GrepIndexState {
-                reorganize,
-                next_run_no,
-            },
-            manifest_segments,
-        )
-        .expect("a successor of a grep manifest that decoding validated should be valid");
-        match publish_grep_manifest(&self.store, Some(&current), &next, &deadline).await {
-            Ok(_) => Ok(GrepReorganizeOutcome::UnitPublished {
+        self.pending().await?.set_entry(
+            GrepEntry::new(entry.status().clone(), reorganize, runs)
+                .expect("a reorganize step should keep a valid entry valid"),
+        );
+        self.finish_step(
+            GrepReorganizeOutcome::UnitWritten {
                 merged_rows: merged.rows_read,
                 segments_written,
                 completed,
-            }),
-            Err(GrepError::PublicationConflict { .. }) => Ok(GrepReorganizeOutcome::Superseded),
-            Err(error) => Err(error),
-        }
+            },
+            GrepReorganizeOutcome::Superseded,
+        )
+        .await
     }
 
-    /// Publishes `current` without its reorganization, and without the
-    /// outputs that the reorganization's earlier steps listed. The inputs
-    /// stay listed, so no value that the reorganization would drop leaves the
-    /// index, and the outputs are left to the collector. A reorganization
-    /// that no step has published yet needs no publication.
-    async fn abandon_reorganization(
-        &self,
-        namespace_id: &NamespaceId,
-        current: &LoadedGrepManifest,
-        deadline: &OperationClock,
-    ) -> Result<GrepReorganizeOutcome> {
-        let state = current.manifest_state();
-        let Some(reorganize) = &state.index().reorganize else {
-            return Ok(GrepReorganizeOutcome::Abandoned);
+    /// Drops the reorganization from the pending entry, with the outputs that
+    /// its earlier steps listed. The inputs stay listed, so no value that the
+    /// reorganization would drop leaves the index, and the outputs are left
+    /// to the collector.
+    async fn abandon_reorganization(&mut self, entry: &GrepEntry) -> Result<()> {
+        let Some(reorganize) = entry.reorganize() else {
+            return Ok(());
         };
         let outputs: BTreeSet<&IndexSegmentId> = reorganize.output_segment_ids.iter().collect();
-        let next = GrepManifestState::new(
-            namespace_id.clone(),
-            next_manifest_no(Some(current))?,
-            state.status().clone(),
-            GrepIndexState {
-                reorganize: None,
-                next_run_no: state.index().next_run_no,
-            },
-            state
-                .segments()
-                .iter()
-                .filter(|segment| !outputs.contains(&segment.segment_id))
-                .cloned()
-                .collect(),
-        )
-        .expect("a successor of a grep manifest that decoding validated should be valid");
-        match publish_grep_manifest(&self.store, Some(current), &next, deadline).await {
-            Ok(_) => Ok(GrepReorganizeOutcome::Abandoned),
-            Err(GrepError::PublicationConflict { .. }) => Ok(GrepReorganizeOutcome::Superseded),
-            Err(error) => Err(error),
-        }
+        let mut runs = entry.runs().to_vec();
+        without_segments(&mut runs, &outputs);
+        self.pending().await?.set_entry(
+            GrepEntry::new(entry.status().clone(), None, runs)
+                .expect("dropping a reorganization should keep a valid entry valid"),
+        );
+        Ok(())
     }
 }
 
-/// Continues the reorganization that `current` records, or picks the inputs
+/// Continues the reorganization that `entry` records, or picks the inputs
 /// of a new one when a level has reached its run limit.
-fn plan_reorganize(
-    current: &GrepManifestState,
-    policy: GramIndexBuildPolicy,
-) -> Result<ReorganizePlan> {
-    let current_run_no = current.index().next_run_no;
-    if let Some(reorganize) = current.index().reorganize.clone() {
-        return Ok(ReorganizePlan::Run {
-            reorganize,
-            next_run_no: current_run_no,
-        });
+fn plan_reorganize(entry: &GrepEntry, policy: GramIndexBuildPolicy) -> ReorganizePlan {
+    if let Some(reorganize) = entry.reorganize() {
+        return ReorganizePlan::Continue(reorganize.clone());
     }
-    let delta_runs = distinct_run_nos_at_level(current.segments(), INDEX_GRAMS_DELTA_LEVEL);
-    let mid_runs = distinct_run_nos_at_level(current.segments(), INDEX_GRAMS_MID_LEVEL);
-    let (is_input, output_level): (fn(&GrepSegmentRef) -> bool, u32) =
+    let delta_runs = runs_at_level(entry.runs(), INDEX_GRAMS_DELTA_LEVEL);
+    let mid_runs = runs_at_level(entry.runs(), INDEX_GRAMS_MID_LEVEL);
+    let (is_input, output_level): (fn(&ExtensionRunRef) -> bool, u32) =
         if delta_runs >= policy.max_delta_runs.get() {
             (
-                |segment| segment.level == INDEX_GRAMS_DELTA_LEVEL,
+                |run| run.level == INDEX_GRAMS_DELTA_LEVEL,
                 INDEX_GRAMS_MID_LEVEL,
             )
         } else if mid_runs >= policy.max_mid_runs.get() {
             (
-                |segment| segment.level != INDEX_GRAMS_DELTA_LEVEL,
+                |run| run.level != INDEX_GRAMS_DELTA_LEVEL,
                 INDEX_GRAMS_BASE_LEVEL,
             )
         } else {
-            return Ok(ReorganizePlan::NotNeeded {
+            return ReorganizePlan::NotNeeded {
                 delta_runs,
                 mid_runs,
-            });
+            };
         };
-    let input_segment_ids = current
-        .segments()
+    let input_segment_ids = entry
+        .runs()
         .iter()
-        .filter(|segment| is_input(segment))
+        .filter(|run| is_input(run))
+        .flat_map(|run| &run.segments)
         .map(|segment| segment.segment_id.clone())
         .collect();
-    Ok(ReorganizePlan::Run {
-        reorganize: GrepReorganizeState {
-            input_segment_ids,
-            output_segment_ids: Vec::new(),
-            row_key_cursor: String::new(),
-            output_level,
-            run_no: current_run_no,
-            pruning: None,
-        },
-        next_run_no: next_index_run_no(current_run_no)?,
+    ReorganizePlan::Start(GrepReorganizeState {
+        input_segment_ids,
+        output_segment_ids: Vec::new(),
+        row_key_cursor: String::new(),
+        output_level,
+        // The step takes the run's provisional number from the pending
+        // change.
+        run_no: RunNo(0),
+        pruning: None,
     })
 }
 
-fn distinct_run_nos_at_level(segments: &[GrepSegmentRef], level: u32) -> usize {
-    segments
+fn runs_at_level(runs: &[ExtensionRunRef], level: u32) -> usize {
+    runs.iter().filter(|run| run.level == level).count()
+}
+
+/// Returns the segments of `reorganize`'s inputs that `entry` lists, by the
+/// number of the run that each belongs to.
+fn input_runs(
+    entry: &GrepEntry,
+    reorganize: &GrepReorganizeState,
+) -> BTreeMap<RunNo, Vec<ExtensionSegmentRef>> {
+    let input_ids: BTreeSet<&IndexSegmentId> = reorganize.input_segment_ids.iter().collect();
+    let input_runs: BTreeMap<RunNo, Vec<ExtensionSegmentRef>> = entry
+        .runs()
         .iter()
-        .filter(|segment| segment.level == level)
-        .map(|segment| segment.run_no)
-        .collect::<BTreeSet<_>>()
-        .len()
+        .map(|run| {
+            let inputs = run
+                .segments
+                .iter()
+                .filter(|segment| input_ids.contains(&segment.segment_id))
+                .cloned()
+                .collect::<Vec<_>>();
+            (run.run_no, inputs)
+        })
+        .filter(|(_, inputs)| !inputs.is_empty())
+        .collect();
+    assert_eq!(
+        input_runs.values().map(Vec::len).sum::<usize>(),
+        input_ids.len(),
+        "a valid grep entry should list its reorganization's inputs"
+    );
+    input_runs
+}
+
+/// Removes the segments in `segment_ids` from `runs`, and the runs that
+/// have no segments left.
+fn without_segments(runs: &mut Vec<ExtensionRunRef>, segment_ids: &BTreeSet<&IndexSegmentId>) {
+    runs.retain_mut(|run| {
+        run.segments
+            .retain(|segment| !segment_ids.contains(&segment.segment_id));
+        !run.segments.is_empty()
+    });
 }
 
 /// The translations and the revision filter that one reorganize step merges
@@ -371,16 +351,25 @@ impl<S: ObjectStore + ?Sized> GrepSegments<'_, S> {
     /// table replaces.
     async fn merge_range(
         &self,
-        inputs: &[GrepSegmentRef],
+        inputs: &BTreeMap<RunNo, Vec<ExtensionSegmentRef>>,
         cursor: &str,
         max_rows: usize,
         tables: &MergeTables<'_>,
     ) -> Result<MergedRange> {
         let loader = MergeInputs(self);
         let start = (!cursor.is_empty()).then(|| cursor.to_owned());
-        let mut readers: Vec<SegmentRowIterator<IndexRow, GrepSegmentRef, ()>> = inputs
+        let start = &start;
+        // A reorganization's first step writes its output's filter and value
+        // table rows before rows with lower keys, so a run's list order isn't
+        // key order, and each segment has an iterator of its own. An
+        // iterator's sort key is its segment's run number.
+        let mut readers: Vec<SegmentRowIterator<IndexRow, ExtensionSegmentRef, RunNo>> = inputs
             .iter()
-            .map(|segment| SegmentRowIterator::new((), vec![segment.clone()], start.clone()))
+            .flat_map(|(run_no, run)| {
+                run.iter().map(move |segment| {
+                    SegmentRowIterator::new(*run_no, vec![segment.clone()], start.clone())
+                })
+            })
             .collect();
         let mut merged = MergedRange {
             rows: IndexRows::default(),
@@ -594,18 +583,21 @@ fn text_without_table(object_key: &str, row: &TextRow) -> GrepError {
 /// table blocks that every step reads again.
 struct MergeInputs<'s, 'a, S: ?Sized>(&'s GrepSegments<'a, S>);
 
-impl<S: ObjectStore + ?Sized> SegmentBlockLoader<IndexRow, GrepSegmentRef>
+impl<S: ObjectStore + ?Sized> SegmentBlockLoader<IndexRow, ExtensionSegmentRef>
     for MergeInputs<'_, '_, S>
 {
     type Error = GrepError;
 
-    async fn load_index(&self, segment: GrepSegmentRef) -> Result<Arc<Vec<SegmentIndexEntry>>> {
+    async fn load_index(
+        &self,
+        segment: ExtensionSegmentRef,
+    ) -> Result<Arc<Vec<SegmentIndexEntry>>> {
         self.0.load_index(segment).await
     }
 
     async fn load_data_blocks(
         &self,
-        segment: GrepSegmentRef,
+        segment: ExtensionSegmentRef,
         entries: Vec<SegmentIndexEntry>,
     ) -> Result<Vec<Arc<DecodedDataBlock<IndexRow>>>> {
         let uncached = GrepSegments {
@@ -620,11 +612,11 @@ impl<S: ObjectStore + ?Sized> SegmentBlockLoader<IndexRow, GrepSegmentRef>
 /// Returns the object key and the run number of the segment that an
 /// iterator with a row reads.
 fn current_segment<S: ObjectStore + ?Sized>(
-    iterator: &SegmentRowIterator<IndexRow, GrepSegmentRef, ()>,
+    iterator: &SegmentRowIterator<IndexRow, ExtensionSegmentRef, RunNo>,
     segments: &GrepSegments<'_, S>,
 ) -> (String, RunNo) {
     let segment = iterator
         .current_segment()
         .expect("an iterator with a row should have a current segment");
-    (segments.object_key(&segment.segment_id), segment.run_no)
+    (segments.object_key(segment), *iterator.sort_key())
 }

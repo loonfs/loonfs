@@ -315,7 +315,7 @@ A counter in the manifest, like the writer epoch, that stops a compaction from p
 
 ### Maintainer
 
-The role that folds a namespace's WAL, compacts its metadata, advances its retention floor, and collects its garbage. The namespace's writer session commits and deletes the namespace, and any process can be its maintainer, with or without the writer session. A compaction claims the compactor epoch first, and a fold or a retention advance publishes under the current compactor epoch without a claim. A maintainer that acknowledges the retention floor of a namespace that nobody writes to claims the writer epoch and writes a fence (see [Acknowledged floor](#acknowledged-floor)). See [Publishing a materialized file set](format.md#72-publishing-a-materialized-file-set).
+The role that folds a namespace's WAL, compacts its metadata, advances its retention floor, publishes an extension's entry, and collects its garbage. The namespace's writer session commits and deletes the namespace, and any process can be its maintainer, with or without the writer session. A compaction claims the compactor epoch first, and a fold, a retention advance, or an extension's publication publishes under the current compactor epoch without a claim. A maintainer that acknowledges the retention floor of a namespace that nobody writes to claims the writer epoch and writes a fence (see [Acknowledged floor](#acknowledged-floor)). See [Publishing a materialized file set](format.md#72-publishing-a-materialized-file-set).
 
 ### Compare-and-swap (CAS)
 
@@ -355,4 +355,4 @@ The document a deployment returns from `GET /v0/capabilities`. It lists the depl
 
 ### Extension
 
-A subsystem built on top of core LoonFS, such as grep, with its own objects and garbage collection rules under `namespaces/{namespace_id}/extensions/{name}/`. Core garbage collection never deletes extension objects.
+An optional subsystem that keeps state derived from a namespace's committed metadata and content, such as the grep index. An extension's state is an entry in the namespace's manifest, under the extension's name, and the entry lists the extension's segments, which are stored under `namespaces/{owner_namespace_id}/extensions/{extension_name}/segments/`. Every manifest publication copies the entry forward (a tombstone copies it with its runs emptied), a fork's first manifest copies its source's entry, a pin keeps the segments that its manifest lists, and garbage collection collects the segments that no kept manifest lists. See [Extensions](format.md#124-extensions).

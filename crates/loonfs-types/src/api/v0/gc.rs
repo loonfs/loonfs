@@ -50,6 +50,9 @@ pub struct DeletedObjectCounts {
     pub wal_objects: u64,
     /// The unreferenced metadata segments that the pass deleted.
     pub metadata_segments: u64,
+    /// The unreferenced extension segments, such as the grep index's segments, that the pass
+    /// deleted.
+    pub extension_segments: u64,
     /// The unreferenced manifests that the pass deleted.
     pub manifests: u64,
     /// The upload session records that the pass deleted after their grace windows passed.
@@ -70,6 +73,7 @@ impl DeletedObjectCounts {
         let Self {
             wal_objects,
             metadata_segments,
+            extension_segments,
             manifests,
             upload_sessions,
             content_objects,
@@ -78,6 +82,7 @@ impl DeletedObjectCounts {
         } = other;
         self.wal_objects += wal_objects;
         self.metadata_segments += metadata_segments;
+        self.extension_segments += extension_segments;
         self.manifests += manifests;
         self.upload_sessions += upload_sessions;
         self.content_objects += content_objects;
@@ -128,58 +133,6 @@ pub struct GcResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub reclaimable_at_ms: Option<u64>,
-    /// The reports from the extension collectors, each under its extension's name, left out when
-    /// no extension collector ran.
-    ///
-    /// After the core collector, a `gc` run runs the collector of each extension whose state the
-    /// deployment maintains. For example, a deployment that advertises `maintenance.grep.index`
-    /// reports the counts of the grep index's collector in `extensions.grep`.
-    #[serde(default, skip_serializing_if = "ExtensionGcReports::is_empty")]
-    pub extensions: ExtensionGcReports,
-}
-
-/// The reports from the extension collectors that one `gc` run ran, with one optional field for
-/// each extension.
-///
-/// Each extension reports its collector under its own name here. A deployment that doesn't
-/// maintain an extension's state leaves that extension's field out, and a client ignores a name
-/// it doesn't know.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct ExtensionGcReports {
-    /// The counts from the grep index's collector, present when the deployment maintains a grep
-    /// index.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub grep: Option<GrepGcReport>,
-}
-
-impl ExtensionGcReports {
-    /// Returns whether no extension reported a collector pass.
-    pub fn is_empty(&self) -> bool {
-        let Self { grep } = self;
-        grep.is_none()
-    }
-}
-
-/// The counts from one pass of the grep index's collector over one namespace.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct GrepGcReport {
-    /// The unreferenced grep segments that the pass deleted because they were older than the
-    /// minimum segment age.
-    pub deleted_segments: u64,
-    /// The other unreferenced grep objects that the pass deleted after the grace window.
-    pub deleted_other_objects: u64,
-    /// Whether the pass deleted the grep extension state of a namespace that is missing or
-    /// deleted.
-    pub namespace_reaped: bool,
-    /// The candidates that the pass kept because they were referenced, too young, or
-    /// unrecognized.
-    pub retained_candidates: u64,
-    /// The bytes of every grep object that the pass listed under the namespace, before the pass's
-    /// deletes.
-    pub listed_bytes: u64,
 }
 
 impl GcResponse {
@@ -194,7 +147,6 @@ impl GcResponse {
             listed_bytes: 0,
             next_reclamation_at_ms: None,
             reclaimable_at_ms: None,
-            extensions: ExtensionGcReports::default(),
         }
     }
 
@@ -310,7 +262,6 @@ mod tests {
         let gc_json = serde_json::to_value(gc).expect("serialize gc response");
         assert!(gc_json.get("next_reclamation_at_ms").is_none());
         assert!(gc_json.get("reclaimable_at_ms").is_none());
-        assert!(gc_json.get("extensions").is_none());
         assert_eq!(
             gc_json["deleted_checkpoints_by_owner"],
             serde_json::json!({"user": 0, "fork": 0})
@@ -320,44 +271,17 @@ mod tests {
             serde_json::from_value(gc_json).expect("decode gc response without optional fields");
         assert_eq!(gc.next_reclamation_at_ms, None);
         assert_eq!(gc.reclaimable_at_ms, None);
-        assert!(gc.extensions.is_empty());
         let retired = GcResponse {
             listed_bytes: 4_096,
             reclaimable_at_ms: Some(2_000_000),
-            extensions: ExtensionGcReports {
-                grep: Some(GrepGcReport {
-                    deleted_segments: 2,
-                    deleted_other_objects: 1,
-                    namespace_reaped: true,
-                    retained_candidates: 5,
-                    listed_bytes: 512,
-                }),
-            },
             ..gc
         };
-        let mut json = serde_json::to_value(&retired).expect("encode retirement");
+        let json = serde_json::to_value(&retired).expect("encode retirement");
         assert_eq!(json["listed_bytes"], 4_096);
         assert_eq!(json["reclaimable_at_ms"], 2_000_000);
+        assert_eq!(json["deleted"]["extension_segments"], 0);
         assert_eq!(
-            json["extensions"],
-            serde_json::json!({
-                "grep": {
-                    "deleted_segments": 2,
-                    "deleted_other_objects": 1,
-                    "namespace_reaped": true,
-                    "retained_candidates": 5,
-                    "listed_bytes": 512
-                }
-            })
-        );
-        assert_eq!(
-            serde_json::from_value::<GcResponse>(json.clone()).expect("decode retirement"),
-            retired
-        );
-        json["extensions"]["vectors"] = serde_json::json!({"deleted_objects": 3});
-        assert_eq!(
-            serde_json::from_value::<GcResponse>(json)
-                .expect("a client ignores an extension name it doesn't know"),
+            serde_json::from_value::<GcResponse>(json).expect("decode retirement"),
             retired
         );
     }

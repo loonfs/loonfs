@@ -8,8 +8,9 @@ use crate::metadata_rows::MetadataRowFamily;
 use crate::segment_blocks::BlockHandle;
 use crate::CompactorEpoch;
 use crate::{AccessGrants, ActorId, ChangeSeq, ManifestNo, MetadataSegmentId, NamespaceId, RunNo};
-use crate::{PrincipalScope, WalNo, WriterEpoch};
+use crate::{ExtensionName, IndexSegmentId, PrincipalScope, WalNo, WriterEpoch};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::num::NonZeroU64;
 
@@ -112,6 +113,105 @@ pub struct MetadataSegmentRef {
     /// the segment without any object fetch; `filter_block` still names and
     /// verifies the same bytes, so the inline copy must decode byte-for-byte
     /// identical (same length and CRC32C) or the manifest is corrupt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter_inline: Option<String>,
+}
+
+/// One extension's entry in a namespace manifest
+/// ([Extensions](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#124-extensions)).
+///
+/// Core reads the entry's `version` and `runs`, and it copies the entry's
+/// other members forward unchanged, as JSON values that it doesn't interpret.
+/// The extension decodes those members itself, and it rejects a member that
+/// it doesn't define, so core keeps unknown members instead of rejecting them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExtensionEntry {
+    /// The version of the extension's format, which governs the entry's other
+    /// members and the rows of its segments.
+    pub version: u32,
+    /// The extension's runs, in the extension's list order.
+    pub runs: Vec<ExtensionRunRef>,
+    /// The entry's other members, which only the extension interprets.
+    #[serde(flatten)]
+    state: serde_json::Map<String, serde_json::Value>,
+}
+
+impl ExtensionEntry {
+    /// Builds an entry from its version, its segments, and the extension's
+    /// other members.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `state` has a `version` or `runs` member, because the entry's
+    /// own fields have those names.
+    pub fn new(
+        version: u32,
+        runs: Vec<ExtensionRunRef>,
+        state: serde_json::Map<String, serde_json::Value>,
+    ) -> Self {
+        assert!(
+            !state.contains_key("version") && !state.contains_key("runs"),
+            "an extension entry's state should not repeat the entry's own members"
+        );
+        Self {
+            version,
+            runs,
+            state,
+        }
+    }
+
+    /// Returns the entry's members other than `version` and `runs`.
+    pub fn state(&self) -> &serde_json::Map<String, serde_json::Value> {
+        &self.state
+    }
+
+    /// Returns the segments of the entry's runs, in list order.
+    pub fn segments(&self) -> impl Iterator<Item = &ExtensionSegmentRef> {
+        self.runs.iter().flat_map(|run| &run.segments)
+    }
+}
+
+/// One run of an extension: the segments that the extension wrote together,
+/// under one run number.
+///
+/// See [Control and manifest
+/// payloads](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a4-control-and-manifest-payloads).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExtensionRunRef {
+    /// The run's number, allocated from the manifest's `next_run_no` like a
+    /// metadata run's number.
+    pub run_no: RunNo,
+    /// The run's level, which only the extension interprets.
+    pub level: u32,
+    /// The run's segments, in the extension's list order.
+    pub segments: Vec<ExtensionSegmentRef>,
+}
+
+/// Reference to one immutable segment of an extension's run.
+///
+/// The fields have the meanings of the [`MetadataSegmentRef`] fields of the
+/// same names. See [Control and manifest
+/// payloads](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a4-control-and-manifest-payloads).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExtensionSegmentRef {
+    /// The namespace that stores the segment, which can be a fork's source.
+    pub owner_namespace_id: NamespaceId,
+    /// The immutable segment ID used in the durable object key.
+    pub segment_id: IndexSegmentId,
+    /// The number of rows in the segment.
+    pub row_count: u64,
+    /// The inclusive least row key.
+    pub min_row_key: String,
+    /// The inclusive greatest row key.
+    pub max_row_key: String,
+    /// The location and verification data for the segment's index block.
+    pub index_block: BlockHandle,
+    /// The location and verification data for the segment's filter block.
+    pub filter_block: BlockHandle,
+    /// The filter block's stored bytes inlined as hex, present when the
+    /// filter is small.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filter_inline: Option<String>,
 }
@@ -261,6 +361,11 @@ pub struct NamespaceManifestPayload {
     pub acknowledged_floor_seq: ChangeSeq,
     /// Complete set of metadata runs required to reconstruct the snapshot.
     pub runs: Vec<MetadataRunRef>,
+    /// Each extension's entry, under the extension's name. Every publication
+    /// copies each entry forward, except a namespace tombstone, which copies
+    /// each entry with its runs emptied.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extensions: BTreeMap<ExtensionName, ExtensionEntry>,
 }
 
 /// A manifest breaks a rule of the namespace's manifest chain.
@@ -327,12 +432,13 @@ impl NamespaceManifestPayload {
             retention_floor_seq: ChangeSeq(0),
             acknowledged_floor_seq: ChangeSeq(0),
             runs: Vec::new(),
+            extensions: BTreeMap::new(),
         }
     }
 
     /// Constructs manifest 1 of a fork of `source` at `fork_basis`, which lists
-    /// the runs of `source`, records the family root of `source`, and starts
-    /// its floors at the fork's head.
+    /// the runs and copies the extension entries of `source`, records the
+    /// family root of `source`, and starts its floors at the fork's head.
     pub fn initial_fork(
         namespace_id: NamespaceId,
         created_at_ms: u64,
@@ -350,6 +456,7 @@ impl NamespaceManifestPayload {
             retention_floor_seq: fork_seq,
             acknowledged_floor_seq: fork_seq,
             runs: source.runs.clone(),
+            extensions: source.extensions.clone(),
             ..Self::initial(
                 namespace_id,
                 created_at_ms,
@@ -360,7 +467,8 @@ impl NamespaceManifestPayload {
     }
 
     /// Returns the manifest after this one, which has the next manifest
-    /// number, lists `runs`, and copies every other field of this manifest.
+    /// number, lists `runs`, and copies every other field of this manifest,
+    /// including each extension entry.
     pub fn successor(
         &self,
         runs: Vec<MetadataRunRef>,
@@ -385,6 +493,7 @@ impl NamespaceManifestPayload {
             retention_floor_seq: self.retention_floor_seq,
             acknowledged_floor_seq: self.acknowledged_floor_seq,
             runs,
+            extensions: self.extensions.clone(),
         })
     }
 
@@ -421,6 +530,9 @@ impl NamespaceManifestPayload {
             None => {
                 if !self.runs.is_empty() {
                     return invalid("runs");
+                }
+                if !self.extensions.is_empty() {
+                    return invalid("extensions");
                 }
                 if self.head_seq != ChangeSeq(0) || self.retention_floor_seq != ChangeSeq(0) {
                     return invalid("head_seq");
@@ -879,6 +991,7 @@ mod tests {
                 ChangeSeq(10),
                 RunTier::Base,
             )],
+            extensions: Default::default(),
         })
         .expect("manifest")
         .into_parts();
@@ -934,6 +1047,7 @@ mod tests {
                     RunTier::Delta,
                 ),
             ],
+            extensions: Default::default(),
         })
         .expect("manifest")
         .into_parts();

@@ -138,7 +138,7 @@ impl ValueFiles {
         let prefix = lookup::content_revision_prefix(&content_id, self.value.size_bytes);
         let probe = lookup::content_revision_probe(&content_id, self.value.size_bytes);
         let upper = string_prefix_upper_bound(&prefix);
-        let segments = plan.index_state.segments();
+        let segments = &plan.index_runs;
         let mut reads = stream::iter(0..segments.len())
             .map(|index| {
                 plan.index.rows_in_range(

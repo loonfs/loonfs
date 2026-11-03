@@ -7,12 +7,12 @@
 use super::pruning::{filter_from_rows, RetainedReferences};
 use super::GREP_WORKER_REQUESTS_IN_FLIGHT;
 use crate::codec::{lookup, ContentValue, IndexRow};
-use crate::manifest::GrepSegmentRef;
 use crate::segments::{GrepSegments, RunWriter};
 use crate::{GrepError, Result};
 use futures::{stream, StreamExt, TryStreamExt};
 use loonfs::engine::{refill_iterators, SegmentRowIterator};
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::manifest::ExtensionSegmentRef;
 use loonfs_types::format::segment_blocks::{
     key_range_may_intersect, string_prefix_upper_bound, SegmentFilter, DEFAULT_TARGET_BLOCK_BYTES,
 };
@@ -27,7 +27,7 @@ pub(super) const DROPPED: u32 = u32::MAX;
 /// ordinals, or [`DROPPED`]. An entry takes four bytes, so the
 /// translations are what a step keeps of the tables.
 pub(super) struct Translation {
-    pub(super) segments: Vec<GrepSegmentRef>,
+    pub(super) segments: Vec<ExtensionSegmentRef>,
     pub(super) ordinals: Vec<u32>,
 }
 
@@ -48,17 +48,17 @@ const MAX_TABLE_READ_DECODED_BYTES: usize = DEFAULT_TARGET_BLOCK_BYTES.get();
 /// checks that the ordinals arrive in order.
 pub(super) struct TableReader {
     run_no: RunNo,
-    rows: SegmentRowIterator<IndexRow, GrepSegmentRef, ()>,
+    rows: SegmentRowIterator<IndexRow, ExtensionSegmentRef, ()>,
     next_ordinal: u64,
     previous: Option<ContentValue>,
 }
 
 impl TableReader {
-    pub(super) fn new(run_no: RunNo, run: &[GrepSegmentRef], ordinal: u64) -> Self {
+    pub(super) fn new(run_no: RunNo, run: &[ExtensionSegmentRef], ordinal: u64) -> Self {
         let lower = lookup::value_row_key(ordinal);
         // The run's segments whose key ranges reach the value table, in key
         // order.
-        let mut segments: Vec<GrepSegmentRef> = run
+        let mut segments: Vec<ExtensionSegmentRef> = run
             .iter()
             .filter(|segment| {
                 key_range_may_intersect(
@@ -127,7 +127,7 @@ impl TableReader {
 /// search over single reads of the table.
 pub(super) async fn table_ordinal<S: ObjectStore + ?Sized>(
     segments: &GrepSegments<'_, S>,
-    run: &[GrepSegmentRef],
+    run: &[ExtensionSegmentRef],
     len: usize,
     value: &ContentValue,
 ) -> Result<Option<u64>> {
@@ -148,7 +148,7 @@ pub(super) async fn table_ordinal<S: ObjectStore + ?Sized>(
 
 /// The input runs' value tables, read together in content order.
 struct InputTables<'r> {
-    readers: Vec<(RunNo, &'r [GrepSegmentRef], TableReader)>,
+    readers: Vec<(RunNo, &'r [ExtensionSegmentRef], TableReader)>,
     heads: Vec<Option<ContentValue>>,
     ordinals: Vec<Vec<u32>>,
 }
@@ -156,7 +156,7 @@ struct InputTables<'r> {
 impl<'r> InputTables<'r> {
     async fn start<S: ObjectStore + ?Sized>(
         segments: &GrepSegments<'_, S>,
-        inputs: &'r BTreeMap<RunNo, Vec<GrepSegmentRef>>,
+        inputs: &'r BTreeMap<RunNo, Vec<ExtensionSegmentRef>>,
     ) -> Result<Self> {
         let mut readers: Vec<_> = inputs
             .iter()
@@ -231,7 +231,7 @@ impl<'r> InputTables<'r> {
 /// run's translation.
 pub(super) async fn decide_output_table<S: ObjectStore + ?Sized>(
     segments: &GrepSegments<'_, S>,
-    inputs: &BTreeMap<RunNo, Vec<GrepSegmentRef>>,
+    inputs: &BTreeMap<RunNo, Vec<ExtensionSegmentRef>>,
     filters: Option<&RetainedReferences>,
     writer: &mut RunWriter<'_, '_, S>,
 ) -> Result<BTreeMap<RunNo, Translation>> {
@@ -266,9 +266,9 @@ pub(super) async fn decide_output_table<S: ObjectStore + ?Sized>(
 /// each input run's translation.
 pub(super) async fn read_translations<S: ObjectStore + ?Sized>(
     segments: &GrepSegments<'_, S>,
-    inputs: &BTreeMap<RunNo, Vec<GrepSegmentRef>>,
+    inputs: &BTreeMap<RunNo, Vec<ExtensionSegmentRef>>,
     output_run_no: RunNo,
-    output_run: &[GrepSegmentRef],
+    output_run: &[ExtensionSegmentRef],
 ) -> Result<BTreeMap<RunNo, Translation>> {
     let mut tables = InputTables::start(segments, inputs).await?;
     let mut output_table = TableReader::new(output_run_no, output_run, 0);
@@ -295,12 +295,12 @@ pub(super) async fn read_translations<S: ObjectStore + ?Sized>(
 /// when the run has no filter rows.
 pub(super) async fn run_filter<S: ObjectStore + ?Sized>(
     segments: &GrepSegments<'_, S>,
-    run: &[GrepSegmentRef],
+    run: &[ExtensionSegmentRef],
 ) -> Result<Option<SegmentFilter>> {
     let upper_bound = string_prefix_upper_bound(lookup::FILTER_ROW_PREFIX);
     let object_key = run
         .first()
-        .map(|segment| segments.object_key(&segment.segment_id))
+        .map(|segment| segments.object_key(segment))
         .unwrap_or_default();
     let mut chunks = Vec::new();
     for segment in run {
@@ -344,16 +344,15 @@ mod tests {
     /// segment, so the table spans segments.
     async fn table_run(
         segments: &GrepSegments<'_, LocalFsStore>,
-        run_no: RunNo,
         contents: &[u128],
-    ) -> Vec<GrepSegmentRef> {
+    ) -> Vec<ExtensionSegmentRef> {
         let rows = contents
             .iter()
             .zip(0..)
             .map(|(content, ordinal)| IndexRow::value(ordinal, &value(*content)))
             .collect();
         segments
-            .write_run(run_no, 0, rows, NonZeroUsize::new(2).expect("two"))
+            .write_run(rows, NonZeroUsize::new(2).expect("two"))
             .await
             .expect("write the run")
     }
@@ -370,14 +369,11 @@ mod tests {
             block_cache: Some(&cache),
         };
         let inputs = BTreeMap::from([
-            (
-                RunNo(1),
-                table_run(&segments, RunNo(1), &[1, 3, 5, 7]).await,
-            ),
-            (RunNo(2), table_run(&segments, RunNo(2), &[2, 3, 8]).await),
+            (RunNo(1), table_run(&segments, &[1, 3, 5, 7]).await),
+            (RunNo(2), table_run(&segments, &[2, 3, 8]).await),
         ]);
 
-        let mut writer = RunWriter::new(&segments, RunNo(3), 1, NonZeroUsize::new(2).expect("two"));
+        let mut writer = RunWriter::new(&segments, NonZeroUsize::new(2).expect("two"));
         let first = decide_output_table(&segments, &inputs, None, &mut writer)
             .await
             .expect("decide");

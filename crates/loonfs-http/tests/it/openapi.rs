@@ -1329,10 +1329,7 @@ const UNION_COMPOSITE_ENVELOPES: &[(&str, &[&str])] = &[
         ],
     ),
     ("UploadSession", &["mode", "namespace_id", "upload_id"]),
-    (
-        "GrepIndex",
-        &["namespace_id", "next_run_no", "reorganize_pending"],
-    ),
+    ("GrepIndex", &["namespace_id", "reorganize_pending"]),
     ("StoreProbeCheck", &["name"]),
 ];
 
@@ -1435,7 +1432,6 @@ fn openapi_caps_public_ordinals_and_uses_string_inode_ids() {
         "ChangeSeq",
         "AttributesRevisionNo",
         "ManifestNo",
-        "RunNo",
         "WriterEpoch",
     ] {
         let schema = schemas.get(name).unwrap_or_else(|| panic!("{name} schema"));
@@ -1459,20 +1455,6 @@ fn openapi_caps_public_ordinals_and_uses_string_inode_ids() {
         inode_id.get("example").and_then(Value::as_str),
         Some(loonfs_types::inode_id::EXAMPLE)
     );
-
-    // Each flattened status variant must use the capped run number schema.
-    for variant in one_of_schema_names(schemas, "GrepIndex") {
-        let schema = schemas
-            .get(variant)
-            .unwrap_or_else(|| panic!("{variant} schema"));
-        assert_eq!(
-            schema
-                .pointer("/properties/next_run_no/$ref")
-                .and_then(Value::as_str),
-            Some("#/components/schemas/RunNo"),
-            "next_run_no must use the capped run number schema in {variant}"
-        );
-    }
 }
 
 #[test]

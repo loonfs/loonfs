@@ -130,10 +130,11 @@ async fn a_maintenance_gc_step_records_the_pass_counters_once() {
         gc.retained.total(),
         "the maintenance pass records its retained count exactly once"
     );
-    assert_eq!(snapshot.by_name("loonfs.gc.reclaimed").count(), 9);
+    assert_eq!(snapshot.by_name("loonfs.gc.reclaimed").count(), 10);
     for (category, reclaimed) in [
         ("deleted_wal_objects", gc.deleted.wal_objects),
         ("deleted_metadata_segments", gc.deleted.metadata_segments),
+        ("deleted_extension_segments", gc.deleted.extension_segments),
         ("deleted_manifests", gc.deleted.manifests),
         (
             "deleted_fork_checkpoints",
@@ -1137,13 +1138,13 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
     // as roots, as a live namespace's pass does.
     let heads = 2;
     for (namespace, metadata_requests, metadata_error, gc_requests, gc_error) in [
-        (&idle, [4, heads, 0, 0], None, [4, heads, 10, 0], None),
-        (&claimed, [4, heads, 0, 0], None, [4, heads, 10, 0], None),
+        (&idle, [4, heads, 0, 0], None, [4, heads, 11, 0], None),
+        (&claimed, [4, heads, 0, 0], None, [4, heads, 11, 0], None),
         (
             &retired,
             [2, 0, 0, 0],
             Some(crate::ErrorCode::NamespaceDeleted),
-            [2, 0, 10, 0],
+            [2, 0, 11, 0],
             None,
         ),
         (

@@ -5,24 +5,23 @@ mod build;
 mod index_rows;
 mod pruning;
 mod reorganize;
+mod steps;
 mod tables;
 
+pub use steps::{GrepPublishOutcome, GrepSteps, DEFAULT_GREP_PUBLISH_INTERVAL_MS};
+
 use crate::cache::GrepBlockCache;
-use crate::manifest::{
-    load_current_grep_manifest, publish_grep_manifest, GrepIndexState, GrepIndexStatus,
-    GrepManifestState, LoadedGrepManifest,
-};
+use crate::entry::{GrepEntry, GrepIndexStatus};
 use crate::reads::NamespaceReads;
 use crate::{GrepError, GrepPassBudget, Result};
-use loonfs::engine::{next_run_no_after, DecodedBlockCacheConfig, Observation, OperationClock};
-use loonfs::{CoreError, CreateSnapshotOptions, LoonFs, ReadOnly, Writable};
+use loonfs::engine::{next_run_no_after, DecodedBlockCacheConfig};
+use loonfs::{CoreError, CreateSnapshotOptions, LoonFs, Maintenance, ReadOnly, Writable};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::segment_blocks::{
     DEFAULT_MAX_COMPACTION_INPUT_ROWS, DEFAULT_MAX_DELTA_RUNS, DEFAULT_MAX_ROWS_PER_SEGMENT,
 };
 use loonfs_types::GrepIndex;
-use loonfs_types::MonotonicTimer;
-use loonfs_types::{ChangeSeq, ManifestNo, NamespaceId, PinId, RunNo};
+use loonfs_types::{ChangeSeq, NamespaceId, PinId, RunNo};
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
 
@@ -107,7 +106,9 @@ pub enum GrepBuildOutcome {
     UpToDate {
         built_through_seq: ChangeSeq,
     },
-    Published {
+    /// The step indexed a range of the namespace's files or commits, and its
+    /// change to grep's entry is pending or published.
+    Indexed {
         built_through_seq: ChangeSeq,
         /// Revisions whose content value the step read and tokenized.
         indexed_revisions: u64,
@@ -119,6 +120,9 @@ pub enum GrepBuildOutcome {
     BackfillRestarted {
         captured_seq: ChangeSeq,
     },
+    /// Another process changed grep's entry before the step's publication,
+    /// so the step's change and every change pending before it weren't
+    /// published.
     Superseded,
 }
 
@@ -130,7 +134,9 @@ pub enum GrepReorganizeOutcome {
         delta_runs: usize,
         mid_runs: usize,
     },
-    UnitPublished {
+    /// The step wrote one bounded unit of the reorganization's output, and
+    /// its change to grep's entry is pending or published.
+    UnitWritten {
         merged_rows: u64,
         segments_written: u64,
         completed: bool,
@@ -140,24 +146,28 @@ pub enum GrepReorganizeOutcome {
     /// it drops, or because the retention floor passed that sequence. The
     /// next step starts a new reorganization.
     Abandoned,
+    /// Another process changed grep's entry before the step's publication,
+    /// so the step's change and every change pending before it weren't
+    /// published.
     Superseded,
 }
 
-/// Bounded writer for grep-owned durable state.
+/// Bounded writer of grep's index.
 ///
-/// The worker writes only grep keys. It reads namespace state through a
-/// read-only `LoonFs` and creates or deletes backfill snapshots through a
-/// writable `LoonFs`, whose writer id the snapshot folds record. Scheduling is
-/// external to this type. A build or reorganize step that finds work waits
-/// for a permit of the worker's [`GrepPassBudget`] before it reads file
-/// content or index segments.
+/// The worker writes grep segments into one store, and it publishes grep's
+/// entry in the namespace's manifests through a [`Maintenance`]. It reads
+/// namespace state through a read-only `LoonFs`, and creates or deletes
+/// backfill snapshots through a writable `LoonFs`. Scheduling is external to
+/// this type. A build or reorganize step that finds work waits for a permit
+/// of the worker's [`GrepPassBudget`] before it reads file content or index
+/// segments.
 #[derive(Clone)]
 pub struct GrepWorker<S> {
     store: S,
     reader: LoonFs<ReadOnly>,
     writer: LoonFs<Writable>,
+    maintenance: Maintenance,
     step_budget: GrepPassBudget,
-    timer: Arc<dyn MonotonicTimer>,
     /// The blocks that reorganize steps read, which keeps the blocks of the
     /// value tables that the steps of one reorganization read again within a
     /// bounded size. Clones of a worker share it.
@@ -176,37 +186,27 @@ impl<S: std::fmt::Debug> std::fmt::Debug for GrepWorker<S> {
 }
 
 impl<S: ObjectStore + Clone> GrepWorker<S> {
-    /// Creates a worker over one grep-keyspace store handle and the runtime
-    /// handles it reads and creates snapshots through. Its steps share
-    /// `step_budget` with every other worker given a clone of it, and its
-    /// deadlines run on `reader`'s monotonic timer.
+    /// Creates a worker that writes grep segments into `store`, reads through
+    /// `reader`, creates snapshots through `writer`, and publishes grep's
+    /// entry through `maintenance`. Its steps share `step_budget` with every
+    /// other worker given a clone of it.
     pub fn new(
         store: S,
         reader: LoonFs<ReadOnly>,
         writer: LoonFs<Writable>,
+        maintenance: Maintenance,
         step_budget: GrepPassBudget,
     ) -> Self {
-        let timer = reader.monotonic_timer();
         Self {
             store,
             reader,
             writer,
+            maintenance,
             step_budget,
-            timer,
             reorganize_blocks: Arc::new(GrepBlockCache::new(DecodedBlockCacheConfig::new(
                 build::GREP_STEP_BLOCK_CACHE_DECODED_BYTES,
             ))),
         }
-    }
-
-    /// The monotonic timer this worker's deadlines and observations run on.
-    pub(crate) fn timer(&self) -> Arc<dyn MonotonicTimer> {
-        Arc::clone(&self.timer)
-    }
-
-    /// Reads the wall clock of the runtime this worker writes through.
-    pub(crate) fn now_ms(&self) -> u64 {
-        self.writer.now_ms()
     }
 
     /// The budget this worker's build and reorganize steps draw from.
@@ -216,111 +216,113 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
 
     /// This worker's filesystem reads for one namespace.
     pub(crate) fn reads(&self, namespace_id: &NamespaceId) -> NamespaceReads {
-        NamespaceReads::new(self.reader.namespace(namespace_id))
+        NamespaceReads::new(self.reader.clone(), namespace_id)
     }
 
-    /// The grep-owned keyspace this worker publishes through.
-    pub(crate) fn store(&self) -> &S {
-        &self.store
+    /// Starts a run of steps over `namespace_id` whose changes are published
+    /// once `publish_interval_ms` has passed since the change began, and when
+    /// the caller calls [`GrepSteps::publish`].
+    pub fn steps(&self, namespace_id: &NamespaceId, publish_interval_ms: u64) -> GrepSteps<'_, S> {
+        GrepSteps::new(self, namespace_id, publish_interval_ms)
     }
 
-    /// Enables grep by pinning a checkpoint and publishing a numbered
-    /// backfilling manifest. Enabling an active manifest is idempotent.
+    /// Runs one bounded build step and publishes its change.
+    pub async fn build_step(
+        &self,
+        namespace_id: &NamespaceId,
+        policy: GramIndexBuildPolicy,
+    ) -> Result<GrepBuildOutcome> {
+        self.steps(namespace_id, 0).build_step(policy).await
+    }
+
+    /// Runs one bounded reorganize step and publishes its change.
+    pub async fn reorganize_step(
+        &self,
+        namespace_id: &NamespaceId,
+        policy: GramIndexBuildPolicy,
+    ) -> Result<GrepReorganizeOutcome> {
+        self.steps(namespace_id, 0).reorganize_step(policy).await
+    }
+
+    /// Enables grep by pinning a snapshot and publishing a backfilling entry.
+    /// Enabling an enabled index changes nothing.
     pub async fn enable(&self, namespace_id: &NamespaceId) -> Result<GrepEnableOutcome> {
-        self.reads(namespace_id).head().await?;
-        let deadline = OperationClock::start(self.now_ms(), self.timer());
-        let current =
-            load_current_grep_manifest(&self.store, namespace_id, deadline.observe()).await?;
-        if let Some(current) = &current {
-            if !matches!(
-                current.manifest_state().status(),
-                GrepIndexStatus::Disabled {}
-            ) {
-                return Ok(GrepEnableOutcome::AlreadyEnabled {
-                    state: current.manifest_state().status().clone(),
-                });
-            }
+        let mut steps = self.steps(namespace_id, 0);
+        let pending = steps.pending().await?;
+        if let Some(entry) = pending.enabled_entry() {
+            return Ok(GrepEnableOutcome::AlreadyEnabled {
+                state: entry.status().clone(),
+            });
         }
-        let Some(checkpoint) = self
-            .publish_backfill(namespace_id, current.as_ref(), &deadline)
-            .await?
-        else {
-            return Ok(GrepEnableOutcome::Superseded);
+        let expected = pending.entry.clone();
+        let Some(checkpoint) = steps.start_backfill(expected.as_ref()).await? else {
+            // Another process changed the entry while the snapshot was
+            // created.
+            return Ok(match steps.pending().await?.enabled_entry() {
+                Some(entry) => GrepEnableOutcome::AlreadyEnabled {
+                    state: entry.status().clone(),
+                },
+                None => GrepEnableOutcome::Superseded,
+            });
         };
-        Ok(GrepEnableOutcome::Enabled {
-            state: backfill_status(&checkpoint),
+        Ok(match steps.publish().await? {
+            GrepPublishOutcome::Superseded => GrepEnableOutcome::Superseded,
+            GrepPublishOutcome::Published | GrepPublishOutcome::NothingPending => {
+                GrepEnableOutcome::Enabled {
+                    state: backfill_status(&checkpoint),
+                }
+            }
         })
     }
 
-    /// Disables grep by publishing the next manifest. Existing segments become grep-GC
-    /// candidates and are never deleted synchronously.
+    /// Disables grep by publishing an entry that lists no segments. The
+    /// segments become garbage-collection candidates and are never deleted
+    /// synchronously.
     pub async fn disable(&self, namespace_id: &NamespaceId) -> Result<GrepDisableOutcome> {
-        self.reads(namespace_id).head().await?;
-        let deadline = OperationClock::start(self.now_ms(), self.timer());
-        let Some(current) = self.load_enabled(namespace_id, &deadline).await? else {
+        let mut steps = self.steps(namespace_id, 0);
+        let pending = steps.pending().await?;
+        let Some(entry) = pending.enabled_entry() else {
             return Ok(GrepDisableOutcome::NotEnabled);
         };
-        let next = GrepManifestState::new(
-            namespace_id.clone(),
-            next_manifest_no(Some(&current))?,
-            GrepIndexStatus::Disabled {},
-            GrepIndexState {
-                reorganize: None,
-                next_run_no: current.manifest_state().index().next_run_no,
-            },
-            Vec::new(),
-        )
-        .expect("a successor of a grep manifest that decoding validated should be valid");
-        match publish_grep_manifest(&self.store, Some(&current), &next, &deadline).await {
-            Ok(_) => {
-                if let Some(pin_id) = current.manifest_state().status().backfill_pin_id() {
-                    self.delete_pin_if_present(namespace_id, pin_id).await;
-                }
-                Ok(GrepDisableOutcome::Disabled)
-            }
-            Err(GrepError::PublicationConflict { .. }) => Ok(GrepDisableOutcome::Superseded),
-            Err(error) => Err(error),
+        if let Some(pin_id) = entry.status().backfill_pin_id().cloned() {
+            pending.record_released_pin(pin_id);
         }
+        pending.set_entry(GrepEntry::disabled());
+        Ok(match steps.publish().await? {
+            GrepPublishOutcome::Superseded => GrepDisableOutcome::Superseded,
+            GrepPublishOutcome::Published | GrepPublishOutcome::NothingPending => {
+                GrepDisableOutcome::Disabled
+            }
+        })
     }
 
-    /// Reads this namespace's durable grep lifecycle, or `Disabled` where no
-    /// manifest has ever been published.
+    /// Reads this namespace's grep lifecycle from its current manifest, or
+    /// `Disabled` when grep was never enabled.
     pub async fn lifecycle(&self, namespace_id: &NamespaceId) -> Result<GrepIndexStatus> {
         Ok(self
-            .manifest_state(namespace_id)
+            .entry(namespace_id)
             .await?
-            .map_or(GrepIndexStatus::Disabled {}, |state| state.status().clone()))
+            .map_or(GrepIndexStatus::Disabled {}, |entry| entry.status().clone()))
     }
 
-    /// Loads current index bookkeeping, or `None` when grep is not enabled.
-    pub async fn manifest_state(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<Option<GrepManifestState>> {
-        Ok(
-            load_current_grep_manifest(&self.store, namespace_id, Observation::now(self.timer()))
-                .await?
-                .map(|manifest| manifest.manifest_state().clone()),
-        )
+    /// Reads grep's entry from the namespace's current manifest, or `None`
+    /// when grep was never enabled.
+    pub async fn entry(&self, namespace_id: &NamespaceId) -> Result<Option<GrepEntry>> {
+        let mut steps = self.steps(namespace_id, 0);
+        Ok(steps.pending().await?.published().cloned())
     }
 
     /// Returns the grep index's state and maintenance progress.
     pub async fn get_grep_index(&self, namespace_id: &NamespaceId) -> Result<GrepIndex> {
-        self.reads(namespace_id).head().await?;
-        let manifest = self.manifest_state(namespace_id).await?;
-        let (status, next_run_no, reorganize_pending) = match &manifest {
-            Some(manifest) => (
-                loonfs_types::GrepIndexStatus::from(manifest.status()),
-                manifest.index().next_run_no,
-                manifest.index().reorganize.is_some(),
-            ),
-            None => (loonfs_types::GrepIndexStatus::Disabled, RunNo(0), false),
-        };
+        let entry = self.entry(namespace_id).await?;
         Ok(GrepIndex {
             namespace_id: namespace_id.clone(),
-            status,
-            next_run_no,
-            reorganize_pending,
+            status: entry
+                .as_ref()
+                .map_or(loonfs_types::GrepIndexStatus::Disabled, |entry| {
+                    loonfs_types::GrepIndexStatus::from(entry.status())
+                }),
+            reorganize_pending: entry.is_some_and(|entry| entry.reorganize().is_some()),
         })
     }
 
@@ -358,80 +360,65 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             ),
         }
     }
+}
 
-    async fn restart_backfill(
-        &self,
-        namespace_id: &NamespaceId,
-        current: &LoadedGrepManifest,
-        deadline: &OperationClock,
-    ) -> Result<GrepBuildOutcome> {
-        let Some(checkpoint) = self
-            .publish_backfill(namespace_id, Some(current), deadline)
-            .await?
-        else {
-            return Ok(GrepBuildOutcome::Superseded);
-        };
-        if let Some(previous_pin_id) = current.manifest_state().status().backfill_pin_id() {
-            self.delete_pin_if_present(namespace_id, previous_pin_id)
-                .await;
-        }
-        Ok(GrepBuildOutcome::BackfillRestarted {
-            captured_seq: checkpoint.captured_seq,
-        })
-    }
-
-    /// Loads the current grep manifest, or `None` when grep was never enabled
-    /// or is disabled.
-    async fn load_enabled(
-        &self,
-        namespace_id: &NamespaceId,
-        deadline: &OperationClock,
-    ) -> Result<Option<LoadedGrepManifest>> {
-        let current =
-            load_current_grep_manifest(&self.store, namespace_id, deadline.observe()).await?;
-        Ok(current.filter(|current| {
-            !matches!(
-                current.manifest_state().status(),
-                GrepIndexStatus::Disabled {}
-            )
-        }))
-    }
-
-    /// Creates a backfill snapshot and publishes the backfilling successor of
-    /// `current`. Returns the snapshot, or `None` when another publisher won.
-    async fn publish_backfill(
-        &self,
-        namespace_id: &NamespaceId,
-        current: Option<&LoadedGrepManifest>,
-        deadline: &OperationClock,
+impl<S: ObjectStore + Clone> GrepSteps<'_, S> {
+    /// Pins a snapshot and, if the pending entry is still `expected`, makes
+    /// the pending entry a backfill from the snapshot's beginning.
+    ///
+    /// Returns the snapshot, or `None` after deleting it when the entry
+    /// changed.
+    ///
+    /// The backfill keeps the entry's segments and reorganization, because
+    /// the index's postings refer to content values, which stay valid, and
+    /// the backfill skips each value that the segments' `texts` rows record.
+    /// So a rebootstrap, and a fork's restart of a backfill that it
+    /// inherited, cost a `texts` lookup for each value that the index has.
+    ///
+    /// Creating a snapshot of a head with an unfolded WAL tail publishes the
+    /// manifest that folds the tail, and a change pending over the manifest
+    /// before it would then lose its put. So the run first publishes a change
+    /// that's pending, and returns `None` if that publication is superseded.
+    /// Once the snapshot exists, the change starts again from the current
+    /// manifest. The entry there can differ from the one the step planned
+    /// from, such as when another process disabled the index, and the
+    /// backfill doesn't replace it.
+    async fn start_backfill(
+        &mut self,
+        expected: Option<&GrepEntry>,
     ) -> Result<Option<loonfs_types::Snapshot>> {
-        let manifest_no = next_manifest_no(current)?;
-        let checkpoint = self.create_backfill_checkpoint(namespace_id).await?;
-        let next = GrepManifestState::new(
-            namespace_id.clone(),
-            manifest_no,
-            backfill_status(&checkpoint),
-            GrepIndexState {
-                reorganize: None,
-                next_run_no: current.map_or(RunNo(0), |manifest| {
-                    manifest.manifest_state().index().next_run_no
-                }),
-            },
-            Vec::new(),
-        )
-        .expect("a backfilling grep manifest state should be valid");
-        match publish_grep_manifest(&self.store, current, &next, deadline).await {
-            Ok(_) => Ok(Some(checkpoint)),
-            Err(GrepError::PublicationConflict { .. }) => {
-                self.delete_pin_if_present(namespace_id, &checkpoint.snapshot_id)
-                    .await;
-                Ok(None)
-            }
-            // A non-conflict failure may be an acknowledgement failure after
-            // the manifest was published. Keep the checkpoint because it
-            // may already reference it.
-            Err(error) => Err(error),
+        if self.is_changed() && self.publish().await? == GrepPublishOutcome::Superseded {
+            return Ok(None);
         }
+        let checkpoint = self
+            .worker
+            .create_backfill_checkpoint(&self.namespace_id)
+            .await?;
+        self.reload_unless_changed();
+        let pending = self.pending().await?;
+        if pending.entry.as_ref() != expected {
+            self.worker
+                .delete_pin_if_present(&self.namespace_id, &checkpoint.snapshot_id)
+                .await;
+            return Ok(None);
+        }
+        pending.record_created_pin(checkpoint.snapshot_id.clone());
+        let previous_pin_id = pending
+            .entry
+            .as_ref()
+            .and_then(|entry| entry.status().backfill_pin_id().cloned());
+        if let Some(pin_id) = previous_pin_id {
+            pending.record_released_pin(pin_id);
+        }
+        let (reorganize, runs) = pending.entry.as_ref().map_or_else(
+            || (None, Vec::new()),
+            |entry| (entry.reorganize().cloned(), entry.runs().to_vec()),
+        );
+        pending.set_entry(
+            GrepEntry::new(backfill_status(&checkpoint), reorganize, runs)
+                .expect("a backfill should keep a valid entry's segments"),
+        );
+        Ok(Some(checkpoint))
     }
 }
 
@@ -459,28 +446,12 @@ fn rebootstrap_required(error: &GrepError) -> bool {
     )
 }
 
-fn next_manifest_no(current: Option<&LoadedGrepManifest>) -> Result<ManifestNo> {
-    let Some(current) = current else {
-        return Ok(ManifestNo(1));
-    };
-    current
-        .manifest_no()
-        .successor()
-        .map_err(|_| GrepError::IndexCorrupt {
-            message: format!(
-                "the current grep manifest is number {}, the largest manifest number, so no \
-                 manifest can follow it",
-                current.manifest_no()
-            ),
-        })
-}
-
-/// The run number after the grep manifest's `current` one.
+/// Returns the run number after `current`, which a change took.
 fn next_index_run_no(current: RunNo) -> Result<RunNo> {
     next_run_no_after(current).map_err(|_| GrepError::IndexCorrupt {
         message: format!(
-            "the grep manifest's next run number is {current}, the largest run number, so no \
-             run can follow it"
+            "the manifest's next run number is {current}, the largest run number, so no run can \
+             follow it"
         ),
     })
 }

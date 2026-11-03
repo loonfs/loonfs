@@ -14,10 +14,10 @@ use loonfs_types::format::control::{
 use loonfs_types::format::envelope::VerifiedEnvelope;
 use loonfs_types::format::manifest::{
     AccessRevisionRecord, ActiveDeletionRecord, ActiveDeletionRowAction, AttributesRevisionRecord,
-    CommitReceiptRecord, ContentLayoutRecord, DeletedBinding, DirentryBindingRecord, InodeRecord,
-    MergeIndexRecord, MetadataRow, MetadataRunRef, MetadataSegmentRef, NamespaceAccess,
-    NamespaceManifestEnvelope, NamespaceManifestPayload, RevisionRecord, SubtreeTombstoneRecord,
-    TombstoneRowAction,
+    CommitReceiptRecord, ContentLayoutRecord, DeletedBinding, DirentryBindingRecord,
+    ExtensionEntry, ExtensionRunRef, ExtensionSegmentRef, InodeRecord, MergeIndexRecord,
+    MetadataRow, MetadataRunRef, MetadataSegmentRef, NamespaceAccess, NamespaceManifestEnvelope,
+    NamespaceManifestPayload, RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
 };
 use loonfs_types::format::segment_blocks::{DecodedDataBlock, SegmentIndexEntry};
 use loonfs_types::format::wal::{
@@ -26,8 +26,8 @@ use loonfs_types::format::wal::{
 use loonfs_types::{
     AbsolutePath, AccessGrants, ActorId, AttributeKey, AttributeValue, Attributes, BindingVersion,
     ChangeSeq, Checksum, ChecksumHex, CommitFingerprint, CommitId, ContentId, ContentRef,
-    DisplayName, InodeId, MetadataSegmentId, NameKey, NamespaceId, PathComponent, PayloadChecksum,
-    PinId, PrincipalId, PrincipalScope, UploadId, WriterId,
+    DisplayName, ExtensionName, IndexSegmentId, InodeId, MetadataSegmentId, NameKey, NamespaceId,
+    PathComponent, PayloadChecksum, PinId, PrincipalId, PrincipalScope, UploadId, WriterId,
 };
 use loonfs_types::{DiffEntry, FilesystemChange};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -89,6 +89,12 @@ fn hash_table_bytes<Entry>(capacity: usize) -> usize {
 /// level takes seven entries: six it keeps and one its parent keeps. The
 /// parents form the next level and fill the same way, up to a single root.
 fn btree_map_node_bytes<K, V>(map: &BTreeMap<K, V>) -> usize {
+    btree_node_bytes::<K, V>(map.len())
+}
+
+/// The nodes of a B-tree map of `len` entries filled by sorted inserts (see
+/// [`btree_map_node_bytes`]).
+fn btree_node_bytes<K, V>(len: usize) -> usize {
     const NODE_SLOTS: usize = 11;
     let leaf = (size_of::<usize>()
         + 2 * size_of::<u16>()
@@ -100,7 +106,7 @@ fn btree_map_node_bytes<K, V>(map: &BTreeMap<K, V>) -> usize {
         entries if entries <= NODE_SLOTS => 1,
         entries => 2 + (entries - NODE_SLOTS - 1) / 7,
     };
-    let mut level = nodes(map.len());
+    let mut level = nodes(len);
     let mut bytes = level * leaf;
     while level > 1 {
         level = nodes(level - 1);
@@ -157,6 +163,8 @@ text_heap_bytes!(
     ContentId,
     DisplayName,
     ChecksumHex,
+    ExtensionName,
+    IndexSegmentId,
     MetadataSegmentId,
     NameKey,
     NamespaceId,
@@ -469,7 +477,66 @@ impl HeapBytes for NamespaceManifestPayload {
             + self.family_root_id.heap_bytes()
             + self.writer.heap_bytes()
             + self.runs.heap_bytes()
+            + self
+                .extensions
+                .iter()
+                .map(|(name, entry)| name.heap_bytes() + entry.heap_bytes())
+                .fold(
+                    btree_map_node_bytes(&self.extensions),
+                    usize::saturating_add,
+                )
     }
+}
+
+impl HeapBytes for ExtensionEntry {
+    fn heap_bytes(&self) -> usize {
+        self.runs.heap_bytes() + json_object_heap_bytes(self.state())
+    }
+}
+
+impl HeapBytes for ExtensionRunRef {
+    fn heap_bytes(&self) -> usize {
+        self.segments.heap_bytes()
+    }
+}
+
+impl HeapBytes for ExtensionSegmentRef {
+    fn heap_bytes(&self) -> usize {
+        self.owner_namespace_id.heap_bytes()
+            + self.segment_id.heap_bytes()
+            + self.min_row_key.heap_bytes()
+            + self.max_row_key.heap_bytes()
+            + self.filter_inline.heap_bytes()
+    }
+}
+
+/// The heap that a decoded JSON object owns: its map's nodes, its keys, and
+/// each value's own heap, walked with a stack instead of recursion.
+fn json_object_heap_bytes(object: &serde_json::Map<String, serde_json::Value>) -> usize {
+    let object_bytes = |object: &serde_json::Map<String, serde_json::Value>| {
+        object.keys().map(HeapBytes::heap_bytes).fold(
+            btree_node_bytes::<String, serde_json::Value>(object.len()),
+            usize::saturating_add,
+        )
+    };
+    let mut bytes = object_bytes(object);
+    let mut values: Vec<&serde_json::Value> = object.values().collect();
+    while let Some(value) = values.pop() {
+        match value {
+            serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            }
+            serde_json::Value::String(text) => bytes = bytes.saturating_add(text.heap_bytes()),
+            serde_json::Value::Array(items) => {
+                bytes = bytes.saturating_add(items.capacity() * size_of::<serde_json::Value>());
+                values.extend(items);
+            }
+            serde_json::Value::Object(object) => {
+                bytes = bytes.saturating_add(object_bytes(object));
+                values.extend(object.values());
+            }
+        }
+    }
+    bytes
 }
 
 impl HeapBytes for NamespaceAccess {

@@ -2,7 +2,6 @@
 
 use crate::common::GrepHost;
 use loonfs::{InlineContentPolicy, LoonFs, NamespaceId, SharedObjectStore, Writable};
-use loonfs_grep::keyspace::{parse_key, GrepKeyKind};
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepBuildOutcome, GrepPassBudget, GrepPassBudgetStats,
     GrepReorganizeOutcome, GrepWorker,
@@ -34,14 +33,14 @@ fn content_watch(inner: LocalFsStore) -> NamespaceOverlapStore<LocalFsStore> {
 
 /// The namespace of a content object or a grep segment.
 fn content_namespace(key: &str) -> Option<String> {
-    if let Some(parsed) =
-        parse_object_key(key).filter(|parsed| parsed.family() == DurableObjectFamily::ContentBlob)
-    {
-        return Some(parsed.prefix_namespace_id().to_owned());
-    }
-    parse_key(key)
-        .filter(|parsed| matches!(parsed.kind, GrepKeyKind::Segment { .. }))
-        .map(|parsed| parsed.namespace_id.to_string())
+    parse_object_key(key)
+        .filter(|parsed| {
+            matches!(
+                parsed.family(),
+                DurableObjectFamily::ContentBlob | DurableObjectFamily::ExtensionSegment
+            )
+        })
+        .map(|parsed| parsed.prefix_namespace_id().to_owned())
 }
 
 /// A writer that stores every file as a content object, so a step's content
@@ -93,6 +92,7 @@ fn worker_with(host: &GrepHost, budget: &GrepPassBudget) -> GrepWorker<SharedObj
         host.store.clone(),
         host.reader.clone(),
         host.writer.clone(),
+        host.maintenance.clone(),
         budget.clone(),
     )
 }
@@ -198,10 +198,10 @@ async fn no_more_grep_steps_hold_content_than_the_limit() {
     .expect("reorganize steps");
 
     for outcome in backfills.iter().chain(&increments) {
-        assert_matches!(outcome, GrepBuildOutcome::Published { .. });
+        assert_matches!(outcome, GrepBuildOutcome::Indexed { .. });
     }
     for outcome in &reorganizations {
-        assert_matches!(outcome, GrepReorganizeOutcome::UnitPublished { .. });
+        assert_matches!(outcome, GrepReorganizeOutcome::UnitWritten { .. });
     }
     assert_eq!(
         watch.peak_namespaces(),
@@ -246,12 +246,12 @@ async fn workers_over_two_stores_share_one_step_permit() {
 
     blocking.release();
     let outcome = holding_step.await.expect("holding step");
-    assert_matches!(outcome, GrepBuildOutcome::Published { .. });
+    assert_matches!(outcome, GrepBuildOutcome::Indexed { .. });
     let outcome = bounded(Duration::from_secs(10), waiting_step)
         .await
         .expect("the waiting step takes the permit the first step returned")
         .expect("waiting step");
-    assert_matches!(outcome, GrepBuildOutcome::Published { .. });
+    assert_matches!(outcome, GrepBuildOutcome::Indexed { .. });
     assert_eq!(budget.stats(), GrepPassBudgetStats::default());
 }
 
@@ -299,7 +299,7 @@ async fn an_up_to_date_step_on_either_worker_takes_no_permit() {
 
     blocking.release();
     let outcome = busy_step.await.expect("busy step");
-    assert_matches!(outcome, GrepBuildOutcome::Published { .. });
+    assert_matches!(outcome, GrepBuildOutcome::Indexed { .. });
 }
 
 #[tokio::test]
@@ -335,7 +335,7 @@ async fn a_dropped_step_returns_its_permit() {
         .await
         .expect("both dropped steps returned the permit")
         .expect("build step");
-    assert_matches!(outcome, GrepBuildOutcome::Published { .. });
+    assert_matches!(outcome, GrepBuildOutcome::Indexed { .. });
 }
 
 #[tokio::test]
@@ -372,6 +372,6 @@ async fn a_step_dropped_while_waiting_leaves_the_counts_at_zero() {
 
     blocking.release();
     let outcome = holding_step.await.expect("holding step");
-    assert_matches!(outcome, GrepBuildOutcome::Published { .. });
+    assert_matches!(outcome, GrepBuildOutcome::Indexed { .. });
     assert_eq!(budget.stats(), GrepPassBudgetStats::default());
 }

@@ -25,9 +25,9 @@ use loonfs_types::format::control::{
 use loonfs_types::format::envelope::EnvelopeCodecError;
 use loonfs_types::format::manifest::{
     decode_namespace_manifest_json, encode_namespace_manifest_json, ActiveDeletionRowAction,
-    DeletedBinding, DeltaPosition, MetadataRow, MetadataRowFamily, MetadataRunRef,
-    MetadataSegmentRef, NamespaceAccess, NamespaceManifestPayload, RunTier, TombstoneRowAction,
-    METADATA_SEGMENT_ENCODING,
+    DeletedBinding, DeltaPosition, ExtensionEntry, ExtensionRunRef, ExtensionSegmentRef,
+    MetadataRow, MetadataRowFamily, MetadataRunRef, MetadataSegmentRef, NamespaceAccess,
+    NamespaceManifestPayload, RunTier, TombstoneRowAction, METADATA_SEGMENT_ENCODING,
 };
 use loonfs_types::format::wal::{
     decode_wal_object_envelope_zstd, encode_wal_object_envelope_zstd, MergeRecord, WalCodecError,
@@ -37,9 +37,10 @@ use loonfs_types::ROOT_INODE_ID;
 use loonfs_types::{
     sha256_digest, AccessGrants, AccessRevisionNo, AccessRight, ActorId, AttributeKey,
     AttributeValue, Attributes, AttributesRevisionNo, ChangeSeq, Checksum, ChecksumAlgorithm,
-    ChecksumHex, CommitFingerprint, CommitId, ContentId, ContentRef, ContentRefKind, InodeId,
-    InodeKind, ManifestNo, MetadataSegmentId, NameKey, NamespaceId, PayloadChecksum, PinId,
-    PrincipalId, PrincipalScope, RevisionNo, RunNo, UploadId, WalNo, WriterEpoch,
+    ChecksumHex, CommitFingerprint, CommitId, ContentId, ContentRef, ContentRefKind, ExtensionName,
+    IndexSegmentId, InodeId, InodeKind, ManifestNo, MetadataSegmentId, NameKey, NamespaceId,
+    PayloadChecksum, PinId, PrincipalId, PrincipalScope, RevisionNo, RunNo, UploadId, WalNo,
+    WriterEpoch,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -606,6 +607,7 @@ fn sample_manifest_payload() -> NamespaceManifestPayload {
                 filter_inline: None,
             }],
         }],
+        extensions: std::collections::BTreeMap::new(),
     };
     let mut publication = manifest.runs[0].segments[0].clone();
     publication.family = MetadataRowFamily::ContentLayouts;
@@ -663,6 +665,62 @@ fn sample_deleted_manifest() -> NamespaceManifestPayload {
         status: NamespaceStatus::Deleted {
             deleted_at_ms: 1_500_000,
         },
+        ..sample_manifest_payload()
+    }
+}
+
+/// A manifest with a grep entry, whose `status` core copies without
+/// interpreting it.
+fn sample_extensions_manifest() -> NamespaceManifestPayload {
+    let state = serde_json::json!({
+        "status": {
+            "kind": "active",
+            "captured_seq": 1,
+            "built_through_seq": 2,
+            "next_event_index": 0,
+        },
+    })
+    .as_object()
+    .cloned()
+    .expect("a JSON object literal is an object");
+    let segment = ExtensionSegmentRef {
+        owner_namespace_id: namespace_id(),
+        segment_id: IndexSegmentId::parse("idx_014d2pf2dbsqqg28t5cy4tqkfg")
+            .expect("valid index segment id"),
+        row_count: 12,
+        min_row_key: "content-revision-014d2pf2dbsqqg28t5cy4tqkfh".to_owned(),
+        max_row_key: "value-00000000000000000001".to_owned(),
+        index_block: loonfs_types::format::segment_blocks::BlockHandle {
+            offset: 900,
+            stored_bytes: 80,
+            decoded_bytes: 160,
+            crc32c: 0x0bad_cafe,
+        },
+        filter_block: loonfs_types::format::segment_blocks::BlockHandle {
+            offset: 880,
+            stored_bytes: 20,
+            decoded_bytes: 20,
+            crc32c: 0x1357_9bdf,
+        },
+        filter_inline: None,
+    };
+    let entry = ExtensionEntry::new(
+        2,
+        vec![ExtensionRunRef {
+            run_no: RunNo(1),
+            level: 0,
+            segments: vec![segment],
+        }],
+        state,
+    );
+    // One counter allocates every run number, so the grep run follows the
+    // metadata run.
+    NamespaceManifestPayload {
+        extensions: std::collections::BTreeMap::from([(
+            ExtensionName::parse("grep").expect("valid extension name"),
+            entry,
+        )]),
+        next_run_no: RunNo(2),
         ..sample_manifest_payload()
     }
 }
@@ -3235,8 +3293,56 @@ fn namespace_manifest_lifecycle_variants_match_golden_bytes() {
             "manifest.retention_window.v1.json",
             sample_retention_window_manifest(),
         ),
+        ("manifest.extensions.v1.json", sample_extensions_manifest()),
     ] {
         assert_manifest_matches_golden(name, payload);
+    }
+}
+
+#[test]
+fn an_extension_entry_keeps_the_members_core_does_not_interpret() {
+    let encoded = control_document_with_payload_edit("manifest.extensions.v1.json", |payload| {
+        payload["extensions"]["grep"]["reorganize"] = serde_json::json!({"run_no": 3});
+    });
+    let decoded = decode_namespace_manifest_json(&rezstd(&encoded))
+        .expect("an entry's own members decode")
+        .into_payload();
+    let entry = &decoded.extensions[&ExtensionName::parse("grep").expect("valid name")];
+    assert_eq!(
+        entry.state()["reorganize"],
+        serde_json::json!({"run_no": 3})
+    );
+    assert_eq!(
+        entry.runs,
+        sample_extensions_manifest()
+            .extensions
+            .into_values()
+            .next()
+            .expect("entry")
+            .runs
+    );
+
+    // Core decodes the segments an entry lists, so a descriptor rejects an
+    // unknown field, and an entry needs its version.
+    for edit in [
+        (|payload: &mut serde_json::Value| {
+            payload["extensions"]["grep"]["runs"][0]["path"] = serde_json::Value::from("x");
+        }) as fn(&mut serde_json::Value),
+        |payload| {
+            payload["extensions"]["grep"]
+                .as_object_mut()
+                .expect("entry")
+                .remove("version");
+        },
+        |payload| {
+            payload["extensions"]["Grep"] = payload["extensions"]["grep"].clone();
+        },
+    ] {
+        let encoded = control_document_with_payload_edit("manifest.extensions.v1.json", edit);
+        assert_matches!(
+            decode_namespace_manifest_json(&rezstd(&encoded)),
+            Err(EnvelopeCodecError::PayloadDecode(_))
+        );
     }
 }
 

@@ -61,8 +61,8 @@ struct Retry {
 pub(super) enum SweepCall {
     Metadata,
     GrepIndex,
-    /// Garbage collection, which runs the core collector and then the grep index's collector
-    /// through [`loonfs_http::gc_namespace`].
+    /// Garbage collection, which also collects the segments of extensions such as the grep
+    /// index.
     Gc,
     /// The retention advance, which the full pass makes, or leaves to a
     /// visit that has the namespace when the pass reaches it.

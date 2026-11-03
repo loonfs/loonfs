@@ -1,6 +1,6 @@
 //! Content search requests and responses for the v0 HTTP API.
 
-use crate::{AbsolutePath, ChangeSeq, InodeId, NamespaceId, PinId, RevisionNo, RunNo};
+use crate::{AbsolutePath, ChangeSeq, InodeId, NamespaceId, PinId, RevisionNo};
 use serde::{Deserialize, Serialize};
 use xxhash_rust::xxh64::xxh64;
 
@@ -179,8 +179,6 @@ pub struct GrepIndex {
     /// The index's status, with the fields that the status records.
     #[serde(flatten)]
     pub status: GrepIndexStatus,
-    /// The next run number that the index allocates.
-    pub next_run_no: RunNo,
     /// Whether a partitioned segment reorganization is in progress.
     pub reorganize_pending: bool,
 }
@@ -282,7 +280,6 @@ mod tests {
             "namespace_id": "demo",
             "status": "rebuilding",
             "rebuild_seq": 9,
-            "next_run_no": 3,
             "reorganize_pending": false
         }))
         .expect("a newer status decodes");
@@ -299,7 +296,6 @@ mod tests {
                     built_through_seq: ChangeSeq(12),
                     next_event_index: 0,
                 },
-                next_run_no: RunNo(3),
                 reorganize_pending: false,
             })
             .expect("serialize active status"),
@@ -308,7 +304,6 @@ mod tests {
                 "status": "active",
                 "built_through_seq": 12,
                 "next_event_index": 0,
-                "next_run_no": 3,
                 "reorganize_pending": false
             })
         );
@@ -322,7 +317,6 @@ mod tests {
                     checkpoint_id: PinId::parse("pin_00000000000000000001-0000000000000009")
                         .expect("checkpoint id"),
                 },
-                next_run_no: RunNo(1),
                 reorganize_pending: false,
             })
             .expect("serialize backfilling status"),
@@ -332,7 +326,6 @@ mod tests {
                 "captured_seq": 12,
                 "cursor_inode_id": InodeId(4).to_string(),
                 "checkpoint_id": "pin_00000000000000000001-0000000000000009",
-                "next_run_no": 1,
                 "reorganize_pending": false
             })
         );

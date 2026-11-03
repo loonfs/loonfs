@@ -118,6 +118,7 @@ pub(super) async fn test_app_with_sessions(
             runtime.object_store(),
             runtime.read_only(),
             runtime.clone(),
+            maintenance.clone(),
             loonfs_grep::GrepPassBudget::default(),
         )
     };
@@ -125,7 +126,7 @@ pub(super) async fn test_app_with_sessions(
         let cache = Arc::new(GrepBlockCache::new(
             loonfs::engine::DecodedBlockCacheConfig::new(DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES),
         ));
-        Arc::new(GrepService::new(cache, runtime.monotonic_timer()))
+        Arc::new(GrepService::new(cache))
     };
     let grep = match config.grep {
         JobMode::Disabled => GrepBinding::Disabled,

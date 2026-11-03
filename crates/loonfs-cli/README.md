@@ -424,12 +424,9 @@ Maintenance
     content prefix reports zero.
     deleted.temporary_objects counts store temporary objects older than the
     window.
-    When the profile's deployment maintains the gram content index, the
-    run then collects the index's unreferenced objects and reports their
-    counts in extensions.grep. The index keeps its own age rules, so
-    --grace-window-ms doesn't apply to it. For a deleted namespace, the
-    run deletes the index's aged objects. For a namespace that doesn't
-    exist, it deletes them too, and then reports namespace_not_found.
+    deleted.extension_segments counts the gram content index's segments
+    that no retained manifest lists. Like metadata segments, they're
+    deleted once they're more than 24 hours old, whatever the window.
 
   loonfs maintenance checkpoint list [--limit <n>] [--page-size <n>]
                                [--cursor <cursor>] [--all] [--jsonl]

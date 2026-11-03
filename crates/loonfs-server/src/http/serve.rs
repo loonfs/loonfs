@@ -190,6 +190,7 @@ pub async fn app(config: ValidatedServerConfig, options: AppConfig) -> Result<(R
             runtime.object_store(),
             runtime.read_only(),
             runtime.clone(),
+            maintenance.clone(),
             loonfs_grep::GrepPassBudget::new(
                 std::num::NonZeroUsize::new(config.grep.worker.max_concurrent_steps)
                     .expect("validated grep step limit should be nonzero"),
@@ -205,10 +206,7 @@ pub async fn app(config: ValidatedServerConfig, options: AppConfig) -> Result<(R
         let block_cache = grep_block_cache
             .as_ref()
             .expect("a config that serves grep should build a grep block cache");
-        Arc::new(GrepService::new(
-            Arc::clone(block_cache),
-            runtime.monotonic_timer(),
-        ))
+        Arc::new(GrepService::new(Arc::clone(block_cache)))
     };
     let grep = match config.grep.mode {
         JobMode::Disabled => GrepBinding::Disabled,

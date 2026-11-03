@@ -1,14 +1,14 @@
 # loonfs-grep
 
-`loonfs-grep` implements LoonFS's optional gram index, which `loonfs grep` uses to search file content. Each namespace stores its own index under `namespaces/{namespace_id}/extensions/grep/`. You need this crate only if you're writing a host (the program that runs the index steps). If you run `loonfs-server`, the server already runs these steps, and you configure them in its `[grep]` table (shown below). To build or collect an index by hand, use the `loonfs maintenance` commands described below.
+`loonfs-grep` implements LoonFS's optional gram index, which `loonfs grep` uses to search file content. A namespace's index state is grep's entry in the namespace manifest, which lists the index's segments. The segments are stored under `namespaces/{owner_namespace_id}/extensions/grep/segments/`. You need this crate only if you're writing a host (the program that runs the index steps). If you run `loonfs-server`, the server already runs these steps, and you configure them in its `[grep]` table (shown below). To build or collect an index by hand, use the `loonfs maintenance` commands described below.
 
 The index records content values rather than file revisions. A "content value" is the bytes that a content reference refers to, identified by the reference's content ID and size, so the index reads and tokenizes those bytes once, however many files refer to them. Each run of index segments stores its gram postings as positions in the run's own table of content values, and a query finds the files that refer to a matching value through the index's `content_revisions` rows. The [fork-family grep note](../../docs/design/grep-fork-family.md) explains the design.
 
-Grep never scans the store to discover namespaces. Instead, its host calls these typed steps on `GrepWorker`, passing the ID of the namespace to work on: `build_step`, `reorganize_step`, and `gc_namespace`.
+Grep never scans the store to discover namespaces. Instead, its host calls typed steps, passing the ID of the namespace to work on. `GrepWorker::steps` starts a run of steps over one namespace (`GrepSteps::build_step` and `GrepSteps::reorganize_step`), whose changes to grep's entry are kept in memory and published together in one manifest once a publish interval has passed, and when the host calls `GrepSteps::publish`. `GrepWorker::build_step` and `GrepWorker::reorganize_step` run one step and publish its change.
 
 Commits don't schedule index work. The reference server (`loonfs-server`) runs index work in two passes:
 
-- The maintenance sweep visits every namespace on a regular schedule. Each visit runs build steps for as long as they publish (at most 16), and then runs one reorganize step once the index is up to date. When the sweep runs a collection pass, that pass also runs grep garbage collection.
+- The maintenance sweep visits every namespace on a regular schedule. Each visit runs build steps for as long as they index something (at most 16), and then runs one reorganize step once the index is up to date. The steps' changes are published once per tick interval (5 seconds by default), and again when the visit ends.
 - A second pass runs every 5 seconds. For each writer session the server has open, it builds that namespace's index if the session's last published sequence number has changed since this pass last indexed it.
 
 A query still returns correct results while the index is behind, because it scans the files that were committed after the last commit the index covers.
@@ -17,12 +17,11 @@ The CLI runs the same steps one command at a time:
 
 ```console
 loonfs maintenance index enable --namespace docs
-loonfs maintenance gc --namespace docs
 ```
 
 On an embedded profile, `maintenance index enable` runs build steps until the index reaches the namespace's sequence number from when the command started. On a remote profile, it waits for the server to get there. `--max-steps` and `--deadline-ms` limit the wait. A write through an embedded profile doesn't update the index, so to bring an active index up to the namespace head, run `maintenance index enable` again.
 
-`loonfs maintenance gc` runs the core garbage collector for one namespace, and then one grep collection pass, which reports its counts in the result's `extensions.grep` object. A host built on `loonfs-http` runs the same pair through `loonfs_http::gc_namespace`. The grep pass also runs for a deleted namespace, and for a namespace that doesn't exist, as long as its old index data is still stored. For a namespace that doesn't exist, the command reports `namespace_not_found` after the pass. Every pass reads the current manifest and hint before it deletes anything. Grep manifests are numbered without gaps (1, 2, 3, and so on) and published with put-if-absent. `hint.json` is where forward discovery starts, and it can lag behind the newest manifest. A query checks that a cached manifest is still current with one HEAD request for the next manifest number. [Grep extension format](../../docs/specs/format.md#appendix-d-grep-extension-format) defines the stored layout and the collection rules.
+The core garbage collector (`loonfs maintenance gc`) collects the index's segments that no current, pinned, or recently superseded manifest lists, and it counts them in the result's `deleted.extension_segments`. A query reads grep's entry from the manifest of its read view, so it sends no request for the index beyond the segment reads. [Grep extension format](../../docs/specs/format.md#appendix-d-grep-extension-format) defines the entry, its publication, and the stored layout.
 
 `GrepWorkerConfig` controls how much work one step can do, and how many steps can read and process content at once. A server reads these values from its `[grep]` table:
 
@@ -34,7 +33,7 @@ max_content_bytes_per_step = 67108864
 max_concurrent_steps = 2
 ```
 
-Every value must be greater than zero, and `max_files_per_step` can be at most 1,000, the largest page a build step reads. The host builds one `GrepPassBudget` from `max_concurrent_steps` and passes it to `GrepWorker::new`. When a build or reorganize step finds work to do, it waits for one of the budget's permits before it reads file content or index segments, and it keeps the permit until it publishes. A step that finds the index up to date, or finds nothing to reorganize, doesn't take a permit. `GrepPassBudget::stats` reports how many steps are running and how many are waiting.
+Every value must be greater than zero, and `max_files_per_step` can be at most 1,000, the largest page a build step reads. The host builds one `GrepPassBudget` from `max_concurrent_steps` and passes it to `GrepWorker::new`. When a build or reorganize step finds work to do, it waits for one of the budget's permits before it reads file content or index segments, and it keeps the permit until it writes its segments. A step that finds the index up to date, or finds nothing to reorganize, doesn't take a permit. `GrepPassBudget::stats` reports how many steps are running and how many are waiting.
 
 The server's `max_concurrent_maintenance` limits how many namespaces its sweep visits at once. Separately, `max_concurrent_steps` limits how many steps read and process content at once, no matter how many visits are running.
 

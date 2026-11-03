@@ -162,8 +162,8 @@ const CONTENT_OBJECTS: CacheNames = CacheNames {
 const GREP_BLOCKS: CacheNames = CacheNames {
     metric: "grep",
     lookups: "Grep",
-    entries_title: "Decoded grep manifests and blocks",
-    entries: "decoded grep manifests and blocks",
+    entries_title: "Decoded grep blocks",
+    entries: "decoded grep blocks",
     budget: "grep",
 };
 

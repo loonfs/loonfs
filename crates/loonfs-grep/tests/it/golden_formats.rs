@@ -1,7 +1,7 @@
 //! Golden-byte fixtures for the durable grep encodings.
 //!
-//! These tests pin the exact bytes the grep hint, the grep manifest,
-//! and a data block of each of the index's five row families write. They run the mechanism the core
+//! These tests pin the exact bytes of grep's entry in a namespace manifest,
+//! and of a data block of each of the index's five row families. They run the mechanism the core
 //! families use in `crates/loonfs-types/tests/golden_formats.rs`:
 //!
 //! - If an encoder's output diverges from its fixture, a Rust-side change
@@ -16,16 +16,13 @@
 //!   sample they hold, so a decoder change fails even while the encoder still
 //!   matches.
 //!
-//! The decode-rejection rules sit in `manifest_format`, which builds its inputs
+//! The decode-rejection rules sit in `entry_format`, which builds its inputs
 //! from these same files.
 
 use loonfs_grep::codec::{ContentValue, Gram, IndexRow};
-use loonfs_grep::manifest::{
-    decode_grep_hint, decode_grep_manifest, encode_grep_hint, encode_grep_manifest, GrepHint,
-    GrepIndexState, GrepIndexStatus, GrepManifestState, GrepPruning, GrepReorganizeState,
-    GrepSegmentRef,
-};
+use loonfs_grep::entry::{GrepEntry, GrepIndexStatus, GrepPruning, GrepReorganizeState};
 use loonfs_test_support::ids::namespace_id;
+use loonfs_types::format::manifest::{ExtensionEntry, ExtensionRunRef, ExtensionSegmentRef};
 use loonfs_types::format::segment_blocks::{
     decode_data_block_rows, decode_index_block, BlockHandle, BuiltSegmentBlocks, DecodedDataBlock,
     SegmentBlocksBuilder, SegmentFilter, SegmentFilterBuilder,
@@ -37,14 +34,14 @@ use std::path::{Path, PathBuf};
 // Fixture names
 // ---------------------------------------------------------------------------
 
-/// The hint that names [`ACTIVE_MANIFEST_FIXTURE`].
-pub(crate) const HINT_FIXTURE: &str = "grep_hint.v1.json";
-/// An active index reorganizing a set of segments.
-pub(crate) const ACTIVE_MANIFEST_FIXTURE: &str = "grep_manifest.v2.json";
-/// A backfill in progress, with segments and no reorganization.
-pub(crate) const BACKFILLING_MANIFEST_FIXTURE: &str = "grep_manifest.backfilling.v2.json";
-/// A disabled index, which carries neither segments nor a reorganization.
-pub(crate) const DISABLED_MANIFEST_FIXTURE: &str = "grep_manifest.disabled.v2.json";
+/// The entry of an active index reorganizing a set of segments.
+pub(crate) const ACTIVE_ENTRY_FIXTURE: &str = "grep_entry.v2.json";
+/// The entry of a backfill in progress, with segments and no
+/// reorganization.
+pub(crate) const BACKFILLING_ENTRY_FIXTURE: &str = "grep_entry.backfilling.v2.json";
+/// The entry of a disabled index, which lists neither segments nor a
+/// reorganization.
+pub(crate) const DISABLED_ENTRY_FIXTURE: &str = "grep_entry.disabled.v2.json";
 /// One data block of `gram_postings` rows.
 const GRAM_POSTINGS_BLOCK_FIXTURE: &str = "grep_segment_gram_postings.v2.bin";
 /// One data block of `text` rows.
@@ -96,13 +93,13 @@ fn unzstd(bytes: &[u8]) -> Vec<u8> {
 // ---------------------------------------------------------------------------
 
 /// An active index with a reorganization into the base level running over
-/// its segments. The reorganization rewrites the two level-1 segments into
-/// the level-2 segment, so every id the reorganize state names is a segment
-/// this manifest holds, and it records the revisions its pruning keeps.
-pub(crate) fn sample_active_manifest(
+/// its runs. The reorganization rewrites the two level-1 runs into the
+/// level-2 run, so every id the reorganize state lists is a segment this
+/// entry lists, and it records the revisions its pruning keeps.
+pub(crate) fn sample_active_entry(
     built_through_seq: ChangeSeq,
     next_event_index: u32,
-) -> GrepManifestState {
+) -> GrepEntry {
     let reorganize = GrepReorganizeState {
         input_segment_ids: vec![segment_id(1), segment_id(2)],
         output_segment_ids: vec![segment_id(3)],
@@ -114,79 +111,59 @@ pub(crate) fn sample_active_manifest(
             retention_floor_seq: ChangeSeq(4),
         }),
     };
-    GrepManifestState::new(
-        namespace_id("docs"),
-        loonfs_types::ManifestNo(1),
+    GrepEntry::new(
         GrepIndexStatus::Active {
             captured_seq: ChangeSeq(3),
             built_through_seq,
             next_event_index,
         },
-        GrepIndexState {
-            reorganize: Some(reorganize),
-            next_run_no: RunNo(4),
-        },
+        Some(reorganize),
         vec![
-            segment_ref(1, 1, 1),
-            segment_ref(2, 2, 1),
-            segment_ref(3, 3, 2),
+            run_ref(1, 1, &[1]),
+            run_ref(2, 1, &[2]),
+            run_ref(3, 2, &[3]),
         ],
     )
-    .expect("valid active manifest state")
+    .expect("valid active entry")
 }
 
-/// A backfill walking a pinned checkpoint. It carries the segments the walk
-/// has written so far and no reorganization, which is the index shape the
-/// active fixture above does not pin.
-pub(crate) fn sample_backfilling_manifest() -> GrepManifestState {
-    GrepManifestState::new(
-        namespace_id("docs"),
-        loonfs_types::ManifestNo(1),
+/// A backfill walking a pinned checkpoint. It lists the run the walk has
+/// written so far and no reorganization, which is the index shape the active
+/// fixture above does not pin.
+pub(crate) fn sample_backfilling_entry() -> GrepEntry {
+    GrepEntry::new(
         GrepIndexStatus::Backfilling {
             captured_seq: ChangeSeq(7),
             cursor_inode_id: Some(InodeId(7)),
             pin_id: PinId::parse("pin_00000000000000000001-0000000000000009")
                 .expect("valid pin id"),
         },
-        GrepIndexState {
-            reorganize: None,
-            next_run_no: RunNo(2),
-        },
-        vec![segment_ref(1, 1, 0)],
+        None,
+        vec![run_ref(1, 0, &[1])],
     )
-    .expect("valid backfilling manifest state")
+    .expect("valid backfilling entry")
 }
 
-/// A disabled index. The status carries no fields, and the manifest holds
-/// neither segments nor a reorganization.
-pub(crate) fn sample_disabled_manifest() -> GrepManifestState {
-    GrepManifestState::new(
-        namespace_id("docs"),
-        loonfs_types::ManifestNo(1),
-        GrepIndexStatus::Disabled {},
-        GrepIndexState {
-            reorganize: None,
-            next_run_no: RunNo(4),
-        },
-        Vec::new(),
-    )
-    .expect("valid disabled manifest state")
+/// A disabled index. The status has no fields, and the entry lists neither
+/// segments nor a reorganization.
+pub(crate) fn sample_disabled_entry() -> GrepEntry {
+    GrepEntry::new(GrepIndexStatus::Disabled {}, None, Vec::new()).expect("valid disabled entry")
 }
 
-fn sample_hint() -> GrepHint {
-    GrepHint {
-        namespace_id: namespace_id("docs"),
-        manifest_no: loonfs_types::ManifestNo(1),
+/// Returns run `run_no` at `level`, with the segments that [`segment_ref`]
+/// returns for `numbers`.
+pub(crate) fn run_ref(run_no: u64, level: u32, numbers: &[u8]) -> ExtensionRunRef {
+    ExtensionRunRef {
+        run_no: RunNo(run_no),
+        level,
+        segments: numbers.iter().copied().map(segment_ref).collect(),
     }
 }
 
-pub(crate) fn segment_ref(number: u8, run_no: u64, level: u32) -> GrepSegmentRef {
-    GrepSegmentRef {
+pub(crate) fn segment_ref(number: u8) -> ExtensionSegmentRef {
+    ExtensionSegmentRef {
+        owner_namespace_id: namespace_id("docs"),
         segment_id: segment_id(number),
-        run_no: RunNo(run_no),
-
-        level,
-
         row_count: 99,
         min_row_key: "gram-616263-00000000000000000000".to_owned(),
         max_row_key: "value-00000000000000000051".to_owned(),
@@ -197,7 +174,7 @@ pub(crate) fn segment_ref(number: u8, run_no: u64, level: u32) -> GrepSegmentRef
             crc32c: 305_419_896,
         },
         filter_block: BlockHandle {
-            offset: 176,
+            offset: 112,
             stored_bytes: 16,
             decoded_bytes: 16,
             crc32c: 2_591_069_104,
@@ -323,72 +300,53 @@ fn decode_golden_data_block(name: &str) -> DecodedDataBlock<IndexRow> {
 // The fixtures
 // ---------------------------------------------------------------------------
 
-fn assert_manifest_matches_golden(fixture: &str, state: GrepManifestState) {
-    let encoded = encode_grep_manifest(state)
-        .expect("build a grep manifest envelope")
-        .into_bytes();
-    assert_matches_golden(fixture, &encoded);
+/// The bytes of `entry` as its core entry, the JSON object that a namespace
+/// manifest lists under `grep`.
+fn entry_bytes(entry: &GrepEntry) -> Vec<u8> {
+    serde_json::to_vec(&entry.encode()).expect("encode the grep entry")
 }
 
-fn assert_manifest_golden_decodes(fixture: &str, state: GrepManifestState) {
-    let expected = encode_grep_manifest(state)
-        .expect("build a grep manifest envelope")
-        .into_envelope();
-    let decoded = decode_grep_manifest(&read_golden(fixture)).expect("decode the golden manifest");
-    assert_eq!(decoded, expected);
+fn assert_entry_matches_golden(fixture: &str, entry: &GrepEntry) {
+    assert_matches_golden(fixture, &entry_bytes(entry));
 }
 
-#[test]
-fn grep_hint_matches_golden_bytes() {
-    let encoded = encode_grep_hint(sample_hint())
-        .expect("build a grep hint envelope")
-        .into_bytes();
-    assert_matches_golden(HINT_FIXTURE, &encoded);
-}
-
-#[test]
-fn grep_hint_golden_decodes_to_sample() {
-    let expected = encode_grep_hint(sample_hint())
-        .expect("build a grep hint envelope")
-        .into_envelope();
-    let decoded = decode_grep_hint(&read_golden(HINT_FIXTURE)).expect("decode the golden hint");
-    assert_eq!(decoded, expected);
-}
-
-#[test]
-fn grep_manifest_matches_golden_bytes() {
-    assert_manifest_matches_golden(
-        ACTIVE_MANIFEST_FIXTURE,
-        sample_active_manifest(ChangeSeq(11), 5),
+fn assert_entry_golden_decodes(fixture: &str, entry: &GrepEntry) {
+    let stored: ExtensionEntry =
+        serde_json::from_slice(&read_golden(fixture)).expect("decode the core entry");
+    assert_eq!(
+        &GrepEntry::decode(&stored).expect("decode the golden entry"),
+        entry
     );
 }
 
 #[test]
-fn grep_manifest_golden_decodes_to_sample() {
-    assert_manifest_golden_decodes(
-        ACTIVE_MANIFEST_FIXTURE,
-        sample_active_manifest(ChangeSeq(11), 5),
-    );
+fn grep_entry_matches_golden_bytes() {
+    assert_entry_matches_golden(ACTIVE_ENTRY_FIXTURE, &sample_active_entry(ChangeSeq(11), 5));
 }
 
 #[test]
-fn grep_manifest_backfilling_matches_golden_bytes() {
-    assert_manifest_matches_golden(BACKFILLING_MANIFEST_FIXTURE, sample_backfilling_manifest());
+fn grep_entry_golden_decodes_to_sample() {
+    assert_entry_golden_decodes(ACTIVE_ENTRY_FIXTURE, &sample_active_entry(ChangeSeq(11), 5));
 }
 
 #[test]
-fn grep_manifest_backfilling_golden_decodes_to_sample() {
-    assert_manifest_golden_decodes(BACKFILLING_MANIFEST_FIXTURE, sample_backfilling_manifest());
+fn grep_entry_backfilling_matches_golden_bytes() {
+    assert_entry_matches_golden(BACKFILLING_ENTRY_FIXTURE, &sample_backfilling_entry());
 }
 
 #[test]
-fn grep_manifest_disabled_matches_golden_bytes() {
-    assert_manifest_matches_golden(DISABLED_MANIFEST_FIXTURE, sample_disabled_manifest());
+fn grep_entry_backfilling_golden_decodes_to_sample() {
+    assert_entry_golden_decodes(BACKFILLING_ENTRY_FIXTURE, &sample_backfilling_entry());
 }
 
 #[test]
-fn grep_manifest_disabled_golden_decodes_to_sample() {
-    assert_manifest_golden_decodes(DISABLED_MANIFEST_FIXTURE, sample_disabled_manifest());
+fn grep_entry_disabled_matches_golden_bytes() {
+    assert_entry_matches_golden(DISABLED_ENTRY_FIXTURE, &sample_disabled_entry());
+}
+
+#[test]
+fn grep_entry_disabled_golden_decodes_to_sample() {
+    assert_entry_golden_decodes(DISABLED_ENTRY_FIXTURE, &sample_disabled_entry());
 }
 
 /// Checks that `rows` encode as one data block whose payload matches

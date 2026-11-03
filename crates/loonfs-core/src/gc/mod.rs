@@ -18,6 +18,5 @@ mod uploads;
 
 pub(crate) use fork_family::MemberState;
 pub use options::GcOptions;
-pub use pins::{grace_age, GraceAge};
 pub(crate) use session_cache::CompletedUploadSession;
 pub use session_cache::{CompletedUploadSessionCache, SharedCompletedUploadSessions};

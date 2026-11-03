@@ -2,7 +2,7 @@
 
 use super::{held_ids, seed_writer, sweep_config, visit_held, SweepServer};
 use loonfs::{ChangeSeq, SharedObjectStore};
-use loonfs_grep::manifest::GrepIndexStatus;
+use loonfs_grep::entry::GrepIndexStatus;
 use loonfs_grep::GrepWorkerConfig;
 use loonfs_http::WriterSessions as _;
 use loonfs_objectstore::local_fs_store::LocalFsStore;

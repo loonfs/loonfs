@@ -3,8 +3,6 @@
 use super::error::ApiResponseError;
 use super::extractors::{missing_actor, OptionalActorHeader};
 
-use super::handlers_query::map_grep_error;
-
 use super::{AppJson, AppQuery, BindingState, NamespaceIdPath, NoQuery};
 use axum::extract::State;
 use axum::Json;
@@ -24,7 +22,7 @@ use std::sync::Arc;
         path = "/v0/maintenance/namespaces/{namespace_id}/runs",
         tag = "maintenance",
         summary = "Run one maintenance job",
-        description = "Runs one maintenance job for the namespace. The body's `kind` selects the job, which is one of `metadata`, `gc`, `retention`, `retention_window`, or `recover_administrator`. The response includes the same `kind` and the job's result. A deleted namespace accepts only `gc`. A `metadata` job folds the WAL tail and compacts metadata until nothing is due, or until it publishes 16 compaction units. A compaction unit can take minutes, so the call can too. When the result's `outcome` is `due`, another `metadata` run continues the work. A `gc` job reads the current manifest, lists the pins, and then sweeps every object family to the end. Each listing starts at the beginning, and the job doesn't keep a position to continue from. When the deployment maintains a grep index, the job then deletes aged, unreferenced grep index objects, and the result includes their counts in `extensions.grep`. A `retention` job advances the retention floor to the folded manifest head, or to the one target that `to_seq` or `cutoff_at_ms` sets. A `retention_window` job sets the namespace's retention window to `retention_window_ms`, or clears it when the body doesn't include that field.",
+        description = "Runs one maintenance job for the namespace. The body's `kind` selects the job, which is one of `metadata`, `gc`, `retention`, `retention_window`, or `recover_administrator`. The response includes the same `kind` and the job's result. A deleted namespace accepts only `gc`. A `metadata` job folds the WAL tail and compacts metadata until nothing is due, or until it publishes 16 compaction units. A compaction unit can take minutes, so the call can too. When the result's `outcome` is `due`, another `metadata` run continues the work. A `gc` job reads the current manifest, lists the pins, and then sweeps every object family to the end, including the segments of extensions such as the grep index. Each listing starts at the beginning, and the job doesn't keep a position to continue from. A `retention` job advances the retention floor to the folded manifest head, or to the one target that `to_seq` or `cutoff_at_ms` sets. A `retention_window` job sets the namespace's retention window to `retention_window_ms`, or clears it when the body doesn't include that field.",
         params(("namespace_id" = String, Path, description = "The namespace ID.")),
         request_body(content = RunMaintenanceRequest, description = "The maintenance job to run"),
         responses(
@@ -59,17 +57,10 @@ pub(super) async fn run_maintenance(
                 .await
                 .map(RunMaintenanceResponse::Metadata)
         }
-        RunMaintenanceRequest::Gc(request) => {
-            return crate::gc_namespace(
-                maintenance,
-                state.grep.worker(),
-                &namespace_id,
-                &GcOptions::from_request(request),
-            )
+        RunMaintenanceRequest::Gc(request) => maintenance
+            .gc_with_options(&namespace_id, &GcOptions::from_request(request))
             .await
-            .map(|collected| Json(RunMaintenanceResponse::Gc(collected)))
-            .map_err(map_grep_error);
-        }
+            .map(RunMaintenanceResponse::Gc),
         RunMaintenanceRequest::Retention(request) => {
             let options = AdvanceRetentionFloorOptions::from_request(request)
                 .map_err(ApiResponseError::runtime)?;

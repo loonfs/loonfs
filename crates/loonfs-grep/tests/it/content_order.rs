@@ -183,7 +183,7 @@ async fn a_stale_search_keeps_its_first_pages_cut_after_the_index_moves() {
         .await
         .expect("catch up");
     let page_two = grep_with(
-        &GrepService::new(default_block_cache(), fixture.host.reader.monotonic_timer()),
+        &GrepService::new(default_block_cache()),
         &fixture.host.reader,
         &fixture.store,
         &fixture.namespace_id,
@@ -287,7 +287,7 @@ async fn a_page_after_the_floor_passes_its_cursor_returns_rebootstrap_required()
         .await
         .expect("reader");
     let error = grep_with(
-        &GrepService::new(default_block_cache(), reader.monotonic_timer()),
+        &GrepService::new(default_block_cache()),
         &reader,
         &fixture.store,
         &fixture.namespace_id,
@@ -424,7 +424,7 @@ async fn a_cursor_from_another_build_of_the_index_is_invalid() {
         .expect("enable again");
     // A new service loads the rebuilt index's manifest.
     let error = grep_with(
-        &GrepService::new(default_block_cache(), fixture.host.reader.monotonic_timer()),
+        &GrepService::new(default_block_cache()),
         &fixture.host.reader,
         &fixture.store,
         &fixture.namespace_id,

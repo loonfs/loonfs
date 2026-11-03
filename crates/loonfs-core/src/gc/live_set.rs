@@ -25,7 +25,8 @@ use crate::time::OperationClock;
 use crate::wal::{live_folded_wal_no, object_is_required};
 use futures::{future, stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::keys::{
-    metadata_manifest_object, metadata_manifest_prefix, metadata_segment_object_key, pin_prefix,
+    extension_segment_object_key, metadata_manifest_object, metadata_manifest_prefix,
+    metadata_segment_object_key, pin_prefix,
 };
 use loonfs_objectstore::layout::manifest_no_of;
 use loonfs_objectstore::ObjectStore;
@@ -443,7 +444,8 @@ impl LiveSet {
     }
 
     /// Keeps `manifest` as a layout view, and keeps the manifest and its
-    /// segments themselves when `roots` protects the namespace's own objects.
+    /// metadata and extension segments themselves when `roots` protects the
+    /// namespace's own objects.
     ///
     /// Every root manifest is a layout view, a tombstone included, because a
     /// deleted member's references protect content until the member is
@@ -453,6 +455,12 @@ impl LiveSet {
             self.objects.insert(manifest.object_key.clone())?;
             for segment in manifest.payload().runs.iter().flat_map(|run| &run.segments) {
                 self.objects.insert(metadata_segment_object_key(segment))?;
+            }
+            for (name, entry) in &manifest.payload().extensions {
+                for segment in entry.segments() {
+                    self.objects
+                        .insert(extension_segment_object_key(name, segment))?;
+                }
             }
         }
         self.manifest_charge
@@ -473,6 +481,7 @@ impl LiveSet {
                     .live_folded_wal_no
                     .is_some_and(|folded_wal_no| object_is_required(key, folded_wal_no)),
                 CandidateFamily::MetadataSegments
+                | CandidateFamily::ExtensionSegments
                 | CandidateFamily::Pins
                 | CandidateFamily::Content
                 | CandidateFamily::Temporary => false,

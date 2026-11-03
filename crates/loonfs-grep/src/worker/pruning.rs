@@ -4,12 +4,13 @@
 
 use super::tables::{TableReader, Translation};
 use crate::codec::{ContentValue, IndexRow};
-use crate::manifest::{GrepPruning, GrepReorganizeState, GrepSegmentRef};
+use crate::entry::{GrepPruning, GrepReorganizeState};
 use crate::reads::{published_revision, NamespaceReads};
 use crate::segments::GrepSegments;
 use crate::{GrepError, Result};
 use loonfs::CoreError;
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::manifest::ExtensionSegmentRef;
 use loonfs_types::format::segment_blocks::{SegmentFilter, SegmentFilterBuilder};
 use loonfs_types::{u64_from_usize, ChangeSeq, InodeId, RevisionNo, RunNo};
 use std::collections::{BTreeMap, BTreeSet};
@@ -92,7 +93,7 @@ fn revision_filter_key(inode_id: InodeId, revision_no: RevisionNo) -> String {
 pub(super) async fn first_step_filters(
     reads: &NamespaceReads,
     reorganize: &mut GrepReorganizeState,
-    inputs: &[GrepSegmentRef],
+    inputs: &[ExtensionSegmentRef],
 ) -> Result<RetainedReferences> {
     let retention_floor_seq = reads.head().await?.retention_floor_seq;
     let view = reads.service_view().await?;

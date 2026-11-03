@@ -637,7 +637,7 @@ fn doctor_failures_show_request_ids_in_json_and_remote_human_output() {
 #[test]
 fn gc_summaries_report_counts_retention_and_namespace_retirement() {
     use super::summaries::gc_summary;
-    use loonfs_types::{GcResponse, GrepGcReport, RetainedReason};
+    use loonfs_types::{GcResponse, RetainedReason};
 
     let mut pass = GcResponse::empty(NamespaceId::parse("demo").expect("namespace id"));
     pass.deleted.wal_objects = 2;
@@ -658,20 +658,10 @@ fn gc_summaries_report_counts_retention_and_namespace_retirement() {
     );
     assert!(summary.contains("2 fork checkpoints"), "{summary}");
     assert!(!summary.contains("namespace can be reclaimed"), "{summary}");
-    assert!(!summary.contains("grep index"), "{summary}");
-
-    pass.extensions.grep = Some(GrepGcReport {
-        deleted_segments: 3,
-        deleted_other_objects: 1,
-        namespace_reaped: true,
-        retained_candidates: 4,
-        listed_bytes: 0,
-    });
+    pass.deleted.extension_segments = 3;
     let summary = gc_summary(&pass);
     assert!(
-        summary.ends_with(
-            "\ngrep index gc deleted 3 segments, 1 other objects (4 retained); the namespace's grep state was reaped"
-        ),
+        summary.contains("0 metadata segments, 3 extension segments"),
         "{summary}"
     );
 

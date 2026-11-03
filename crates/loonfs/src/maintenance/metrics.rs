@@ -42,10 +42,13 @@ impl MetricLabel for CompactionOutcome {
 type GcKind = (&'static str, fn(&GcResponse) -> u64);
 
 /// Counts each deletion once, with pins grouped by owner.
-const GC_CATEGORIES: [GcKind; 9] = [
+const GC_CATEGORIES: [GcKind; 10] = [
     ("deleted_wal_objects", |gc| gc.deleted.wal_objects),
     ("deleted_metadata_segments", |gc| {
         gc.deleted.metadata_segments
+    }),
+    ("deleted_extension_segments", |gc| {
+        gc.deleted.extension_segments
     }),
     ("deleted_manifests", |gc| gc.deleted.manifests),
     ("deleted_fork_checkpoints", |gc| {
