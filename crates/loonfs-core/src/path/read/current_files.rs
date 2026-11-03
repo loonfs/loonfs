@@ -6,10 +6,10 @@
 use super::loaded_view::LoadedMetadataView;
 use crate::authorize::ReadAccess;
 use crate::error::{CoreError, Result};
-use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::limits::MAX_CURRENT_FILES_PER_STAT;
-use crate::metadata::{AncestorWalk, MetadataViewSession, ResolvedVisiblePath};
-use futures::{stream, StreamExt, TryStreamExt};
+use crate::metadata::{
+    preload_inode_groups, AncestorWalk, MetadataViewSession, ResolvedVisiblePath,
+};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{AbsolutePath, InodeId, InodeKind, RevisionNo, ROOT_INODE_ID};
 use std::collections::HashMap;
@@ -54,11 +54,17 @@ pub(crate) fn ensure_stat_batch_within_cap(requested: usize) -> Result<()> {
     Ok(())
 }
 
-/// Resolves inode IDs against one loaded view in input order.
+/// Resolves inode IDs against one loaded view, and returns their states in
+/// input order.
 ///
-/// Up to [`STORE_READS_IN_FLIGHT`] inodes resolve at once, so their metadata
-/// reads overlap. Each inode resolves in its own session over the same
-/// namespace state, because a session's lookups take it by `&mut`.
+/// The inodes resolve in inode ID order, in the contiguous groups of
+/// [`preload_inode_groups`]. An inode ID starts with the sequence of the
+/// commit that created the inode, so inodes created together have neighboring
+/// rows in the inode, binding, and revision families. In a group, each lookup
+/// finds the blocks that the lookups before it read in the read's memo, and
+/// the groups start in different parts of the ID range, so their reads don't
+/// wait on the same blocks. Each inode resolves in its own session over the
+/// same namespace state, because a session's lookups take it by `&mut`.
 pub(crate) async fn stat_current_files_by_inode<S: ObjectStore + ?Sized>(
     view: &LoadedMetadataView<'_, S>,
     inode_ids: &[InodeId],
@@ -66,16 +72,30 @@ pub(crate) async fn stat_current_files_by_inode<S: ObjectStore + ?Sized>(
 ) -> Result<Vec<CurrentFileState>> {
     ensure_stat_batch_within_cap(inode_ids.len())?;
     let metadata_view = view.metadata_view();
-    // `buffered` yields results in input order, so the batch returns the
-    // error of the first inode that fails, as a serial loop would.
-    stream::iter(inode_ids.iter().copied())
-        .map(|inode_id| async move {
-            let mut session = metadata_view.session();
-            resolve_one(&mut session, &mut HashMap::new(), inode_id, access).await
+    let mut sorted = inode_ids.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    // Each lookup keeps its error in its result, so no group stops the
+    // others, and the results come back in ID order, so the batch returns the
+    // error of the lowest failing ID.
+    let resolved = preload_inode_groups(&sorted, |inode_id| async move {
+        let mut session = metadata_view.session();
+        Ok(resolve_one(&mut session, &mut HashMap::new(), inode_id, access).await)
+    })
+    .await?;
+    let states: HashMap<InodeId, CurrentFileState> = resolved
+        .into_iter()
+        .map(|(inode_id, state)| state.map(|state| (inode_id, state)))
+        .collect::<Result<_>>()?;
+    Ok(inode_ids
+        .iter()
+        .map(|inode_id| {
+            states
+                .get(inode_id)
+                .cloned()
+                .expect("every requested inode should be resolved")
         })
-        .buffered(STORE_READS_IN_FLIGHT)
-        .try_collect()
-        .await
+        .collect())
 }
 
 async fn resolve_one<S: ObjectStore + ?Sized>(
