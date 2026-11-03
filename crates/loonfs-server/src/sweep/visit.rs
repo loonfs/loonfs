@@ -14,8 +14,8 @@ use crate::sweep::MAX_GREP_BUILD_STEPS_PER_VISIT;
 use futures::FutureExt as _;
 use loonfs::SharedObjectStore;
 use loonfs::{
-    AdvanceRetentionFloorOptions, ChangeSeq, GcOptions, MetadataMaintenanceOutcome, NamespaceId,
-    RetentionTarget,
+    AdvanceRetentionFloorOptions, ChangeSeq, ErrorCode, GcOptions, MetadataMaintenanceOutcome,
+    NamespaceId, RetentionTarget,
 };
 use loonfs_grep::{
     GrepBuildOutcome, GrepError, GrepPublishOutcome, GrepReorganizeOutcome, GrepSteps,
@@ -27,6 +27,16 @@ use std::sync::Mutex;
 use tokio::sync::SemaphorePermit;
 
 impl Sweep {
+    /// Visits one namespace for a full pass. For a namespace that the host
+    /// holds a session for, the visit makes no metadata call, because the
+    /// ticks make that call through the session: on every tick after a
+    /// caught-up answer, and once the retry time has come after an answer
+    /// that left work due or a failure. A session without a current
+    /// position reads the store at least once per revalidation bound, so a
+    /// tail that another writer left is folded without this visit. The
+    /// visit still makes the index call on that namespace, because the
+    /// ticks index only after the session's own commits, and a commit by
+    /// another writer would otherwise wait until the session closes.
     pub(super) async fn visit(&self, namespace_id: NamespaceId, garbage: GarbageCollection) {
         let inner = &self.inner;
         let Some((visit, _permit)) = self
@@ -38,12 +48,17 @@ impl Sweep {
         let entry = inner.namespaces.entry(&namespace_id);
         let entry = entry.as_deref();
         let seq = entry.and_then(|entry| lock(entry).handle.last_published_seq());
-        self.maintain_metadata(&namespace_id, entry, seq).await;
+        if entry.is_none() {
+            // The call records its own failure, and the pass makes the
+            // visit's other calls whatever it answers.
+            let _ = self.maintain_metadata(&namespace_id, None).await;
+        }
         if let Some(grep) = &inner.grep {
             self.maintain_index(grep, &namespace_id, entry, seq).await;
         }
         // The advance reads only folded commits, so it runs after the
-        // metadata call, which can fold an idle tail.
+        // metadata call, which can fold an idle tail. On a held namespace,
+        // a tick's metadata call folds the idle tail instead.
         self.advance_retention(&namespace_id, entry).await;
         if garbage == GarbageCollection::Collect {
             self.gc(&namespace_id, entry, seq).await;
@@ -52,15 +67,17 @@ impl Sweep {
     }
 
     /// Makes one metadata call, through the namespace's writer session when
-    /// the namespace is held, so the call never folds or compacts what the
-    /// session is already folding or compacting. Unfinished work, or a
-    /// failure, leaves the call due again after `maintenance_interval_ms`.
+    /// the namespace is held, and returns the call's outcome, or the code
+    /// that it failed with.
+    ///
+    /// A call through the session never folds or compacts what the session
+    /// is already folding or compacting. Unfinished work, or a failure,
+    /// leaves the call due again after `maintenance_interval_ms`.
     pub(super) async fn maintain_metadata(
         &self,
         namespace_id: &NamespaceId,
         entry: Option<&Mutex<HeldNamespace<SweepState>>>,
-        seq: Option<ChangeSeq>,
-    ) {
+    ) -> Result<MetadataMaintenanceOutcome, ErrorCode> {
         let inner = &self.inner;
         let call = match entry {
             Some(entry) => {
@@ -76,13 +93,11 @@ impl Sweep {
             call.map(|result| result.map_err(|error| CallFailure::error(error.code(), error))),
         )
         .await;
-        let outcome = result
-            .as_ref()
-            .map_or(MetadataMaintenanceOutcome::Due, |response| response.outcome);
-        if let Some(entry) = entry {
-            lock(entry).handle.record_metadata_maintenance(seq, outcome);
-        }
-        let work_wait_ms = if outcome == MetadataMaintenanceOutcome::CaughtUp {
+        let answer = match &result {
+            Ok(response) => Ok(response.outcome),
+            Err(failure) => Err(failure.code()),
+        };
+        let work_wait_ms = if answer == Ok(MetadataMaintenanceOutcome::CaughtUp) {
             0
         } else {
             inner.config.maintenance_interval_ms
@@ -94,6 +109,7 @@ impl Sweep {
             result,
             work_wait_ms,
         );
+        answer
     }
 
     pub(super) async fn maintain_index(

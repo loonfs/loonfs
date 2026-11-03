@@ -36,6 +36,14 @@ fn held_ids(namespaces: &Namespaces<SweepState>) -> Vec<NamespaceId> {
     .collect()
 }
 
+/// Counts the list requests in `operations`, which only collection sends.
+fn list_count(operations: &[RecordedOperation]) -> usize {
+    operations
+        .iter()
+        .filter(|operation| matches!(operation, RecordedOperation::List { .. }))
+        .count()
+}
+
 /// Reads or updates the held entry of `namespace_id` in `namespaces`.
 fn visit_held<T>(
     namespaces: &Namespaces<SweepState>,
@@ -48,6 +56,15 @@ fn visit_held<T>(
 }
 const DAY_MS: u64 = 24 * 60 * MINUTE_MS;
 
+/// Requests that a tick's metadata call makes through a held session without
+/// a writer position, on a namespace whose hint is at its current manifest
+/// and that has nothing to fold or compact: one load of the current manifest
+/// and the WAL tail, and one load of the current manifest for the
+/// compaction. The session keeps a caught-up answer until its next
+/// publication, so later ticks make none.
+/// `docs/design/maintenance-hosting.md` quotes this number.
+const UNPOSITIONED_TAIL_READ_REQUESTS: usize = 10;
+
 /// Returns the idle fold age, in milliseconds, of the runtime that `config`
 /// builds, and zero when the runtime doesn't fold idle tails.
 fn idle_fold_after_ms(config: &ServerConfig) -> u64 {
@@ -55,6 +72,19 @@ fn idle_fold_after_ms(config: &ServerConfig) -> u64 {
         .runtime_config()
         .idle_fold_after_ms
         .map_or(0, std::num::NonZeroU64::get)
+}
+
+/// Asks `held`'s session for its metadata work, as a tick does, and returns
+/// whether the call finds the session's metadata caught up. A session with
+/// nothing due returns without a store request, except when it has no
+/// current writer position and no caught-up answer that still applies, and
+/// then it reads its tail from the store once.
+async fn metadata_caught_up(held: &Namespace<Writable>) -> bool {
+    held.maintain_metadata_while_due(&loonfs::MaintenanceCancellation::new())
+        .await
+        .expect("ask the session for its metadata work")
+        .outcome
+        == loonfs::MetadataMaintenanceOutcome::CaughtUp
 }
 
 /// A server's runtime and sweep over `store`, reading `clock`.
@@ -622,7 +652,12 @@ async fn a_panicking_visit_is_backed_off_and_the_next_namespace_is_still_visited
         .expect("hold the namespace that panics");
     store.armed.store(true, Ordering::SeqCst);
 
+    // The pass leaves the held namespace's metadata call to the ticks, and
+    // its acknowledgment of the floor and its retention advance load the
+    // manifest, so they panic. The tick's metadata call loads the manifest
+    // to read the tail of a session that never published, so it panics too.
     server.pass_after(0).await;
+    server.tick_after(config.tick_interval_ms).await;
     store.armed.store(false, Ordering::SeqCst);
     assert_eq!(server.wal_tail_objects(&names[0]).await, 0);
     assert!(server.wal_tail_objects(&names[1]).await > 0);
@@ -631,8 +666,6 @@ async fn a_panicking_visit_is_backed_off_and_the_next_namespace_is_still_visited
         0,
         "the panic doesn't stop the visits to other namespaces"
     );
-    // The acknowledgment of the floor and the retention advance load the
-    // same manifest, so they panic too.
     assert_eq!(server.counter("loonfs.maintenance.sweep_panics", &[]), 3);
     for call in [
         SweepCall::Metadata,
@@ -651,11 +684,11 @@ async fn a_panicking_visit_is_backed_off_and_the_next_namespace_is_still_visited
         "the panic counts as a failure, and ticks wait for its retry time"
     );
 
-    server.pass_after(0).await;
+    server.tick_after(config.maintenance_interval_ms).await;
     assert_eq!(
         server.wal_tail_objects(&names[1]).await,
         0,
-        "the next pass tries the namespace again"
+        "the tick at the retry time tries the namespace again"
     );
 }
 
@@ -712,6 +745,13 @@ impl SweepServer {
         })
         .expect("a held session")
         .expect("a call that keeps retry state")
+    }
+
+    /// Whether the held session's last metadata call left work due, so the
+    /// ticks wait for the metadata retry time before they ask again.
+    fn metadata_left_due(&self, namespace_id: &NamespaceId) -> bool {
+        self.retry(namespace_id, SweepCall::Metadata).retry_at_ms
+            > self.sweep.inner.timer.monotonic_now_ms()
     }
 
     async fn pass_after(&self, elapsed_ms: u64) {
@@ -811,7 +851,7 @@ async fn a_failing_collection_backs_off_from_one_tick_to_an_hour() {
     let (store, server, namespace_id, held) =
         held_failing_server(directory.path(), &config, OperationSelector::List).await;
     server.tick_after(config.tick_interval_ms).await;
-    assert!(held.metadata_caught_up());
+    assert!(metadata_caught_up(&held).await);
     store.fail_all();
     server.tick_after(config.gc_interval_ms).await;
     assert_eq!(server.visit_failures(SweepCall::Gc), 1);
@@ -848,23 +888,27 @@ async fn an_idle_session_with_a_failing_call_closes_once_its_backoff_reaches_the
         "a transient failure keeps the idle session held"
     );
 
-    let attempts = || server.retry(&namespace_id, SweepCall::Metadata).attempts;
-    while super::retries::backoff_ms(config.tick_interval_ms, attempts())
-        < super::MAX_SWEEP_BACKOFF_MS
-    {
-        let failures = server.visit_failures(SweepCall::Metadata);
+    // The failures in a row that bring the call's backoff to the cap.
+    let at_cap = (1..)
+        .find(|&attempts| {
+            super::retries::backoff_ms(config.tick_interval_ms, attempts)
+                >= super::MAX_SWEEP_BACKOFF_MS
+        })
+        .expect("the backoff reaches the cap");
+    for failures in 3..=u64::from(at_cap) {
         server.tick_after(super::MAX_SWEEP_BACKOFF_MS).await;
         assert_eq!(
             server.visit_failures(SweepCall::Metadata),
-            failures + 1,
+            failures,
             "ticks retry the call on its backoff"
         );
-        assert!(!held_ids(namespaces).is_empty());
+        if failures < u64::from(at_cap) {
+            assert!(!held_ids(namespaces).is_empty());
+        }
     }
-    server.tick_after(config.tick_interval_ms).await;
     assert!(
         held_ids(namespaces).is_empty(),
-        "a call whose backoff reached the cap doesn't keep an idle session open"
+        "the tick whose failure brings the call's backoff to the cap closes the idle session"
     );
 }
 
@@ -1165,6 +1209,7 @@ async fn a_stray_child_of_the_namespace_prefix_is_not_a_failed_visit() {
     }
 }
 
+mod caught_up_answers;
 mod floor_acknowledgment;
 mod indexing;
 mod retention;

@@ -1,6 +1,7 @@
 //! A writable session's own metadata compaction: started by its folds,
 //! cancelled by close and shutdown, and run under the runtime's compactor
-//! claim.
+//! claim. Also the fold permit that a host's metadata call through the
+//! session takes.
 
 use super::*;
 use crate::{InlineContentPolicy, MetadataCompactionOutcome};
@@ -623,4 +624,43 @@ async fn closing_a_session_does_not_wait_for_another_sessions_compaction() {
         "a later fold on a reopened session compacts"
     );
     writer.shutdown().await.expect("shut down writer");
+}
+
+/// Checks that a host's metadata call through a session that has nothing to
+/// fold takes no fold permit, so the call returns while every permit is
+/// held.
+#[tokio::test]
+async fn a_metadata_call_with_nothing_to_fold_takes_no_fold_permit() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("nothing-to-fold").expect("namespace id");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let writer = crate::LoonFs::builder_with_store(store)
+        .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
+        .build()
+        .await
+        .expect("build writer");
+    writer
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("create the namespace");
+    let namespace = writer.open_namespace(&namespace_id).expect("open");
+    namespace
+        .put_file("/note", b"body", &loonfs_test_support::test_actor())
+        .await
+        .expect("put a file");
+    let permits = hold_every_fold_permit(&writer).await;
+    let maintained = bounded(
+        Duration::from_secs(10),
+        namespace.maintain_metadata_while_due(&crate::MaintenanceCancellation::new()),
+    )
+    .await
+    .expect("the call doesn't wait for a fold permit")
+    .expect("the metadata call");
+    assert_eq!(
+        maintained.outcome,
+        crate::MetadataMaintenanceOutcome::Due,
+        "the tail waits for its idle fold age"
+    );
+    drop(permits);
+    writer.shutdown().await.expect("shutdown");
 }

@@ -74,7 +74,10 @@ async fn a_pass_fences_a_held_session_that_committed_nothing_since_the_previous_
         .await
         .expect("write a file")
         .committed_seq;
-    server.pass_after(2 * WINDOW_MS).await;
+    // The pass makes no metadata call on a held namespace, so a tick folds
+    // the session's idle tail before the pass advances the floor over it.
+    server.tick_after(2 * WINDOW_MS).await;
+    server.pass_after(0).await;
     assert_eq!(server.floors(&namespace_id).await, (floor, ChangeSeq(0)));
     let (epoch, _) = server.writer_block(&namespace_id).await;
 

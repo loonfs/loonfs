@@ -1,6 +1,9 @@
 //! Index lifecycle changes and unfinished index work on held entries.
 
-use super::{held_ids, seed_writer, sweep_config, visit_held, SweepServer};
+use super::{
+    held_ids, idle_fold_after_ms, seed_writer, sweep_config, visit_held, SweepServer,
+    UNPOSITIONED_TAIL_READ_REQUESTS,
+};
 use loonfs::{ChangeSeq, SharedObjectStore};
 use loonfs_grep::entry::GrepIndexStatus;
 use loonfs_grep::GrepWorkerConfig;
@@ -17,9 +20,11 @@ use tempfile::tempdir;
 #[tokio::test]
 async fn ticks_index_publishes_and_lifecycle_changes_then_cost_nothing() {
     let directory = tempdir().expect("tempdir");
+    // The runtime raises the hint in the background after each publication,
+    // so the recording leaves out the hint's requests.
     let store = Arc::new(RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::any(),
+        KeyPredicate::any().except_hints(),
     ));
     let mut config = sweep_config(Some(GrepWorkerConfig::default()));
     config.idle_fold_after_ms = Some(0);
@@ -63,7 +68,13 @@ async fn ticks_index_publishes_and_lifecycle_changes_then_cost_nothing() {
                 .built_through_seq(),
             commit.committed_seq
         );
+        // The first build publishes a manifest, and the session's position
+        // moves onto it, so the next tick's metadata call reads that
+        // manifest once. Enabling the active index again publishes nothing.
         store.reset();
+        server.sweep.tick().await;
+        let after = store.take();
+        assert_eq!(after.len(), usize::from(index == 0), "{after:#?}");
         server.sweep.tick().await;
         assert!(store.take().is_empty(), "the lifecycle change is finished");
     }
@@ -110,9 +121,15 @@ async fn enabling_an_empty_namespace_holds_it_and_ticks_build_without_a_commit()
         .expect("open");
     store.reset();
     server.sweep.tick().await;
+    assert_eq!(
+        store.take().len(),
+        UNPOSITIONED_TAIL_READ_REQUESTS,
+        "only the first tick reads the tail of a session that never published"
+    );
+    server.sweep.tick().await;
     assert!(
         store.take().is_empty(),
-        "no commit or lifecycle change costs no requests"
+        "no commit or lifecycle change costs no more requests"
     );
     for id in [&held_id, &unheld_id] {
         server.enable_index(id).await;
@@ -137,6 +154,105 @@ async fn enabling_an_empty_namespace_holds_it_and_ticks_build_without_a_commit()
     assert!(
         store.take().is_empty(),
         "finished lifecycle changes cost no requests"
+    );
+    server.runtime.shutdown().await.expect("shutdown");
+}
+
+/// Checks that a session that receives a commit on every tick gets its index
+/// step on every tick and stays open, because each commit opens the session
+/// again, and that the session closes once the commits stop and its tail
+/// is folded.
+#[tokio::test]
+async fn a_session_written_on_every_tick_is_indexed_on_every_tick_and_stays_open() {
+    let directory = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+    let mut config = sweep_config(Some(GrepWorkerConfig::default()));
+    // Two ticks without an open would make the session idle.
+    config.idle_session_close_after_ms = 2 * config.tick_interval_ms;
+    let server = SweepServer::start(store, &config, 0).await;
+    let namespaces = &server.sweep.inner.namespaces;
+    let namespace_id = namespace_id("steady");
+    server
+        .runtime
+        .create_namespace(&namespace_id, &test_actor())
+        .await
+        .expect("create");
+    server.enable_index(&namespace_id).await;
+    for index in 0..12 {
+        // Each commit opens the session and drops its handle, as an HTTP
+        // request does.
+        let commit = namespaces
+            .open(&namespace_id)
+            .await
+            .expect("open")
+            .put_file(&format!("/note-{index}"), b"needle", &test_actor())
+            .await
+            .expect("publish");
+        server.tick_after(config.tick_interval_ms).await;
+        assert_eq!(
+            server
+                .grep_status(&namespace_id)
+                .await
+                .active_watermark()
+                .expect("active")
+                .built_through_seq(),
+            commit.committed_seq,
+            "tick {index} indexes the commit before it"
+        );
+        assert_eq!(
+            held_ids(namespaces),
+            std::slice::from_ref(&namespace_id),
+            "tick {index} leaves the session open"
+        );
+    }
+    server.tick_after(idle_fold_after_ms(&config)).await;
+    assert!(
+        held_ids(namespaces).is_empty(),
+        "once the commits stop, the tick that folds the idle tail closes the session"
+    );
+    server.runtime.shutdown().await.expect("shutdown");
+}
+
+/// Checks that a session with a commit on every tick still collects on its
+/// collection interval, because a collection that's due runs before the
+/// index step.
+#[tokio::test]
+async fn a_session_written_on_every_tick_still_collects_on_its_interval() {
+    let directory = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+    let mut config = sweep_config(Some(GrepWorkerConfig::default()));
+    config.gc_interval_ms = 3 * config.tick_interval_ms;
+    let server = SweepServer::start(store, &config, 0).await;
+    let namespaces = &server.sweep.inner.namespaces;
+    let namespace_id = namespace_id("steady-collected");
+    server
+        .runtime
+        .create_namespace(&namespace_id, &test_actor())
+        .await
+        .expect("create");
+    server.enable_index(&namespace_id).await;
+    let collected_seq = || {
+        visit_held(namespaces, &namespace_id, |held| {
+            held.host_state.collected_seq
+        })
+        .expect("a held session")
+    };
+    let mut collections = 0;
+    for index in 0..12 {
+        namespaces
+            .open(&namespace_id)
+            .await
+            .expect("open")
+            .put_file(&format!("/note-{index}"), b"needle", &test_actor())
+            .await
+            .expect("publish");
+        let before = collected_seq();
+        server.tick_after(config.tick_interval_ms).await;
+        collections += usize::from(collected_seq() != before);
+    }
+    assert_eq!(
+        collections, 4,
+        "60 seconds of ticks collect once every 15 seconds"
     );
     server.runtime.shutdown().await.expect("shutdown");
 }
@@ -212,7 +328,7 @@ async fn ticks_finish_a_backfill_without_a_local_commit_before_closing() {
 }
 
 #[tokio::test]
-async fn pending_reorganization_keeps_an_idle_entry_settling() {
+async fn pending_reorganization_keeps_an_idle_session_open() {
     let directory = tempdir().expect("tempdir");
     let store = Arc::new(RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),

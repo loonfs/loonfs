@@ -8,8 +8,7 @@ use crate::runtime_core::{HeadPositions, ReadPositionSlot, RuntimeCore};
 use crate::trace::phase_event;
 use crate::{
     CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, Error, ErrorCode,
-    MetadataMaintenanceOutcome, MetadataMaintenanceResponse, Result, SharedObjectStore,
-    WriterState,
+    MetadataMaintenanceResponse, Result, SharedObjectStore, WriterState,
 };
 use futures::future::BoxFuture;
 use loonfs_core::limits::HINT_RAISE_INTERVAL_MS;
@@ -196,28 +195,8 @@ impl NamespaceSession {
             .map(|last| last.seq)
     }
 
-    pub(crate) fn last_published_at_ms(&self) -> Option<u64> {
-        self.publisher
-            .lock_state()
-            .last_published
-            .map(|last| last.at_ms)
-    }
-
-    pub(crate) fn metadata_caught_up(&self) -> bool {
-        self.publisher.lock_state().metadata_caught_up
-    }
-
     pub(crate) fn idle_fold_due_at_ms(&self) -> Option<u64> {
         self.publisher.idle_fold_due_at_ms()
-    }
-
-    pub(crate) fn record_metadata_maintenance(
-        &self,
-        expected_seq: Option<ChangeSeq>,
-        outcome: MetadataMaintenanceOutcome,
-    ) {
-        self.publisher
-            .record_metadata_maintenance(expected_seq, outcome);
     }
 
     pub(crate) async fn wait_for_fold(&self) -> Result<()> {

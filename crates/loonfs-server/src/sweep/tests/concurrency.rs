@@ -1,6 +1,6 @@
 //! Concurrent visits preserve session progress and share the host's slots.
 
-use super::{sweep_config, visit_held, SweepServer};
+use super::{list_count, metadata_caught_up, sweep_config, visit_held, SweepServer};
 use crate::sweep::GarbageCollection;
 use loonfs_http::WriterSessions as _;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -29,8 +29,9 @@ async fn a_daily_pass_and_a_tick_never_visit_the_same_namespace_together() {
         OperationSelector::Any,
     ));
     let mut config = sweep_config(None);
-    // Each visit's metadata call folds the session's tail, so the gate parks
-    // the visit at the fold's first request.
+    // The tick's metadata call folds the session's tail, and the pass's
+    // acknowledgment of the retention floor loads the current manifest, so
+    // the gate parks either visit at its first request.
     config.idle_fold_after_ms = Some(1);
     let server = SweepServer::start(store.clone(), &config, 0).await;
     server
@@ -140,7 +141,10 @@ async fn a_publish_during_metadata_maintenance_stays_due() {
         .expect("publish during visit");
     store.release();
     visit.await.expect("finish visit");
-    assert!(!held.metadata_caught_up());
+    assert!(
+        server.metadata_left_due(&namespace_id),
+        "the tail that the concurrent publish left waits for its idle fold age"
+    );
     store.inner().reset();
     server.tick_after(config.tick_interval_ms).await;
     assert!(
@@ -211,7 +215,7 @@ async fn ticks_share_slots_with_a_parked_daily_pass_and_continue_when_a_slot_is_
         } else {
             tick.as_mut().await;
             assert!(
-                held.metadata_caught_up(),
+                metadata_caught_up(&held).await,
                 "a free slot lets the tick finish while the daily pass waits"
             );
             assert!(!store.inner().take().is_empty());
@@ -288,7 +292,9 @@ async fn a_collection_finishing_after_close_does_not_update_the_replacement_entr
     let directory = tempdir().expect("tempdir");
     let namespace_id = namespace_id("replacement-during-collection");
     // The runtime raises the hint in the background after each publication,
-    // so neither the gate nor the recording selects the hint.
+    // so neither the gate nor the recording selects the hint. Only
+    // collection lists, so the gate parks the tick's visit in its
+    // collection, after the metadata call has returned the session's handle.
     let store = Arc::new(BlockingStore::new(
         RecordingStore::new(
             LocalFsStore::new(directory.path()).expect("store"),
@@ -296,7 +302,7 @@ async fn a_collection_finishing_after_close_does_not_update_the_replacement_entr
         ),
         KeyPredicate::prefix(loonfs_objectstore::keys::namespace_prefix(&namespace_id))
             .except_hints(),
-        OperationSelector::Any,
+        OperationSelector::List,
     ));
     let mut config = sweep_config(None);
     config.idle_fold_after_ms = Some(0);
@@ -339,10 +345,14 @@ async fn a_collection_finishing_after_close_does_not_update_the_replacement_entr
             .collected_seq),
         Some(None)
     );
+    // The replacement's first tick reads the tail of a session that never
+    // published.
+    server.sweep.tick().await;
     store.inner().reset();
     server.tick_after(config.gc_interval_ms).await;
-    assert!(
-        store.inner().take().is_empty(),
+    assert_eq!(
+        list_count(&store.inner().take()),
+        0,
         "the replacement never published and owes no collection"
     );
     server.runtime.shutdown().await.expect("shutdown");

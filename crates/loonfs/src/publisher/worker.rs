@@ -310,8 +310,9 @@ impl NamespacePublisher {
             .filter_map(|result| result.as_ref().ok())
             .map(|commit| commit.committed_seq)
             .max();
+        let mut state = self.lock_state();
+        state.record_position_change();
         if let Some(committed_seq) = committed_seq {
-            let mut state = self.lock_state();
             let seq = state
                 .last_published
                 .map_or(committed_seq, |last| last.seq.max(committed_seq));
@@ -319,7 +320,6 @@ impl NamespacePublisher {
                 seq,
                 at_ms: self.context.runtime_core.timer().monotonic_now_ms(),
             });
-            state.metadata_caught_up = false;
         }
         fold_start
     }

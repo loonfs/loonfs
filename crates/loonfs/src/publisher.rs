@@ -35,7 +35,7 @@ pub(crate) use worker::sleep_ms;
 mod write_stop;
 
 use crate::runtime_core::{ReadPositionSlot, RuntimeCore};
-use crate::{CoreError, MetadataMaintenanceOutcome, SharedObjectStore, WriterState};
+use crate::{CoreError, SharedObjectStore, WriterState};
 use admission::PublicationAdmission;
 pub(crate) use fold_trigger::FoldTrigger;
 use loonfs_core::publish::{NamespaceCommitEngine, SharedWriterSessionStatus, WriterSessionStatus};
@@ -207,7 +207,16 @@ struct NamespacePublisherState {
     /// immediately.
     last_publish: Option<Observation>,
     last_published: Option<LastPublish>,
-    metadata_caught_up: bool,
+    /// Counts the batches that this session attempted and the drops of its
+    /// position. Either can leave metadata work that a caught-up answer
+    /// doesn't know about: a batch whose WAL put landed with an unknown
+    /// outcome leaves a tail without moving the published seq, and a fork's
+    /// fold can make compaction due.
+    position_changes: u64,
+    /// The last caught-up answer that a host's metadata call through this
+    /// session read from the store, because the session had no position
+    /// checked within the revalidation bound.
+    caught_up_at: Option<CaughtUpAt>,
     /// The newest manifest that the engine published itself (a claim or a
     /// tombstone) and that the worker hasn't raised the hint to yet.
     unraised_manifest_no: Option<ManifestNo>,
@@ -220,7 +229,37 @@ struct LastPublish {
     at_ms: u64,
 }
 
+/// When a metadata call that read the store found the session's metadata
+/// caught up.
+///
+/// Nothing can become due without a commit after that answer, so the answer
+/// applies while the session's position hasn't changed since, and for as
+/// long as a check of a position does: until the revalidation bound after
+/// the call started. A later call then reads the store again, which bounds
+/// how long another writer's tail goes unseen.
+#[derive(Debug, Clone)]
+struct CaughtUpAt {
+    /// The session's `position_changes` when the call started.
+    position_changes: u64,
+    /// When the call started.
+    observed: Observation,
+}
+
 impl NamespacePublisherState {
+    /// Whether a caught-up answer that a store read found still applies.
+    fn caught_up_answer_applies(&self) -> bool {
+        self.caught_up_at.as_ref().is_some_and(|at| {
+            at.position_changes == self.position_changes
+                && at.observed.is_within_revalidation_bound()
+        })
+    }
+
+    /// Records a batch that this session attempted, or a drop of its
+    /// position.
+    fn record_position_change(&mut self) {
+        self.position_changes = self.position_changes.wrapping_add(1);
+    }
+
     /// Whether the session is over and nothing it admitted can still
     /// publish. A session is over once no handle refers to it, or once it was
     /// closed or its namespace deleted.
@@ -258,7 +297,8 @@ impl NamespacePublisher {
                 next_task_id: 0,
                 last_publish: None,
                 last_published: None,
-                metadata_caught_up: true,
+                position_changes: 0,
+                caught_up_at: None,
                 unraised_manifest_no: None,
             })),
             engine: Arc::new(AsyncMutex::new(EngineSlot {
@@ -399,8 +439,15 @@ impl NamespacePublisher {
     /// one grace.
     pub(super) async fn change_position(&self, change: PositionChange) {
         let mut slot = self.lock_engine().await;
-        if let Some(engine) = slot.engine.as_mut() {
-            change.apply(engine);
+        let dropped = match slot.engine.as_mut() {
+            Some(engine) => {
+                change.apply(engine);
+                engine.writer_position().is_none()
+            }
+            None => matches!(change, PositionChange::Drop),
+        };
+        if dropped {
+            self.lock_state().record_position_change();
         }
     }
 
@@ -460,17 +507,6 @@ impl NamespacePublisher {
         let published = self.lock_state().unraised_manifest_no.take();
         if let Some((manifest_no, shared)) = published.zip(self.shared.upgrade()) {
             shared.raise_hint(&self.namespace_id, manifest_no).await;
-        }
-    }
-
-    pub(super) fn record_metadata_maintenance(
-        &self,
-        expected_seq: Option<ChangeSeq>,
-        outcome: MetadataMaintenanceOutcome,
-    ) {
-        let mut state = self.lock_state();
-        if state.last_published.map(|last| last.seq) == expected_seq {
-            state.metadata_caught_up = outcome == MetadataMaintenanceOutcome::CaughtUp;
         }
     }
 

@@ -8,7 +8,7 @@ use super::{FoldTrigger, NamespacePublisher, NamespacePublisherState};
 use crate::maintenance::{Compactor, TailFold};
 use crate::trace::{phase_event, phase_span};
 use crate::MaintainMetadataOptions;
-use crate::{Error, FoldWalOutcome, MetadataMaintenanceOutcome, Result, SharedObjectStore};
+use crate::{Error, FoldWalOutcome, Result, SharedObjectStore};
 use futures::FutureExt;
 use loonfs_core::limits::FOLD_AT_WAL_OBJECTS;
 use loonfs_core::publish::NamespaceCommitEngine;
@@ -139,14 +139,16 @@ impl NamespacePublisher {
         Some(start)
     }
 
-    /// Whether the session's engine has a position.
-    pub(super) async fn has_position(&self) -> bool {
+    /// Whether the session's engine has a position that was last checked
+    /// within the revalidation bound. A metadata step reads such a position's
+    /// manifest through the segment cache instead of the store.
+    pub(super) async fn has_current_position(&self) -> bool {
         self.lock_engine()
             .await
             .engine
             .as_ref()
-            .and_then(position_tail)
-            .is_some()
+            .and_then(NamespaceCommitEngine::writer_position)
+            .is_some_and(|position| position.basis_checked.is_within_revalidation_bound())
     }
 
     /// Whether the engine's position shows its tail over the fold trigger.
@@ -159,6 +161,20 @@ impl NamespacePublisher {
                 self.fold_is_due(FoldRule::AtTrigger, objects, inline_bytes)
             })
         })
+    }
+
+    /// Returns whether `rule` applies to the tail that `engine`'s position
+    /// shows. Without a position, only [`FoldRule::WhenDue`] doesn't apply,
+    /// because it can't tell the age of a tail that it hasn't read.
+    fn tail_fold_is_due(
+        &self,
+        engine: Option<&NamespaceCommitEngine<SharedObjectStore>>,
+        rule: FoldRule,
+    ) -> bool {
+        match engine.and_then(position_tail) {
+            Some((objects, inline_bytes)) => self.fold_is_due(rule, objects, inline_bytes),
+            None => rule != FoldRule::WhenDue,
+        }
     }
 
     /// Returns whether `rule` applies to a tail of `objects` WAL objects
@@ -233,7 +249,6 @@ impl NamespacePublisher {
             () = self.compaction_cancellation.cancelled() => return,
             turn = self.compaction_turn.lock() => turn,
         };
-        let seq = self.lock_state().last_published.map(|last| last.seq);
         let result = compactor
             .metadata_while_due(
                 &self.namespace_id,
@@ -242,10 +257,6 @@ impl NamespacePublisher {
                 MaintainMetadataOptions::default().compaction_policy,
             )
             .await;
-        let outcome = result
-            .as_ref()
-            .map_or(MetadataMaintenanceOutcome::Due, |response| response.outcome);
-        self.record_metadata_maintenance(seq, outcome);
         if let Err(error) = result {
             phase_event!(
                 self.context.runtime_core,
@@ -277,9 +288,10 @@ impl NamespacePublisher {
     /// Folds the session's WAL tail if `rule` applies to it, and returns
     /// whether the fold published a manifest.
     ///
-    /// The fold waits for the session's fold turn (`fold_turn`) and then for
-    /// a fold permit. Waiting for the turn means that the fold reads the
-    /// position that the session's previous fold left. A session without a
+    /// A fold that's due waits for the session's fold turn (`fold_turn`) and
+    /// then for a fold permit, and a call that finds nothing due takes
+    /// neither. Waiting for the turn means that the fold reads the position
+    /// that the session's previous fold left. A session without a
     /// position loads its tail from the store and folds it, except under
     /// [`FoldRule::WhenDue`], which can't tell the age of a tail that it
     /// hasn't read. A fold that publishes wakes the commits that wait at the
@@ -288,16 +300,19 @@ impl NamespacePublisher {
         let Some(_writer) = self.context.writer.upgrade() else {
             return Ok(false);
         };
+        // A host's metadata call usually finds nothing to fold, so it checks
+        // before it waits for the turn or takes a fold permit. The check
+        // repeats under the turn, because a fold that held the turn may have
+        // folded the tail.
+        if !self.tail_fold_is_due(self.lock_engine().await.engine.as_ref(), rule) {
+            return Ok(false);
+        }
         let _turn = self.fold_turn.lock().await;
         let _permit = self.context.runtime_core.fold_permit().await;
         let input = {
             let slot = self.lock_engine().await;
             let engine = slot.engine.as_ref();
-            let due = match engine.and_then(position_tail) {
-                Some((objects, inline_bytes)) => self.fold_is_due(rule, objects, inline_bytes),
-                None => rule != FoldRule::WhenDue,
-            };
-            if !due {
+            if !self.tail_fold_is_due(engine, rule) {
                 return Ok(false);
             }
             engine.and_then(NamespaceCommitEngine::writer_position)

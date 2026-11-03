@@ -100,28 +100,44 @@ pub enum GarbageCollection {
 
 /// Ticks held sessions every `tick_interval_ms`.
 ///
-/// Active sessions publish and maintain themselves. Settling sessions run the
-/// first due step: metadata, index, collection, or close. Quiet sessions cost
-/// no store requests. Metadata that remains unfinished waits
-/// `maintenance_interval_ms` before retrying. Collection requires a moved seq
-/// and `gc_interval_ms` elapsed. Each held entry keeps one retry time per
-/// call, which ticks wait for. A call that fails waits its failure backoff:
-/// one tick interval, doubled for each failure in a row up to
-/// [`MAX_SWEEP_BACKOFF_MS`]. A failed metadata call waits the later of its
-/// backoff and `maintenance_interval_ms`, because its work remains. A success
-/// clears the backoff. A call that panics counts as a `server_error` failure.
-/// The panic stops neither the sweep nor the visits to other namespaces.
-/// Quiet sessions close after `idle_session_close_after_ms` without an open,
-/// when no caller has a handle. An open during close waits for its drain. A
-/// failing call keeps an idle session held, so ticks retry it, until its
-/// backoff reaches [`MAX_SWEEP_BACKOFF_MS`].
+/// Each tick asks every held session for its metadata work, whether or not
+/// the session is receiving commits, unless the session's last answer left
+/// work due or failed and its retry time hasn't come. The tick then runs the
+/// session's first due step: collection, index, or close. The session checks
+/// its own state for a fold or a compaction that's due, so a session with
+/// nothing due costs no store requests, except that a session without a
+/// current writer position reads the store once per revalidation bound.
+/// Metadata that remains
+/// unfinished waits `maintenance_interval_ms` before the tick asks again,
+/// and the session's tail reaching its idle fold age allows one earlier
+/// call. Collection runs once the session's published seq has moved and
+/// `gc_interval_ms` has elapsed, and it comes before the index step, so a
+/// session with index work on every tick still collects.
+///
+/// Each held entry keeps one retry time per call, which ticks wait for. A
+/// call that fails waits its failure backoff: one tick interval, doubled for
+/// each failure in a row up to [`MAX_SWEEP_BACKOFF_MS`]. A failed metadata
+/// call waits the later of its backoff and `maintenance_interval_ms`,
+/// because its work remains. A success clears the backoff. A call that
+/// panics counts as a `server_error` failure. The panic stops neither the
+/// sweep nor the visits to other namespaces.
+///
+/// A session closes after `idle_session_close_after_ms` without an open,
+/// when its metadata call on that tick finds its metadata caught up, nothing
+/// else is due, and no caller has a handle. An open during close waits for its
+/// drain. A failing call keeps an idle session held, so ticks retry it,
+/// until its backoff reaches [`MAX_SWEEP_BACKOFF_MS`]. A session that another
+/// writer fenced, or whose namespace is gone, closes once no caller has a
+/// handle, and the ticks don't ask a fenced session for metadata work.
 ///
 /// The daily listing pass runs at start and every `full_sweep_interval_ms`,
 /// alongside ticks. It covers namespaces without held sessions and garbage
 /// still inside its grace window. It makes every call on every namespace it
-/// lists without waiting for a held entry's retry times, and a namespace
-/// without a held entry keeps no retry state, because the next pass is its
-/// retry.
+/// lists, except the metadata call on a held namespace, which the ticks make
+/// whenever its retry time has come, and it doesn't wait for a held entry's
+/// retry times. A
+/// namespace without a held entry keeps no retry state, because the next
+/// pass is its retry.
 ///
 /// The pass also advances each active namespace's retention floor to the
 /// last commit at or before the current time minus the namespace's retention

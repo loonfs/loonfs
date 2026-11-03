@@ -28,7 +28,7 @@ impl CallFailure {
         }
     }
 
-    fn code(&self) -> ErrorCode {
+    pub(super) fn code(&self) -> ErrorCode {
         match self {
             Self::Error { code, .. } => *code,
             Self::Panic { .. } => ErrorCode::ServerError,
@@ -36,11 +36,16 @@ impl CallFailure {
     }
 
     /// Whether the failure counts against the call. A namespace that is
-    /// gone, or a server that is shutting down, doesn't.
+    /// gone, a session that another writer fenced, or a server that is
+    /// shutting down, doesn't. A tick closes a session that one of the first
+    /// two ends.
     fn counts(&self) -> bool {
         !matches!(
             self.code(),
-            ErrorCode::NamespaceNotFound | ErrorCode::NamespaceDeleted | ErrorCode::ShuttingDown
+            ErrorCode::NamespaceNotFound
+                | ErrorCode::NamespaceDeleted
+                | ErrorCode::WriterFenced
+                | ErrorCode::ShuttingDown
         )
     }
 }
