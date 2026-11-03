@@ -10,8 +10,9 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_types::options::StatOptions;
 use loonfs_types::{
-    ChangeSeq, Commit, CommitId, InodeId, MergeConflict, MergeConflictKind, MergeConflictRevision,
-    MergeConflictVersion, NamespaceId, NamespaceRebasedFrom, PathEntry, PathEntryKind,
+    ChangeSeq, Commit, CommitId, InodeId, Merge, MergeConflict, MergeConflictKind,
+    MergeConflictRevision, MergeConflictVersion, NamespaceId, NamespaceRebasedFrom,
+    NextMergeRangeResponse, PathEntry, PathEntryKind,
 };
 use tempfile::TempDir;
 
@@ -178,6 +179,18 @@ impl Family {
             commit,
             conflicts: Some(conflicts),
         })
+    }
+
+    /// Returns where the fork's next replay commit into the new fork starts.
+    async fn next_range(&self) -> NextMergeRangeResponse {
+        namespace_engine(&self.store, &self.rebase, &self.writer)
+            .next_merge_range(
+                &read_context(&self.store, &self.rebase).await,
+                &namespace_engine(&self.store, &self.fork, &self.writer),
+                &read_context(&self.store, &self.fork).await,
+            )
+            .await
+            .expect("the next range")
     }
 
     /// Merges `source`, a fork of `main`, into `main` under `commit_id`.
@@ -492,19 +505,44 @@ async fn a_skipped_move_keeps_its_old_directorys_delete_from_applying() {
 
 /// Checks that a rebase in two pieces continues into the same new fork,
 /// and that the second piece plans against the rows that the first wrote.
+/// The next-range query on the new fork reports a start at the fork's
+/// `resume_after_seq` before the first piece, and at the first piece's end
+/// after it.
 #[tokio::test]
 async fn a_rebase_in_two_pieces_continues_into_the_same_new_fork() {
     let family = Family::new().await;
     let first = family.write(&family.fork, "/docs/a.txt", b"one").await;
     family.write(&family.fork, "/docs/a.txt", b"two").await;
-    family.write(&family.fork, "/d.txt", b"d").await;
+    let last = family.write(&family.fork, "/d.txt", b"d").await;
     family.create_rebase().await;
+    // The fork was made at main's sequence 2, which is its
+    // `resume_after_seq`, because it has never merged.
+    assert_eq!(
+        family.next_range().await,
+        NextMergeRangeResponse {
+            merge: None,
+            next_after_seq: Some(ChangeSeq(2)),
+            fork_point_seq: ChangeSeq(2),
+            source_head_seq: last.committed_seq,
+            rebootstrap_required: None,
+        }
+    );
 
     let piece = family
         .replay("piece-1", Some(first.committed_seq))
         .await
         .expect("the first piece");
     assert_eq!(piece.conflicts, Some(Vec::new()));
+    let range = family.next_range().await;
+    assert_eq!(range.next_after_seq, Some(first.committed_seq));
+    assert_eq!(
+        range.merge,
+        Some(Merge {
+            source_namespace_id: family.fork.clone(),
+            source_after_seq: ChangeSeq(2),
+            source_through_seq: first.committed_seq,
+        })
+    );
     assert_eq!(
         family.bytes(&family.rebase, "/docs/a.txt").await.as_deref(),
         Some(&b"one"[..])

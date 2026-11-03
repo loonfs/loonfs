@@ -7,7 +7,7 @@
 use super::classify::{Classifier, SubtreeCheck};
 use super::operations::BindingChange;
 use super::state::StateReader;
-use super::{fork_point, merge_after_seq, range_start, MergeAllowance, MergeRequest};
+use super::{fork_point, merge_start, range_start, rebase_basis, MergeAllowance, MergeRequest};
 use crate::commit::engine::CommitCandidate;
 use crate::engine::{NamespaceEngine, RuntimeReadContext};
 use crate::error::{CoreError, Result};
@@ -100,7 +100,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         let main = self.namespace.load_metadata_view(context).await?;
         let fork_view = fork.namespace.load_metadata_view(fork_context).await?;
         let fork_point_seq = fork_point(fork_view.head(), &main.head().namespace_id)?;
-        merge_after_seq(
+        merge_start(
             &main.metadata_view(),
             main.head(),
             &fork_view.head().namespace_id,
@@ -218,13 +218,7 @@ async fn replay_range_start<'a, S: ObjectStore + ?Sized>(
     request: &MergeRequest,
 ) -> Result<ReplayRange<'a>> {
     let fork_id = &fork_view.head().namespace_id;
-    let source = new_fork.head().fork_basis.as_ref().filter(|basis| {
-        basis
-            .rebased_from
-            .as_ref()
-            .is_some_and(|rebased_from| rebased_from.source_namespace_id == *fork_id)
-    });
-    let Some(basis) = source else {
+    let Some((basis, _)) = rebase_basis(new_fork.head(), fork_id) else {
         return Err(CoreError::InvalidMerge {
             param: "/new_namespace_id",
             message: format!(

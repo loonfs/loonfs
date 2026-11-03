@@ -14,8 +14,8 @@ use loonfs_test_support::ids::{attribute_key, attribute_text, namespace_id};
 use loonfs_types::options::StatOptions;
 use loonfs_types::{
     AbsolutePath, AccessGrants, AccessRight, AccessRights, ChangeSeq, Commit, CommitId, ErrorCode,
-    InodeId, MergeConflictKind, NamespaceAccess, NamespaceId, PathEntry, PrincipalId,
-    PrincipalScope, Subject,
+    InodeId, Merge, MergeConflictKind, NamespaceAccess, NamespaceId, NextMergeRangeResponse,
+    PathEntry, PrincipalId, PrincipalScope, Subject,
 };
 use std::assert_matches;
 use tempfile::TempDir;
@@ -194,6 +194,18 @@ impl Family {
             .await
             .pop()
             .expect("one result")
+    }
+
+    /// Returns where the fork's next merge into `main` starts.
+    async fn next_range(&self) -> NextMergeRangeResponse {
+        namespace_engine(&self.store, &self.main, &self.writer)
+            .next_merge_range(
+                &read_context(&self.store, &self.main).await,
+                &namespace_engine(&self.store, &self.fork, &self.writer),
+                &read_context(&self.store, &self.fork).await,
+            )
+            .await
+            .expect("the next range")
     }
 
     /// Returns an engine over `namespace_id` that acts as `subject`.
@@ -820,17 +832,21 @@ async fn the_plan_returns_the_writers_error_for_the_subjects_missing_rights() {
 
 /// Checks that a merge that would exceed one WAL object fails with
 /// `merge_too_large` before the conflict check, so the error isn't
-/// `merge_conflict` although a create's name conflicts.
+/// `merge_conflict` although a create's name conflicts. The error's
+/// `split_at_seq` is the last commit through which the fork's net change
+/// fits, and once the name is free, a merge through `split_at_seq` commits,
+/// and so does a merge of the rest.
 #[tokio::test]
 async fn a_merge_over_one_wal_object_is_too_large_before_its_conflicts() {
     let family = Family::new().await;
     // Each directory's attribute update bounds about 66 KB, so 8,192 of them
-    // bound more than one WAL object's 512 MiB.
+    // bound more than one WAL object's 512 MiB, and 6,144 bound less.
+    let mut batches = Vec::new();
     for batch in 0..4 {
         let directories: Vec<_> = (0..2_048)
             .map(|index| format!("/c{batch}-{index}"))
             .collect();
-        family
+        let commit = family
             .commit_all(
                 &family.fork,
                 directories
@@ -841,6 +857,7 @@ async fn a_merge_over_one_wal_object_is_too_large_before_its_conflicts() {
             )
             .await
             .expect("fork");
+        batches.push(commit.committed_seq);
     }
     family
         .main()
@@ -858,9 +875,28 @@ async fn a_merge_over_one_wal_object_is_too_large_before_its_conflicts() {
             bound: MergeBound::WalObject,
             estimated_bytes,
             max_bytes,
-            split_at_seq: None,
-        } if estimated_bytes > max_bytes
+            split_at_seq: Some(split_at_seq),
+        } if estimated_bytes > max_bytes && split_at_seq == batches[2]
     );
+    family
+        .commit(
+            &family.main,
+            FilesystemOperation::DeletePath {
+                path: AbsolutePath::parse("/c0-0").expect("path"),
+                behavior: loonfs_types::DeleteDirectoryBehavior::NonRecursive,
+                expected_inode_id: None,
+            },
+        )
+        .await
+        .expect("free the name");
+    family
+        .merge("through-the-split", Some(batches[2]))
+        .await
+        .expect("a merge through the split");
+    family.merge("the-rest", None).await.expect("the rest");
+    for path in ["/c0-0", "/c2-2047", "/c3-0"] {
+        assert!(family.entry(&family.main, path).await.is_some(), "{path}");
+    }
 }
 
 /// Checks that a range whose commits touched more inodes than one WAL object
@@ -925,8 +961,9 @@ async fn a_range_that_touched_too_many_inodes_is_too_large() {
 }
 
 /// Checks that the planner stops a merge whose estimated peak exceeds the
-/// merge allowance with `merge_too_large` before the conflict check, and that
-/// the error reports the peak and the allowance, as admission does.
+/// merge allowance with `merge_too_large` before the conflict check, that
+/// the error reports the peak and the allowance, as admission does, and that
+/// a merge through its `split_at_seq` fits and gets to the conflict check.
 #[tokio::test]
 async fn a_merge_over_the_allowance_is_too_large_before_its_conflicts() {
     let mut family = Family::new().await;
@@ -953,14 +990,62 @@ async fn a_merge_over_the_allowance_is_too_large_before_its_conflicts() {
         .merge("over-the-allowance", None)
         .await
         .expect_err("too large");
+    let split_at_seq = error
+        .details()
+        .and_then(|details| details.split_at_seq)
+        .expect("a split hint");
     assert_matches!(
         error,
         CoreError::MergeTooLarge {
             bound: MergeBound::MergeAllowance,
             estimated_bytes,
             max_bytes,
-            split_at_seq: None,
+            ..
         } if estimated_bytes > max_bytes && max_bytes == 64 * 1024 && estimated_bytes % 3 == 0
+    );
+    let error = family
+        .merge("through-the-split", Some(split_at_seq))
+        .await
+        .expect_err("a conflict");
+    assert_eq!(error.code(), ErrorCode::MergeConflict);
+}
+
+/// Checks that a merge whose first commit alone exceeds the merge allowance
+/// has no `split_at_seq`, because no shorter range fits, although the commit
+/// after it fits alone.
+#[tokio::test]
+async fn a_first_commit_over_the_allowance_has_no_split_hint() {
+    let mut family = Family::new().await;
+    // A directory's attribute update bounds about 66 KB, and the allowance is
+    // charged three times that.
+    family.allowance = MergeAllowance {
+        max_bytes: 64 * 1024,
+        peak_per_planned_byte: 3,
+    };
+    family
+        .commit_all(
+            &family.fork,
+            vec![create_directory("/big"), set_attribute("/big", "ours")],
+        )
+        .await
+        .expect("a large first commit");
+    family
+        .fork()
+        .write_file_bytes("/small.txt", b"small", None)
+        .await
+        .expect("a small commit");
+
+    let error = family
+        .merge("first-too-large", None)
+        .await
+        .expect_err("too large");
+    assert_matches!(
+        error,
+        CoreError::MergeTooLarge {
+            bound: MergeBound::MergeAllowance,
+            split_at_seq: None,
+            ..
+        }
     );
 }
 
@@ -1510,20 +1595,35 @@ async fn an_empty_net_change_commits_the_record_alone() {
 
 /// Checks that a merge through a sequence below the fork's head applies the
 /// fork's commits through that sequence, and the next merge applies the
-/// rest.
+/// rest. The next-range query reports a start at the fork point before the
+/// first merge, and at each merge's end after it.
 #[tokio::test]
 async fn a_merge_through_a_sequence_below_the_head_leaves_the_rest() {
     let family = Family::new().await;
+    let fork_point = resolve_path(&family.store, &family.main, "/")
+        .await
+        .expect("root")
+        .head_seq;
     let first = family
         .fork()
         .write_file_bytes("/p.txt", b"p", None)
         .await
         .expect("p");
-    family
+    let second = family
         .fork()
         .write_file_bytes("/q.txt", b"q", None)
         .await
         .expect("q");
+    assert_eq!(
+        family.next_range().await,
+        NextMergeRangeResponse {
+            merge: None,
+            next_after_seq: Some(fork_point),
+            fork_point_seq: fork_point,
+            source_head_seq: second.committed_seq,
+            rebootstrap_required: None,
+        }
+    );
 
     family
         .merge("through-p", Some(first.committed_seq))
@@ -1531,8 +1631,20 @@ async fn a_merge_through_a_sequence_below_the_head_leaves_the_rest() {
         .expect("merge through p");
     assert!(family.entry(&family.main, "/p.txt").await.is_some());
     assert!(family.entry(&family.main, "/q.txt").await.is_none());
+    let range = family.next_range().await;
+    assert_eq!(range.next_after_seq, Some(first.committed_seq));
+    assert_eq!(
+        range.merge,
+        Some(Merge {
+            source_namespace_id: family.fork.clone(),
+            source_after_seq: fork_point,
+            source_through_seq: first.committed_seq,
+        })
+    );
     family.merge("rest", None).await.expect("merge the rest");
     assert!(family.entry(&family.main, "/q.txt").await.is_some());
+    let range = family.next_range().await;
+    assert_eq!(range.next_after_seq, Some(second.committed_seq));
 
     let error = family
         .merge("nothing", None)
@@ -1619,7 +1731,8 @@ async fn a_reused_commit_id_with_another_request_conflicts() {
 /// Checks that a merge that needs history below a retention floor returns
 /// `rebootstrap_required`, and that the details say which floor: `main`'s
 /// floor above the fork point, or the fork's own floor above the range's
-/// start.
+/// start. The next-range query reports the same details, and no start when
+/// the fork point is below `main`'s floor.
 #[tokio::test]
 async fn a_merge_below_either_floor_needs_a_rebootstrap() {
     let family = Family::new().await;
@@ -1647,6 +1760,9 @@ async fn a_merge_below_either_floor_needs_a_rebootstrap() {
     let details = error.details().expect("details");
     assert_eq!(details.fork_point_seq, Some(fork_point));
     assert_eq!(details.retention_floor_seq, Some(floor));
+    let range = family.next_range().await;
+    assert_eq!(range.next_after_seq, None);
+    assert_eq!(range.rebootstrap_required, Some(details));
 
     let family = Family::new().await;
     let fork_point = resolve_path(&family.store, &family.main, "/")
@@ -1672,6 +1788,9 @@ async fn a_merge_below_either_floor_needs_a_rebootstrap() {
     assert_eq!(details.actual_after_seq, Some(fork_point));
     assert_eq!(details.retention_floor_seq, Some(floor));
     assert_eq!(details.fork_point_seq, None);
+    let range = family.next_range().await;
+    assert_eq!(range.next_after_seq, Some(fork_point));
+    assert_eq!(range.rebootstrap_required, Some(details));
 }
 
 /// Checks that a namespace that isn't a fork of `main` can't be merged into

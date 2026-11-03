@@ -3,6 +3,7 @@
 
 use super::state::InodeState;
 use crate::error::{CoreError, Result};
+use crate::metadata::RevisionRecord;
 use loonfs_types::{
     AttributesRevisionNo, BindingVersion, ChangeSeq, CommitPrecondition, ContentRef,
     DeleteDirectoryBehavior, DisplayName, FilesystemOperation, InodeId, InodeKind, RevisionNo,
@@ -17,6 +18,50 @@ pub(super) struct InodePlan {
     pub(super) binding: Option<BindingChange>,
     /// The revision, attribute, and access updates, in that order.
     pub(super) updates: Vec<FilesystemOperation>,
+}
+
+impl InodePlan {
+    /// Returns the plan's operations: the binding change, then the updates.
+    pub(super) fn operations(&self) -> Vec<FilesystemOperation> {
+        self.binding
+            .as_ref()
+            .map(|binding| binding.operation(self.inode_id, self.kind))
+            .into_iter()
+            .chain(self.updates.iter().cloned())
+            .collect()
+    }
+}
+
+/// Returns the plan of the create of `inode_id`, with its parent, name,
+/// content, attributes, and access at `ours`, its state in the fork, for a
+/// merge into a namespace that doesn't have the inode, or `None` when the
+/// inode isn't visible in the fork.
+pub(super) fn create_plan(inode_id: InodeId, ours: &InodeState) -> Result<Option<InodePlan>> {
+    let Some(edge) = ours.edge() else {
+        return Ok(None);
+    };
+    let binding = BindingChange::Create {
+        parent_inode_id: edge.parent_inode_id,
+        display_name: display_name(&edge.display_name)?,
+        content_ref: ours.revision.as_ref().map(|row| row.content_ref.clone()),
+    };
+    let updates = ours
+        .attributes
+        .is_some()
+        .then(|| attributes_update(inode_id, ours, None))
+        .into_iter()
+        .chain(
+            ours.access
+                .is_some()
+                .then(|| access_update(inode_id, ours, None)),
+        )
+        .collect();
+    Ok(Some(InodePlan {
+        inode_id,
+        kind: ours.kind,
+        binding: Some(binding),
+        updates,
+    }))
 }
 
 /// How a merge changes an inode's binding.
@@ -126,6 +171,23 @@ impl BindingChange {
                 },
             },
         }
+    }
+}
+
+/// Builds the revision update that sets a file's content to the fork's
+/// revision `ours`, against the revision `theirs`.
+pub(super) fn revision_update(
+    inode_id: InodeId,
+    ours: &RevisionRecord,
+    theirs: &RevisionRecord,
+) -> FilesystemOperation {
+    FilesystemOperation::PutFileRevisionByInode {
+        inode_id,
+        content: loonfs_types::FileContent::Ref {
+            content_ref: ours.content_ref.clone(),
+            source_namespace_id: None,
+        },
+        expected_revision_no: theirs.revision_no,
     }
 }
 

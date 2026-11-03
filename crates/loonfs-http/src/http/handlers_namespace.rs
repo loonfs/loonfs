@@ -2,21 +2,21 @@
 
 use super::error::ApiResponseError;
 use super::extractors::{ActorHeader, SubjectHeaders};
+use super::query_params::required_query_param;
 
 use super::{AppJson, AppQuery, BindingState, NamespaceIdPath, NoQuery};
 use axum::extract::State;
 use axum::Json;
 use loonfs::{CreateNamespaceOptions, DeleteNamespaceOptions, MergeForkOptions};
-use loonfs_types::ChangeSeq;
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
 use loonfs_types::{
-    CapabilityDocument, Commit, CreateNamespaceRequest, ForkNamespaceRequest, MergeForkRequest,
-    RebaseForkRequest, RebaseForkResponse, API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0,
-    API_GROUP_QUERY_V0, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_MAINTENANCE_GREP_INDEX,
-    FEATURE_MERGES, FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_MULTIPART,
-    FEATURE_UPLOADS_DIRECT_PUT, LIMIT_COMMIT_MAX_REQUEST_BODY_BYTES,
-    LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS,
+    CapabilityDocument, ChangeSeq, Commit, CreateNamespaceRequest, ForkNamespaceRequest,
+    MergeForkRequest, NamespaceId, NextMergeRangeResponse, RebaseForkRequest, RebaseForkResponse,
+    API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0, API_GROUP_QUERY_V0,
+    FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_MAINTENANCE_GREP_INDEX, FEATURE_MERGES,
+    FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
+    LIMIT_COMMIT_MAX_REQUEST_BODY_BYTES, LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS,
     LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES,
     LIMIT_QUERY_GREP_TAIL_BUDGET_FILES, LIMIT_UPLOAD_COMPLETE_MAX_REQUEST_BODY_BYTES,
     LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES,
@@ -43,6 +43,18 @@ fn set_feature(capabilities: &mut CapabilityDocument, feature: &str, supported: 
 pub(super) struct DeleteNamespaceQuery {
     /// The head sequence that the namespace must still have for the delete to succeed.
     expected_head_seq: Option<ChangeSeq>,
+}
+
+/// The query of the next-range query.
+#[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
+#[serde(deny_unknown_fields)]
+pub(super) struct NextMergeRangeQuery {
+    /// The fork whose next merge into the namespace the query reads. It has to be a fork of the
+    /// namespace, or the fork that a rebase replays into the namespace.
+    #[cfg_attr(feature = "openapi", param(required = true))]
+    source: Option<NamespaceId>,
 }
 
 /// The capability value for a transfer limit. The API lists these limits on
@@ -441,6 +453,69 @@ pub(super) async fn merge_fork(
                 error,
             )
             .with_commit_id(&commit_id)
+        })?;
+    Ok(Json(response))
+}
+
+/// Returns where a fork's next merge into the namespace starts. A request
+/// with a subject needs an administrator in both namespaces, as the change
+/// feed does. A runtime whose merge allowance is zero returns
+/// `not_supported` for `filesystem.merges` before it reads a namespace.
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        get,
+        operation_id = "get_next_merge_range",
+        extensions(("x-loonfs-retry" = json!("idempotent"))),
+        path = "/v0/namespaces/{namespace_id}/merges",
+        tag = "namespaces",
+        summary = "Get a fork's next merge range",
+        description = "Returns where the fork's next merge into the namespace starts, without planning the merge: the fork's newest merge into the namespace, the fork sequence that the next merge starts after, the fork point, and the fork's head. When the namespace is a rebase's new fork for the fork, the range continues the new fork's replay commits. When a merge would return `rebootstrap_required`, the response includes that error's details in `rebootstrap_required` instead of failing.",
+        params(
+            ("namespace_id" = String, Path, description = "The namespace that the fork merges into."),
+            NextMergeRangeQuery
+        ),
+        responses(
+            (status = 200, description = "The fork's next merge range", body = NextMergeRangeResponse),
+            (status = 400, description = "Invalid request, or the source isn't a fork of this namespace", body = ErrorResponse),
+            (status = 401, description = "Unauthorized", body = ErrorResponse),
+            (status = 403, description = "Forbidden", body = ErrorResponse),
+            (status = 404, description = "Namespace not found", body = ErrorResponse),
+            (status = 410, description = "Namespace deleted", body = ErrorResponse),
+            (status = 501, description = "Merges are disabled", body = ErrorResponse),
+            crate::http::openapi::UnavailableResponses
+        )
+    )
+)]
+pub(super) async fn get_next_merge_range(
+    State(state): State<Arc<BindingState>>,
+    SubjectHeaders(subject): SubjectHeaders,
+    NamespaceIdPath(namespace_id): NamespaceIdPath,
+    AppQuery(query): AppQuery<NextMergeRangeQuery>,
+) -> Result<Json<NextMergeRangeResponse>, ApiResponseError> {
+    if state.runtime.execution_budget().max_merge_bytes() == 0 {
+        return Err(ApiResponseError::not_supported(
+            FEATURE_MERGES,
+            "merges are disabled",
+        ));
+    }
+    let source_namespace_id = required_query_param(query.source, "source")?;
+    let response = state
+        .runtime_for(subject)
+        .namespace(&namespace_id)
+        .next_merge_range(&source_namespace_id)
+        .await
+        .map_err(|error| {
+            // The runtime reports the source as the merge request's body
+            // field, which this route reads from the `source` parameter.
+            let source_refused =
+                error.invalid_request_param().as_deref() == Some("/source_namespace_id");
+            let response = ApiResponseError::runtime(error);
+            if source_refused {
+                response.with_param("source")
+            } else {
+                response
+            }
         })?;
     Ok(Json(response))
 }

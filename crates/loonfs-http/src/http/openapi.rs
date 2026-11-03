@@ -38,6 +38,7 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
         crate::http::handlers_namespace::delete_namespace,
         crate::http::handlers_namespace::fork_namespace,
         crate::http::handlers_namespace::merge_fork,
+        crate::http::handlers_namespace::get_next_merge_range,
         crate::http::handlers_namespace::rebase_fork,
         crate::http::handlers_snapshots::create_snapshot,
         crate::http::handlers_snapshots::list_snapshots,

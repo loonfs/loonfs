@@ -199,6 +199,14 @@ pub(crate) const OPERATION_SDK_NAMES: &[(&str, SdkName)] = &[
         },
     ),
     (
+        "get_next_merge_range",
+        SdkName {
+            group: &["namespaces"],
+            method: "nextMergeRange",
+            request: Some("GetNextMergeRangeRequest"),
+        },
+    ),
+    (
         "get_path_entry",
         SdkName {
             group: &["files"],

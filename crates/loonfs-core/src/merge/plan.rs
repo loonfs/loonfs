@@ -6,13 +6,14 @@ use super::classify::Classifier;
 use super::operations::BindingChange;
 use super::order::MergeOperations;
 use super::replay::Replay;
+use super::size::split_hint;
 use super::state::StateReader;
 use super::{through_seq, MergeAllowance, MergeRequest};
 use crate::authorize::{Authorizer, CommitAuthority};
 use crate::commit::engine::CommitCandidate;
 use crate::commit::wal_size::commit_fields_bytes;
 use crate::engine::NamespaceEngine;
-use crate::error::Result;
+use crate::error::{CoreError, MergeBound, Result};
 use crate::limits::DIRECT_TRANSFER_URL_TTL_MS;
 use crate::path::read::LoadedMetadataView;
 use crate::storage::content_admission::PreparedContent;
@@ -44,7 +45,9 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// directory, or moves an inode through a temporary name, for a replay
     /// commit too, because a rebase's new fork takes ordinary commits while
     /// the rebase runs. A replay commit skips its conflicting changes and the
-    /// changes that depend on them.
+    /// changes that depend on them. A commit that doesn't fit one WAL object
+    /// or `allowance` returns `merge_too_large` with the split hint that the
+    /// fork's net change over shorter ranges gives (see [`split_hint`]).
     #[allow(
         clippy::too_many_arguments,
         reason = "a merge and a replay commit share every input, and a replay commit adds the pin"
@@ -73,6 +76,12 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             )?,
         };
         let intent = self.merge_intent(request, Vec::new(), Vec::new());
+        let fields_bytes = commit_fields_bytes(
+            &intent.commit_id,
+            &intent.actor_id,
+            intent.message.as_deref(),
+            Some(&record),
+        );
         let mut classifier = Classifier {
             main,
             theirs: StateReader::new(main.metadata_view()),
@@ -90,12 +99,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             own_seqs: HashMap::new(),
             plans: Vec::new(),
             layouts: HashMap::new(),
-            planned_bytes: commit_fields_bytes(
-                &intent.commit_id,
-                &intent.actor_id,
-                intent.message.as_deref(),
-                Some(&record),
-            ),
+            planned_bytes: fields_bytes,
             subtree_checks: Vec::new(),
             conflicted: HashSet::new(),
             first_conflict: None,
@@ -104,7 +108,30 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
                 report: Vec::new(),
             }),
         };
-        classifier.classify().await?;
+        match classifier.classify().await {
+            Err(CoreError::MergeTooLarge {
+                bound: bound @ (MergeBound::WalObject | MergeBound::MergeAllowance),
+                estimated_bytes,
+                max_bytes,
+                split_at_seq: None,
+            }) => {
+                let split_at_seq = split_hint(
+                    fork_view,
+                    source_after_seq,
+                    record.source_through_seq,
+                    fields_bytes,
+                    allowance,
+                )
+                .await?;
+                return Err(CoreError::MergeTooLarge {
+                    bound,
+                    estimated_bytes,
+                    max_bytes,
+                    split_at_seq,
+                });
+            }
+            classified => classified?,
+        }
         let holders = classifier.check_targets().await?;
         if classifier.replay.is_some() {
             classifier.skip_conflicts(&holders).await?;

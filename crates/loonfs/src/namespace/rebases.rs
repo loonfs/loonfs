@@ -15,7 +15,7 @@ impl LoonFs<Writable> {
     /// Creates `new_namespace_id` as a rebase's new fork of
     /// `namespace_id`'s head for the fork `source_namespace_id`, or returns
     /// it when it already is one
-    /// ([API section 6.15](https://github.com/loonfs/loonfs/blob/main/docs/specs/api.md#615-post-rebases)).
+    /// ([API section 6.16](https://github.com/loonfs/loonfs/blob/main/docs/specs/api.md#616-post-rebases)).
     ///
     /// Before it creates anything, the call checks that
     /// `source_namespace_id` is a fork of `namespace_id` and that the fork
@@ -126,7 +126,7 @@ impl Namespace<Writable> {
     /// Replays the fork `source_namespace_id`'s unmerged commits into this
     /// namespace, a rebase's new fork, through `options.through_seq` or the
     /// fork's head, as one replay commit
-    /// ([API section 6.15](https://github.com/loonfs/loonfs/blob/main/docs/specs/api.md#615-post-rebases)).
+    /// ([API section 6.16](https://github.com/loonfs/loonfs/blob/main/docs/specs/api.md#616-post-rebases)).
     ///
     /// The replay commit is a merge of the fork into this namespace. It
     /// applies the fork's net change since its previous replay commit, or

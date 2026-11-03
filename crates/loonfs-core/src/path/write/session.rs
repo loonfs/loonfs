@@ -8,7 +8,7 @@ use crate::authorize::Authorizer;
 use crate::commit::engine::{CommitCandidate, MergeIntent};
 use crate::commit::{AppendedContent, CommitFingerprint, CommitPlan, CommitValidationSession};
 use crate::error::{CoreError, Result};
-use crate::merge::merge_after_seq;
+use crate::merge::merge_start;
 use crate::metadata::{DurableVisibilityCache, MetadataState, MetadataView};
 use crate::namespace::state::NamespaceReadState;
 use crate::storage::tail_content::{cut_layout, materialize_content_layout, ContentWrites};
@@ -344,7 +344,7 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
 }
 
 /// Requires a merge into the namespace at `head` and `view` to pass the floor
-/// rule and to start where [`merge_after_seq`] says, so that a fork's commits
+/// rule and to start where [`merge_start`] says, so that a fork's commits
 /// are applied once and in order.
 ///
 /// The floor check runs first because the range check depends on it. A base
@@ -357,8 +357,9 @@ async fn ensure_merge_is_admissible<S: ObjectStore + ?Sized>(
     merge: &MergeIntent,
 ) -> Result<()> {
     let source_namespace_id = &merge.record.source_namespace_id;
-    let expected_after_seq =
-        merge_after_seq(view, head, source_namespace_id, merge.fork_point_seq).await?;
+    let expected_after_seq = merge_start(view, head, source_namespace_id, merge.fork_point_seq)
+        .await?
+        .after_seq;
     if merge.record.source_after_seq != expected_after_seq {
         return Err(CoreError::MergeRangeConflict {
             source_namespace_id: source_namespace_id.clone(),

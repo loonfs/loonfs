@@ -1,9 +1,10 @@
-//! Merging a fork into a namespace, and rebasing a fork: the requests, the
-//! conflict that a refused merge reports, and a rebase's conflict report.
+//! Merging a fork into a namespace, and rebasing a fork: the requests, where
+//! a fork's next merge starts, the conflict that a refused merge reports, and
+//! a rebase's conflict report.
 
 use crate::{
-    AbsolutePath, ChangeSeq, CommitId, ContentRef, InodeId, NamespaceId, NamespaceMetadata,
-    RevisionNo,
+    AbsolutePath, ChangeSeq, CommitId, ContentRef, ErrorDetails, InodeId, Merge, NamespaceId,
+    NamespaceMetadata, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -66,6 +67,37 @@ pub struct RebaseForkResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub conflicts: Option<Vec<MergeConflict>>,
+}
+
+/// Where a fork's next merge into a namespace starts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct NextMergeRangeResponse {
+    /// The fork's newest merge into the namespace, which the next merge continues. It's absent
+    /// before the fork's first merge, and when the fork point is below the namespace's retention
+    /// floor. In a rebase's new fork, it's the fork's newest replay commit, never a merge that the
+    /// new fork inherited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub merge: Option<Merge>,
+    /// The fork sequence that the fork's next merge starts after: the newest merge's
+    /// `source_through_seq`, or the fork point before the fork's first merge. In a rebase's new
+    /// fork, it's the new fork's `resume_after_seq` before the first replay commit. It's absent
+    /// when the fork point is below the namespace's retention floor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub next_after_seq: Option<ChangeSeq>,
+    /// The sequence that the fork was made at, of the namespace or, for a rebase's new fork, of
+    /// the namespace that the rebase forked.
+    pub fork_point_seq: ChangeSeq,
+    /// The fork's head sequence when the server read it.
+    pub source_head_seq: ChangeSeq,
+    /// The details of the `rebootstrap_required` error that a merge of the fork returns, because
+    /// history that the merge needs is below a retention floor. It's absent when the floors allow
+    /// the merge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub rebootstrap_required: Option<ErrorDetails>,
 }
 
 /// One inode whose change a merge can't apply, because the namespace being merged into changed
