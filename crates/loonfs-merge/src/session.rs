@@ -279,11 +279,7 @@ impl<M: Mechanics, R: Resolver> MergeSession<M, R> {
                         conflicts,
                     ))
                 }
-                None => {
-                    return self
-                        .replace_new_fork(fork_id, through_seq, new_fork_id)
-                        .await
-                }
+                None => return Ok(self.replace_new_fork(fork_id, through_seq, new_fork_id)),
             },
             Err(error) => refused(error)?,
         };
@@ -321,20 +317,25 @@ impl<M: Mechanics, R: Resolver> MergeSession<M, R> {
         })
     }
 
-    /// Deletes a new fork whose conflict report was lost, and starts the
-    /// rebase again into another new fork, which repeats the classification
-    /// of every change.
-    async fn replace_new_fork(
+    /// Starts the rebase again into another new fork after the conflict
+    /// report of `new_fork_id` was lost, which repeats the classification of
+    /// every change.
+    ///
+    /// `new_fork_id` stays in the state's new forks, and the session deletes
+    /// it with the others once it's `merged` or `abandoned`. If this step
+    /// deleted it, a run that stopped before the caller saved the step's state
+    /// would resume from a state whose new fork is deleted, and its rebase
+    /// would fail with `namespace_deleted`.
+    fn replace_new_fork(
         &self,
         fork_id: &NamespaceId,
         through_seq: ChangeSeq,
         new_fork_id: &NamespaceId,
-    ) -> Result<Transition> {
-        delete_if_present(&self.mechanics, new_fork_id).await?;
+    ) -> Transition {
         let Some(replacement_id) = self.new_fork_id() else {
-            return Ok(Transition::failed(fork_id, MergeFailure::NewForkLimit, &[]));
+            return Transition::failed(fork_id, MergeFailure::NewForkLimit, &[]);
         };
-        Ok(Transition {
+        Transition {
             status: MergeSessionStatus::Rebasing {
                 fork_id: fork_id.clone(),
                 through_seq,
@@ -344,10 +345,10 @@ impl<M: Mechanics, R: Resolver> MergeSession<M, R> {
             },
             created_fork_id: Some(replacement_id.clone()),
             outcome: MergeSessionOutcome::ReportLost {
-                deleted_fork_id: new_fork_id.clone(),
+                replaced_fork_id: new_fork_id.clone(),
                 new_fork_id: replacement_id,
             },
-        })
+        }
     }
 
     /// Hands the new fork to the resolver, and then merges it through its

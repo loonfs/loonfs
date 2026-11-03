@@ -50,11 +50,12 @@ pub enum MergeSessionOutcome {
         conflict_count: usize,
     },
     /// A rebase returned no conflict report, because an earlier request had
-    /// committed its replay commit, so the session deleted the new fork and
-    /// replays the fork's unmerged commits again into another one.
+    /// committed its replay commit, so the session replays the fork's
+    /// unmerged commits again into another new fork. The session deletes the
+    /// replaced new fork with its other new forks.
     ReportLost {
         /// The new fork whose report was lost.
-        deleted_fork_id: NamespaceId,
+        replaced_fork_id: NamespaceId,
         /// The new fork that the next step rebases into.
         new_fork_id: NamespaceId,
     },

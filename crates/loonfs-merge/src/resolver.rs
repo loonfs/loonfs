@@ -1,5 +1,5 @@
 //! The resolver, which writes resolutions of a rebase's conflicts into the
-//! new fork, and the default resolver, which fails.
+//! new fork, and the default resolver, which fails on a conflict.
 
 use crate::ConflictReport;
 use loonfs_types::NamespaceId;
@@ -18,9 +18,10 @@ pub trait Resolver: Send + Sync {
     /// Writes resolutions of the changes that `reports` list into
     /// `new_fork_id`, and returns once the new fork is ready to merge.
     ///
-    /// An error fails the session, which keeps the reports and the new fork
-    /// for the caller to inspect. A step that fails after the resolver
-    /// returned calls the resolver again.
+    /// The reports list no change when the rebase applied every change. An
+    /// error fails the session, which keeps the reports and the new fork for
+    /// the caller to inspect. A step that fails after the resolver returned
+    /// calls the resolver again.
     fn resolve(
         &self,
         new_fork_id: &NamespaceId,
@@ -28,9 +29,12 @@ pub trait Resolver: Send + Sync {
     ) -> impl Future<Output = Result<(), Box<dyn Error + Send + Sync>>> + Send;
 }
 
-/// The resolver that resolves nothing, so the session fails with the
-/// conflict reports and the new fork to inspect, and the conflicting changes
-/// aren't merged.
+/// The resolver that resolves nothing, so a session whose rebase left out a
+/// change fails with the conflict reports and the new fork to inspect, and
+/// the conflicting changes aren't merged.
+///
+/// When the reports list no change, the default resolver returns, and the
+/// session merges the new fork.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DefaultResolver;
 
@@ -41,9 +45,13 @@ impl Resolver for DefaultResolver {
         reports: &[ConflictReport],
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let conflicts: usize = reports.iter().map(|report| report.conflicts.len()).sum();
+        if conflicts == 0 {
+            return Ok(());
+        }
+        let noun = if conflicts == 1 { "change" } else { "changes" };
         Err(format!(
             "the default resolver doesn't resolve conflicts, and the rebase into \
-             `{new_fork_id}` left out {conflicts} conflicting changes"
+             `{new_fork_id}` left out {conflicts} conflicting {noun}"
         )
         .into())
     }

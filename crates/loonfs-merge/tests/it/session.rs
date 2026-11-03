@@ -2,8 +2,8 @@
 //! loop, and the requests that each transition sends.
 
 use crate::scripted_mechanics::{
-    conflict, merges, run_to_end, sandbox, start, Answer, RecordingResolver, ScriptedMechanics,
-    Sent,
+    conflict, deletes, merges, run_to_end, sandbox, start, Answer, RecordingResolver,
+    ScriptedMechanics, Sent,
 };
 use loonfs_merge::{
     DefaultResolver, MergeError, MergeFailure, MergeSession, MergeSessionOutcome,
@@ -172,10 +172,9 @@ async fn a_lost_report_rebases_again_and_the_default_resolver_fails_with_the_rep
         Answer::range(10, 20),
         Answer::refused(ErrorCode::MergeConflict),
         Answer::Replayed(None),
-        Answer::Deleted,
         Answer::Replayed(Some(vec![conflict("/a.txt")])),
         // After the caller abandons the session, it deletes both new forks.
-        Answer::refused(ErrorCode::NamespaceDeleted),
+        Answer::Deleted,
         Answer::Deleted,
     ]);
     let mut session = start(&mechanics, DefaultResolver).await;
@@ -207,14 +206,8 @@ async fn a_lost_report_rebases_again_and_the_default_resolver_fails_with_the_rep
         "the failure identifies the new fork to inspect"
     );
     let sent = mechanics.sent();
-    assert_eq!(
-        sent[3],
-        Sent::Delete {
-            namespace_id: lost_id.clone()
-        }
-    );
-    let Sent::Rebase { new_fork_id, .. } = &sent[4] else {
-        panic!("the session rebases again: {:?}", sent[4]);
+    let Sent::Rebase { new_fork_id, .. } = &sent[3] else {
+        panic!("the session rebases again: {:?}", sent[3]);
     };
     assert_eq!(*new_fork_id, replacement_id);
     assert!(
@@ -227,7 +220,96 @@ async fn a_lost_report_rebases_again_and_the_default_resolver_fails_with_the_rep
 
     assert_eq!(state.status, MergeSessionStatus::Abandoned);
     assert!(state.new_fork_ids.is_empty());
+    assert_eq!(
+        deletes(&mechanics.sent()),
+        [lost_id, replacement_id],
+        "the session deletes the new fork whose report was lost only once it ends"
+    );
     assert_eq!(outcomes.len(), 2, "one step deletes each new fork");
+}
+
+#[tokio::test]
+async fn a_run_that_stops_after_a_lost_report_resumes_from_its_saved_state() {
+    let mechanics = ScriptedMechanics::new([
+        Answer::range(10, 20),
+        Answer::refused(ErrorCode::MergeConflict),
+        // The run stops after this answer, before it saves the step's state.
+        Answer::Replayed(None),
+        // The resumed run sends the same rebase into the same new fork.
+        Answer::Replayed(None),
+        Answer::Replayed(Some(vec![conflict("/a.txt")])),
+        Answer::range(40, 43),
+        Answer::Committed(50),
+        Answer::Deleted,
+        Answer::Deleted,
+    ]);
+    let resolver = RecordingResolver::default();
+    let mut session = start(&mechanics, resolver.clone()).await;
+    session.step().await.expect("merge");
+    let saved = session.state().clone();
+    let lost = session.step().await.expect("rebase");
+    assert!(
+        matches!(lost, Some(MergeSessionOutcome::ReportLost { .. })),
+        "{lost:?}"
+    );
+    assert!(
+        deletes(&mechanics.sent()).is_empty(),
+        "the step keeps the new fork that the saved state rebases into"
+    );
+
+    let session = MergeSession::resume(mechanics.clone(), resolver.clone(), saved);
+    let (_, state) = run_to_end(&mechanics, &resolver, session).await;
+
+    assert_eq!(state.status, MergeSessionStatus::Merged);
+    let sent = mechanics.sent();
+    let rebases: Vec<_> = sent
+        .iter()
+        .filter_map(|sent| match sent {
+            Sent::Rebase {
+                new_fork_id,
+                options,
+                ..
+            } => Some((new_fork_id.clone(), options.commit_id.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        rebases[0], rebases[1],
+        "the resumed run sends the same rebase"
+    );
+    let [(lost_id, _), _, (replacement_id, _)] = rebases.try_into().expect("three rebases");
+    assert_eq!(
+        merges(&sent).last().map(|(fork_id, _)| fork_id),
+        Some(&replacement_id)
+    );
+    assert_eq!(deletes(&sent), [lost_id, replacement_id]);
+}
+
+#[tokio::test]
+async fn the_default_resolver_merges_a_new_fork_whose_rebase_left_out_nothing() {
+    let mechanics = ScriptedMechanics::new([
+        Answer::range(10, 20),
+        Answer::refused(ErrorCode::MergeConflict),
+        Answer::too_large(15),
+        Answer::Replayed(Some(Vec::new())),
+        Answer::Replayed(Some(Vec::new())),
+        Answer::range(40, 43),
+        Answer::Committed(50),
+        Answer::Deleted,
+    ]);
+    let session = start(&mechanics, DefaultResolver).await;
+
+    let (outcomes, state) = run_to_end(&mechanics, &DefaultResolver, session).await;
+
+    assert_eq!(state.status, MergeSessionStatus::Merged, "{outcomes:?}");
+    assert!(state.new_fork_ids.is_empty());
+    let merges = merges(&mechanics.sent());
+    let (new_fork_id, _) = merges.last().expect("the new fork merges");
+    assert_ne!(*new_fork_id, sandbox());
+    assert!(outcomes.contains(&MergeSessionOutcome::Resolved {
+        fork_id: new_fork_id.clone(),
+        through_seq: ChangeSeq(43),
+    }));
 }
 
 #[tokio::test]

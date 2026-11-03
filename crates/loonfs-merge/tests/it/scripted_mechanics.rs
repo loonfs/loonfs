@@ -336,6 +336,16 @@ pub(crate) fn merges(sent: &[Sent]) -> Vec<(NamespaceId, MergeForkOptions)> {
         .collect()
 }
 
+/// Returns the namespaces that the session deleted, in order.
+pub(crate) fn deletes(sent: &[Sent]) -> Vec<NamespaceId> {
+    sent.iter()
+        .filter_map(|sent| match sent {
+            Sent::Delete { namespace_id } => Some(namespace_id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Returns a `content` conflict on one file.
 pub(crate) fn conflict(path: &str) -> MergeConflict {
     serde_json::from_value(json!({

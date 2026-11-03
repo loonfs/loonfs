@@ -288,11 +288,11 @@ pub(crate) fn human_merge_step(outcome: &MergeSessionOutcome) -> String {
             )
         }
         MergeSessionOutcome::ReportLost {
-            deleted_fork_id,
+            replaced_fork_id,
             new_fork_id,
         } => format!(
-            "the conflict report of `{deleted_fork_id}` was lost, so it was deleted; rebasing \
-             into `{new_fork_id}`"
+            "the conflict report of `{replaced_fork_id}` was lost; rebasing again into \
+             `{new_fork_id}`"
         ),
         MergeSessionOutcome::Resolved {
             fork_id,
