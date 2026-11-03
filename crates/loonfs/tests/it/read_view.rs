@@ -2,8 +2,8 @@
 
 use crate::common::{assert_core_error_kind, metadata_options, open_runtime_async, store};
 use loonfs::{
-    CreateSnapshotOptions, CurrentFile, DestinationBehavior, ErrorCode, LoonFs, NamespaceId,
-    PutFileOptions,
+    ChangeSeq, CreateSnapshotOptions, CurrentFile, DestinationBehavior, ErrorCode, LoonFs,
+    NamespaceId, PutFileOptions, RevisionNo,
 };
 use std::assert_matches;
 use tempfile::tempdir;
@@ -679,6 +679,246 @@ async fn a_read_view_keeps_one_head_across_later_commits() {
         .stat("/later.txt")
         .await
         .expect("latest view sees later file");
+}
+
+/// Checks that a view at an earlier sequence reads the namespace as it was at
+/// that sequence, refuses a sequence above its head, and returns
+/// `rebootstrap_required` once the retention floor passes the sequence.
+#[tokio::test]
+async fn a_view_at_an_earlier_sequence_reads_that_sequence_until_the_floor_passes_it() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = store(temp_dir.path());
+    let runtime = open_runtime_async(store.clone(), "earlier-view-test").await;
+    let namespace_id = NamespaceId::parse("earlier-views").expect("namespace id");
+    let actor = loonfs_test_support::test_actor();
+    runtime
+        .create_namespace(&namespace_id, &actor)
+        .await
+        .expect("create namespace");
+    let first = runtime
+        .put_file(&namespace_id, "/a.txt", b"one", &actor)
+        .await
+        .expect("create a");
+    let replace = PutFileOptions {
+        behavior: DestinationBehavior::Replace,
+        ..Default::default()
+    };
+    runtime
+        .put_file_with_options(&namespace_id, "/a.txt", b"two", &actor, &replace)
+        .await
+        .expect("replace a");
+    runtime
+        .put_file(&namespace_id, "/b.txt", b"b", &actor)
+        .await
+        .expect("create b");
+
+    let view = runtime
+        .reader
+        .namespace(&namespace_id)
+        .read_view()
+        .await
+        .expect("read view");
+    let earlier = view
+        .at_seq(first.committed_seq)
+        .await
+        .expect("view at the first commit");
+    assert_eq!(earlier.head_seq(), first.committed_seq);
+    let a = earlier.stat("/a.txt").await.expect("stat a");
+    assert_eq!(a.revision_no(), Some(RevisionNo(1)));
+    assert_eq!(a.head_seq, first.committed_seq);
+    assert_eq!(
+        earlier
+            .read_file_revision_by_inode(a.inode_id, RevisionNo(1), 64)
+            .await
+            .expect("read a's first revision"),
+        b"one"
+    );
+    assert_eq!(
+        earlier
+            .stat_current_files_by_inode(&[a.inode_id])
+            .await
+            .expect("resolve a")[0]
+            .file,
+        CurrentFile::Visible {
+            path: a.path.clone(),
+            revision_no: Some(RevisionNo(1)),
+        }
+    );
+    let later = earlier.stat("/b.txt").await.expect_err("b is later");
+    assert_eq!(later.code(), ErrorCode::PathNotFound);
+    let Err(ahead) = view.at_seq(ChangeSeq(view.head_seq().0 + 1)).await else {
+        panic!("a sequence above the head should be refused");
+    };
+    assert_eq!(ahead.code(), ErrorCode::InvalidRequest);
+
+    runtime
+        .maintenance
+        .maintain_metadata_with_options(&namespace_id, &metadata_options(1))
+        .await
+        .expect("fold the WAL");
+    loonfs::test_support::maintenance_past_the_grace_window(store.clone())
+        .await
+        .advance_retention_floor(&namespace_id)
+        .await
+        .expect("advance the retention floor");
+    let reader = LoonFs::builder_with_store(store)
+        .read_only()
+        .build()
+        .await
+        .expect("fresh reader");
+    let view = reader
+        .namespace(&namespace_id)
+        .read_view()
+        .await
+        .expect("read view after the floor moved");
+    let Err(error) = view.at_seq(first.committed_seq).await else {
+        panic!("the floor passed the first commit");
+    };
+    assert_eq!(error.code(), ErrorCode::RebootstrapRequired);
+}
+
+/// Checks that a view lists every retained file revision, including the
+/// revisions in its WAL tail and the revisions of a deleted file, by inode
+/// and newest first, across pages.
+#[tokio::test]
+async fn a_view_lists_every_retained_revision_with_its_wal_tail() {
+    let temp_dir = tempdir().expect("tempdir");
+    let runtime = open_runtime_async(store(temp_dir.path()), "retained-revisions-test").await;
+    let namespace_id = NamespaceId::parse("retained-revisions").expect("namespace id");
+    let actor = loonfs_test_support::test_actor();
+    runtime
+        .create_namespace(&namespace_id, &actor)
+        .await
+        .expect("create namespace");
+    runtime
+        .put_file(&namespace_id, "/a.txt", b"one", &actor)
+        .await
+        .expect("create a");
+    runtime
+        .maintenance
+        .maintain_metadata_with_options(&namespace_id, &metadata_options(1))
+        .await
+        .expect("fold the first revision into the manifest");
+    let replace = PutFileOptions {
+        behavior: DestinationBehavior::Replace,
+        ..Default::default()
+    };
+    runtime
+        .put_file_with_options(&namespace_id, "/a.txt", b"two", &actor, &replace)
+        .await
+        .expect("replace a");
+    runtime
+        .put_file(&namespace_id, "/b.txt", b"b", &actor)
+        .await
+        .expect("create b");
+    runtime
+        .namespace_writer(&namespace_id)
+        .expect("open namespace")
+        .delete_path("/b.txt", &actor)
+        .await
+        .expect("delete b");
+
+    let view = runtime
+        .reader
+        .namespace(&namespace_id)
+        .read_view()
+        .await
+        .expect("read view");
+    let mut listed = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = view
+            .list_retained_revisions()
+            .page_limit(loonfs::EffectiveLimit::from_requested(Some(1)).expect("limit"))
+            .cursor(cursor)
+            .page()
+            .await
+            .expect("list retained revisions");
+        assert!(page.revisions.len() <= 1);
+        listed.extend(page.revisions);
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    let a = view.stat("/a.txt").await.expect("stat a").inode_id;
+    assert_eq!(
+        listed
+            .iter()
+            .map(|revision| (revision.inode_id == a, revision.revision_no))
+            .collect::<Vec<_>>(),
+        [
+            (true, RevisionNo(2)),
+            (true, RevisionNo(1)),
+            (false, RevisionNo(1))
+        ]
+    );
+    assert!(listed[0].inode_id < listed[2].inode_id);
+}
+
+/// Checks that a view below its manifest's head lists a full page of
+/// retained revisions when the manifest's first rows are above the view's
+/// sequence, and returns no cursor after its last revision.
+#[tokio::test]
+async fn a_view_below_the_manifest_head_lists_full_pages_of_retained_revisions() {
+    let temp_dir = tempdir().expect("tempdir");
+    let runtime = open_runtime_async(store(temp_dir.path()), "earlier-revisions-test").await;
+    let namespace_id = NamespaceId::parse("earlier-revisions").expect("namespace id");
+    let actor = loonfs_test_support::test_actor();
+    runtime
+        .create_namespace(&namespace_id, &actor)
+        .await
+        .expect("create namespace");
+    runtime
+        .put_file(&namespace_id, "/a.txt", b"one", &actor)
+        .await
+        .expect("create a");
+    let b = runtime
+        .put_file(&namespace_id, "/b.txt", b"b", &actor)
+        .await
+        .expect("create b");
+    let replace = PutFileOptions {
+        behavior: DestinationBehavior::Replace,
+        ..Default::default()
+    };
+    for content in [b"two", b"six"] {
+        runtime
+            .put_file_with_options(&namespace_id, "/a.txt", content, &actor, &replace)
+            .await
+            .expect("replace a");
+    }
+    runtime
+        .maintenance
+        .maintain_metadata_with_options(&namespace_id, &metadata_options(1))
+        .await
+        .expect("fold every revision into the manifest");
+
+    let earlier = runtime
+        .reader
+        .namespace(&namespace_id)
+        .read_view()
+        .await
+        .expect("read view")
+        .at_seq(b.committed_seq)
+        .await
+        .expect("view at b's creation");
+    // The revisions of `a` sort newest first, so the manifest's first two
+    // rows are the two replacements, which the view doesn't see.
+    let page = earlier
+        .list_retained_revisions()
+        .page_limit(loonfs::EffectiveLimit::from_requested(Some(2)).expect("limit"))
+        .page()
+        .await
+        .expect("list retained revisions");
+    let a = earlier.stat("/a.txt").await.expect("stat a").inode_id;
+    assert_eq!(
+        page.revisions
+            .iter()
+            .map(|revision| (revision.inode_id == a, revision.revision_no))
+            .collect::<Vec<_>>(),
+        [(true, RevisionNo(1)), (false, RevisionNo(1))]
+    );
+    assert_eq!(page.next_cursor, None);
 }
 
 #[tokio::test]

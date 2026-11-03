@@ -40,6 +40,7 @@ pub(crate) async fn read_context<S: ObjectStore + ?Sized>(
             head: anchor.read_state,
         },
         tail: None,
+        visible_seq: None,
     }
 }
 

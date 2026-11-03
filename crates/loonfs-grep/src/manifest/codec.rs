@@ -13,7 +13,7 @@ pub(crate) const GREP_MANIFEST_KIND: &str = "grep_manifest";
 /// Sole hint format version this build reads and writes.
 pub(crate) const GREP_HINT_FORMAT_VERSION: u32 = 1;
 /// Sole manifest format version this build reads and writes.
-pub(crate) const GREP_MANIFEST_FORMAT_VERSION: u32 = 1;
+pub(crate) const GREP_MANIFEST_FORMAT_VERSION: u32 = 2;
 
 /// Verified in-memory representation of one grep hint envelope.
 pub(crate) type GrepHintEnvelope = VerifiedEnvelope<GrepHint>;

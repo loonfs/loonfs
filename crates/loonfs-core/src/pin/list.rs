@@ -230,8 +230,8 @@ mod cursor_tests {
     fn every_cursor_kind_matches_its_golden_bytes() {
         use crate::test_support::assert_matches_golden_token;
         use loonfs_types::{
-            ChangeSeq, FileRevisionsPageCursor, GrepCursorPosition, GrepPageCursor, InodeId,
-            RevisionNo, TrashPageCursor,
+            ChangeSeq, ContentId, FileRevisionsPageCursor, GrepCursorPosition, GrepPageCursor,
+            InodeId, RevisionNo, TrashPageCursor,
         };
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let checkpoint = CheckpointPageCursor {
@@ -271,6 +271,11 @@ mod cursor_tests {
                 "grep.txt",
                 encode_cursor(&GrepPageCursor {
                     head_seq: ChangeSeq(12),
+                    index_captured_seq: ChangeSeq(10),
+                    cut_seq: ChangeSeq(11),
+                    last_content_id: ContentId::parse("con_3s0drmj8em84yb4mnetqkz2j0x")
+                        .expect("content id"),
+                    last_size_bytes: 4096,
                     last_inode_id: InodeId(42),
                     resume: GrepCursorPosition::AfterMatch { byte_offset: 1024 },
                     fingerprint: 7,

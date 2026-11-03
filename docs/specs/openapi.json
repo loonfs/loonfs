@@ -3037,10 +3037,10 @@
           },
           "head_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
-            "description": "The namespace head sequence that the server used to evaluate this page."
+            "description": "The sequence that the server read the namespace at for this page. A first page reads at\nthe namespace's head, and a later page reads at the first page's `head_seq`."
           },
           "matches": {
-            "description": "The matches, in ascending `(inode_id, byte_offset)` order.",
+            "description": "The matches, ordered by the content value of each file's revision (its content ID and\nsize), then by `inode_id`, and then by `byte_offset`.",
             "items": {
               "$ref": "#/components/schemas/GrepMatch"
             },
@@ -7630,7 +7630,7 @@
     },
     "/v0/namespaces/{namespace_id}/grep": {
       "get": {
-        "description": "Searches file content with a regular expression, using the namespace's grep index to narrow the candidates. The server checks each candidate against the full pattern and returns matches in ascending `(inode_id, byte_offset)` order. It scans every revision committed after the index watermark, unless `allow_stale` skips them. The deployment must serve grep, and the namespace must have a materialized, active grep index.",
+        "description": "Searches file content with a regular expression, using the namespace's grep index to narrow the candidates. The server checks each candidate against the full pattern and returns matches ordered by the content value of each file's revision, then by `inode_id`, and then by `byte_offset`. It scans every revision committed after the index watermark, unless `allow_stale` skips them. A first page reads the namespace at its head, and a later page reads at the first page's head. The deployment must serve grep, and the namespace must have a materialized, active grep index.",
         "operationId": "grep",
         "parameters": [
           {
@@ -7764,6 +7764,16 @@
               }
             },
             "description": "Namespace, scope path, or scope inode not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The cursor's sequence is older than the retention floor. Run the search again from its first page."
           },
           "410": {
             "content": {

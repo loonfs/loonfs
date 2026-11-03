@@ -5,6 +5,8 @@
 #![allow(clippy::panic, reason = "an integration test binary is test code")]
 
 mod common;
+mod content_index;
+mod content_order;
 mod golden_formats;
 mod grams_index;
 mod grep_publication;
@@ -12,5 +14,6 @@ mod grep_reorganize;
 mod grep_service_differential;
 mod grep_step_permits;
 mod grep_worker;
+mod later_pages;
 mod manifest_format;
 mod manifest_store;

@@ -16,4 +16,4 @@ pub use current_files::{CurrentFile, CurrentFileState};
 pub(crate) use file_reads::{ensure_within_read_limit, file_content_ref};
 pub use file_reads::{DirectDownloadByInodeTarget, DirectDownloadTarget, FileBytes, GrantedRange};
 pub(crate) use loaded_view::LoadedMetadataView;
-pub use revisions::FileRevisionsPage;
+pub use revisions::{FileRevisionsPage, RetainedRevisionsPage, RetainedRevisionsPageCursor};

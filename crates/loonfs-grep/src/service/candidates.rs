@@ -1,203 +1,340 @@
-//! The candidates a grep query examines: index postings, the unindexed
-//! tail, and the plan-less scan.
+//! The candidates a grep query examines: the content values the index
+//! matched, the files of the unindexed tail, and the files of the plan-less
+//! scan.
 
 use super::{
     GREP_READS_IN_FLIGHT, MAX_GREP_SCAN_FILES, MAX_GREP_TAIL_FILES,
-    MAX_GREP_VERIFIED_FILES_PER_PAGE, SCAN_DIRECTORY_PAGE_ENTRIES, TAIL_FEED_PAGE_COMMITS,
+    MAX_GREP_VERIFIED_VALUES_PER_PAGE, SCAN_DIRECTORY_PAGE_ENTRIES, TAIL_FEED_PAGE_COMMITS,
 };
-use crate::codec::{lookup, Gram, IndexRow};
-use crate::index_read::{
-    index_segment_corrupt, load_data_block, load_filter_block, load_index_block,
-};
+use crate::codec::{lookup, ContentValue, Gram, IndexRow};
+use crate::index_read::index_segment_corrupt;
 use crate::manifest::{ChangeFeedResume, GrepSegmentRef};
 use crate::query::GramQueryPlan;
 use crate::reads::{published_revision, NamespaceReadView};
 use crate::segments::GrepSegments;
 use crate::{GrepError, Result};
-use futures::{stream, StreamExt, TryStreamExt};
+use futures::{stream, StreamExt, TryFutureExt, TryStreamExt};
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::hex::hex_decode_bytes;
-use loonfs_types::format::segment_blocks::{
-    decode_filter_block, index_blocks_for_key_range, key_range_may_intersect,
-    string_prefix_upper_bound,
+use loonfs_types::format::segment_blocks::string_prefix_upper_bound;
+use loonfs_types::{
+    EntryInodeKind, ErrorCode, InodeId, PathEntry, PathEntryKind, RevisionNo, RunNo, ROOT_INODE_ID,
 };
-use loonfs_types::{EntryInodeKind, ErrorCode, InodeId, PathEntry, RevisionNo, ROOT_INODE_ID};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-/// The revisions a query must examine, keyed by durable inode identity.
+/// The files that the index doesn't decide for a query, grouped by the
+/// content value of each file's revision at the read sequence.
+pub(super) type CandidateFiles = BTreeMap<ContentValue, BTreeMap<InodeId, RevisionNo>>;
+
+/// The candidates a query examines, in content order.
 #[derive(Debug, Default)]
 pub(super) struct GrepCandidates {
-    /// Index-supplied candidates: the revisions whose content contained
-    /// every required gram. A candidate survives only if the inode's
-    /// newest visible revision is in its set.
-    pub(super) indexed: BTreeMap<InodeId, BTreeSet<RevisionNo>>,
-    /// Tail- or scan-supplied candidates: examined whatever their newest
-    /// visible revision is, because no gram filter applies to them.
-    pub(super) unfiltered: BTreeSet<InodeId>,
+    /// The ordinals, in each run, of the content values whose bytes contain
+    /// every required gram, a superset of the values that match. A page maps
+    /// the ordinals that it walks to values, and finds the values' files in
+    /// the index's `content_revisions` rows.
+    pub(super) indexed: Vec<RunCandidates>,
+    /// Files from the unindexed tail or the plan-less scan, each with its
+    /// revision at the read sequence. A file of an indexed value joins that
+    /// value's files from the index.
+    pub(super) files: CandidateFiles,
+    /// Tail files whose values the index has examined and found eligible. A
+    /// file here joins the walk only if the index produces its value.
+    pub(super) index_decided: CandidateFiles,
 }
 
-impl GrepCandidates {
-    pub(super) fn inodes(&self) -> impl Iterator<Item = InodeId> + '_ {
-        let mut merged: BTreeSet<InodeId> = self.indexed.keys().copied().collect();
-        merged.extend(self.unfiltered.iter().copied());
-        merged.into_iter()
+/// The candidate ordinals of one run, in ascending order, which is content
+/// order.
+#[derive(Debug)]
+pub(super) struct RunCandidates {
+    segments: Vec<GrepSegmentRef>,
+    ordinals: Vec<u64>,
+}
+
+/// Ordinals of one run that one read of its value table maps. A page
+/// verifies at most this many values, so it usually maps one batch of each
+/// run.
+const VALUES_PER_TABLE_READ: usize = MAX_GREP_VERIFIED_VALUES_PER_PAGE;
+
+/// One value that a page walks, and whether the index produced it.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct CandidateValue {
+    pub(super) value: ContentValue,
+    pub(super) indexed: bool,
+}
+
+/// The position of a walk in the candidate values of a query, which are in
+/// content order.
+///
+/// Each run's ordinals map to values a batch at a time, as the walk reaches
+/// them, so a page reads the table rows of the values it walks rather than
+/// those of every candidate. The runs' values merge with the values of the
+/// tail and scan files in content order, and a value that two runs produce
+/// is walked once. The position refers to its candidates by index, so a
+/// stream can own it.
+pub(super) struct CandidateValues {
+    /// One position for each run of `GrepCandidates::indexed`, in order.
+    runs: Vec<RunValues>,
+    /// The values of the candidates' `files` and `index_decided` at or after
+    /// the resume point, in content order.
+    files: VecDeque<ContentValue>,
+}
+
+struct RunValues {
+    /// The position in the run's ordinals of the next ordinal to map.
+    next: usize,
+    /// Mapped values that the walk hasn't reached, in content order.
+    mapped: VecDeque<ContentValue>,
+}
+
+impl CandidateValues {
+    /// Returns the position of the values of `candidates` at or after
+    /// `from`, or at the start when `from` is `None`.
+    pub(super) async fn start<S: ObjectStore + ?Sized>(
+        index: &GrepSegments<'_, S>,
+        candidates: &GrepCandidates,
+        from: Option<&ContentValue>,
+    ) -> Result<Self> {
+        let starts: Vec<usize> = match from {
+            None => vec![0; candidates.indexed.len()],
+            Some(from) => {
+                stream::iter(0..candidates.indexed.len())
+                    .map(|position| index.first_at_or_after(&candidates.indexed[position], from))
+                    .buffered(GREP_READS_IN_FLIGHT)
+                    .try_collect()
+                    .await?
+            }
+        };
+        let files: BTreeSet<&ContentValue> = candidates
+            .files
+            .keys()
+            .chain(candidates.index_decided.keys())
+            .filter(|value| from.is_none_or(|from| *value >= from))
+            .collect();
+        Ok(Self {
+            runs: starts
+                .into_iter()
+                .map(|next| RunValues {
+                    next,
+                    mapped: VecDeque::new(),
+                })
+                .collect(),
+            files: files.into_iter().copied().collect(),
+        })
     }
 
-    /// Whether the inode's newest visible revision should be verified.
-    pub(super) fn admits(&self, inode_id: InodeId, revision_no: RevisionNo) -> bool {
-        if self.unfiltered.contains(&inode_id) {
-            return true;
+    /// Returns the next value of `candidates`, the candidates that the walk
+    /// started from, in content order, or `None` after the last.
+    pub(super) async fn next<S: ObjectStore + ?Sized>(
+        &mut self,
+        index: &GrepSegments<'_, S>,
+        candidates: &GrepCandidates,
+    ) -> Result<Option<CandidateValue>> {
+        loop {
+            self.map_next_batches(index, candidates).await?;
+            let Some(value) = self
+                .runs
+                .iter()
+                .filter_map(|run| run.mapped.front())
+                .chain(self.files.front())
+                .min()
+                .copied()
+            else {
+                return Ok(None);
+            };
+            let mut indexed = false;
+            for run in &mut self.runs {
+                if run.mapped.front() == Some(&value) {
+                    run.mapped.pop_front();
+                    indexed = true;
+                }
+            }
+            if self.files.front() == Some(&value) {
+                self.files.pop_front();
+            }
+            if indexed || candidates.files.contains_key(&value) {
+                return Ok(Some(CandidateValue { value, indexed }));
+            }
         }
-        self.indexed
-            .get(&inode_id)
-            .is_some_and(|revisions| revisions.contains(&revision_no))
+    }
+
+    /// Maps the next batch of ordinals of each run whose mapped values the
+    /// walk has passed, with the runs' table reads in flight together.
+    async fn map_next_batches<S: ObjectStore + ?Sized>(
+        &mut self,
+        index: &GrepSegments<'_, S>,
+        candidates: &GrepCandidates,
+    ) -> Result<()> {
+        let batches: Vec<(usize, &RunCandidates, BTreeSet<u64>)> = self
+            .runs
+            .iter()
+            .zip(&candidates.indexed)
+            .enumerate()
+            .filter(|(_, (values, run))| {
+                values.mapped.is_empty() && values.next < run.ordinals.len()
+            })
+            .map(|(position, (values, run))| {
+                let end = (values.next + VALUES_PER_TABLE_READ).min(run.ordinals.len());
+                (
+                    position,
+                    run,
+                    run.ordinals[values.next..end].iter().copied().collect(),
+                )
+            })
+            .collect();
+        let mapped: Vec<BTreeMap<u64, ContentValue>> = stream::iter(0..batches.len())
+            .map(|batch| index.table_values(&batches[batch].1.segments, &batches[batch].2))
+            .buffered(GREP_READS_IN_FLIGHT)
+            .try_collect()
+            .await?;
+        for ((position, _, ordinals), values) in batches.into_iter().zip(mapped) {
+            let run = &mut self.runs[position];
+            run.next += ordinals.len();
+            run.mapped.extend(values.into_values());
+        }
+        Ok(())
     }
 }
 
 impl<S: ObjectStore + ?Sized> GrepSegments<'_, S> {
-    /// Evaluates the gram plan against all index segments.
+    /// Evaluates the gram plan against all index segments, and returns the
+    /// content values that contain every required gram.
     ///
-    /// For each required set, postings for alternative grams are unioned; the
+    /// Each run evaluates the plan on its own value ordinals: for each
+    /// required set, postings for alternative grams are unioned, and the
     /// results of required sets are intersected. Independent probes run with
     /// at most [`GREP_READS_IN_FLIGHT`] in flight. Evaluation stops when the
-    /// intersection is empty or small enough to verify within the page budget.
-    /// Stopping early may widen the candidate set, but final byte-level
-    /// pattern verification preserves exact results.
+    /// intersections are empty or small enough together to verify within the
+    /// page budget. Stopping early may widen the candidate set, but final
+    /// byte-level pattern verification preserves exact results.
     pub(super) async fn indexed_candidates(
         &self,
         segments: &[GrepSegmentRef],
         plan: &GramQueryPlan,
-    ) -> Result<BTreeMap<InodeId, BTreeSet<RevisionNo>>> {
-        let mut intersection: Option<BTreeSet<(InodeId, RevisionNo)>> = None;
+    ) -> Result<Vec<RunCandidates>> {
+        let mut runs: BTreeMap<RunNo, Vec<&GrepSegmentRef>> = BTreeMap::new();
+        for segment in segments {
+            runs.entry(segment.run_no).or_default().push(segment);
+        }
+        let mut intersections: Option<BTreeMap<RunNo, BTreeSet<u64>>> = None;
         for or_set in &plan.required {
-            // Lookup keys derive once per gram; the key-range prune is free
-            // (already in the descriptor), so only surviving probes fan out.
             let lookups: Vec<GramLookup> =
                 or_set.iter().map(|gram| GramLookup::new(*gram)).collect();
-            let mut probes: Vec<(&GramLookup, &GrepSegmentRef)> = Vec::new();
-            for gram_lookup in &lookups {
-                for descriptor in segments {
-                    if !key_range_may_intersect(
-                        &descriptor.min_row_key,
-                        &descriptor.max_row_key,
-                        descriptor.row_count,
-                        &gram_lookup.probe,
-                        gram_lookup.upper.as_deref(),
-                    ) {
-                        continue;
-                    }
-                    probes.push((gram_lookup, descriptor));
-                }
-            }
+            let probes: Vec<(&GramLookup, &GrepSegmentRef)> = lookups
+                .iter()
+                .flat_map(|gram_lookup| {
+                    segments
+                        .iter()
+                        .filter(|descriptor| {
+                            intersections
+                                .as_ref()
+                                .is_none_or(|runs| runs.contains_key(&descriptor.run_no))
+                        })
+                        .map(move |descriptor| (gram_lookup, descriptor))
+                })
+                .collect();
             // This union is the query's largest temporary allocation. In the worst
-            // case it contains one `(inode, revision)` pair per indexed revision. A
+            // case it contains one ordinal per indexed value of each run. A
             // streaming intersection would reduce memory but add probe-ordering
             // complexity.
-            let mut set_postings = BTreeSet::new();
+            let mut set_postings: BTreeMap<RunNo, BTreeSet<u64>> = BTreeMap::new();
             let mut batches = stream::iter(0..probes.len())
                 .map(|index| {
                     let (gram_lookup, descriptor) = probes[index];
                     self.postings_for_gram(descriptor, gram_lookup)
+                        .map_ok(move |batch| (descriptor.run_no, batch))
                 })
                 .buffered(GREP_READS_IN_FLIGHT);
-            while let Some(batch) = batches.try_next().await? {
-                set_postings.extend(batch);
+            while let Some((run_no, batch)) = batches.try_next().await? {
+                set_postings.entry(run_no).or_default().extend(batch);
             }
-            intersection = Some(match intersection {
+            let mut next = match intersections {
                 None => set_postings,
-                Some(current) => current.intersection(&set_postings).copied().collect(),
-            });
-            if intersection.as_ref().is_some_and(BTreeSet::is_empty) {
-                break;
-            }
-            // The budget stop: the intersection contains (inode, revision) pairs,
-            // an upper bound on the files a page could ever verify from it, so
-            // once it fits the per-page verification budget the remaining AND
-            // sets are constraints the page cannot use.
-            if intersection
-                .as_ref()
-                .is_some_and(|candidates| candidates.len() <= MAX_GREP_VERIFIED_FILES_PER_PAGE)
-            {
+                Some(current) => current
+                    .into_iter()
+                    .filter_map(|(run_no, ordinals)| {
+                        let found = set_postings.get(&run_no)?;
+                        Some((run_no, ordinals.intersection(found).copied().collect()))
+                    })
+                    .collect(),
+            };
+            next.retain(|_, ordinals: &mut BTreeSet<u64>| !ordinals.is_empty());
+            let candidates: usize = next.values().map(BTreeSet::len).sum();
+            intersections = Some(next);
+            // The budget stop: the intersections contain one ordinal per content
+            // value of a run, an upper bound on the values a page could ever
+            // verify from them, so once they fit the per-page verification
+            // budget the remaining AND sets are constraints the page cannot
+            // use.
+            if candidates <= MAX_GREP_VERIFIED_VALUES_PER_PAGE {
                 break;
             }
         }
-        let mut candidates: BTreeMap<InodeId, BTreeSet<RevisionNo>> = BTreeMap::new();
-        for (inode_id, revision_no) in intersection.unwrap_or_default() {
-            candidates.entry(inode_id).or_default().insert(revision_no);
-        }
-        Ok(candidates)
+        Ok(intersections
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(run_no, ordinals)| RunCandidates {
+                segments: runs[&run_no]
+                    .iter()
+                    .map(|segment| (*segment).clone())
+                    .collect(),
+                ordinals: ordinals.into_iter().collect(),
+            })
+            .collect())
     }
 
-    /// One gram's postings from one segment: bloom filter first (the inline
-    /// copy when the descriptor has one — no fetch at all — otherwise the
-    /// cached filter block), then only the data blocks the segment index
-    /// names for the gram's key range, loaded with at most
-    /// [`GREP_READS_IN_FLIGHT`] in flight. Every fetched section resolves
-    /// through the grep-private decoded-block cache.
+    /// Returns the position in `run`'s ordinals of the first one whose value
+    /// is at or after `from`, by a binary search over single reads of the
+    /// run's value table, because ordinal order is content order.
+    async fn first_at_or_after(&self, run: &RunCandidates, from: &ContentValue) -> Result<usize> {
+        let (mut low, mut high) = (0, run.ordinals.len());
+        while low < high {
+            let middle = low + (high - low) / 2;
+            let ordinal = run.ordinals[middle];
+            let values = self
+                .table_values(&run.segments, &BTreeSet::from([ordinal]))
+                .await?;
+            if values[&ordinal] < *from {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        Ok(low)
+    }
+
+    /// One gram's posting ordinals from one segment, read from the data
+    /// blocks that the segment's index lists for the gram's key range once
+    /// its filter admits the gram.
     async fn postings_for_gram(
         &self,
         descriptor: &GrepSegmentRef,
         gram_lookup: &GramLookup,
-    ) -> Result<BTreeSet<(InodeId, RevisionNo)>> {
-        let object_key = self.object_key(&descriptor.segment_id);
+    ) -> Result<BTreeSet<u64>> {
+        let range = self
+            .rows_in_range(
+                descriptor,
+                Some(&gram_lookup.probe),
+                &gram_lookup.prefix,
+                gram_lookup.upper.as_deref(),
+                usize::MAX,
+            )
+            .await?;
         let mut postings = BTreeSet::new();
-        let admitted = match &descriptor.filter_inline {
-            Some(inline) => {
-                let filter_bytes =
-                    hex_decode_bytes(inline).map_err(|error| GrepError::IndexCorrupt {
-                        message: format!(
-                            "index segment `{}` carries undecodable inline filter hex: {error}",
-                            object_key
-                        ),
-                    })?;
-                let filter = decode_filter_block(&filter_bytes, &descriptor.filter_block)
-                    .map_err(|error| index_segment_corrupt(&object_key, "filter block", &error))?;
-                filter.may_contain(&gram_lookup.probe)
+        for (_, row) in range.rows {
+            let IndexRow::GramPostings(row) = row else {
+                continue;
+            };
+            if row.gram != gram_lookup.gram {
+                continue;
             }
-            None => {
-                let filter =
-                    load_filter_block(self.store, self.block_cache, &object_key, descriptor)
-                        .await?;
-                filter.may_contain(&gram_lookup.probe)
-            }
-        };
-        if !admitted {
-            return Ok(postings);
-        }
-        let entries =
-            load_index_block(self.store, self.block_cache, &object_key, descriptor).await?;
-        let range =
-            index_blocks_for_key_range(&entries, &gram_lookup.prefix, gram_lookup.upper.as_deref());
-        // The range's blocks are independent ranged GETs, so they fan out
-        // instead of paying one round trip each; `buffered` returns them
-        // in entry order and rows fold in that order, so assembly stays
-        // deterministic even though the posting union is order-independent.
-        let mut blocks = stream::iter(range)
-            .map(|index| {
-                load_data_block(
-                    self.store,
-                    self.block_cache,
-                    &object_key,
-                    &descriptor.segment_id,
-                    &entries[index].block,
+            let batch = row.ordinals().map_err(|error| {
+                index_segment_corrupt(
+                    &self.object_key(&descriptor.segment_id),
+                    "posting batch",
+                    &error,
                 )
-            })
-            .buffered(GREP_READS_IN_FLIGHT);
-        while let Some(block) = blocks.try_next().await? {
-            for row in &block.rows {
-                let IndexRow::GramPostings { gram: row_gram, .. } = row;
-                if *row_gram != gram_lookup.gram {
-                    continue;
-                }
-                let batch = row
-                    .postings()
-                    .map_err(|error| index_segment_corrupt(&object_key, "posting batch", &error))?;
-                postings.extend(
-                    batch
-                        .into_iter()
-                        .map(|posting| (posting.inode_id, posting.revision_no)),
-                );
-            }
+            })?;
+            postings.extend(batch);
         }
         Ok(postings)
     }
@@ -226,9 +363,17 @@ impl GramLookup {
     }
 }
 
+/// The revision of one file in the unindexed tail, at the read sequence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct TailRevision {
+    pub(super) revision_no: RevisionNo,
+    pub(super) value: ContentValue,
+}
+
 /// The files whose content changed after the index cursor: the unindexed
-/// tail a query scans exhaustively. A cursor inside its watermark commit
-/// includes only that commit's remaining event suffix.
+/// tail a query scans exhaustively, with each file's newest revision. A
+/// cursor inside its watermark commit includes only that commit's remaining
+/// event suffix.
 ///
 /// Paging stops as soon as the tail exceeds the query's tail budget: past
 /// that the query either fails as lagging or serves the index's cut, and
@@ -237,8 +382,11 @@ pub(super) async fn tail_revisions(
     reads: &NamespaceReadView<'_>,
     resume: ChangeFeedResume,
 ) -> Result<TailScan> {
-    let mut inodes = BTreeSet::new();
+    let mut files = BTreeMap::new();
     let mut after_seq = resume.after_seq();
+    if after_seq >= reads.head_seq() {
+        return Ok(TailScan::Within(files));
+    }
     loop {
         let feed = reads
             .list_changes_after(after_seq, TAIL_FEED_PAGE_COMMITS)
@@ -258,36 +406,121 @@ pub(super) async fn tail_revisions(
             }
             for event in events.iter().skip(start_event_index) {
                 if let Some(revision) = published_revision(event) {
-                    inodes.insert(revision.inode_id);
+                    files.insert(
+                        revision.inode_id,
+                        TailRevision {
+                            revision_no: revision.revision_no,
+                            value: ContentValue::of(revision.content_ref),
+                        },
+                    );
                 }
             }
         }
-        if inodes.len() > MAX_GREP_TAIL_FILES {
+        if files.len() > MAX_GREP_TAIL_FILES {
             return Ok(TailScan::OverBudget);
         }
         match feed.next_after_seq {
             Some(next_after_seq) => after_seq = next_after_seq,
-            None => return Ok(TailScan::Within(inodes)),
+            None => return Ok(TailScan::Within(files)),
         }
     }
 }
 
 /// The unindexed tail, or the fact that it is larger than one query scans.
 pub(super) enum TailScan {
-    /// Every file whose content changed after the index watermark.
-    Within(BTreeSet<InodeId>),
+    /// Every file whose content changed after the index watermark, with its
+    /// newest revision.
+    Within(BTreeMap<InodeId, TailRevision>),
     /// More files changed after the watermark than the tail budget allows;
     /// enumeration stopped there, so no set is returned.
     OverBudget,
 }
 
-/// Collects visible files in the query scope for a full scan.
+/// Adds the files of the unindexed tail to `candidates`, except the files
+/// whose values the index has already examined and the query can skip.
+///
+/// A tail value with a `texts` row is either ineligible, so its files can't
+/// match, or indexed, so the posting intersection decides whether the value
+/// is a candidate, and its files wait in `index_decided` for the walk to
+/// find the value among the index's candidates. Only the values without a
+/// row are read and verified whatever their grams are.
+pub(super) async fn add_tail_files<S: ObjectStore + ?Sized>(
+    segments: &GrepSegments<'_, S>,
+    descriptors: &[GrepSegmentRef],
+    candidates: &mut GrepCandidates,
+    tail: BTreeMap<InodeId, TailRevision>,
+) -> Result<()> {
+    let values: BTreeSet<ContentValue> = tail.values().map(|revision| revision.value).collect();
+    let texts = segments
+        .text_rows(descriptors, &values, GREP_READS_IN_FLIGHT)
+        .await?;
+    for (inode_id, revision) in tail {
+        let files = match texts.get(&revision.value) {
+            Some(true) => &mut candidates.index_decided,
+            Some(false) => continue,
+            None => &mut candidates.files,
+        };
+        files
+            .entry(revision.value)
+            .or_default()
+            .insert(inode_id, revision.revision_no);
+    }
+    Ok(())
+}
+
+/// Collects the visible files in the query scope for a full scan, grouped
+/// by the content value of each file's current revision.
 ///
 /// The bounded walk starts at the scope's inode, or at the root inode when
 /// the request names no scope. It lists directories by inode because a
 /// derived path may exceed the request path limits. The directory limit
-/// bounds the work and prevents a binding cycle from running forever.
-pub(super) async fn scan_candidate_inodes(
+/// bounds the work and prevents a binding cycle from running forever. Then
+/// the scan reads each file's entry, with at most [`GREP_READS_IN_FLIGHT`] in
+/// flight, for its content value.
+pub(super) async fn scan_candidate_files(
+    reads: &NamespaceReadView<'_>,
+    scope: Option<&PathEntry>,
+) -> Result<CandidateFiles> {
+    let inodes = scan_candidate_inodes(reads, scope).await?;
+    let mut files = CandidateFiles::new();
+    let mut entries = stream::iter(inodes)
+        .map(|inode_id| async move {
+            match reads.resolve_inode(inode_id).await {
+                Ok(entry) => Ok(Some(entry)),
+                Err(error)
+                    if matches!(
+                        error.code(),
+                        ErrorCode::InodeNotFound | ErrorCode::Forbidden
+                    ) =>
+                {
+                    Ok(None)
+                }
+                Err(error) => Err(error),
+            }
+        })
+        .buffered(GREP_READS_IN_FLIGHT);
+    while let Some(entry) = entries.try_next().await? {
+        let Some(entry) = entry else {
+            continue;
+        };
+        let PathEntryKind::File {
+            revision_no,
+            content_ref: Some(content_ref),
+            ..
+        } = &entry.kind
+        else {
+            continue;
+        };
+        files
+            .entry(ContentValue::of(content_ref))
+            .or_default()
+            .insert(entry.inode_id, *revision_no);
+    }
+    Ok(files)
+}
+
+/// Walks the scope's directories for the inodes of its visible files.
+async fn scan_candidate_inodes(
     reads: &NamespaceReadView<'_>,
     scope: Option<&PathEntry>,
 ) -> Result<BTreeSet<InodeId>> {

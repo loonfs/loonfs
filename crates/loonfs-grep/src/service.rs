@@ -2,6 +2,7 @@
 
 mod candidates;
 mod page_walk;
+mod value_files;
 
 use crate::cache::{DecodedGrepBlock, GrepBlockCache, GrepBlockCacheKey};
 use crate::keyspace::manifest_key;
@@ -12,7 +13,7 @@ use crate::query::{compile_pattern, CompiledPattern, GramPlanOutcome};
 use crate::reads::{NamespaceReadView, NamespaceReads};
 use crate::segments::GrepSegments;
 use crate::{GrepError, Result};
-use candidates::{scan_candidate_inodes, tail_revisions, GrepCandidates, TailScan};
+use candidates::{add_tail_files, scan_candidate_files, tail_revisions, GrepCandidates, TailScan};
 use loonfs::engine::{Observation, SegmentBlockKind};
 use loonfs::CoreError;
 use loonfs_objectstore::ObjectStore;
@@ -34,11 +35,13 @@ pub const MAX_GREP_TAIL_FILES: usize = 512;
 pub const MAX_GREP_SCAN_FILES: usize = 4096;
 /// Longest match line returned, in bytes; longer lines are truncated.
 pub(crate) const GREP_LINE_CAP_BYTES: usize = 512;
-/// Candidate files one page will read and verify before returning with a
-/// resume cursor, so a page's cost is bounded by its own budget rather
-/// than by how many false-positive candidates the plan admits.
-pub(crate) const MAX_GREP_VERIFIED_FILES_PER_PAGE: usize = 256;
-/// Maximum candidates examined while building one page. This bounds work
+/// Candidate content values whose bytes one page will read and verify before
+/// returning with a resume cursor, so a page's cost is bounded by its own
+/// budget rather than by how many false-positive candidates the plan admits.
+/// The files of each value count against
+/// [`MAX_GREP_EXAMINED_CANDIDATES_PER_PAGE`].
+pub(crate) const MAX_GREP_VERIFIED_VALUES_PER_PAGE: usize = 256;
+/// Maximum candidate files examined while building one page. This bounds work
 /// when scope filters reject most candidates. The cursor advances past
 /// rejected candidates so the next page does not examine them again.
 pub(crate) const MAX_GREP_EXAMINED_CANDIDATES_PER_PAGE: usize = 4096;
@@ -134,6 +137,9 @@ impl CurrentManifests {
 
 #[derive(Debug, Clone)]
 struct MaterializedGrepIndexSnapshot {
+    /// The sequence that the index's backfill captured, which identifies
+    /// the build that a cursor records.
+    captured_seq: ChangeSeq,
     resume: ChangeFeedResume,
     state: Arc<GrepManifestState>,
 }
@@ -211,23 +217,23 @@ impl GrepService {
     }
 
     async fn plan_query<'a, S: ObjectStore>(
-        &self,
+        &'a self,
         request: &GrepRequest,
         cursor: Option<&str>,
         namespace_reads: &'a NamespaceReads,
-        store: &S,
-    ) -> Result<QueryPlan<'a>> {
+        store: &'a S,
+    ) -> Result<QueryPlan<'a, S>> {
         validate_grep_request(request)?;
-        let mut reads = namespace_reads.read_view().await?;
+        // The index loads before the read view, so the view's head is at or
+        // above every sequence that the index records, such as its build's
+        // capture and a reorganization's pruning floor.
         let snapshot = self
-            .load_index_snapshot(store, reads.namespace_id())
+            .load_index_snapshot(store, namespace_reads.namespace_id())
             .await?;
-        if snapshot.resume.built_through_seq() > reads.head_seq() {
-            reads = namespace_reads.read_view().await?;
-        }
-        let head_seq = reads.head_seq();
+        let head = namespace_reads.read_view().await?;
+        let head_seq = head.head_seq();
         let fingerprint = request.fingerprint();
-        let resume = match cursor {
+        let (reads, resume, cursor_cut_seq, later) = match cursor {
             Some(cursor) => {
                 let cursor: GrepPageCursor = decode_cursor(cursor)
                     .map_err(|error| CoreError::InvalidCursor(error.to_string()))?;
@@ -245,31 +251,89 @@ impl GrepService {
                     ))
                     .into());
                 }
-                Some(GrepResume::from_cursor(&cursor))
+                if cursor.index_captured_seq != snapshot.captured_seq {
+                    return Err(CoreError::InvalidCursor(
+                        "the cursor was issued by an earlier build of the grep index; start the search again"
+                            .to_owned(),
+                    )
+                    .into());
+                }
+                // Every page after the first reads at the first page's
+                // sequence, so a file whose content changed between pages
+                // keeps its place in content order.
+                let at_cursor = head.at_seq(cursor.head_seq).await?;
+                let later = LaterPage {
+                    members: namespace_reads.membership_view(cursor.head_seq).await?,
+                    head,
+                };
+                (
+                    at_cursor,
+                    Some(GrepResume::from_cursor(&cursor)),
+                    Some(cursor.cut_seq),
+                    Some(later),
+                )
             }
-            None => None,
+            None => (head, None, None, None),
         };
+        let read_seq = reads.head_seq();
         let CompiledPattern {
             regex: pattern,
             plan: gram_plan,
         } = compile_pattern(request)?;
+        // A later page decides its cut at its read sequence as the service,
+        // and that includes the scope.
+        let member_reads = later.as_ref().map_or(&reads, |later| &later.members);
         let scope = match &request.scope {
-            GrepScope::PathPrefix(prefix) => Some(reads.resolve_path(prefix).await?),
-            GrepScope::Inode(inode_id) => Some(reads.resolve_inode(*inode_id).await?),
+            GrepScope::PathPrefix(prefix) => Some(member_reads.resolve_path(prefix).await?),
+            GrepScope::Inode(inode_id) => Some(member_reads.resolve_inode(*inode_id).await?),
             GrepScope::Namespace => None,
         };
+        let index = GrepSegments {
+            store,
+            namespace_id: namespace_reads.namespace_id(),
+            block_cache: Some(&self.block_cache),
+        };
         let mut candidates = GrepCandidates::default();
-        let tail_resume = match gram_plan {
+        let mut cut_seq = read_seq;
+        let mut tail_scanned = true;
+        match gram_plan {
             GramPlanOutcome::Indexable(plan) => {
-                let segments = GrepSegments {
-                    store,
-                    namespace_id: reads.namespace_id(),
-                    block_cache: Some(&self.block_cache),
-                };
-                candidates.indexed = segments
+                candidates.indexed = index
                     .indexed_candidates(snapshot.state.segments(), &plan)
                     .await?;
-                Some(snapshot.resume)
+                match cursor_cut_seq.filter(|cursor_cut_seq| *cursor_cut_seq < read_seq) {
+                    // An earlier page of this stale search left out the
+                    // commits after its cut, so this page leaves them out
+                    // too, however far the index has moved since. The cut
+                    // stays at or below what this page's index covers in
+                    // full.
+                    Some(cursor_cut_seq) => {
+                        tail_scanned = false;
+                        cut_seq = cursor_cut_seq.min(stale_cut_seq(snapshot.resume));
+                    }
+                    None => match tail_revisions(&reads, snapshot.resume).await? {
+                        TailScan::Within(tail) => {
+                            add_tail_files(
+                                &index,
+                                snapshot.state.segments(),
+                                &mut candidates,
+                                tail,
+                            )
+                            .await?;
+                        }
+                        TailScan::OverBudget if request.allow_stale => {
+                            tail_scanned = false;
+                            cut_seq = cut_seq.min(stale_cut_seq(snapshot.resume));
+                        }
+                        TailScan::OverBudget => {
+                            return Err(GrepError::IndexLagging {
+                                behind_commits: read_seq
+                                    .0
+                                    .saturating_sub(snapshot.resume.built_through_seq().0),
+                            });
+                        }
+                    },
+                }
             }
             GramPlanOutcome::Unindexable => {
                 if !request.allow_scan {
@@ -278,44 +342,33 @@ impl GrepService {
                             .to_owned(),
                     ));
                 }
-                candidates.unfiltered = scan_candidate_inodes(&reads, scope.as_ref()).await?;
-                None
-            }
-        };
-        let mut tail_scanned = true;
-        if let Some(tail_resume) = tail_resume {
-            match tail_revisions(&reads, tail_resume).await? {
-                TailScan::Within(inodes) => candidates.unfiltered.extend(inodes),
-                TailScan::OverBudget if request.allow_stale => {
-                    tail_scanned = false;
-                }
-                TailScan::OverBudget => {
-                    return Err(GrepError::IndexLagging {
-                        behind_commits: head_seq
-                            .0
-                            .saturating_sub(snapshot.resume.built_through_seq().0),
-                    });
-                }
+                candidates.files = scan_candidate_files(member_reads, scope.as_ref()).await?;
             }
         }
         Ok(QueryPlan {
             reads,
-            head_seq,
+            later,
+            read_seq,
             built_through_seq: snapshot.resume.built_through_seq(),
+            index_captured_seq: snapshot.captured_seq,
             fingerprint,
             resume,
             pattern,
             scope,
             candidates,
             tail_scanned,
+            cut_seq,
+            index,
+            index_state: snapshot.state,
         })
     }
 
     /// Content search over one namespace read view, for the page at
     /// `page.cursor`.
     ///
-    /// A cursor resumes only the request whose page returned it, and the
-    /// search checks it against the current namespace head.
+    /// A cursor resumes only the request whose page returned it. A first page
+    /// reads at the namespace head, and a later page reads at the sequence
+    /// that the first page read at, which the cursor records.
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.phase",
@@ -336,7 +389,7 @@ impl GrepService {
         let page = walk_page(&plan, page.limit.as_usize()).await?;
         Ok(GrepResponse {
             namespace_id: plan.reads.namespace_id().clone(),
-            head_seq: plan.head_seq,
+            head_seq: plan.read_seq,
             built_through_seq: plan.built_through_seq,
             tail_scanned: plan.tail_scanned,
             matches: page.matches,
@@ -366,27 +419,76 @@ fn materialized_snapshot_from_state(
 ) -> Result<MaterializedGrepIndexSnapshot> {
     // Queries require an active index and its watermark. Disabled and
     // backfilling indexes return their corresponding errors.
-    let resume = match state.status() {
+    let (captured_seq, resume) = match state.status() {
         GrepIndexStatus::Disabled {} => return Err(GrepError::NotEnabled),
         GrepIndexStatus::Backfilling { .. } => return Err(GrepError::Backfilling),
-        GrepIndexStatus::Active { .. } => state
-            .status()
-            .active_watermark()
-            .expect("an active grep status should have a watermark"),
+        status @ GrepIndexStatus::Active { captured_seq, .. } => (
+            *captured_seq,
+            status
+                .active_watermark()
+                .expect("an active grep status should have a watermark"),
+        ),
     };
-    Ok(MaterializedGrepIndexSnapshot { resume, state })
+    Ok(MaterializedGrepIndexSnapshot {
+        captured_seq,
+        resume,
+        state,
+    })
 }
 
-struct QueryPlan<'a> {
+/// Everything one page of a query reads with: the read view, the candidates,
+/// and the index that the candidates' files are read from.
+struct QueryPlan<'a, S> {
+    /// The subject's view at the read sequence. A later page reads the files
+    /// that changed since its read sequence through it, which needs the
+    /// subject's `history` right.
     reads: NamespaceReadView<'a>,
-    head_seq: ChangeSeq,
+    /// The other views of a page after the first.
+    later: Option<LaterPage<'a>>,
+    /// The sequence that the page reads at: the head for a first page, and
+    /// the cursor's sequence for a later page.
+    read_seq: ChangeSeq,
     built_through_seq: ChangeSeq,
+    /// The sequence that the index's backfill captured, which the page's
+    /// cursor records.
+    index_captured_seq: ChangeSeq,
     fingerprint: u64,
     resume: Option<GrepResume>,
     pattern: regex::bytes::Regex,
     scope: Option<PathEntry>,
     candidates: GrepCandidates,
     tail_scanned: bool,
+    /// The newest commit whose `content_revisions` rows the page uses: the
+    /// read sequence, or with `allow_stale` and a tail past its budget, the
+    /// last commit that the index covers in full, if that's lower.
+    cut_seq: ChangeSeq,
+    index: GrepSegments<'a, S>,
+    index_state: Arc<GrepManifestState>,
+}
+
+/// The views of a page after the first, which reads at its cursor's
+/// sequence.
+///
+/// The page decides its cut at that sequence through `members`, as the
+/// service. A file in the cut whose state at the head is its state at the
+/// read sequence (the same revision and path) is current content, which the
+/// page serves through `head` with the subject's rights there, as a first
+/// page would. The page serves any other file in the cut through the
+/// subject's view at the read sequence, so only to a subject with the
+/// `history` right.
+struct LaterPage<'a> {
+    members: NamespaceReadView<'a>,
+    head: NamespaceReadView<'a>,
+}
+
+/// Returns the last commit that an index at `resume` covers in full, which a
+/// stale query treats as the end of what it scanned. The commit at the
+/// watermark is left out while the index covers only part of it.
+fn stale_cut_seq(resume: ChangeFeedResume) -> ChangeSeq {
+    match resume.next_event_index() {
+        0 => resume.built_through_seq(),
+        _ => ChangeSeq(resume.built_through_seq().0.saturating_sub(1)),
+    }
 }
 
 #[cfg(test)]
@@ -412,6 +514,7 @@ mod tests {
                 namespace_id.clone(),
                 ManifestNo(manifest_no),
                 GrepIndexStatus::Active {
+                    captured_seq: ChangeSeq(0),
                     built_through_seq: ChangeSeq(0),
                     next_event_index: 0,
                 },

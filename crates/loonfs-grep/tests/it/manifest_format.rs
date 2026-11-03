@@ -126,7 +126,7 @@ fn mutable_hint_envelope_rejects_unknown_fields_as_corruption() {
 fn decoder_rejects_the_string_format_version_without_a_shim() {
     let manifest = String::from_utf8(read_golden(DISABLED_MANIFEST_FIXTURE))
         .expect("manifest JSON is UTF-8")
-        .replace("\"format_version\":1", "\"format_version\":\"v1\"");
+        .replace("\"format_version\":2", "\"format_version\":\"v2\"");
 
     assert_matches!(
         decode_grep_manifest(manifest.as_bytes()),
@@ -166,17 +166,22 @@ fn decoder_rejects_a_manifest_that_omits_its_event_index() {
 }
 
 #[test]
-fn decoder_rejects_unknown_version_without_fallback() {
-    let wrong_version = String::from_utf8(read_golden(ACTIVE_MANIFEST_FIXTURE))
-        .expect("manifest JSON is UTF-8")
-        .replace("\"format_version\":1", "\"format_version\":7");
+fn decoder_rejects_other_versions_without_fallback() {
+    for version in [1, 7] {
+        let wrong_version = String::from_utf8(read_golden(ACTIVE_MANIFEST_FIXTURE))
+            .expect("manifest JSON is UTF-8")
+            .replace(
+                "\"format_version\":2",
+                &format!("\"format_version\":{version}"),
+            );
 
-    assert_matches!(
-        decode_grep_manifest(wrong_version.as_bytes()),
-        Err(GrepEnvelopeCodecError::Envelope(
-            EnvelopeCodecError::UnsupportedFormatVersion { kind, found, supported }
-        )) if kind == "grep_manifest" && found == 7 && supported == 1
-    );
+        assert_matches!(
+            decode_grep_manifest(wrong_version.as_bytes()),
+            Err(GrepEnvelopeCodecError::Envelope(
+                EnvelopeCodecError::UnsupportedFormatVersion { kind, found, supported }
+            )) if kind == "grep_manifest" && found == version && supported == 2
+        );
+    }
 }
 
 #[test]
@@ -215,6 +220,7 @@ fn constructor_rejects_reorganization_segment_mismatch() {
             row_key_cursor: String::new(),
             output_level: 1,
             run_no: RunNo(1),
+            pruning: None,
         }),
         next_run_no: RunNo(2),
     };
@@ -224,6 +230,7 @@ fn constructor_rejects_reorganization_segment_mismatch() {
             namespace_id("docs"),
             loonfs_types::ManifestNo(1),
             GrepIndexStatus::Active {
+                captured_seq: ChangeSeq(0),
                 built_through_seq: ChangeSeq(7),
                 next_event_index: 0,
             },
@@ -244,6 +251,7 @@ fn constructor_rejects_a_segment_with_no_rows() {
             namespace_id("docs"),
             loonfs_types::ManifestNo(1),
             GrepIndexStatus::Active {
+                captured_seq: ChangeSeq(0),
                 built_through_seq: ChangeSeq(7),
                 next_event_index: 0,
             },

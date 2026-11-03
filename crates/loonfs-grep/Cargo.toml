@@ -23,7 +23,7 @@ serde.workspace = true
 serde_bytes.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["macros", "sync"] }
 tracing.workspace = true
 
 [dev-dependencies]

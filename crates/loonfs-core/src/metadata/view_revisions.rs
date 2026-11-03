@@ -2,6 +2,7 @@
 //! attributes and access revisions, and content layouts.
 
 use super::manifest_index;
+use super::manifest_tail_merge::{ManifestPage, ManifestTailMerge, TieOrder};
 use crate::error::{CoreError, Result};
 use crate::metadata::view::newest;
 use crate::metadata::view::MetadataView;
@@ -122,6 +123,59 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         revisions.sort_by_key(|revision| std::cmp::Reverse(revision_order_key(revision)));
         revisions.truncate(limit);
         Ok(revisions)
+    }
+
+    /// Returns up to `limit` of the view's revisions whose row keys are at or
+    /// after `lower_bound`, with their row keys, in key order (by inode, and
+    /// newest first within each inode).
+    ///
+    /// The manifest's rows merge with the WAL tail's rows, and the page reads
+    /// manifest rows until it has `limit` rows at or below the view's
+    /// sequence, so a page below the manifest's head is short only at the end
+    /// of the family.
+    pub(crate) async fn revisions_page(
+        &self,
+        lower_bound: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, RevisionRecord)>> {
+        let visible_seq = self.visible_seq();
+        let mut tail: Vec<(String, RevisionRecord)> = self
+            .row_states()
+            .flat_map(|state| state.revisions())
+            .filter(|revision| revision.committed_seq <= visible_seq)
+            .map(|revision| (revision_row_key(revision), revision.clone()))
+            .filter(|(row_key, _)| row_key.as_str() >= lower_bound)
+            .collect();
+        tail.sort_by(|(left, _), (right, _)| left.cmp(right));
+        let segments = self.manifest_segments();
+        // A short page is the end of the family.
+        let refill = |lower_bound: String| async move {
+            let rows = manifest_index::revisions_page(segments, &lower_bound, limit).await?;
+            Ok(ManifestPage {
+                more: rows.len() >= limit,
+                rows,
+            })
+        };
+        let mut merge = ManifestTailMerge::new(lower_bound.to_owned(), tail, TieOrder::TailFirst);
+        let mut rows: Vec<(String, RevisionRecord)> = Vec::with_capacity(limit);
+        while rows.len() < limit {
+            let Some((row_key, revision)) = merge.next(refill).await? else {
+                break;
+            };
+            if revision.committed_seq > visible_seq {
+                continue;
+            }
+            // A row present in both the manifest and the tail is one
+            // revision, not two.
+            if rows
+                .last()
+                .is_some_and(|(last_key, _)| *last_key == row_key)
+            {
+                continue;
+            }
+            rows.push((row_key, revision));
+        }
+        Ok(rows)
     }
 
     /// The newest attribute revision record for `inode_id` at the visible
@@ -331,6 +385,16 @@ fn access_order_key(record: &AccessRevisionRecord) -> (AccessRevisionNo, ChangeS
         record.access_revision_no,
         record.committed_seq,
         record.delta_index,
+    )
+}
+
+/// Returns the revisions family's row key of `revision`.
+fn revision_row_key(revision: &RevisionRecord) -> String {
+    loonfs_types::format::manifest::lookup_keys::revision_row_key(
+        revision.inode_id,
+        revision.revision_no,
+        revision.committed_seq,
+        revision.delta_index,
     )
 }
 

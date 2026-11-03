@@ -5,7 +5,11 @@
 //! service holding the query-side block cache, and a worker over grep's own
 //! keyspace.
 
-use loonfs::{LoonFs, Maintenance, ReadOnly, SharedObjectStore, Writable};
+use loonfs::publish::{CommitCandidate, CommitIntent, FilesystemOperation};
+use loonfs::{
+    CommitId, DestinationBehavior, LoonFs, MaintainMetadataOptions, Maintenance, ReadOnly,
+    SharedObjectStore, Writable,
+};
 use loonfs_grep::manifest::GrepIndexStatus;
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepBlockCache, GrepBuildOutcome, GrepDisableOutcome, GrepEnableOutcome,
@@ -14,7 +18,7 @@ use loonfs_grep::{
 };
 use loonfs_test_support::clock::ManualClock;
 use loonfs_types::GrepIndex;
-use loonfs_types::{ChangeSeq, GrepRequest, GrepResponse, NamespaceId, PageRequest};
+use loonfs_types::{AbsolutePath, ChangeSeq, GrepRequest, GrepResponse, NamespaceId, PageRequest};
 use std::sync::Arc;
 
 pub(crate) struct GrepHost {
@@ -272,5 +276,109 @@ pub(crate) fn page_request(cursor: Option<String>, matches: u32) -> PageRequest<
         limit: loonfs_types::EffectiveLimit::from_requested(Some(matches))
             .expect("test page limits should be within the pagination policy"),
         cursor,
+    }
+}
+
+/// Folds the tail through `maintenance`, then advances the floor to the head
+/// through a handle whose wall clock is one default grace window ahead, so the
+/// advance can pass every commit made before the call.
+pub(crate) async fn fold_wal_and_advance_retention(
+    store: &SharedObjectStore,
+    maintenance: &Maintenance,
+    namespace_id: &NamespaceId,
+) -> ChangeSeq {
+    maintenance
+        .maintain_metadata_with_options(
+            namespace_id,
+            &MaintainMetadataOptions {
+                max_wal_tail_objects: std::num::NonZeroU64::MIN,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("fold wal");
+    loonfs::test_support::maintenance_past_the_grace_window(store.clone())
+        .await
+        .advance_retention_floor(namespace_id)
+        .await
+        .expect("advance retention")
+        .retention_floor_seq
+}
+
+/// Returns `paths` in the order a grep walk visits their files: by the
+/// content value of each file's current revision, which is its content ID
+/// and size, and then by inode ID.
+///
+/// Content IDs are random, so a test that needs one file before another
+/// learns the order after it writes the files.
+pub(crate) async fn in_walk_order<const N: usize>(
+    namespace: &loonfs::Namespace<loonfs::Writable>,
+    paths: [&str; N],
+) -> [String; N] {
+    let mut files = Vec::with_capacity(N);
+    for path in paths {
+        let entry = namespace.stat(path).await.expect("stat the file");
+        let content_ref = entry.content_ref().expect("a file has content");
+        files.push((
+            (
+                content_ref.content_id.clone(),
+                content_ref.size_bytes,
+                entry.inode_id,
+            ),
+            path.to_owned(),
+        ));
+    }
+    files.sort();
+    files
+        .into_iter()
+        .map(|(_, path)| path)
+        .collect::<Vec<_>>()
+        .try_into()
+        .expect("one path for each file")
+}
+
+/// Publishes `count` files under `/{prefix}-{index}.txt` that refer to one
+/// upload of `content`, in one publication.
+pub(crate) async fn publish_same_content_files(
+    namespace: &loonfs::Namespace<Writable>,
+    prefix: &str,
+    count: usize,
+    content: &[u8],
+) {
+    let prepared = namespace
+        .prepare_content(content)
+        .await
+        .expect("prepare shared content");
+    let content_ref = prepared.content_ref().clone();
+    let candidates = (0..count)
+        .map(|index| {
+            CommitCandidate::prepared(
+                CommitIntent::single(
+                    CommitId::generate(),
+                    loonfs_test_support::test_actor(),
+                    None,
+                    FilesystemOperation::PutFile {
+                        path: AbsolutePath::parse(format!("/{prefix}-{index:04}.txt"))
+                            .expect("batch path"),
+                        content: loonfs_types::FileContent::Ref {
+                            content_ref: content_ref.clone(),
+                            source_namespace_id: None,
+                        },
+                        behavior: DestinationBehavior::NoReplace,
+                        expected_inode_id: None,
+                        expected_revision_no: None,
+                    },
+                ),
+                vec![prepared.clone()],
+            )
+        })
+        .collect::<Vec<_>>();
+    // Every candidate is admitted before the publisher's worker can take
+    // any of them, so they coalesce into one publication.
+    let submissions = candidates
+        .into_iter()
+        .map(|candidate| namespace.commit_candidate(candidate));
+    for result in futures::future::join_all(submissions).await {
+        result.expect("publish batch file");
     }
 }

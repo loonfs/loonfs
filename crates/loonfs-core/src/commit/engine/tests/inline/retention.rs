@@ -278,6 +278,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
         .load_metadata_view(&crate::RuntimeReadContext {
             read_basis: pinned,
             tail: None,
+            visible_seq: None,
         })
         .await
         .expect("fresh snapshot view");

@@ -1869,8 +1869,8 @@ There are four kinds of control object: `hint`, `pin`, `upload_session`, and `up
 | Upload outcome record | `upload_outcome` | Uncompressed JSON | 1 |
 | Content object | No envelope | Immutable extent bytes | Not versioned. A layout lists the whole and span objects for a `blob_v1` chain prefix. |
 | Grep hint | `grep_hint` | Uncompressed JSON | 1 |
-| Grep manifest | `grep_manifest` | Uncompressed JSON | 1 |
-| Grep segment | No envelope | Block sections with grep rows | Governed by grep manifest version 1 |
+| Grep manifest | `grep_manifest` | Uncompressed JSON | 2 |
+| Grep segment | No envelope | Block sections with grep rows | Governed by grep manifest version 2 |
 
 ### A.2 Envelope layout
 
@@ -2539,7 +2539,9 @@ namespaces/{namespace_id}/extensions/grep/
 
 The `grep_hint` version 1 JSON payload contains `namespace_id` and `manifest_no`. Enabling grep writes a hint that points to manifest 1, and then creates manifest 1 with put-if-absent. A hint collision is allowed, and the manifest put determines which installation succeeds. Later publications use the next number.
 
-A `grep_manifest` version 1 payload contains `namespace_id`, `manifest_no`, `status`, `index`, and `segments`, and its namespace and number MUST match the key. Both envelopes verify their stored payload checksum, and they reject unknown kinds, versions, fields, and invalid nested state. The hint contains no separate manifest checksum.
+A `grep_manifest` version 2 payload contains `namespace_id`, `manifest_no`, `status`, `index`, and `segments`, and its namespace and number MUST match the key. Both envelopes verify their stored payload checksum, and they reject unknown kinds, versions, fields, and invalid nested state. The hint contains no separate manifest checksum.
+
+Version 2 differs from version 1 in the active status and the index's row families, and a reader doesn't read a version 1 index. A version 1 index has to be removed (its whole `extensions/grep/` prefix deleted), and then grep has to be enabled again, which builds a version 2 index from a new backfill.
 
 `index_stored_bytes` is the sum of `index_block.offset + index_block.stored_bytes` for the manifest's referenced segments, computed with checked arithmetic, so it doesn't need any segment reads. It's reported with the grep manifest number and the full indexing status, including any partial-commit position. Confirmed absence means zero referenced index bytes, and a read failure stays an error.
 
@@ -2548,7 +2550,7 @@ Grep discovery works like core discovery:
 1. Load the hinted manifest, and probe the following numbers until one returns not found. A missing hint, or a missing manifest 1, means grep isn't enabled. A missing higher hinted manifest is corruption.
 2. After any not-found result, read the hint again, because garbage collection might have deleted manifests below a newer hint. Start again from that hint when it points to a later manifest, or when its answer arrives `READ_REVALIDATION_BOUND_MS` or more after a time read before discovery loaded the hint it started from.
 
-A successor manifest MUST have the same `namespace_id` and the next manifest number, and it MUST NOT lower `next_run_no` or the indexing position in `status`. A backfill can reset its inode cursor only when it restarts from a new user pin. Disabling grep keeps `next_run_no` and drops the rest of the index state, and enabling it starts a new backfill.
+A successor manifest MUST have the same `namespace_id` and the next manifest number, and it MUST NOT lower `next_run_no` or the indexing position in `status`. A backfill can reset its inode cursor only when it restarts from a new user pin. An active successor MUST keep the `captured_seq` of the active manifest or the backfill that it follows. Disabling grep keeps `next_run_no` and drops the rest of the index state, and enabling it starts a new backfill.
 
 A query validates a cached manifest with a HEAD request for its successor:
 
@@ -2558,12 +2560,12 @@ A query validates a cached manifest with a HEAD request for its successor:
 
 A manifest loaded by discovery is dated by a time read before discovery began, and decoded manifests can be cached by namespace and number.
 
-If an index watermark is ahead of the head of a query's read view, the index is still used. The query takes a new read view once before it uses that index.
+A query loads the grep manifest before it takes its read view, so the view's head is at or above every sequence that the manifest records, such as a backfill's captured sequence and the sequences that a reorganization's `pruning` records. An index watermark can still be ahead of the sequence that a page reads at, for example on a later page of a search. The page then still uses the index, and it leaves out the index's rows of commits above its read sequence (see [Querying the index](#d6-querying-the-index)).
 
-A step writes segments first, and then it publishes the next manifest with put-if-absent. A publisher that loses reloads the durable state and plans again against the current inputs. If a manifest put ends with an unknown outcome, the publisher reads the manifest at the number it tried:
+A step writes segments first, and then it publishes the next manifest with put-if-absent. A step whose put loses ends without publishing anything: it returns `superseded`, it deletes a user pin that it created for a backfill, and its segments are left to the collector. The next step loads the winning manifest and plans its own work from that manifest's state. If a manifest put ends with an unknown outcome, the publisher reads the manifest at the number it tried:
 
 - If that manifest has an identical payload and the publication budget hasn't expired, the publication succeeded.
-- If it has another payload, the publisher lost, and it reloads and plans its next step from the current state.
+- If it has another payload, the publisher lost, the same as when a put fails its precondition.
 - If the number is missing, the outcome stays unknown. The publisher returns `outcome_unknown`, and it keeps the backfill's user pin that the step created, because the put might still succeed and refer to it.
 
 A put that succeeds after the budget has expired also has an unknown outcome (see [Clock and operation assumptions](#114-clock-and-operation-assumptions)). A successful publisher raises the hint with CAS, taking the greater number, at most once per second for each namespace. A hint read or write that returns no compare token is a store error, and a failed hint raise doesn't undo the publication.
@@ -2577,12 +2579,12 @@ The manifest's `status` contains the position fields for its lifecycle state:
 | Kind | Status fields |
 | --- | --- |
 | `backfilling` | `captured_seq`, `pin_id` (the ID of the backfill's user pin), optional `cursor_inode_id` |
-| `active` | `built_through_seq`, `next_event_index` |
+| `active` | `captured_seq`, `built_through_seq`, `next_event_index` |
 | `disabled` | No other status fields |
 
-Backfill's `captured_seq` is the user pin's captured sequence, and its cursor resumes strictly after the last inode ID. An active index's `next_event_index` is zero at a commit boundary. A disabled index contains no segments and no reorganization work.
+Backfill's `captured_seq` is the user pin's captured sequence, and its cursor resumes strictly after the last inode ID. An active index keeps the `captured_seq` of the backfill that built it, which identifies that build of the index. A rebuild after a rebootstrap, or after grep is disabled and enabled again, starts from a backfill at a later sequence. An active index's `next_event_index` is zero at a commit boundary. A disabled index contains no segments and no reorganization work.
 
-The nested `index` contains `next_run_no` and an optional `reorganize`. Reorganization contains `input_segment_ids`, `output_segment_ids`, `row_key_cursor`, `output_level`, and `run_no`, and its cursor is inclusive. Input and output segment IDs MUST be unique, disjoint, and present in the manifest's segment list, and each output MUST have the recorded level and run number. The extension can rebuild its state from a fresh user pin.
+The nested `index` contains `next_run_no` and an optional `reorganize`. Reorganization contains `input_segment_ids`, `output_segment_ids`, `row_key_cursor`, `output_level`, and `run_no`, and its cursor is inclusive. A reorganization into the base level also contains `pruning`, which identifies the revisions whose content values the reorganization keeps. The reorganization's first step records `pruning` (see [Pruning the index](#d5-pruning-the-index)). Input and output segment IDs MUST be unique, disjoint, and present in the manifest's segment list, and each output MUST have the recorded level and run number. The extension can rebuild its state from a fresh user pin.
 
 Grep segments follow list order, and each descriptor has a positive row count. The complete descriptor fields are `segment_id`, `run_no`, `level`, `row_count`, `min_row_key`, `max_row_key`, `index_block`, `filter_block`, and an optional `filter_inline`. The block handles and checksums use the same representation as metadata segment descriptors.
 
@@ -2596,36 +2598,126 @@ In-progress reorganization records the output level and run number, so resumed s
 
 ### D.3 Tokenization and postings
 
-A revision is eligible for the version 1 gram index when its content is at most 8 MiB, and its first 8 KiB contain no NUL byte and pass the text check. The sample MUST be valid UTF-8, except that an incomplete final character is accepted when it follows a nonempty valid prefix. This only checks the sample, so the bytes after it don't have to be UTF-8.
+Content is eligible for the version 2 gram index when it's at most 8 MiB, and its first 8 KiB contain no NUL byte and pass the text check. The sample MUST be valid UTF-8, except that an incomplete final character is accepted when it follows a nonempty valid prefix. This only checks the sample, so the bytes after it don't have to be UTF-8.
 
-For each eligible revision, the tokenizer folds ASCII letters to lowercase and takes every overlapping three-byte window. Grams are bytes, not Unicode characters, and this folding is different from the Unicode rule that's used to compare file names.
+For eligible content, the tokenizer folds ASCII letters to lowercase and takes every overlapping three-byte window. Grams are bytes, not Unicode characters, and this folding is different from the Unicode rule that's used to compare file names.
 
 For example, `Abcd` produces the byte grams `abc` and `bcd`, represented as `616263` and `626364`. A gram is encoded as six lowercase hexadecimal characters.
 
-A row is a kind-tagged CBOR object with the kind `gram_postings`. Its fields after `kind` are `gram`, `first_inode_id`, and `postings`. The gram is a hexadecimal string, the inode ID is a 16-byte byte string (see [Field conventions](#121-field-conventions)), and `postings` is a CBOR byte string that contains the packed batch. `first_inode_id` MUST equal the first posting's inode ID. The row key is:
+A "content value" is the bytes that a content reference refers to, identified by the reference's content ID and size (see [File contents and ownership](#15-file-contents-and-ownership)). Two references with the same content ID and size refer to the same bytes in every member of a fork family. So the index records content values, not file revisions, and it reads and tokenizes a value once, however many revisions refer to the value. For example, a file copied by reference, or restored to an earlier revision, refers to a value that the index already has.
+
+The index stores five row families in its segments: postings, value tables, `texts`, `content_revisions`, and the revision filters of reorganizations into the base level (see [Pruning the index](#d5-pruning-the-index)). A row is a kind-tagged CBOR object, and a row stores a content ID in its string form (`con_` followed by its 26-character body). The segments of one run (the output of one step, or of one reorganization) share a value table, and the run's postings refer to content values by their positions in that table.
+
+A run's "value table" lists each content value that the run has a `texts` row for (see [The `texts` and `content_revisions` families](#d4-the-texts-and-content_revisions-families)), ordered by content ID and then by size. A value's "ordinal" is its position in that order, from zero, so ordinal order is content order. For example, if a run's values are `(con_1..., 12)`, `(con_1..., 40)`, and `(con_7..., 5)`, their ordinals are 0, 1, and 2. A `value` row's fields after `kind` are `ordinal`, `content_id`, and `size_bytes`, and its row key is:
 
 ```text
-gram-{gram_hex}-{first_inode_id_body}
+value-{ordinal:020}
 ```
 
-Its filter key is `gram-{gram_hex}`. Several rows can contain batches for the same gram, within a segment or across segments, and a reader combines those batches.
+Every `value` row has the filter key `value`. The value rows sort after every other family's rows, so a segment of the run has value rows exactly when its key range reaches `value-`, and a reader finds them by key range without probing the segment's filter. A run's value rows MUST list its ordinals from zero without a gap, in content order. A reader decodes a run's table from the value rows of all of the run's segments.
 
-A posting identifies `(inode_id, revision_no)`, not a path. Batches are strictly ordered by that pair. A batch starts with the number of postings, and each posting stores its inode ID as 16 bytes, with the most significant byte first, followed by its revision number. The count and the revision numbers are unsigned LEB128 values:
+A posting identifies a content value whose bytes contain a gram, by the value's ordinal in its run's table. A `gram_postings` row's fields after `kind` are `gram`, `first_ordinal`, and `postings`. The gram is a hexadecimal string, and `postings` is a CBOR byte string that contains the packed batch. `first_ordinal` MUST equal the batch's first ordinal. The row key is:
+
+```text
+gram-{gram_hex}-{first_ordinal:020}
+```
+
+Its filter key is `gram-{gram_hex}`. Several rows can contain batches for the same gram, within a segment or across the segments of a run, and a reader combines those batches. A batch's ordinals are strictly ascending. The batch stores the number of postings, the first ordinal, and then the gap from each ordinal to the next, which is at least one. Every number is an unsigned LEB128 value:
 
 ```text
 posting_count   (unsigned LEB128)
-inode_id        (16 bytes)
-revision_no     (unsigned LEB128)
-... inode_id and revision_no repeated for each remaining posting
+first_ordinal   (unsigned LEB128)
+gap             (unsigned LEB128, at least 1)
+... one gap for each remaining posting
 ```
 
-Empty batches, unordered postings, and trailing bytes after the declared batch are invalid.
+For example, the batch of ordinals 7, 8, and 300 is the bytes `03 07 01 a4 02`. Empty batches, a zero gap, an ordinal above 2^64 - 1, trailing bytes after the declared batch, and an ordinal that the run's table doesn't list are invalid.
+
+A reorganization writes a new run, and the run's table lists the union of its input runs' values, less the values that a reorganization into the base level drops (see [Pruning the index](#d5-pruning-the-index)). Its postings refer to the new table's ordinals, which each step translates from the inputs' ordinals through the two tables. The reorganization's first step writes the whole table, so every output that a manifest lists can be read.
+
+Why do postings refer to ordinals instead of content IDs? A content ID is 16 random bytes, so a posting that included a content ID wouldn't compress, and the postings would be most of the index. The gap between two ordinals in one gram's batch usually fits in one byte, and the run's table stores each content ID once.
 
 The segment framing is exactly the data, filter, and index format in Appendix A, with grep CBOR rows instead of metadata rows, and per-block CRCs verify ranged reads.
 
-Grep manifest version 1 governs the tokenizer, the posting representation, and the meaning of row keys. They aren't implementation choices that can change while an existing index is read under the same version.
+Grep manifest version 2 governs the tokenizer, the posting representation, and the meaning of row keys. They aren't implementation choices that can change while an existing index is read under the same version.
 
-### D.4 Grep collection
+### D.4 The `texts` and `content_revisions` families
+
+This section describes the two row families that let a grep step skip a value that a grep step has already examined, and let a query find the files that refer to a value.
+
+The `texts` family has one row for each content value that a grep step examined. A `text` row's fields after `kind` are `content_id`, `size_bytes`, and `eligible`, which records whether the value passed the eligibility rule, and so whether the index has postings for the value. Its row key and filter key are:
+
+```text
+text-{content_id_body}-{size_bytes:020}
+text-{content_id_body}
+```
+
+Before a grep step reads a value's bytes, it looks up the value's `texts` row in the segments that its manifest lists, and it skips a value that has a row. A step that examines a value writes the value's `texts` row in the same run as the value's postings, and lists the value in the run's value table, whether or not the value is eligible. It records a value above the size cap as ineligible without reading it. Eligibility depends only on the bytes, so two rows for one value MUST agree, and a reorganization merges them into one row.
+
+The `content_revisions` family has one row for each file revision that a grep step indexed. A `content_revision` row's fields after `kind` are `content_id`, `size_bytes`, `inode_id`, `revision_no`, and `committed_seq`, the sequence of the commit that published the revision. The inode ID is a 16-byte byte string (see [Field conventions](#121-field-conventions)). Its row key and filter key are:
+
+```text
+content-revision-{content_id_body}-{size_bytes:020}-{inode_id_body}-{u64::MAX - revision_no:020}
+content-revision-{content_id_body}-{size_bytes:020}
+```
+
+A scan of one value's prefix returns the revisions that refer to the value, ordered by inode, and newest first within each inode. A backfill step writes a row for the current revision of each file that it lists, including a deleted file, and a build step writes a row for each `file_created` or `content_changed` event that it indexes, including an event whose value it skips because the value has a `texts` row. So the family has a row for every revision committed since the index was enabled, and for the revision that was current, for every file, when the index was enabled. Two rows with the same key describe the same revision, and a reorganization merges them into one row.
+
+Why does the index store `content_revisions` itself? A query that finds a content value needs the revisions that refer to the value, and no core row family is keyed by content value. The steps write these rows from the listings and change events that they already read.
+
+### D.5 Pruning the index
+
+This section describes how a reorganization into the base level drops the rows of content values and revisions that the namespace no longer retains. Without pruning, an index would keep a posting for every value that a grep step ever examined.
+
+A reorganization into the base level keeps the content values and `content_revisions` rows of a set of revisions, which its first step records in `pruning`:
+
+- `filter_seq` is the namespace head when the first step starts.
+- `retention_floor_seq` is the namespace's retention floor at that time, at or below `filter_seq`.
+
+The reorganization keeps every file revision at or below `filter_seq` that's newer than `retention_floor_seq`, and each file's newest revision at or below `retention_floor_seq`, including the revisions of deleted files. The first step scans the namespace's revisions at `filter_seq`, including the commits in the WAL tail, and builds two Bloom filters from the revisions that the reorganization keeps: one of their content values, and one of their `(inode_id, revision_no)` pairs. Then:
+
+1. The first step writes the revision filter, and then decides the output run's value table in one pass over the input tables in content order: the table lists each input value that the value filter contains. The step writes each table row as it decides it, in segments of the output run that hold the filter and the table.
+2. Every later step reads the revision filter back from the reorganization's outputs, so the reorganization scans the namespace once, and it reads the output's table back beside the input tables in the same kind of pass.
+3. Every step translates each input posting's ordinal to the output's ordinal of the same value, through a list for each input run that the pass builds (both tables are in content order). A posting whose value the output's table doesn't list translates to nothing and is dropped. A run's `n`th `texts` row is the `n`th value of its table, so the step translates a `texts` row's value the same way, and it keeps the `texts` row of each value that the output's table lists. So a value's postings and its `texts` row are dropped together.
+4. Every step drops each `content_revisions` row whose `(inode_id, revision_no)` pair isn't in the revision filter.
+
+The revision filter is stored as `filter` rows, whose fields after `kind` are `chunk` and `payload`. The payloads, in chunk order, form the payload of a filter block (see [Block-segment encoding](#a7-block-segment-encoding)) over one key for each kept revision, `{inode_id_body}-{revision_no:020}`, and each row's payload is at most 32 KiB. The row key is `filter-{chunk:020}`, and every `filter` row has the filter key `filter`. A reader finds the rows by key range, and a reorganization doesn't copy an input's `filter` rows to its output. A filter is sized at ten bits for each of the inputs' rows, up to 64 MiB, and a larger namespace fills it more densely, so it keeps more rows.
+
+A step reads the tables a block at a time, so it keeps four bytes for each input value, the translation lists, plus the filters, whatever the size of the tables. A Bloom filter can err only toward keeping a row, and a later reorganization drops what a filter kept. If the retention floor passes `filter_seq` before the reorganization finishes, the reorganization is abandoned.
+
+Before the last step of the reorganization publishes, it runs a "re-reference check". It reads the change feed from `filter_seq` to the head, and if a `file_created` or `content_changed` event refers to a value that an input run's table lists and the run's translation drops, the reorganization is abandoned. A publication then removes the reorganization and its outputs from the manifest and keeps its inputs, and the outputs are left to the collector.
+
+Why are a value's postings and its `texts` row dropped together? A build step skips a value that has a `texts` row. If the postings were dropped and the `texts` row kept, a file that refers to the value later would never be indexed, and grep would never find the file.
+
+Why does the check abandon the reorganization? Suppose that the value filter doesn't contain a value, and then a merge or a restore commits a file with the value. A build step finds the value's `texts` row in the inputs, skips the value, and advances the watermark past the commit. If the reorganization then published, the value's postings and `texts` row would be dropped from the index, and grep would never find the file, with no indexing work left to do. Abandoning keeps the inputs listed, and the next reorganization builds filters that keep the value.
+
+Why does the first step write the table and the revision filter? A scan reads every retained revision of the namespace, so a scan in every step would cost the reorganization one scan for each step. Writing the filter in the output run lets the later steps prune without a scan, and the table that the first step writes lists the kept values for every step, so no step keeps a value's postings while another drops its `texts` row. The rows are stored in the run that the manifest lists, so they're kept as long as the reorganization's outputs are.
+
+Why does the scan apply the rule at the floor instead of keeping every revision that it finds? A revision that a later revision replaced at or below the floor can't be read at any retained sequence, but the metadata lists it until a base compaction of `revisions` drops it. The rule leaves such a revision out, as that compaction does, and `pruning` records the retention floor that the filters describe.
+
+### D.6 Querying the index
+
+This section describes how a query uses the index's postings, value tables, `texts`, and `content_revisions`, and the order and cursor of its pages.
+
+A query reads the namespace at its "read sequence", which is the head for a first page, and the first page's head for every later page. The cursor records the read sequence, so a later page sees the same files as the first page, and a file whose content changed between pages keeps its place in the order. A page whose read sequence is below the retention floor returns `rebootstrap_required`.
+
+The query plans its grams, and in each run it intersects the ordinals of the grams' batches. The candidates are the content values of the surviving ordinals of any run. A page reads the values of the ordinals that it walks from each run's value table, a batch at a time, and merges the runs' values in content order, so a page reads table rows in proportion to the values it examines. A later page finds where its cursor's value falls in each run's surviving ordinals with a binary search, because ordinal order is content order. For each candidate value, in content order, the query:
+
+1. Reads the value's `content_revisions` rows, and keeps each inode's newest revision whose `committed_seq` is at or below the query's "cut".
+2. Checks that the file is in the page's cut: at the read sequence, the file is visible, its current revision is the row's revision, and its path, which a match reports, is within the scope resolved at that sequence (a later page decides this as the service, so the subject's rights don't change the cut). The page then serves a file whose revision and path at the namespace's head are the same with the subject's rights at the head, as a first page would, and any other file only to a subject with the `history` right, so a page never serves a file outside its cut.
+3. Reads and verifies the value's bytes once, and reports the matches for each file that passed.
+
+The cut is usually the read sequence, so a row of a commit above the read sequence (from an index built past it) is left out. A query with `allow_stale` whose unindexed tail is larger than one query can scan uses a lower cut, the last commit that the index covers in full. That commit is the watermark, or the commit before the watermark when `next_event_index` is above zero. The query still reads visibility and current revisions at the read sequence, so a file whose current revision is newer than the cut is left out, and a file deleted after the cut isn't reported.
+
+A later page uses the lower of its cursor's cut and the last commit that its own index covers in full. When that cut is below the read sequence, the page doesn't scan the tail, and it reports `tail_scanned: false`. So a stale search is one cut across its pages, and a page that runs after the index has moved past the read sequence still leaves out what the first page left out.
+
+The unindexed tail is the files with a revision committed after the watermark and at or below the read sequence. The query looks up the `texts` row of each tail file's value. It reads and verifies a value without a row, whatever its grams are. A value with an eligible row is a candidate only if the posting intersection produced it, and the walk checks that when it reaches the value. The query skips a value with an ineligible row. A tail file is ordered with the other files of its value.
+
+Matches are ordered by content value (content ID, then size), then by inode, and then by byte offset. A page reads the bytes of a bounded number of values and checks the state of a bounded number of files, so a page can stop inside one value's files. The cursor records the content value, the inode, and the position in the file where the page stopped, together with the read sequence, the page's cut, the active index's `captured_seq`, and the request's fingerprint. The next page reads the value's rows after that inode. A page served by an index whose `captured_seq` differs from the cursor's returns `invalid_request`, and the client issues the search again from its first page.
+
+Why does the cursor record the index's `captured_seq`? A later page reads at the first page's sequence, and an index rebuilt after that sequence has `content_revisions` rows only for the files that were current when its backfill started, and for later commits. If a file's revision at the cursor's read sequence was replaced before the backfill started, the rebuilt index has no row for that revision, so a page that resumed the cursor would leave the file out, and the client would have no way to tell.
+
+### D.7 Grep collection
 
 Each explicit call discovers the current grep manifest, builds its live segment set, and lists `manifests/` and `segments/` completely, using one supplied `now_ms`. The collector stores no durable progress cursor.
 

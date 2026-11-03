@@ -345,6 +345,26 @@ pub(super) async fn revisions_by_inode_page_desc<S: ObjectStore + ?Sized>(
         .collect()
 }
 
+/// Returns up to `limit` rows of the revisions family from `lower_bound`, in
+/// key order, with each row's stored key, whatever their sequences.
+pub(super) async fn revisions_page<S: ObjectStore + ?Sized>(
+    segments: &VerifiedMetadataSegments<'_, S>,
+    lower_bound: &str,
+    limit: usize,
+) -> Result<Vec<(String, RevisionRecord)>> {
+    segments
+        .scan_range_page_with_keys(
+            MetadataRowFamily::Revisions,
+            lower_bound,
+            string_prefix_upper_bound(lookup_keys::REVISION_ROW_PREFIX).as_deref(),
+            limit,
+        )
+        .await?
+        .into_iter()
+        .map(|(row_key, row)| Ok((row_key, revision_from_manifest_row(row)?)))
+        .collect()
+}
+
 /// One key-ordered page of the derived active-deletion family, with each
 /// row's stored key. The trash listing's whole durable read: the family is
 /// keyed by deletion position, so a page is a range scan whose cost follows

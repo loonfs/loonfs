@@ -31,7 +31,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         access: &ReadAccess<'_, S>,
     ) -> Result<Page<TrashEntry, TrashPageCursor>> {
         validate_cursor_head(
-            self.head.seq,
+            self.visible_seq,
             request.cursor.as_ref().map(|cursor| cursor.head_seq),
         )?;
         let start_after = request
@@ -41,7 +41,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         let retention_floor_seq = self.retention_floor_seq();
         let mut session = self.metadata_view().session();
         let cursor = |seq: ChangeSeq, inode_id: InodeId| TrashPageCursor {
-            head_seq: self.head.seq,
+            head_seq: self.visible_seq,
             last_deletion_seq: seq,
             last_root_inode_id: inode_id,
         };

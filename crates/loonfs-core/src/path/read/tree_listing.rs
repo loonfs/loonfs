@@ -123,7 +123,7 @@ impl<S: ObjectStore + ?Sized> LoadedMetadataView<'_, S> {
             returned.push(child);
         };
         let next_cursor = (!walk_ended).then(|| DirectoryTreePageCursor {
-            head_seq: self.head.seq,
+            head_seq: self.visible_seq,
             pin_id: None,
             frames: stack
                 .iter()

@@ -2,15 +2,19 @@
 //! that build and reorganize one namespace's grep index.
 
 mod build;
+mod index_rows;
+mod pruning;
 mod reorganize;
+mod tables;
 
+use crate::cache::GrepBlockCache;
 use crate::manifest::{
     load_current_grep_manifest, publish_grep_manifest, GrepIndexState, GrepIndexStatus,
     GrepManifestState, LoadedGrepManifest,
 };
 use crate::reads::NamespaceReads;
 use crate::{GrepError, GrepPassBudget, Result};
-use loonfs::engine::{next_run_no_after, Observation, OperationClock};
+use loonfs::engine::{next_run_no_after, DecodedBlockCacheConfig, Observation, OperationClock};
 use loonfs::{CoreError, CreateSnapshotOptions, LoonFs, ReadOnly, Writable};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::segment_blocks::{
@@ -105,7 +109,10 @@ pub enum GrepBuildOutcome {
     },
     Published {
         built_through_seq: ChangeSeq,
+        /// Revisions whose content value the step read and tokenized.
         indexed_revisions: u64,
+        /// Revisions whose content value the step didn't tokenize, because
+        /// the value is ineligible or the index has already examined it.
         skipped_revisions: u64,
         segments_written: u64,
     },
@@ -128,6 +135,11 @@ pub enum GrepReorganizeOutcome {
         segments_written: u64,
         completed: bool,
     },
+    /// The step dropped a reorganization into the base level, either
+    /// because a commit since its filters' sequence brought back a value that
+    /// it drops, or because the retention floor passed that sequence. The
+    /// next step starts a new reorganization.
+    Abandoned,
     Superseded,
 }
 
@@ -146,6 +158,10 @@ pub struct GrepWorker<S> {
     writer: LoonFs<Writable>,
     step_budget: GrepPassBudget,
     timer: Arc<dyn MonotonicTimer>,
+    /// The blocks that reorganize steps read, which keeps the blocks of the
+    /// value tables that the steps of one reorganization read again within a
+    /// bounded size. Clones of a worker share it.
+    reorganize_blocks: Arc<GrepBlockCache>,
 }
 
 /// The runtime handles have no debug representation (they are clones of a
@@ -177,6 +193,9 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             writer,
             step_budget,
             timer,
+            reorganize_blocks: Arc::new(GrepBlockCache::new(DecodedBlockCacheConfig::new(
+                build::GREP_STEP_BLOCK_CACHE_DECODED_BYTES,
+            ))),
         }
     }
 

@@ -340,6 +340,7 @@ async fn slot_versions_preserve_moves_name_reuse_and_pinned_reads() {
                 head: anchor.read_state.clone(),
             },
             tail: None,
+            visible_seq: None,
         };
         let pinned = namespace
             .load_metadata_view(&context)

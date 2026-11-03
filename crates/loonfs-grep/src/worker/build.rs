@@ -2,32 +2,41 @@
 //! checkpoint or the change feed, reading and indexing its content, and
 //! publishing the result.
 
+use super::index_rows::IndexRows;
 use super::reorganize::INDEX_GRAMS_DELTA_LEVEL;
 use super::{
     next_index_run_no, next_manifest_no, rebootstrap_required, GramIndexBuildPolicy,
     GrepBuildOutcome, GrepWorker, GREP_WORKER_REQUESTS_IN_FLIGHT,
 };
+use crate::cache::GrepBlockCache;
 use crate::codec::{
-    extract_grams, is_indexable_text_content, Gram, GramPosting, IndexRow,
+    extract_grams, is_indexable_text_content, ContentValue, Gram, IndexRow,
     MAX_INDEX_GRAMS_FILE_BYTES,
 };
 use crate::manifest::{
     publish_grep_manifest, ChangeFeedResume, GrepIndexState, GrepIndexStatus, GrepManifestState,
-    LoadedGrepManifest,
+    GrepSegmentRef, LoadedGrepManifest,
 };
 use crate::reads::{page_limit, published_revision, NamespaceReads};
 use crate::segments::GrepSegments;
+use crate::value_table::ValueTable;
 use crate::{GrepError, Result};
 use futures::{stream, StreamExt, TryFutureExt, TryStreamExt};
-use loonfs::engine::OperationClock;
+use loonfs::engine::{DecodedBlockCacheConfig, OperationClock};
 use loonfs::{CheckpointFilesPageCursor, CoreError};
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::segment_blocks::DEFAULT_TARGET_BLOCK_BYTES;
 use loonfs_types::{
     ChangeSeq, ContentRef, InodeId, NamespaceId, PinId, RevisionNo, MAX_PAGE_LIMIT,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-const GRAM_POSTING_BATCH_TARGET: usize = 256;
+/// Decoded bytes of the block cache that one build step reads index segments
+/// through, so a step loads each segment's filter and index block once, and
+/// of the cache that a worker's reorganize steps share. It fits 256 data
+/// blocks, enough for a build step's lookups of 256 values.
+pub(super) const GREP_STEP_BLOCK_CACHE_DECODED_BYTES: usize =
+    256 * DEFAULT_TARGET_BLOCK_BYTES.get();
 
 impl<S: ObjectStore + Clone> GrepWorker<S> {
     /// Runs one bounded checkpoint-backfill or incremental build unit.
@@ -93,7 +102,16 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             GrepIndexStatus::Disabled {} => return Ok(GrepBuildOutcome::NotEnabled),
         };
         let _permit = self.step_budget.permit().await;
-        let unit = index_planned_unit(&reads, planned).await?;
+        let block_cache = GrepBlockCache::new(DecodedBlockCacheConfig::new(
+            GREP_STEP_BLOCK_CACHE_DECODED_BYTES,
+        ));
+        let index = GrepSegments {
+            store: &self.store,
+            namespace_id,
+            block_cache: Some(&block_cache),
+        };
+        let unit = index_planned_unit(&reads, &index, current.manifest_state().segments(), planned)
+            .await?;
         self.publish_build_unit(namespace_id, current, unit, policy, &deadline)
             .await
     }
@@ -107,11 +125,10 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         deadline: &OperationClock,
     ) -> Result<GrepBuildOutcome> {
         let CollectedIndexUnit {
-            postings,
+            rows,
             stats,
             progress,
         } = unit;
-        let rows = gram_postings_rows(postings);
         let current_run_no = current.manifest_state().index().next_run_no;
         let next_run_no = if rows.is_empty() {
             current_run_no
@@ -154,6 +171,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 ),
                 None => (
                     GrepIndexStatus::Active {
+                        captured_seq,
                         built_through_seq: captured_seq,
                         next_event_index: 0,
                     },
@@ -166,6 +184,11 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 next_event_index,
             } => (
                 GrepIndexStatus::Active {
+                    captured_seq: current
+                        .manifest_state()
+                        .status()
+                        .active_captured_seq()
+                        .expect("an incremental unit should continue an active grep status"),
                     built_through_seq,
                     next_event_index,
                 },
@@ -203,16 +226,15 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
 }
 
 struct CollectedIndexUnit {
-    postings: BTreeMap<Gram, Vec<GramPosting>>,
+    rows: Vec<IndexRow>,
     stats: IndexingStats,
     progress: CollectedProgress,
 }
 
-/// The file content one build step reads, and the progress it publishes
-/// once that content is indexed.
+/// The file revisions one build step examines, and the progress it publishes
+/// once their content is indexed.
 struct PlannedIndexUnit {
     pending: Vec<PendingRevisionContent>,
-    stats: IndexingStats,
     progress: CollectedProgress,
 }
 
@@ -264,7 +286,10 @@ impl IncrementalCursor {
 
 #[derive(Default)]
 struct IndexingStats {
+    /// Revisions whose content value the step read and tokenized.
     indexed_revisions: u64,
+    /// Revisions whose content value the step didn't tokenize, because the
+    /// value is ineligible or the index has already examined it.
     skipped_revisions: u64,
 }
 
@@ -291,7 +316,8 @@ enum CollectedProgress {
 /// inode it consumed. The budgets are the ones the step always had: at most
 /// `max_files_per_step` files examined, and content planning stops once
 /// `max_content_bytes_per_step` is reached (the file that crosses it is
-/// still included, exactly as the row walk did).
+/// still included, exactly as the row walk did). A file over the eligibility
+/// cap counts no content bytes, because the step never reads it.
 async fn plan_backfill_unit(
     reads: &NamespaceReads,
     pin_id: &PinId,
@@ -299,7 +325,6 @@ async fn plan_backfill_unit(
     cursor: Option<InodeId>,
     policy: GramIndexBuildPolicy,
 ) -> Result<PlannedIndexUnit> {
-    let mut stats = IndexingStats::default();
     let mut next_cursor = cursor;
     let mut pending = Vec::new();
     let mut planned_content_bytes = 0u64;
@@ -325,17 +350,16 @@ async fn plan_backfill_unit(
         let mut budget_reached = false;
         for file in page.files {
             files_remaining = files_remaining.saturating_sub(1);
-            if file.size_bytes > MAX_INDEX_GRAMS_FILE_BYTES {
-                stats.skipped_revisions += 1;
-            } else {
+            if file.size_bytes <= MAX_INDEX_GRAMS_FILE_BYTES {
                 planned_content_bytes += file.size_bytes;
-                pending.push(PendingRevisionContent {
-                    inode_id: file.inode_id,
-                    revision_no: file.revision_no,
-                    content_ref: file.content_ref,
-                });
             }
             next_cursor = Some(file.inode_id);
+            pending.push(PendingRevisionContent {
+                inode_id: file.inode_id,
+                revision_no: file.revision_no,
+                committed_seq: file.committed_seq,
+                content_ref: file.content_ref,
+            });
             if planned_content_bytes >= policy.max_content_bytes_per_step.get() {
                 budget_reached = true;
                 break;
@@ -357,7 +381,6 @@ async fn plan_backfill_unit(
     }
     Ok(PlannedIndexUnit {
         pending,
-        stats,
         progress: CollectedProgress::Backfill {
             pin_id: pin_id.clone(),
             captured_seq,
@@ -382,7 +405,6 @@ async fn plan_incremental_unit(
     if feed.changes.is_empty() {
         return Ok(IncrementalWork::UpToDate(resume));
     }
-    let mut stats = IndexingStats::default();
     let mut cursor = IncrementalCursor::new(resume);
     let mut pending = Vec::new();
     let mut planned_content_bytes = 0u64;
@@ -404,24 +426,24 @@ async fn plan_incremental_unit(
             let Some(revision) = published_revision(event) else {
                 continue;
             };
+            let content_bytes = Some(revision.content_ref.size_bytes)
+                .filter(|size_bytes| *size_bytes <= MAX_INDEX_GRAMS_FILE_BYTES)
+                .unwrap_or(0);
             let would_exceed_content_budget = planned_content_bytes > 0
-                && planned_content_bytes.saturating_add(revision.content_ref.size_bytes)
+                && planned_content_bytes.saturating_add(content_bytes)
                     > policy.max_content_bytes_per_step.get();
             if examined_files >= policy.max_files_per_step.get() || would_exceed_content_budget {
                 cursor.stop_at(change.committed_seq, event_index, events.len(), false)?;
                 break 'changes;
             }
             examined_files += 1;
-            if revision.content_ref.size_bytes > MAX_INDEX_GRAMS_FILE_BYTES {
-                stats.skipped_revisions += 1;
-            } else {
-                planned_content_bytes += revision.content_ref.size_bytes;
-                pending.push(PendingRevisionContent {
-                    inode_id: revision.inode_id,
-                    revision_no: revision.revision_no,
-                    content_ref: revision.content_ref.clone(),
-                });
-            }
+            planned_content_bytes += content_bytes;
+            pending.push(PendingRevisionContent {
+                inode_id: revision.inode_id,
+                revision_no: revision.revision_no,
+                committed_seq: change.committed_seq,
+                content_ref: revision.content_ref.clone(),
+            });
             if examined_files >= policy.max_files_per_step.get()
                 || planned_content_bytes >= policy.max_content_bytes_per_step.get()
             {
@@ -436,7 +458,6 @@ async fn plan_incremental_unit(
     }
     Ok(IncrementalWork::Unit(PlannedIndexUnit {
         pending,
-        stats,
         progress: CollectedProgress::Incremental {
             built_through_seq: cursor.resume.built_through_seq(),
             next_event_index: cursor.resume.next_event_index(),
@@ -447,62 +468,98 @@ async fn plan_incremental_unit(
 struct PendingRevisionContent {
     inode_id: InodeId,
     revision_no: RevisionNo,
+    committed_seq: ChangeSeq,
     content_ref: ContentRef,
 }
 
-/// Reads the file content a step planned and extracts its grams.
-async fn index_planned_unit(
+/// Indexes the revisions a step planned: writes a `content_revisions` row for
+/// each revision, and reads and tokenizes each content value that the
+/// index's `texts` rows don't record, once however many revisions refer to
+/// it.
+async fn index_planned_unit<S: ObjectStore + ?Sized>(
     reads: &NamespaceReads,
+    index: &GrepSegments<'_, S>,
+    segments: &[GrepSegmentRef],
     planned: PlannedIndexUnit,
 ) -> Result<CollectedIndexUnit> {
-    let PlannedIndexUnit {
-        pending,
-        mut stats,
-        progress,
-    } = planned;
-    let mut postings: BTreeMap<Gram, Vec<GramPosting>> = BTreeMap::new();
-    let mut contents = stream::iter(0..pending.len())
+    let PlannedIndexUnit { pending, progress } = planned;
+    let mut rows = IndexRows::default();
+    let mut postings: BTreeMap<Gram, Vec<ContentValue>> = BTreeMap::new();
+    let mut values: BTreeMap<ContentValue, (&ContentRef, u64)> = BTreeMap::new();
+    for revision in &pending {
+        let value = ContentValue::of(&revision.content_ref);
+        rows.add_content_revision(IndexRow::content_revision(
+            &value,
+            revision.inode_id,
+            revision.revision_no,
+            revision.committed_seq,
+        ));
+        values.entry(value).or_insert((&revision.content_ref, 0)).1 += 1;
+    }
+    let examined = index
+        .text_rows(
+            segments,
+            &values.keys().cloned().collect::<BTreeSet<_>>(),
+            GREP_WORKER_REQUESTS_IN_FLIGHT,
+        )
+        .await?;
+    let mut stats = IndexingStats::default();
+    let mut unread = Vec::new();
+    for (value, (content_ref, revisions)) in values {
+        if examined.contains_key(&value) {
+            stats.skipped_revisions += revisions;
+        } else if value.size_bytes > MAX_INDEX_GRAMS_FILE_BYTES {
+            stats.skipped_revisions += revisions;
+            rows.texts.insert(value, false);
+        } else {
+            unread.push((value, content_ref, revisions));
+        }
+    }
+    let mut contents = stream::iter(0..unread.len())
         .map(|index| {
-            let revision = &pending[index];
-            // Index eligibility is the worker's own read budget: content
-            // past the cap was skipped before it was ever planned.
+            // The eligibility cap is the worker's own read budget, and a value
+            // past the cap is recorded as ineligible without a read.
             reads
-                .read_content(&revision.content_ref, MAX_INDEX_GRAMS_FILE_BYTES)
-                .map_ok(move |content| (revision, content))
+                .read_content(unread[index].1, MAX_INDEX_GRAMS_FILE_BYTES)
+                .map_ok(move |content| (index, content))
         })
         .buffered(GREP_WORKER_REQUESTS_IN_FLIGHT);
-    while let Some((revision, content)) = contents.try_next().await? {
-        if !is_indexable_text_content(&content) {
-            stats.skipped_revisions += 1;
-            continue;
+    while let Some((index, content)) = contents.try_next().await? {
+        let (value, _, revisions) = &unread[index];
+        let eligible = is_indexable_text_content(&content);
+        if eligible {
+            for gram in extract_grams(&content) {
+                postings.entry(gram).or_default().push(*value);
+            }
+            stats.indexed_revisions += revisions;
+        } else {
+            stats.skipped_revisions += revisions;
         }
-        let posting = GramPosting {
-            inode_id: revision.inode_id,
-            revision_no: revision.revision_no,
-        };
-        for gram in extract_grams(&content) {
-            postings.entry(gram).or_default().push(posting);
-        }
-        stats.indexed_revisions += 1;
+        rows.texts.insert(*value, eligible);
     }
+    // The step's run lists each value it has a `texts` row for in its own
+    // value table, whose rows end the run, and its postings refer to a value
+    // by its ordinal in that table.
+    let table = ValueTable::new(rows.texts.keys().copied().collect());
+    rows.postings = postings
+        .into_iter()
+        .map(|(gram, values)| {
+            let ordinals = values
+                .iter()
+                .map(|value| {
+                    table
+                        .ordinal(value)
+                        .expect("a step's value table should list every value it read")
+                })
+                .collect();
+            (gram, ordinals)
+        })
+        .collect();
+    let mut rows = rows.into_rows();
+    rows.extend(table.rows());
     Ok(CollectedIndexUnit {
-        postings,
+        rows,
         stats,
         progress,
     })
-}
-
-pub(super) fn gram_postings_rows(postings: BTreeMap<Gram, Vec<GramPosting>>) -> Vec<IndexRow> {
-    let mut rows = Vec::new();
-    for (gram, mut gram_postings) in postings {
-        gram_postings.sort_unstable();
-        gram_postings.dedup();
-        for batch in gram_postings.chunks(GRAM_POSTING_BATCH_TARGET) {
-            rows.push(
-                IndexRow::gram_postings(gram, batch)
-                    .expect("a non-empty gram postings batch should encode"),
-            );
-        }
-    }
-    rows
 }

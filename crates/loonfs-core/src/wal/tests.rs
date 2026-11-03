@@ -998,6 +998,7 @@ async fn a_warm_probe_reports_a_broken_chain_at_its_own_epoch_as_corruption() {
             head: loaded.read_state,
         },
         tail: None,
+        visible_seq: None,
     };
     let error = super::probe_namespace_wal(
         &store,
@@ -1044,6 +1045,7 @@ async fn warm_context_behind(
             head: loaded.read_state,
         },
         tail: None,
+        visible_seq: None,
     }
 }
 

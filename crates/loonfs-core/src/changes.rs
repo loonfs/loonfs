@@ -33,6 +33,7 @@ async fn list_changes_within<S: ObjectStore + ?Sized>(
     max_page_bytes: usize,
 ) -> Result<ListChangesResponse> {
     let head = view.head();
+    let head_seq = view.visible_seq();
     let retention_floor_seq = view.retention_floor_seq();
     let namespace_id = &head.namespace_id;
     crate::namespace::control::ensure_namespace_live(&head.namespace_id, head.status)?;
@@ -49,18 +50,17 @@ async fn list_changes_within<S: ObjectStore + ?Sized>(
             retention_floor_seq,
         });
     }
-    if after_seq > head.seq {
+    if after_seq > head_seq {
         return Err(CoreError::InvalidCursor(format!(
-            "change feed sequence `{after_seq}` is ahead of namespace head `{}`",
-            head.seq
+            "change feed sequence `{after_seq}` is ahead of namespace head `{head_seq}`"
         )));
     }
     ensure_event_index_allowed(event_index, splitting)?;
-    if after_seq == head.seq && event_index == 0 {
+    if after_seq == head_seq && event_index == 0 {
         return Ok(ListChangesResponse {
             namespace_id: namespace_id.clone(),
             after_seq,
-            head_seq: head.seq,
+            head_seq,
             next_after_seq: None,
             next_event_index: None,
             changes: Vec::new(),
@@ -105,7 +105,7 @@ async fn list_changes_within<S: ObjectStore + ?Sized>(
     Ok(ListChangesResponse {
         namespace_id: namespace_id.clone(),
         after_seq,
-        head_seq: head.seq,
+        head_seq,
         next_after_seq: scan.next_after_seq(),
         next_event_index: scan.next_event_index(),
         changes,
@@ -642,6 +642,7 @@ mod tests {
                 head: loaded.read_state,
             },
             tail: None,
+            visible_seq: None,
         };
         let engine =
             NamespaceEngine::reader(crate::test_support::namespace_store(&store, &namespace_id));

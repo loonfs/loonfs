@@ -414,6 +414,28 @@ string_id! {
     )
 }
 
+impl ContentId {
+    /// Builds the content ID whose 128-bit value is `bytes`, most
+    /// significant byte first.
+    pub fn from_be_bytes(bytes: [u8; 16]) -> Self {
+        Self(format!(
+            "con_{}",
+            encode_generated_id_body(u128::from_be_bytes(bytes))
+        ))
+    }
+
+    /// Returns the ID's 128-bit value as 16 bytes, most significant first,
+    /// which a binary encoding stores in place of the 26-character body.
+    ///
+    /// The body's alphabet is in byte order, so the byte order of two IDs'
+    /// bytes is the order of their bodies.
+    pub fn to_be_bytes(&self) -> [u8; 16] {
+        decode_generated_id_body(self.body())
+            .expect("a validated content ID should have a valid body")
+            .to_be_bytes()
+    }
+}
+
 string_id! {
     /// Durable id for one metadata segment.
     MetadataSegmentId,
@@ -846,6 +868,25 @@ mod tests {
         ] {
             ContentId::parse(invalid).expect_err(invalid);
         }
+    }
+
+    #[test]
+    fn content_id_bytes_round_trip_and_sort_like_the_bodies() {
+        let ids = [
+            "con_00000000000000000000000000",
+            "con_00000000000000000000000001",
+            "con_3s0drmj8em84yb4mnetqkz2j0x",
+            "con_7zzzzzzzzzzzzzzzzzzzzzzzzz",
+        ]
+        .map(|id| ContentId::parse(id).expect("valid content ID"));
+        for id in &ids {
+            assert_eq!(&ContentId::from_be_bytes(id.to_be_bytes()), id);
+        }
+        assert_eq!(ids[1].to_be_bytes(), 1_u128.to_be_bytes());
+        assert_eq!(ids[3].to_be_bytes(), u128::MAX.to_be_bytes());
+        assert!(ids
+            .windows(2)
+            .all(|pair| pair[0].to_be_bytes() < pair[1].to_be_bytes()));
     }
 
     fn assert_generated_id_shape(value: &str, prefix: &str) {

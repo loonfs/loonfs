@@ -298,7 +298,11 @@ impl RuntimeCore {
         read_basis: ReadBasis,
         tail: Option<Arc<ProjectedWalTail>>,
     ) -> RuntimeReadContext {
-        RuntimeReadContext { read_basis, tail }
+        RuntimeReadContext {
+            read_basis,
+            tail,
+            visible_seq: None,
+        }
     }
 
     /// The shared preamble of every pinned read: the read context of the

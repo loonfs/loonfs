@@ -58,6 +58,22 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let manifest_no = basis.manifest_no();
         let loaded_basis =
             load_basis_metadata_segments(&self.store, Some(&self.segment_cache), basis).await?;
+        let visible_seq = context.visible_seq();
+        assert!(
+            visible_seq <= head.seq,
+            "a read context should read at or below its head"
+        );
+        let retention_floor_seq = loaded_basis
+            .segments
+            .manifest()
+            .payload()
+            .retention_floor_seq;
+        if visible_seq < retention_floor_seq {
+            return Err(CoreError::ReadRebootstrapRequired {
+                read_seq: visible_seq,
+                retention_floor_seq,
+            });
+        }
         let manifest_head = loaded_basis.replay_head(&head);
         let anchor = ReadAnchor {
             head_seq: head.seq,
@@ -89,6 +105,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         };
         Ok(LoadedMetadataView {
             head,
+            visible_seq,
             segments: loaded_basis.segments,
             wal_tail,
             anchor,
@@ -107,6 +124,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 head: loaded.read_state,
             },
             tail: None,
+            visible_seq: None,
         };
         self.load_metadata_view(&context).await
     }
@@ -119,6 +137,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
 /// engine's read methods.
 pub(crate) struct LoadedMetadataView<'a, S: ObjectStore + ?Sized> {
     pub(super) head: NamespaceReadState,
+    /// The sequence that reads of this view see, at or below `head`.
+    pub(super) visible_seq: ChangeSeq,
     pub(super) segments: VerifiedMetadataSegments<'a, S>,
     pub(crate) wal_tail: Arc<ProjectedWalTail>,
     pub(crate) anchor: ReadAnchor,
@@ -129,6 +149,11 @@ pub(crate) struct LoadedMetadataView<'a, S: ObjectStore + ?Sized> {
 impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     pub(crate) fn head(&self) -> &NamespaceReadState {
         &self.head
+    }
+
+    /// Returns the sequence that reads of this view see.
+    pub(crate) fn visible_seq(&self) -> ChangeSeq {
+        self.visible_seq
     }
 
     pub(crate) fn retention_floor_seq(&self) -> ChangeSeq {
@@ -209,7 +234,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     }
 
     pub(crate) fn metadata_view(&self) -> MetadataView<'_, '_, S> {
-        MetadataView::from_loaded_head(&self.head, &self.segments, &self.wal_tail)
+        MetadataView::over_loaded_basis(&self.segments, &self.wal_tail, self.visible_seq)
     }
 
     /// Returns the view of this basis at `visible_seq`, a retained sequence
@@ -382,6 +407,7 @@ mod tests {
                 head: anchor.read_state,
             },
             tail: None,
+            visible_seq: None,
         };
         // Once the first load caches the manifest, a load reads nothing from
         // the store before the WAL objects of the tail.

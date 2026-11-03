@@ -7,11 +7,11 @@ use crate::Result;
 use loonfs::{
     CheckpointFilesPager, Consistency, CoreError, CurrentFileState, ListChangesOptions,
     ListCheckpointFilesOptions, Namespace, NamespaceMetadata, ReadAt, ReadOnly, ReadView,
-    StatOptions, MAX_CURRENT_FILES_PER_STAT,
+    RetainedRevisionsPage, RetainedRevisionsPageCursor, StatOptions, MAX_CURRENT_FILES_PER_STAT,
 };
 use loonfs_types::{
     AbsolutePath, ChangeSeq, ContentRef, EffectiveLimit, InodeId, LimitError, NamespaceId, Page,
-    PathEntry, PinId, RevisionNo, Subject,
+    PathEntry, PinId, RevisionNo, Subject, MAX_PAGE_LIMIT,
 };
 use loonfs_types::{FilesystemChange, ListChangesResponse};
 
@@ -51,6 +51,35 @@ impl NamespaceReads {
         let namespace = self.subject_namespace.as_ref().unwrap_or(&self.namespace);
         let view = namespace.read_view().await?;
         view.ensure_subject()?;
+        Ok(NamespaceReadView {
+            namespace: &self.namespace,
+            view,
+        })
+    }
+
+    /// Captures a read view of the head as the service, without the
+    /// subject, for the reads that the change feed's rule allows the service:
+    /// the index's own reads of the namespace's revisions.
+    pub(crate) async fn service_view(&self) -> Result<NamespaceReadView<'_>> {
+        Ok(NamespaceReadView {
+            namespace: &self.namespace,
+            view: self.namespace.read_view().await?,
+        })
+    }
+
+    /// Returns a view of the namespace at `seq` whose reads check no
+    /// subject's rights, which a later page decides the files of its cut
+    /// through. It reads as the service, so a subject's rights never decide
+    /// what the cut contains.
+    pub(crate) async fn membership_view(&self, seq: ChangeSeq) -> Result<NamespaceReadView<'_>> {
+        let view = self
+            .namespace
+            .read_view()
+            .await?
+            .at_seq(seq)
+            .await?
+            .as_administrator()
+            .await?;
         Ok(NamespaceReadView {
             namespace: &self.namespace,
             view,
@@ -119,9 +148,20 @@ impl NamespaceReadView<'_> {
         self.view.namespace_id()
     }
 
-    /// Returns the head sequence shared by every metadata read.
+    /// Returns the sequence that every metadata read sees: the head the view
+    /// captured, or the earlier sequence of a view from [`Self::at_seq`].
     pub(crate) fn head_seq(&self) -> ChangeSeq {
         self.view.head_seq()
+    }
+
+    /// Returns a view of this view's head at `seq`, which checks the
+    /// subject's rights at the head, or `rebootstrap_required` when the
+    /// retention floor is above `seq`.
+    pub(crate) async fn at_seq(&self, seq: ChangeSeq) -> Result<Self> {
+        Ok(Self {
+            namespace: self.namespace,
+            view: self.view.at_seq(seq).await?,
+        })
     }
 
     /// Reads committed changes after `after_seq`, capped at the view's head.
@@ -165,6 +205,21 @@ impl NamespaceReadView<'_> {
             .map(|change| change.committed_seq)
             .filter(|last_seq| *last_seq < head_seq);
         Ok(page)
+    }
+
+    /// Lists one page of every file revision that the view's metadata
+    /// retains, ordered by inode and newest first within each inode.
+    pub(crate) async fn retained_revisions_page(
+        &self,
+        cursor: Option<RetainedRevisionsPageCursor>,
+    ) -> Result<RetainedRevisionsPage> {
+        Ok(self
+            .view
+            .list_retained_revisions()
+            .page_limit(page_limit(MAX_PAGE_LIMIT as usize))
+            .cursor(cursor)
+            .page()
+            .await?)
     }
 
     /// Resolves visibility, revision, and path in input order.

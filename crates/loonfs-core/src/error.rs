@@ -262,6 +262,14 @@ pub enum CoreError {
         from_seq: ChangeSeq,
         retention_floor_seq: ChangeSeq,
     },
+    /// A read view's sequence is below the retention floor, so a base
+    /// compaction might have removed the rows that the read needs. The error
+    /// has the change feed's code, and its details report only the floor.
+    #[error("read sequence `{read_seq}` is older than retention floor `{retention_floor_seq}`")]
+    ReadRebootstrapRequired {
+        read_seq: ChangeSeq,
+        retention_floor_seq: ChangeSeq,
+    },
     /// History that a merge needs is below a retention floor. Either the
     /// fork point is below this namespace's floor, so a base compaction might
     /// have removed the fork's previous merge from the merge index, or the
@@ -556,6 +564,7 @@ impl CoreError {
             CoreError::UploadContentConflict { .. } => ErrorCode::UploadContentConflict,
             CoreError::RebootstrapRequired { .. }
             | CoreError::DiffRebootstrapRequired { .. }
+            | CoreError::ReadRebootstrapRequired { .. }
             | CoreError::MergeRebootstrapRequired { .. } => ErrorCode::RebootstrapRequired,
             CoreError::ExpectedFile { .. }
             | CoreError::ExpectedDirectory { .. }
@@ -662,6 +671,7 @@ impl CoreError {
             | CoreError::InvalidDiffRange { .. }
             | CoreError::RebootstrapRequired { .. }
             | CoreError::DiffRebootstrapRequired { .. }
+            | CoreError::ReadRebootstrapRequired { .. }
             | CoreError::MergeRebootstrapRequired { .. }
             | CoreError::NamespaceCorrupt(_)
             | CoreError::WriterFenced(_)
@@ -735,6 +745,13 @@ impl CoreError {
                 retention_floor_seq,
             } => Some(ErrorDetails {
                 from_seq: Some(*from_seq),
+                retention_floor_seq: Some(*retention_floor_seq),
+                ..ErrorDetails::default()
+            }),
+            CoreError::ReadRebootstrapRequired {
+                retention_floor_seq,
+                ..
+            } => Some(ErrorDetails {
                 retention_floor_seq: Some(*retention_floor_seq),
                 ..ErrorDetails::default()
             }),

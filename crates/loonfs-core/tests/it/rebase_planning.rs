@@ -122,6 +122,7 @@ impl Family {
                 .await
                 .expect("main through the pin"),
             tail: None,
+            visible_seq: None,
         }
     }
 

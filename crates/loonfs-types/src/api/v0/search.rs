@@ -90,14 +90,16 @@ pub struct GrepMatch {
 pub struct GrepResponse {
     /// The namespace that was searched.
     pub namespace_id: NamespaceId,
-    /// The namespace head sequence that the server used to evaluate this page.
+    /// The sequence that the server read the namespace at for this page. A first page reads at
+    /// the namespace's head, and a later page reads at the first page's `head_seq`.
     pub head_seq: ChangeSeq,
     /// The last sequence that the index covers. The server searched the commits at or below this
     /// sequence through the index.
     pub built_through_seq: ChangeSeq,
     /// Whether the server scanned every revision after `built_through_seq`.
     pub tail_scanned: bool,
-    /// The matches, in ascending `(inode_id, byte_offset)` order.
+    /// The matches, ordered by the content value of each file's revision (its content ID and
+    /// size), then by `inode_id`, and then by `byte_offset`.
     pub matches: Vec<GrepMatch>,
     /// The cursor for the next page. It's present when another page follows.
     #[serde(default, skip_serializing_if = "Option::is_none")]

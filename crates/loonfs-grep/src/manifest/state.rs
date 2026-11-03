@@ -42,6 +42,11 @@ pub enum GrepIndexStatus {
     },
     /// Backfill is complete and changes are consumed incrementally.
     Active {
+        /// Namespace sequence that the backfill which built this index
+        /// captured. It identifies the build: a rebootstrap rebuilds the
+        /// index from a later backfill, and a query cursor that refers
+        /// to another build is invalid.
+        captured_seq: ChangeSeq,
         /// Sequence of the commit at the index cursor. Everything at or
         /// below it is indexed, subject to `next_event_index`.
         built_through_seq: ChangeSeq,
@@ -71,7 +76,17 @@ impl GrepIndexStatus {
             Self::Active {
                 built_through_seq,
                 next_event_index,
+                ..
             } => Some(ChangeFeedResume::new(*built_through_seq, *next_event_index)),
+            Self::Backfilling { .. } | Self::Disabled {} => None,
+        }
+    }
+
+    /// Returns the sequence that the active index's backfill captured,
+    /// which identifies the build of the index.
+    pub fn active_captured_seq(&self) -> Option<ChangeSeq> {
+        match self {
+            Self::Active { captured_seq, .. } => Some(*captured_seq),
             Self::Backfilling { .. } | Self::Disabled {} => None,
         }
     }
@@ -101,6 +116,7 @@ impl From<&GrepIndexStatus> for loonfs_types::GrepIndexStatus {
             GrepIndexStatus::Active {
                 built_through_seq,
                 next_event_index,
+                ..
             } => Self::Active {
                 built_through_seq: *built_through_seq,
                 next_event_index: *next_event_index,
@@ -124,6 +140,31 @@ pub struct GrepReorganizeState {
     pub output_level: u32,
     /// Run number stamped on every output segment of this reorganize.
     pub run_no: RunNo,
+    /// The revisions whose content values and `content_revisions` rows a
+    /// reorganization into the base level keeps. Its first step records
+    /// them, builds the pruning filters from one scan of them, and writes the
+    /// output run's value table and revision filter, which later steps read
+    /// back. Absent for a reorganization into a lower level, which drops
+    /// nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pruning: Option<GrepPruning>,
+}
+
+/// The revisions whose content values a reorganization into the base level
+/// keeps.
+///
+/// They're every revision at or below `filter_seq` that's newer than
+/// `retention_floor_seq`, and each file's newest revision at or below
+/// `retention_floor_seq`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GrepPruning {
+    /// The sequence that the filters describe, the head when the first step
+    /// built them.
+    pub filter_seq: ChangeSeq,
+    /// The retention floor when the first step built the filters, at or
+    /// below `filter_seq`.
+    pub retention_floor_seq: ChangeSeq,
 }
 
 /// Durable index bookkeeping paired with the visible segment set.
@@ -296,15 +337,18 @@ impl GrepManifestState {
         match (&self.status, &successor.status) {
             (
                 GrepIndexStatus::Active {
+                    captured_seq: before_build,
                     built_through_seq: before,
                     next_event_index: before_event,
                 },
                 GrepIndexStatus::Active {
+                    captured_seq: after_build,
                     built_through_seq: after,
                     next_event_index: after_event,
                 },
             ) => {
-                if after < before
+                if after_build != before_build
+                    || after < before
                     || (after == before && *before_event == 0 && *after_event != 0)
                     || (after == before && *after_event != 0 && after_event < before_event)
                 {
@@ -333,9 +377,13 @@ impl GrepManifestState {
             (
                 GrepIndexStatus::Backfilling { captured_seq, .. },
                 GrepIndexStatus::Active {
-                    built_through_seq, ..
+                    captured_seq: build,
+                    built_through_seq,
+                    ..
                 },
-            ) if built_through_seq < captured_seq => return invalid("status"),
+            ) if build != captured_seq || built_through_seq < captured_seq => {
+                return invalid("status")
+            }
             (
                 GrepIndexStatus::Active {
                     built_through_seq, ..
