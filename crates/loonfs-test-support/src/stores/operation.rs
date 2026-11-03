@@ -4,7 +4,7 @@ use bytes::Bytes;
 use loonfs_objectstore::{AssemblySource, ByteRange, PutMode};
 use loonfs_types::Checksum;
 
-use super::Outcome;
+use super::{KeyPredicate, Outcome};
 
 /// A broad selector a test wrapper uses to choose the operations it acts on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -242,6 +242,26 @@ pub fn sort_head_runs(operations: &mut [RecordedOperation]) {
     for run in operations.chunk_by_mut(|left, right| head(left) && head(right)) {
         run.sort_by(|left, right| left.key().cmp(right.key()));
     }
+}
+
+/// Returns the keys of the writes in `operations` (puts, streamed puts, and
+/// assemblies) that `keys` selects, in order, with a key repeated for each
+/// write to it.
+pub fn write_keys(operations: &[RecordedOperation], keys: &KeyPredicate) -> Vec<String> {
+    operations
+        .iter()
+        .filter(|operation| {
+            matches!(
+                operation,
+                RecordedOperation::Put { .. }
+                    | RecordedOperation::PutStreamed { .. }
+                    | RecordedOperation::Assemble { .. }
+            )
+        })
+        .map(RecordedOperation::key)
+        .filter(|key| keys.matches(key))
+        .map(str::to_owned)
+        .collect()
 }
 
 impl RecordedOperation {

@@ -162,12 +162,12 @@ async fn the_raises_an_interval_skips_share_one_trailing_raise_when_it_ends() {
 }
 
 /// Checks that a failed raise doesn't fail the publication that started it,
-/// that it counts as the interval's raise, and that the first publication
-/// an interval later raises the hint.
-#[tokio::test]
+/// that it counts as the interval's raise, so the interval's trailing raise
+/// raises the hint when the interval ends, and that the first publication an
+/// interval after the trailing raise raises the hint at once.
+#[tokio::test(start_paused = true)]
 async fn a_failed_raise_is_ignored_and_a_publication_an_interval_later_raises_the_hint() {
-    let timer = Arc::new(ManualClock::new(0));
-    let mut fixture = RaiseFixture::new(timer.clone()).await;
+    let mut fixture = RaiseFixture::new(Arc::new(TokioClock::start())).await;
     fixture.store.inner().inner().fail_next(1);
     fixture.commit().await;
     fixture.writer.drain().await.expect("drain");
@@ -175,10 +175,13 @@ async fn a_failed_raise_is_ignored_and_a_publication_an_interval_later_raises_th
     assert_eq!(fixture.commit_and_fold().await, 3);
     assert_eq!(fixture.hint().await, 1);
     assert_eq!(fixture.hint_writes(), 1);
-    timer.advance_ms(HINT_RAISE_INTERVAL_MS);
+    advance_ms(HINT_RAISE_INTERVAL_MS).await;
+    fixture.wait_for_hint(3).await;
+    assert_eq!(fixture.hint_writes(), 2, "one trailing raise");
+    advance_ms(HINT_RAISE_INTERVAL_MS).await;
     assert_eq!(fixture.commit_and_fold().await, 4);
     assert_eq!(fixture.hint().await, 4);
-    assert_eq!(fixture.hint_writes(), 2);
+    assert_eq!(fixture.hint_writes(), 3);
     fixture.writer.shutdown().await.expect("shut down");
 }
 

@@ -8,13 +8,14 @@
 //! hosts drive it.
 
 use crate::pagers::{decode_page_request, encode_next_cursor, CheckpointsPager};
-use crate::publisher::{NamespaceChange, PublisherRegistry};
+use crate::publisher::{FoldWhen, NamespaceChange, NamespaceFold, PublisherRegistry};
 use crate::runtime_core::RuntimeCore;
 use crate::trace::{self, operation_span};
 use crate::{
     AdvanceRetentionFloorOptions, AdvanceRetentionResponse, Checkpoint, FoldWalResponse,
-    ListCheckpointsResponse, MaintainMetadataOptions, MetadataMaintenanceResponse,
-    NamespaceDiagnostics, NamespaceId, PinId, SetRetentionWindowResponse, WriterState,
+    ListCheckpointsResponse, MaintainMetadataOptions, MetadataMaintenanceOutcome,
+    MetadataMaintenanceResponse, NamespaceDiagnostics, NamespaceId, PinId,
+    SetRetentionWindowResponse, WriterState,
 };
 use crate::{Error, Result};
 use loonfs_core::control::NamespaceStorageDiagnostics;
@@ -33,7 +34,7 @@ mod reports;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use compactor::{Compactor, TailFold};
+pub(crate) use compactor::Compactor;
 pub use floor_acknowledgment::{
     AcknowledgeRetentionFloorOutcome, AcknowledgeRetentionFloorReport, RetentionFloors,
 };
@@ -181,7 +182,7 @@ impl Maintenance {
     /// Folds the WAL tail at `max_wal_tail_objects` WAL objects, at the
     /// runtime's inline fold size when this runtime's writer session records
     /// the tail's inline bytes, or once the tail's newest commit reaches the
-    /// runtime's idle fold age on this handle's wall clock (see
+    /// runtime's idle fold age (see
     /// [`RuntimeConfig::idle_fold_after_ms`](crate::RuntimeConfig::idle_fold_after_ms)).
     /// Then runs one compaction unit whose window lists at most the run
     /// policy's `max_decoded_input_rows_per_step` rows, and reports a larger
@@ -196,21 +197,53 @@ impl Maintenance {
         trace::in_operation(
             operation_span!(self.compactor.core, "maintain_metadata", namespace_id),
             async {
-                let step = self
+                let (wal_fold, observed) = match self.fold_when_due(namespace_id, options).await? {
+                    NamespaceFold::NotDue { observed, .. } => {
+                        (WalFoldStepOutcome::NotNeeded, observed)
+                    }
+                    NamespaceFold::Folded(folded) => {
+                        (WalFoldStepOutcome::of(&folded.response), None)
+                    }
+                };
+                let compaction = self
                     .compactor
-                    .metadata_step(
+                    .compact_once(
                         namespace_id,
-                        TailFold::from_options(options),
                         options.compaction_policy,
+                        loonfs_core::CompactionAdmission::WithinRowBudget,
+                        observed,
                         &MetadataCompactionCancellation::default(),
                     )
                     .await?;
-                Ok(step
-                    .expect("a pass without a cancellation runs to its end")
-                    .response)
+                tracing::debug!(
+                    ?wal_fold,
+                    ?compaction,
+                    "metadata maintenance pass concluded"
+                );
+                Ok(MetadataPassReport {
+                    namespace_id: namespace_id.clone(),
+                    wal_fold,
+                    compaction,
+                })
             },
         )
         .await
+    }
+
+    /// Folds the namespace's WAL tail when a fold is due under `options`,
+    /// through the namespace's one fold path.
+    async fn fold_when_due(
+        &self,
+        namespace_id: &NamespaceId,
+        options: &MaintainMetadataOptions,
+    ) -> Result<NamespaceFold> {
+        let when = FoldWhen::Due {
+            max_wal_tail_objects: options.max_wal_tail_objects.get(),
+        };
+        self.compactor
+            .publisher
+            .fold_namespace(namespace_id, when)
+            .await
     }
 
     /// Runs [`Self::maintain_metadata_while_due_with_options`] with the
@@ -228,21 +261,28 @@ impl Maintenance {
         .await
     }
 
-    /// Repeats [`Self::maintain_metadata_with_options`] while it finds
-    /// compaction due. When a pass reports a window too large for it, runs
-    /// [`Self::compact_metadata`].
+    /// Folds the WAL tail when a fold is due, as
+    /// [`Self::maintain_metadata_with_options`] does, and then runs
+    /// compaction units while a unit is due. When a unit reports a window too
+    /// large for a metadata pass, runs [`Self::compact_metadata`]. The fold
+    /// waits for a fold of the namespace in progress, such as its writer
+    /// session's, and each unit waits for a unit in progress, so the call
+    /// never repeats that work.
     ///
     /// Stops when nothing is due, when another process has the compactor
-    /// epoch, when `cancellation` is set, after three abandoned units in a
-    /// row, or after it publishes 16 compaction units. Work still due after
-    /// the 16th unit waits for the next call. A unit that loses its manifest
-    /// put to another publication tries again over the manifest that won, so
-    /// only an abandoned unit counts as a lost race. Setting `cancellation`
-    /// ends a wait for a permit and drops a fold in progress at once, and a
-    /// running compaction unit stops at its next block. A dropped call
-    /// leaves what a crash would: unreferenced segments, or a manifest the
-    /// runtime learns of the way it learns of another process's. Fails with
-    /// the first error. Keeps no state between calls.
+    /// epoch, when `cancellation` is set, when the namespace's writer
+    /// session in this runtime is closed or its namespace deleted, after three
+    /// abandoned units in a row, or after it publishes 16 compaction units.
+    /// Work still due after the 16th unit waits for the next call. A unit
+    /// that loses its manifest put to another publication tries again over
+    /// the manifest that won, so only an abandoned unit counts as a lost
+    /// race. Setting `cancellation` ends a wait for a lock or a permit and
+    /// drops a fold in progress at once, and a running compaction unit stops
+    /// at its next block. A close or a delete of the session stops the call
+    /// before its next unit. A dropped call leaves what a crash would:
+    /// unreferenced segments, or a manifest the runtime learns of the way it
+    /// learns of another process's. Fails with the first error. Keeps no
+    /// state between calls.
     ///
     /// The response reports the compaction units the call published, and an
     /// outcome. The outcome is [`MetadataMaintenanceOutcome::CaughtUp`] when
@@ -257,14 +297,50 @@ impl Maintenance {
         cancellation: &MaintenanceCancellation,
         options: &MaintainMetadataOptions,
     ) -> Result<MetadataMaintenanceResponse> {
-        // Boxing erases the loop's nested step futures. Without it, a host
+        let cancellation = cancellation.metadata_compaction();
+        let maintained = async {
+            let fold = tokio::select! {
+                biased;
+                () = cancellation.cancelled() => {
+                    return Ok(MetadataMaintenanceResponse {
+                        namespace_id: namespace_id.clone(),
+                        outcome: MetadataMaintenanceOutcome::Due,
+                        compaction_units: 0,
+                    });
+                }
+                fold = self.fold_when_due(namespace_id, options) => fold?,
+            };
+            let (tail_caught_up, observed) = match fold {
+                NamespaceFold::NotDue {
+                    idle_fold_pending,
+                    observed,
+                } => (!idle_fold_pending, observed),
+                NamespaceFold::Folded(_) => (true, None),
+            };
+            let mut maintained = self
+                .compactor
+                .compact_namespace(
+                    namespace_id,
+                    options.compaction_policy,
+                    observed,
+                    cancellation,
+                )
+                .await?;
+            if !tail_caught_up {
+                maintained.outcome = MetadataMaintenanceOutcome::Due;
+            }
+            Ok(maintained)
+        };
+        // Boxing erases the loop's nested unit futures. Without it, a host
         // that awaits this call inside its own scheduling futures exceeds
         // rustc's type-recursion depth.
-        Box::pin(self.compactor.metadata_while_due(
-            namespace_id,
-            cancellation.metadata_compaction(),
-            TailFold::from_options(options),
-            options.compaction_policy,
+        Box::pin(trace::in_operation(
+            operation_span!(
+                self.compactor.core,
+                "maintain_metadata_while_due",
+                namespace_id
+            ),
+            maintained,
         ))
         .await
     }
@@ -408,10 +484,22 @@ impl Maintenance {
     /// waits for a fold permit from the runtime's execution budget. This runs
     /// no compaction; [`Self::maintain_metadata`] folds and then runs one
     /// compaction unit.
+    ///
+    /// The runtime runs one fold of a namespace at a time, so this fold waits
+    /// for a fold in progress, such as the writer session's, instead of
+    /// folding the same tail. It starts from the session's position when the
+    /// runtime has a session for the namespace, so it reads no WAL objects.
     pub async fn fold_wal(&self, namespace_id: &NamespaceId) -> Result<FoldWalResponse> {
         trace::in_operation(
             operation_span!(self.compactor.core, "fold_wal", namespace_id),
-            self.compactor.run_wal_fold(namespace_id),
+            async {
+                let folded = self
+                    .compactor
+                    .publisher
+                    .fold_namespace(namespace_id, FoldWhen::Always)
+                    .await?;
+                Ok(folded.folded().expect("a fold of any tail runs").response)
+            },
         )
         .await
     }

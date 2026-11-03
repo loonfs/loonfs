@@ -1,6 +1,7 @@
 //! [`Maintenance::acknowledge_retention_floor`], which acknowledges the
 //! retention floor of a namespace whose writer commits nothing.
 
+use crate::publisher::FoldWhen;
 use crate::trace::{self, operation_span};
 use crate::{ChangeSeq, Error, Maintenance, NamespaceId, Result};
 use loonfs_core::control::LoadedManifest;
@@ -70,8 +71,8 @@ impl Maintenance {
     /// fence that records the floor, and folds again (format spec, "Writer
     /// ownership"). A writer session of the namespace, in this runtime or
     /// another, then returns `writer_fenced` to its next publication, and a
-    /// later write opens a new session. Each fold waits for a fold permit
-    /// from the runtime's execution budget.
+    /// later write opens a new session. Each fold is one of the namespace's
+    /// folds as [`Self::fold_wal`] describes them.
     ///
     /// The runtime doesn't schedule this call. The reference server makes
     /// it on each full maintenance pass, before the pass's retention
@@ -102,7 +103,10 @@ impl Maintenance {
                         AcknowledgeRetentionFloorOutcome::AlreadyAcknowledged,
                     ));
                 }
-                self.compactor.run_wal_fold(namespace_id).await?;
+                self.compactor
+                    .publisher
+                    .fold_namespace(namespace_id, FoldWhen::Always)
+                    .await?;
                 let folded = RetentionFloors::of(
                     &self.compactor.load_live_basis(namespace_id).await?.manifest,
                 );
@@ -119,7 +123,10 @@ impl Maintenance {
                     .publisher
                     .finish_publication(namespace_id, acquired)
                     .await?;
-                self.compactor.run_wal_fold(namespace_id).await?;
+                self.compactor
+                    .publisher
+                    .fold_namespace(namespace_id, FoldWhen::Always)
+                    .await?;
                 let fenced = RetentionFloors::of(
                     &self.compactor.load_live_basis(namespace_id).await?.manifest,
                 );

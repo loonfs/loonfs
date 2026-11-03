@@ -5,16 +5,15 @@
 
 use crate::pinned_read::PinnedRead;
 use crate::publish::CommitCandidate;
-use crate::publisher::MergeSlot;
+use crate::publisher::{FoldWhen, MergeSlot};
 use crate::trace::{self, operation_span};
 use crate::{
-    ActorId, Commit, CommitId, Consistency, CoreError, Error, Maintenance, MergeForkOptions, Mode,
-    Namespace, NamespaceId, NextMergeRangeResponse, Result, Writable,
+    ActorId, Commit, CommitId, Consistency, CoreError, Error, MergeForkOptions, Mode, Namespace,
+    NamespaceId, NextMergeRangeResponse, Result, Writable,
 };
 use futures::future::BoxFuture;
 use loonfs_core::MergeRequest;
 use loonfs_types::format::wal::MergeRecord;
-use std::sync::Arc;
 
 /// The plans that one merge makes before it returns its commit's error,
 /// which are the first and three more after this namespace changed between
@@ -300,13 +299,12 @@ impl Namespace<Writable> {
         if remaining_ms == 0 {
             return;
         }
-        let maintenance = self.maintenance();
         // When the budget runs out first, the dropped fold leaves the segments
         // that it wrote unlisted by any manifest, and garbage collection
         // removes them, as it does the output of an abandoned compaction
         // unit.
         tokio::select! {
-            folded = maintenance.fold_wal(&self.namespace_id) => {
+            folded = self.mode.publisher.fold_namespace(&self.namespace_id, FoldWhen::Always) => {
                 if let Err(error) = folded {
                     tracing::warn!(
                         namespace_id = %self.namespace_id,
@@ -322,6 +320,10 @@ impl Namespace<Writable> {
     /// Folds the WAL tail of `namespace_id`, and returns a strong read of
     /// it at the fold's manifest or a newer one.
     ///
+    /// The fold is the namespace's one fold path, so when the namespace's
+    /// writer session in this runtime is already folding, the fold waits for
+    /// that fold instead of folding the same tail.
+    ///
     /// A strong read confirms a namespace's head, but the manifest that the
     /// read starts from is the cached head's, which a runtime checks for a
     /// successor only once per
@@ -334,7 +336,10 @@ impl Namespace<Writable> {
     /// would quietly merge a shorter range. So the fold drops the
     /// namespace's cached head before the read, whether or not it published.
     pub(crate) async fn fold_and_read(&self, namespace_id: &NamespaceId) -> Result<PinnedRead> {
-        self.maintenance().fold_wal(namespace_id).await?;
+        self.mode
+            .publisher
+            .fold_namespace(namespace_id, FoldWhen::Always)
+            .await?;
         self.core.invalidate_namespace_read_cache(namespace_id);
         self.core
             .pinned_read(namespace_id, Consistency::Strong)
@@ -342,11 +347,12 @@ impl Namespace<Writable> {
     }
 
     /// Returns a maintenance value that folds as this runtime's writer.
-    pub(super) fn maintenance(&self) -> Maintenance {
-        Maintenance::new(
+    #[cfg(test)]
+    pub(super) fn maintenance(&self) -> crate::Maintenance {
+        crate::Maintenance::new(
             self.core.clone(),
             self.mode.publisher.clone(),
-            Arc::clone(&self.mode.writer),
+            std::sync::Arc::clone(&self.mode.writer),
             self.mode.writer.writer_id.clone(),
         )
     }

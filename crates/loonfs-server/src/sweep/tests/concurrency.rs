@@ -29,7 +29,10 @@ async fn a_daily_pass_and_a_tick_never_visit_the_same_namespace_together() {
         OperationSelector::Any,
     ));
     let mut config = sweep_config(None);
-    config.idle_fold_after_ms = Some(0);
+    // The tick's metadata step folds the session's tail, and the pass's
+    // acknowledgment of the retention floor loads the current manifest, so
+    // the gate parks either visit at its first request.
+    config.idle_fold_after_ms = Some(1);
     let server = SweepServer::start(store.clone(), &config, 0).await;
     server
         .runtime
@@ -92,7 +95,7 @@ async fn a_daily_pass_and_a_tick_never_visit_the_same_namespace_together() {
 }
 
 #[tokio::test]
-async fn a_publish_during_metadata_maintenance_stays_due() {
+async fn a_publish_during_a_metadata_step_is_folded_by_the_next_tick() {
     let directory = tempdir().expect("tempdir");
     let namespace_id = namespace_id("concurrent-publish");
     // The runtime raises the hint in the background after each publication,
@@ -107,7 +110,9 @@ async fn a_publish_during_metadata_maintenance_stays_due() {
         OperationSelector::Any,
     ));
     let mut config = sweep_config(None);
-    config.idle_fold_after_ms = Some(0);
+    // The tick's metadata step folds the session's tail, so the gate parks
+    // the visit at the fold's first request.
+    config.idle_fold_after_ms = Some(1);
     let server = SweepServer::start(store.clone(), &config, 0).await;
     server
         .runtime
@@ -136,13 +141,16 @@ async fn a_publish_during_metadata_maintenance_stays_due() {
         .expect("publish during visit");
     store.release();
     visit.await.expect("finish visit");
-    assert!(!held.metadata_caught_up());
     store.inner().reset();
     server.tick_after(config.tick_interval_ms).await;
     assert!(
         !store.inner().take().is_empty(),
-        "the concurrent publish stays due"
+        "the next tick folds the tail that the concurrent publish left"
     );
+    assert_eq!(server.wal_tail_objects(&namespace_id).await, 0);
+    // The tick after a fold reads the fold's manifest once.
+    server.sweep.tick().await;
+    store.inner().reset();
     server.sweep.tick().await;
     assert!(store.inner().take().is_empty());
     server.runtime.shutdown().await.expect("shutdown");
@@ -165,7 +173,9 @@ async fn ticks_share_slots_with_a_parked_daily_pass_and_continue_when_a_slot_is_
         let mut config = sweep_config(None);
         config.max_concurrent_maintenance =
             std::num::NonZeroUsize::new(slots).expect("a nonzero slot count");
-        config.idle_fold_after_ms = Some(0);
+        // The tick's metadata step folds the held session's tail, so a tick
+        // that runs sends requests.
+        config.idle_fold_after_ms = Some(1);
         let server = SweepServer::start(store.clone(), &config, 0).await;
         server
             .runtime
@@ -205,7 +215,7 @@ async fn ticks_share_slots_with_a_parked_daily_pass_and_continue_when_a_slot_is_
         } else {
             tick.as_mut().await;
             assert!(
-                held.metadata_caught_up(),
+                server.metadata_caught_up(&later).await,
                 "a free slot lets the tick finish while the daily pass waits"
             );
             assert!(!store.inner().take().is_empty());

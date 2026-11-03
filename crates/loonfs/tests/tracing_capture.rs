@@ -118,7 +118,7 @@ fn a_metadata_maintenance_pass_emits_debug_events() {
     // Fields are matched with their `=` so a span carrying the same word
     // cannot satisfy the assertion.
     let step = find_event(&log, "metadata maintenance pass concluded");
-    for field in ["wal_fold=", "compaction=", "wal_tail_objects_before="] {
+    for field in ["wal_fold=", "compaction="] {
         assert!(step.contains(field), "missing `{field}` in: {step}");
     }
     // Record the WAL fold phase.

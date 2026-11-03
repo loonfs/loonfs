@@ -107,7 +107,10 @@ async fn creations_wait_for_a_fold_permit_whether_or_not_the_tail_is_folded() {
     let permits = hold_every_fold_permit(&writer).await;
     let mut creations = start_creations(&writer, &unfolded);
     creations.extend(start_creations(&writer, &folded));
-    wait_for_fold_waiters(&writer, creations.len()).await;
+    // The creations of one namespace fold under its fold lock, one at a
+    // time, so one creation of each namespace waits for a permit, and the
+    // other waits for the lock.
+    wait_for_fold_waiters(&writer, 2).await;
     bounded(
         Duration::from_secs(10),
         writer.fork_namespace_with_options(
@@ -181,12 +184,11 @@ async fn dropped_creations_return_their_fold_permits() {
     let writer = writer_over(store.clone(), one_fold_at_a_time(), &[&namespace_id]).await;
     seed_unfolded_tail(store.as_ref(), &namespace_id).await;
 
-    // The snapshot takes the permit and parks at its manifest put, and the
-    // fork waits for that permit.
+    // The snapshot takes the namespace's fold lock and the permit, and parks
+    // at its manifest put, and the fork waits for the lock.
     store.block_next();
     let creations = start_creations(&writer, &namespace_id);
     store.wait_until_blocked().await;
-    wait_for_fold_waiters(&writer, 1).await;
     assert_eq!(writer.execution_budget().stats().folds_running, 1);
 
     for creation in &creations {

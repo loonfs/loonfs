@@ -2,23 +2,18 @@
 //! WAL-tail fold, and the metadata compaction that a fold starts, and the
 //! waits for them.
 
-use super::registry::PositionChange;
 use super::PublisherRegistry;
-use super::{FoldTrigger, NamespacePublisher, NamespacePublisherState};
-use crate::maintenance::{Compactor, TailFold};
-use crate::trace::{phase_event, phase_span};
+use super::{FoldWhen, NamespaceFold, NamespacePublisher, NamespacePublisherState};
+use crate::maintenance::Compactor;
+use crate::trace::phase_event;
 use crate::MaintainMetadataOptions;
-use crate::{Error, FoldWalOutcome, MetadataMaintenanceOutcome, Result};
+use crate::{Error, FoldWalOutcome, Result};
 use futures::FutureExt;
 use loonfs_core::limits::FOLD_AT_WAL_OBJECTS;
-use loonfs_core::publish::NamespaceCommitEngine;
-use loonfs_core::time::OperationClock;
 use loonfs_core::Phase;
 use std::panic::AssertUnwindSafe;
-use std::sync::Arc;
 use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
-use tracing::Instrument;
 
 /// The worker that drains a session's queue.
 pub(super) struct WorkerHandle {
@@ -63,7 +58,7 @@ impl NamespacePublisher {
     /// A panicked fold is retried by the next publish over the threshold. The
     /// drain reports the contained panic. A fold that publishes starts the
     /// session's compaction after it releases its fold permit, and the task
-    /// folds again while the tail that the fold left is over the trigger.
+    /// folds again while the tail that the fold left is at the trigger.
     pub(super) fn start_fold(&self) -> Option<oneshot::Sender<()>> {
         let mut state = self.lock_state();
         let _session = self.unfenced_session().ok()?;
@@ -86,42 +81,17 @@ impl NamespacePublisher {
             // commits published during the pass before it.
             loop {
                 match AssertUnwindSafe(publisher.run_fold()).catch_unwind().await {
-                    Ok(true) => {
-                        publisher.fold_published.send_replace(());
-                        publisher.start_compaction();
-                    }
+                    Ok(true) => publisher.start_compaction(),
                     Ok(false) => return,
                     Err(_) => {
                         publisher.record_panic();
                         return;
                     }
                 }
-                if !publisher.position_fold_is_due().await {
-                    return;
-                }
             }
         });
         state.fold = Some(fold);
         Some(start)
-    }
-
-    /// Whether the engine's position shows its tail over the fold trigger.
-    /// Without a position the tail is unknown, and the next publish reads
-    /// the tail and starts the fold.
-    async fn position_fold_is_due(&self) -> bool {
-        let slot = self.lock_engine().await;
-        slot.engine.as_ref().is_some_and(|engine| {
-            engine
-                .wal_tail_objects()
-                .zip(engine.wal_tail_inline_bytes())
-                .is_some_and(|(objects, inline_bytes)| {
-                    FoldTrigger::new(self.context.runtime_core.config()).fold_is_due(
-                        FOLD_AT_WAL_OBJECTS.get(),
-                        objects,
-                        inline_bytes,
-                    )
-                })
-        })
     }
 
     /// Starts the session's metadata compaction unless one is running or the
@@ -152,25 +122,20 @@ impl NamespacePublisher {
         state.compaction = Some(compaction);
     }
 
-    /// Runs the maintenance loop over this session's namespace without its
-    /// fold step, so folding stays with [`Self::run_fold`].
+    /// Runs compaction units over this session's namespace while compaction
+    /// is due, through the namespace's one compaction path (see
+    /// [`Compactor::compact_namespace`]).
     async fn run_compaction(&self) {
         let Some(compactor) = self.compactor() else {
             return;
         };
-        let seq = self.lock_state().last_published.map(|last| last.seq);
-        let result = compactor
-            .metadata_while_due(
-                &self.namespace_id,
-                &self.compaction_cancellation,
-                TailFold::Never,
-                MaintainMetadataOptions::default().compaction_policy,
-            )
-            .await;
-        let outcome = result
-            .as_ref()
-            .map_or(MetadataMaintenanceOutcome::Due, |response| response.outcome);
-        self.record_metadata_maintenance(seq, outcome);
+        let result = Box::pin(compactor.compact_namespace(
+            &self.namespace_id,
+            MaintainMetadataOptions::default().compaction_policy,
+            None,
+            &self.compaction_cancellation,
+        ))
+        .await;
         if let Err(error) = result {
             phase_event!(
                 self.context.runtime_core,
@@ -199,78 +164,28 @@ impl NamespacePublisher {
         ))
     }
 
-    /// Folds the tail under a fold permit. Returns whether the fold published
-    /// a manifest.
+    /// Folds the tail through the namespace's one fold path (see
+    /// [`PublisherRegistry::fold_namespace`]) when it's at the fold trigger.
+    /// Returns whether the fold published a manifest.
     async fn run_fold(&self) -> bool {
-        let Some(_writer) = self.context.writer.upgrade() else {
+        let (Some(_writer), Some(shared)) = (self.context.writer.upgrade(), self.shared.upgrade())
+        else {
             return false;
         };
-        let _permit = self.context.runtime_core.fold_permit().await;
-        let input = {
-            let slot = self.lock_engine().await;
-            if slot.engine.as_ref().is_some_and(|engine| {
-                engine
-                    .wal_tail_objects()
-                    .zip(engine.wal_tail_inline_bytes())
-                    .is_some_and(|(objects, inline_bytes)| {
-                        !FoldTrigger::new(self.context.runtime_core.config()).fold_is_due(
-                            FOLD_AT_WAL_OBJECTS.get(),
-                            objects,
-                            inline_bytes,
-                        )
-                    })
-            }) {
-                return false;
-            }
-            slot.engine
-                .as_ref()
-                .and_then(NamespaceCommitEngine::writer_position)
+        let registry = PublisherRegistry { shared };
+        let when = FoldWhen::Due {
+            max_wal_tail_objects: FOLD_AT_WAL_OBJECTS.get(),
         };
-        let started_at_ms = self.context.runtime_core.timer().monotonic_now_ms();
-        let result = self
-            .context
-            .runtime_core
-            .namespace_store(&self.namespace_id)
-            .fold_wal_tail(
-                input,
-                &OperationClock::start(
-                    self.context.runtime_core.now_ms(),
-                    Arc::clone(self.context.runtime_core.timer()),
-                ),
-            )
-            .instrument(phase_span!(
-                self.context.runtime_core,
-                Phase::WalFold,
-                self.namespace_id
-            ))
-            .await;
-        self.context
-            .runtime_core
-            .instruments()
-            .publisher
-            .wal_fold_duration(self.elapsed_ms_since(started_at_ms));
-        // The fold moves the position onto the manifest that covers its tail,
-        // whether it published that manifest or found it current. A fold
-        // that failed leaves the position where it was.
-        if let Ok(folded) = &result {
-            self.change_position(PositionChange::Move(folded.manifest.clone()))
-                .await;
-        }
-        match result {
-            Ok(folded) => {
+        match registry.fold_namespace(&self.namespace_id, when).await {
+            Ok(NamespaceFold::Folded(folded)) => {
                 let published = folded.response.outcome == FoldWalOutcome::Published;
                 if published {
                     self.context.runtime_core.instruments().publisher.wal_fold();
-                    if let Some(shared) = self.shared.upgrade() {
-                        shared
-                            .raise_hint(&self.namespace_id, folded.response.manifest_no)
-                            .await;
-                    }
                 }
                 published
             }
+            Ok(NamespaceFold::NotDue { .. }) => false,
             Err(error) => {
-                let error = Error::from(error);
                 phase_event!(
                     self.context.runtime_core,
                     Phase::WalFold,

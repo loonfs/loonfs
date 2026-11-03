@@ -23,6 +23,7 @@
 mod admission;
 mod delete_barrier;
 mod fold_trigger;
+mod folds;
 mod hint_raises;
 mod inline_content;
 pub(crate) mod metrics;
@@ -35,9 +36,11 @@ pub(crate) use worker::sleep_ms;
 mod write_stop;
 
 use crate::runtime_core::{ReadPositionSlot, RuntimeCore};
-use crate::{CoreError, MetadataMaintenanceOutcome, SharedObjectStore, WriterState};
+use crate::{CoreError, SharedObjectStore, WriterState};
 use admission::PublicationAdmission;
 pub(crate) use fold_trigger::FoldTrigger;
+use folds::NamespaceTurns;
+pub(crate) use folds::{FoldWhen, NamespaceFold};
 use loonfs_core::publish::{NamespaceCommitEngine, SharedWriterSessionStatus, WriterSessionStatus};
 use loonfs_core::time::Observation;
 use loonfs_core::MetadataCompactionCancellation;
@@ -95,10 +98,15 @@ struct NamespacePublisher {
     /// Set once the session stops admitting work. A session never compacts
     /// again after that.
     compaction_cancellation: MetadataCompactionCancellation,
-    /// Signals each fold of this session that publishes, so a worker waiting
-    /// at the write stop wakes once that fold frees room, even when the fold
-    /// task goes on to fold again.
+    /// Signals each fold of this session's namespace that publishes, so a
+    /// worker waiting at the write stop wakes once that fold frees room,
+    /// even when the fold task goes on to fold again.
     fold_published: watch::Sender<()>,
+    /// The namespace's fold and compaction locks. Strong: the registry's
+    /// table of locks keeps a namespace's entry while a caller has it, so
+    /// the session's folds and every other fold of the namespace share one
+    /// lock for the session's whole life.
+    turns: Arc<NamespaceTurns>,
 }
 
 /// Commit engine and writer session retained by one namespace publisher.
@@ -196,7 +204,6 @@ struct NamespacePublisherState {
     /// immediately.
     last_publish: Option<Observation>,
     last_published: Option<LastPublish>,
-    metadata_caught_up: bool,
     /// The newest manifest that the engine published itself (a claim or a
     /// tombstone) and that the worker hasn't raised the hint to yet.
     unraised_manifest_no: Option<ManifestNo>,
@@ -229,7 +236,11 @@ impl NamespacePublisherState {
 }
 
 impl NamespacePublisher {
-    pub(super) fn new(namespace_id: NamespaceId, shared: &Arc<RegistryShared>) -> Self {
+    pub(super) fn new(
+        namespace_id: NamespaceId,
+        shared: &Arc<RegistryShared>,
+        turns: Arc<NamespaceTurns>,
+    ) -> Self {
         let session = SharedWriterSessionStatus::default();
         let read_position = Arc::new(ReadPositionSlot::new(
             shared.context.runtime_core.head_and_wal_tail_cache(),
@@ -247,7 +258,6 @@ impl NamespacePublisher {
                 next_task_id: 0,
                 last_publish: None,
                 last_published: None,
-                metadata_caught_up: true,
                 unraised_manifest_no: None,
             })),
             engine: Arc::new(AsyncMutex::new(EngineSlot {
@@ -259,6 +269,7 @@ impl NamespacePublisher {
             shared: Arc::downgrade(shared),
             compaction_cancellation: MetadataCompactionCancellation::default(),
             fold_published: watch::Sender::new(()),
+            turns,
         }
     }
 
@@ -450,15 +461,10 @@ impl NamespacePublisher {
         }
     }
 
-    pub(super) fn record_metadata_maintenance(
-        &self,
-        expected_seq: Option<ChangeSeq>,
-        outcome: MetadataMaintenanceOutcome,
-    ) {
-        let mut state = self.lock_state();
-        if state.last_published.map(|last| last.seq) == expected_seq {
-            state.metadata_caught_up = outcome == MetadataMaintenanceOutcome::CaughtUp;
-        }
+    /// Returns when this session last published, on the runtime's monotonic
+    /// clock, or `None` before its first publish.
+    pub(super) fn last_published_at_ms(&self) -> Option<u64> {
+        self.lock_state().last_published.map(|last| last.at_ms)
     }
 
     pub(super) fn namespace_deleted(&self) -> CoreError {

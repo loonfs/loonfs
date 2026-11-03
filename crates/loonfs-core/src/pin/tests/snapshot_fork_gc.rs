@@ -50,6 +50,7 @@ impl Fixture {
                     name: "historical".into(),
                     expires_at_ms: Some(u64::MAX),
                 },
+                None,
                 &setup.clock(),
             )
             .await
@@ -329,6 +330,7 @@ async fn snapshot_fork_refuses_a_snapshot_that_expired_after_the_fork_call_began
                 name: "short".into(),
                 expires_at_ms: Some(context.now_ms + 10),
             },
+            None,
             &context.clock(),
         )
         .await

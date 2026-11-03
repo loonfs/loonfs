@@ -1,7 +1,7 @@
 //! The retention advance that full passes make under each namespace's
 //! retention window, or the server's.
 
-use super::{local_store, seed_writer, sweep_config, SweepServer, DAY_MS};
+use super::{idle_fold_after_ms, local_store, seed_writer, sweep_config, SweepServer, DAY_MS};
 use crate::config::ServerConfig;
 use crate::sweep::retries::SweepCall;
 use crate::sweep::{lock, GarbageCollection};
@@ -325,15 +325,16 @@ async fn ticks_never_advance_the_floor_and_the_next_full_pass_does() {
         .committed_seq;
     let floor = server.diagnostics(&namespace_id).await.retention_floor_seq;
 
-    server.tick_after(2 * WINDOW_MS).await;
-    for _ in 0..3 {
-        server.tick_after(config.tick_interval_ms).await;
-    }
+    server.tick_after(idle_fold_after_ms(&config)).await;
     assert_eq!(
         server.wal_tail_objects(&namespace_id).await,
         0,
         "a tick folded the tail"
     );
+    server.tick_after(2 * WINDOW_MS).await;
+    for _ in 0..3 {
+        server.tick_after(config.tick_interval_ms).await;
+    }
     let entry = server
         .sweep
         .inner
@@ -396,9 +397,11 @@ async fn a_pass_that_finds_a_tick_visiting_leaves_its_advance_to_that_visit() {
         .expect("write a file")
         .committed_seq;
     let floor = server.diagnostics(&namespace_id).await.retention_floor_seq;
+    server.tick_after(idle_fold_after_ms(&config)).await;
+    assert_eq!(server.wal_tail_objects(&namespace_id).await, 0);
     server.clock.advance_ms(2 * WINDOW_MS);
 
-    // The tick's idle fold parks on its first request, so the tick has the
+    // The tick's collection parks on its first request, so the tick has the
     // namespace for the whole pass.
     store.block_next();
     let tick = tokio::spawn({

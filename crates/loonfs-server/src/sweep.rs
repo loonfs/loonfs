@@ -100,28 +100,45 @@ pub enum GarbageCollection {
 
 /// Ticks held sessions every `tick_interval_ms`.
 ///
-/// Active sessions publish and maintain themselves. Settling sessions run the
-/// first due step: metadata, index, collection, or close. Quiet sessions cost
-/// no store requests. Metadata that remains unfinished waits
-/// `maintenance_interval_ms` before retrying. Collection requires a moved seq
-/// and `gc_interval_ms` elapsed. Each held entry keeps one retry time per
-/// call, which ticks wait for. A call that fails waits its failure backoff:
-/// one tick interval, doubled for each failure in a row up to
-/// [`MAX_SWEEP_BACKOFF_MS`]. A failed metadata call waits the later of its
-/// backoff and `maintenance_interval_ms`, because its work remains. A success
-/// clears the backoff. A call that panics counts as a `server_error` failure.
-/// The panic stops neither the sweep nor the visits to other namespaces.
-/// Quiet sessions close after `idle_session_close_after_ms` without an open,
-/// when no caller has a handle. An open during close waits for its drain. A
-/// failing call keeps an idle session held, so ticks retry it, until its
-/// backoff reaches [`MAX_SWEEP_BACKOFF_MS`].
+/// On each tick, a session that has a current writer position gets a
+/// metadata step when the step's retry time has come: a fold of the WAL tail
+/// if one is due, then compaction units if one is due, through the
+/// namespace's one fold path and one compaction path, which the session's
+/// own fold and compaction also use. A step that the session's position
+/// shows to be not due costs no store requests. The tick then runs the first
+/// due step of collection, index, and close. A session without a current
+/// position gets no metadata step, because it isn't writing and the daily
+/// pass maintains its namespace's metadata, except one step from the store
+/// once its tail reaches the idle fold age. Metadata that remains unfinished
+/// waits `maintenance_interval_ms` before the next step, and the session's
+/// tail reaching its idle fold age allows one earlier step. Collection runs
+/// once the session's published seq has moved and `gc_interval_ms` has
+/// elapsed, and it comes before the index step, so a session with index
+/// work on every tick still collects.
+///
+/// Each held entry keeps one retry time per call, which ticks wait for. A
+/// call that fails waits its failure backoff: one tick interval, doubled for
+/// each failure in a row up to [`MAX_SWEEP_BACKOFF_MS`]. A failed metadata
+/// step waits the later of its backoff and `maintenance_interval_ms`,
+/// because its work remains. A success clears the backoff. A call that
+/// panics counts as a `server_error` failure. The panic stops neither the
+/// sweep nor the visits to other namespaces.
+///
+/// A session closes after `idle_session_close_after_ms` without an open,
+/// when nothing else is due, its metadata step on that tick found its
+/// metadata caught up or it has no current position, and no caller has its
+/// handle. An open during close waits for its drain. A failing call keeps an
+/// idle session held, so ticks retry it, until its backoff reaches
+/// [`MAX_SWEEP_BACKOFF_MS`]. A session that was closed or fenced, or whose
+/// namespace is gone, closes once no caller has its handle.
 ///
 /// The daily listing pass runs at start and every `full_sweep_interval_ms`,
 /// alongside ticks. It covers namespaces without held sessions and garbage
 /// still inside its grace window. It makes every call on every namespace it
-/// lists without waiting for a held entry's retry times, and a namespace
-/// without a held entry keeps no retry state, because the next pass is its
-/// retry.
+/// lists, except the metadata step of a held session with a current writer
+/// position, which the ticks make, and it doesn't wait for a held entry's
+/// retry times. A namespace without a held entry keeps no retry state,
+/// because the next pass is its retry.
 ///
 /// The pass also advances each active namespace's retention floor to the
 /// last commit at or before the current time minus the namespace's retention

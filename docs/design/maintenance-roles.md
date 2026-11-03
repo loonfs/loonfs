@@ -11,7 +11,7 @@ Pins, forks, and namespace creation belong to no role. Every other publication i
 
 A manifest is created at its predecessor's number plus one with put-if-absent, so two publishers can't both create the same number. The manifest records the writer epoch and the compactor epoch, so a publisher can check whether it still has the role it acts under. Compaction uses both mechanisms. A runtime claims the compactor epoch before its first compaction, every compaction publication has to match the current epoch, and a newer claim stops an older compactor at its next check.
 
-Folds start in several places. A writer's host folds its session's tail after a commit that reaches the fold thresholds or when the tail reaches the idle fold age, a maintenance call or the host's daily pass runs an explicit fold, and a pin from the current head or a namespace deletion folds the tail first. Two folds of one namespace can run at once, in one process or in two. If a session's fold were bound to the writer epoch and the other folds weren't, LoonFS would have fold paths with different rules. The binding would exist to keep the session's position off a manifest published after another writer's claim, and the writer position's epoch rule (the position never moves onto a manifest with a newer writer epoch) already does that job.
+Folds start in several places. A writer's host folds its session's tail after a commit that reaches the fold thresholds or when the tail reaches the idle fold age, a maintenance call or the host's daily pass runs an explicit fold, and a pin from the current head or a namespace deletion folds the tail first. Two folds of one namespace can run at once in two processes. If a session's fold were bound to the writer epoch and the other folds weren't, LoonFS would have two kinds of fold that follow different rules. The binding would exist to keep the session's position off a manifest published after another writer's claim, and the writer position's epoch rule (the position never moves onto a manifest with a newer writer epoch) already does that job.
 
 ## Two roles
 
@@ -40,7 +40,9 @@ Why two epochs and not one? The two roles have different lifetimes and can belon
 
 A [fold](../specs/glossary.md#fold) moves the WAL objects after the current manifest's folded boundary into metadata segments, and publishes the next manifest as the maintainer's publication, with both epochs copied from its predecessor. The writer's host folds its own sessions' tails as the maintainer, after a commit that reaches the fold thresholds and when a tail reaches the idle fold age. A maintenance runtime folds a tail that no host is maintaining, such as a crashed writer's, with no claim on the writer role and no fence on a writer. A snapshot from any process folds the tail the same way, and then pins the resulting manifest.
 
-A writer session runs one fold at a time. A maintenance call's fold can run beside the session's fold, in the same process or in another one, and the numbered create resolves the two. A fold whose create loses reloads the current manifest and rebuilds against it, and the rebuild has four outcomes:
+Within one runtime, every fold of a namespace goes through the namespace's fold path ([Folding and compacting a namespace](maintenance-hosting.md#folding-and-compacting-a-namespace)): the session's own folds, a maintenance call's fold, the fold of the fork in a merge or a rebase, the fold before a pin or a deletion, and the folds of a retention floor acknowledgment. Each fold takes the namespace's fold lock, an in-memory lock that one fold at a time can have, and LoonFS checks whether the fold is due after the fold has the lock. So if a fold waited for another fold, the check finds the tail already folded, and the second fold does nothing. The fold reads the tail from the writer session's position when the runtime has a session with a current position, and from the store otherwise.
+
+A fold in another process can still run at the same time. Both folds try to create the same manifest number with put-if-absent, so one create succeeds and the other fails. A fold whose create loses reloads the current manifest and rebuilds against it, and the rebuild has four outcomes:
 
 - **The tail is already folded.** The current manifest's folded boundary is at or past the fold's tip, and its head and number are at or past the fold's, so there's nothing to publish.
 - **The winner is at the same head.** The winner is a compaction, a compactor claim, or a retention advance, so the rebuild keeps the tail it read.
@@ -61,7 +63,7 @@ Compaction claims the compactor epoch before a runtime's first compaction of the
 
 Garbage collection publishes nothing and claims nothing. A pass establishes its roots from the current manifest, the upload sessions, the WAL tail, and the complete pin listing, and deletes each object that no root references once the object is older than the grace. Two passes over one namespace delete the same objects, and the second finds them gone. The maintainer runs garbage collection because it runs the other passes, not because a fence requires it.
 
-A host that has both roles for a namespace folds and compacts. A separate maintenance host that visits the same namespace claims the compactor epoch when it compacts, which stops the writer host's next compaction at its check, and the writer host claims again when it next compacts. The two hosts' folds coexist. The host's daily pass visits every listed namespace, but a visit folds a tail only when a fold is due (at the fold thresholds or the idle fold age, as on a tick). Two hosts that maintain one namespace alternate claims for compaction only, and each lost claim costs the loser one compaction. An unfinished metadata visit that finds another process's compactor claim retries on an interval, at six requests per retry.
+A host that has both roles for a namespace folds and compacts. A separate maintenance host that visits the same namespace claims the compactor epoch when it compacts, which stops the writer host's next compaction at its check, and the writer host claims again when it next compacts. The two hosts' folds coexist. The host's daily pass visits every listed namespace, but a visit folds a tail only when a fold is due (at the fold thresholds or the idle fold age, as on a tick). Two hosts that maintain one namespace alternate claims for compaction only, and each lost claim costs the loser at most the one compaction unit that the claim interrupts. An unfinished metadata visit that finds another process's compactor claim retries on an interval, at six requests per retry.
 
 ## Pins and forks
 
@@ -69,7 +71,7 @@ A [pin](../specs/glossary.md#pin) is a record under the namespace's pins prefix,
 
 ## Costs
 
-Folds, pins, retention advances, and deletions make no claim, so they send no request beyond their own publications. A runtime claims the compactor epoch before its first compaction of a namespace, and again after another runtime's claim, and each claim is one manifest publication. Two hosts that maintain one namespace alternate claims, and each lost claim costs the loser one compaction.
+Folds, pins, retention advances, and deletions make no claim, so they send no request beyond their own publications. A runtime claims the compactor epoch before its first compaction of a namespace, and again after another runtime's claim, and each claim is one manifest publication. A writer session's position doesn't show another runtime's claim, so before a compaction unit that's due plans from the position, the runtime sends one HEAD for the manifest after the position's manifest. When another runtime has claimed the compactor epoch, the unit finds the claim and stops before it reads its inputs. Two hosts that maintain one namespace alternate claims, and each lost claim costs the loser at most the one compaction unit that the claim interrupts.
 
 ## What the format and API specs say
 
@@ -81,7 +83,7 @@ In the API specification, the maintenance jobs say which role each runs under, a
 
 ## Alternatives considered
 
-Bind a writer session's fold to the writer epoch, and leave the explicit fold and the pin's fold unbound. This keeps three fold paths, and a binding rule whose job the position's epoch rule already does.
+Bind a writer session's fold to the writer epoch, and leave the explicit fold and the pin's fold unbound. This keeps three kinds of fold, and a binding rule whose job the position's epoch rule already does.
 
 Put folds on the writer, under the writer epoch, with a maintenance pass claiming the writer role to fold a crashed writer's tail. This keeps each fold with its log, but either a pass fences an idle session, which costs the application a failed commit when it returns, or the tail stays unfolded until a writer opens the namespace again.
 

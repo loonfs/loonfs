@@ -136,6 +136,7 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
                 name: "test-pin".to_owned(),
                 expires_at_ms: None,
             },
+            None,
             &context.clock(),
         )
         .await

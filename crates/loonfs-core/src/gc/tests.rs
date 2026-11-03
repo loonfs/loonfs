@@ -1961,6 +1961,7 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
                 name: "keeper".to_owned(),
                 expires_at_ms: None,
             },
+            None,
             &setup.clock(),
         )
         .await
@@ -1972,6 +1973,7 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
                 name: "releaser".to_owned(),
                 expires_at_ms: None,
             },
+            None,
             &setup.clock(),
         )
         .await
@@ -2352,6 +2354,7 @@ async fn a_fork_retry_keeps_young_pins_and_reclaims_the_abandoned_one_after_grac
             PinOwner::Fork {
                 target_namespace_id: clone.clone(),
             },
+            None,
             &setup.clock(),
         )
         .await
@@ -3106,7 +3109,7 @@ async fn expiry_and_creation_grace_delete_pins_without_a_released_state() {
     ] {
         pins.push(
             crate::test_support::namespace_store(&store, &namespace_id)
-                .create_pin(owner, &setup.clock())
+                .create_pin(owner, None, &setup.clock())
                 .await
                 .map(|report| crate::pin::checkpoint_summary(report.response))
                 .expect("pin"),
@@ -3188,6 +3191,7 @@ async fn a_pin_naming_an_absent_manifest_is_corruption_before_sweeping() {
                 name: "initial".to_owned(),
                 expires_at_ms: None,
             },
+            None,
             &setup.clock(),
         )
         .await

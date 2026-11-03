@@ -502,10 +502,12 @@ where
         result = server.as_mut() => (result, deadline_from_now()),
         () = shutdown.as_mut() => {
             // This is synchronous so readiness changes before the drain waits.
-            runtime.close_admission();
+            // The sweep stops first, so no tick finds the sessions closed by
+            // the admission close and tries to close them itself.
             if let Some(sweep) = &sweep {
                 sweep.cancel();
             }
+            runtime.close_admission();
             let mut deadline = deadline_from_now();
             let drained = drain_with_deadline(
                 server.as_mut(),

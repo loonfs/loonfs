@@ -1408,7 +1408,7 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
         .expect("write");
 
     let first = crate::test_support::namespace_store(&store, &namespace_id)
-        .create_pin(owner(Some(10_000)), &context.clock())
+        .create_pin(owner(Some(10_000)), None, &context.clock())
         .await
         .map(|report| crate::pin::checkpoint_summary(report.response))
         .expect("create checkpoint");
@@ -1419,7 +1419,7 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
     let mut minted = BTreeSet::from([first.checkpoint_id.clone()]);
     for expiry in [Some(99_000), Some(5_000), None] {
         let next = crate::test_support::namespace_store(&store, &namespace_id)
-            .create_pin(owner(expiry), &later_context.clock())
+            .create_pin(owner(expiry), None, &later_context.clock())
             .await
             .map(|report| crate::pin::checkpoint_summary(report.response))
             .expect("create checkpoint");
@@ -1472,6 +1472,7 @@ async fn an_expired_pin_serves_no_reads_but_stays_until_a_pass_deletes_it() {
                 name: "test-pin".to_owned(),
                 expires_at_ms: Some(context.now_ms),
             },
+            None,
             &context.clock(),
         )
         .await

@@ -416,8 +416,10 @@ impl LoonFs<Writable> {
     ///
     /// A fork of the current head folds the source's WAL tail first when it
     /// is not folded, and waits for a fold permit from the runtime's
-    /// execution budget either way. A fork of a snapshot never folds and
-    /// takes no fold permit.
+    /// execution budget either way. The fold is the source's one fold path,
+    /// so it waits for a fold in progress, such as the fold of the source's
+    /// writer session, and it starts from that session's position. A fork of
+    /// a snapshot never folds and takes no fold permit.
     pub async fn fork_namespace_with_options(
         &self,
         source_namespace_id: &NamespaceId,
@@ -431,13 +433,12 @@ impl LoonFs<Writable> {
                 self.namespace(source_namespace_id)
                     .ensure_administrator()
                     .await?;
-                let engine = self.engine(source_namespace_id);
                 let snapshot_id = options.snapshot_id.as_ref();
                 self.install_fork(
                     source_namespace_id,
                     new_namespace_id,
                     snapshot_id.is_none(),
-                    async move {
+                    |engine| async move {
                         engine
                             .fork_namespace(new_namespace_id, actor, snapshot_id)
                             .await
@@ -450,37 +451,40 @@ impl LoonFs<Writable> {
     }
 
     /// Installs the fork of `source_namespace_id` into `new_namespace_id`
-    /// that `fork` makes, under a fold permit from the runtime's execution
-    /// budget when `fold` says that the fork folds the source's WAL tail,
-    /// and moves this runtime's views of both namespaces past the fork.
-    pub(crate) async fn install_fork(
+    /// that `fork` makes with the source's engine, and moves this runtime's
+    /// views of both namespaces past the fork.
+    ///
+    /// When `fold` says that the fork pins the source's current head, the
+    /// source's WAL tail is folded first, through the source's one fold path,
+    /// and the fork pins the fold's manifest (see
+    /// [`PublisherRegistry::pin_after_fold`]).
+    pub(crate) async fn install_fork<Fork>(
         &self,
         source_namespace_id: &NamespaceId,
         new_namespace_id: &NamespaceId,
         fold: bool,
-        fork: impl std::future::Future<
+        mut fork: impl FnMut(NamespaceWriterEngine<SharedObjectStore>) -> Fork,
+    ) -> Result<crate::NamespaceMetadata>
+    where
+        Fork: std::future::Future<
             Output = loonfs_core::Result<loonfs_core::PublicationReport<crate::NamespaceMetadata>>,
         >,
-    ) -> Result<crate::NamespaceMetadata> {
-        let result = {
-            let _permit = if fold {
-                Some(self.core.fold_permit().await)
-            } else {
-                None
-            };
-            fork.await
-        }
-        .map_err(Error::from);
-        if let Some(published) = result
-            .as_ref()
-            .ok()
-            .and_then(|report| report.published.as_ref())
-        {
+    {
+        let result = if fold {
             self.mode
                 .publisher
-                .raise_hint(source_namespace_id, published.manifest.manifest_no)
-                .await;
-        }
+                .pin_after_fold(source_namespace_id, |manifest| {
+                    fork(
+                        self.engine(source_namespace_id)
+                            .with_folded_manifest(manifest),
+                    )
+                })
+                .await
+        } else {
+            fork(self.engine(source_namespace_id))
+                .await
+                .map_err(Error::from)
+        };
         // The runtime drops its view of the source after a fork, as it does
         // after a creation or a deletion (see the read freshness design
         // note), so the source's publisher drops its position instead of

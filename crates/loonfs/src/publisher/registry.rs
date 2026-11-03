@@ -3,13 +3,13 @@
 
 use super::admission::{AdmissionPermit, PublicationAdmission};
 use super::hint_raises::HintRaises;
-use super::{lock_state, FoldTrigger, NamespacePublisher, PublisherContext};
+use super::{lock_state, FoldTrigger, NamespacePublisher, NamespaceTurns, PublisherContext};
 use crate::publish::CommitCandidate;
 use crate::runtime_core::{HeadPositions, ReadPositionSlot, RuntimeCore};
 use crate::trace::phase_event;
 use crate::{
-    CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, Error, ErrorCode,
-    MetadataMaintenanceOutcome, Result, SharedObjectStore, WriterState,
+    CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, Error, ErrorCode, Result,
+    SharedObjectStore, WriterState,
 };
 use futures::future::BoxFuture;
 use loonfs_core::publish::{NamespaceCommitEngine, WriterPosition};
@@ -73,6 +73,25 @@ pub(super) struct RegistryShared {
 pub(super) struct RegistryState {
     pub(super) closed: bool,
     pub(super) sessions: HashMap<NamespaceId, LiveSession>,
+    /// The fold and compaction locks of the namespaces that a session, a
+    /// fold, or a compaction unit in this runtime has. Strong: the table
+    /// owns the locks. Adding an entry removes every entry that no caller
+    /// has, so the table lists at most one entry more than the most callers
+    /// that had entries at once since the last addition, and a session keeps
+    /// its namespace's entry for the session's life.
+    turns: HashMap<NamespaceId, Arc<NamespaceTurns>>,
+}
+
+impl RegistryState {
+    /// Returns the fold and compaction locks of `namespace_id`, adding an
+    /// entry when the table has none.
+    pub(super) fn turns(&mut self, namespace_id: &NamespaceId) -> Arc<NamespaceTurns> {
+        if let Some(turns) = self.turns.get(namespace_id) {
+            return Arc::clone(turns);
+        }
+        self.turns.retain(|_, turns| Arc::strong_count(turns) > 1);
+        Arc::clone(self.turns.entry(namespace_id.clone()).or_default())
+    }
 }
 
 /// One entry in the table of live sessions.
@@ -165,30 +184,16 @@ impl NamespaceSession {
             .map(|last| last.seq)
     }
 
-    pub(crate) fn last_published_at_ms(&self) -> Option<u64> {
-        self.publisher
-            .lock_state()
-            .last_published
-            .map(|last| last.at_ms)
-    }
-
-    pub(crate) fn metadata_caught_up(&self) -> bool {
-        self.publisher.lock_state().metadata_caught_up
-    }
-
     pub(crate) fn idle_fold_due_at_ms(&self) -> Option<u64> {
-        let published_at_ms = self.last_published_at_ms()?;
+        let published_at_ms = self.publisher.last_published_at_ms()?;
         FoldTrigger::new(self.publisher.context.runtime_core.config())
             .idle_fold_due_at_ms(published_at_ms)
     }
 
-    pub(crate) fn record_metadata_maintenance(
-        &self,
-        expected_seq: Option<ChangeSeq>,
-        outcome: MetadataMaintenanceOutcome,
-    ) {
-        self.publisher
-            .record_metadata_maintenance(expected_seq, outcome);
+    /// Whether the session has a writer position whose last check is within
+    /// the revalidation bound.
+    pub(crate) fn has_current_writer_position(&self) -> bool {
+        self.publisher.current_position().is_some()
     }
 
     pub(crate) async fn wait_for_fold(&self) -> Result<()> {
@@ -302,6 +307,7 @@ impl PublisherRegistry {
                 state: Mutex::new(RegistryState {
                     closed: false,
                     sessions: HashMap::new(),
+                    turns: HashMap::new(),
                 }),
                 panicked_units: AtomicUsize::new(0),
                 hint_raises: HintRaises::default(),
@@ -351,7 +357,8 @@ impl PublisherRegistry {
             live.session = Arc::downgrade(&session);
             return Ok(session);
         }
-        let publisher = NamespacePublisher::new(namespace_id.clone(), &self.shared);
+        let turns = state.turns(namespace_id);
+        let publisher = NamespacePublisher::new(namespace_id.clone(), &self.shared, turns);
         let session = Arc::new(NamespaceSession {
             publisher: publisher.clone(),
         });
@@ -461,6 +468,7 @@ impl PublisherRegistry {
         Arc::downgrade(&self.shared) as Weak<dyn HeadPositions>
     }
 
+    #[cfg(test)]
     pub(crate) async fn wal_tail_inline_bytes(&self, namespace_id: &NamespaceId) -> Option<usize> {
         let publisher = self.live_publisher(namespace_id)?;
         let slot = publisher.lock_engine().await;
@@ -468,32 +476,18 @@ impl PublisherRegistry {
     }
 
     /// Returns the namespace's writer position that reads in this runtime
-    /// start from, as a fold input, or `None` when this runtime has no
-    /// position for the namespace or the namespace's session is fenced.
+    /// start from, or `None` when this runtime has no position for the
+    /// namespace or the namespace's session is fenced.
     ///
-    /// Unlike [`Self::wal_fold_input`], this function doesn't wait for a
-    /// publication that the session's engine is running, so the position
-    /// doesn't include that publication's commits.
+    /// The function doesn't wait for a publication that the session's
+    /// engine is running, so the position doesn't include that
+    /// publication's commits.
     pub(crate) fn read_position_fold_input(
         &self,
         namespace_id: &NamespaceId,
     ) -> Option<WriterPosition> {
         let position = self.shared.read_position_slot(namespace_id)?.current()?;
         Some(WriterPosition::clone(&position))
-    }
-
-    /// Returns the namespace's writer position as a fold input: the manifest
-    /// it plans against and the unfolded WAL tail above that manifest. Returns
-    /// `None` when this runtime has no position for the namespace.
-    pub(crate) async fn wal_fold_input(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Option<WriterPosition> {
-        let publisher = self.live_publisher(namespace_id)?;
-        let slot = publisher.lock_engine().await;
-        slot.engine
-            .as_ref()
-            .and_then(NamespaceCommitEngine::writer_position)
     }
 
     /// Whether [`Self::close_admission`] has run: later submissions fail
