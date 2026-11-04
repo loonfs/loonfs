@@ -172,7 +172,17 @@ pub fn content_prefix(family_root_id: &NamespaceId) -> String {
 /// Builds the immutable key of a chain's whole object, under the prefix of
 /// the reading namespace's family root.
 pub fn content_blob(family_root_id: &NamespaceId, content_id: &ContentId) -> String {
-    format!("{}{content_id}", content_prefix(family_root_id))
+    format!(
+        "{}{}",
+        content_prefix(family_root_id),
+        content_blob_name(content_id)
+    )
+}
+
+/// Builds the name of a chain's whole object: its key with the family root's
+/// content prefix removed.
+pub fn content_blob_name(content_id: &ContentId) -> String {
+    content_id.to_string()
 }
 
 /// Builds the immutable key of the span object that stores one run of chain
@@ -184,9 +194,16 @@ pub fn content_span(
     end: u64,
 ) -> String {
     format!(
-        "{}-{start:020}-{end:020}",
-        content_blob(family_root_id, content_id)
+        "{}{}",
+        content_prefix(family_root_id),
+        content_span_name(content_id, start, end)
     )
+}
+
+/// Builds the name of a span object: its key with the family root's content
+/// prefix removed.
+pub fn content_span_name(content_id: &ContentId, start: u64, end: u64) -> String {
+    format!("{content_id}-{start:020}-{end:020}")
 }
 
 /// Builds a fresh key for a temporary object that an assembly writes and
@@ -222,7 +239,8 @@ mod tests {
     #![allow(clippy::disallowed_methods)]
 
     use super::{
-        content_blob, extension_segment, hint, metadata_manifest_object, metadata_segment,
+        content_blob, content_blob_name, content_prefix, content_span, content_span_name,
+        extension_segment, hint, metadata_manifest_object, metadata_segment,
         metadata_segment_object_key, pin, probe_run_prefix, probe_runs_prefix, temporary_object,
         upload_outcome, upload_session, wal_object, wal_prefix,
     };
@@ -369,7 +387,7 @@ mod tests {
             ),
             (
                 "Content span objects",
-                super::content_span(&family_root_id(), &content_id(), 2, 19),
+                content_span(&family_root_id(), &content_id(), 2, 19),
             ),
             ("Temporary objects", temporary),
         ];
@@ -401,6 +419,19 @@ mod tests {
         assert!(probe_run_prefix(&run_id).starts_with(&probe_runs_prefix()));
     }
 
+    #[test]
+    fn content_keys_are_the_content_prefix_and_a_name() {
+        let prefix = content_prefix(&family_root_id());
+        assert_eq!(
+            content_blob(&family_root_id(), &content_id()),
+            format!("{prefix}{}", content_blob_name(&content_id()))
+        );
+        assert_eq!(
+            content_span(&family_root_id(), &content_id(), 2, 19),
+            format!("{prefix}{}", content_span_name(&content_id(), 2, 19))
+        );
+    }
+
     fn segment_descriptor() -> MetadataSegmentRef {
         MetadataSegmentRef {
             owner_namespace_id: namespace_id(),
@@ -423,6 +454,7 @@ mod tests {
                 crc32c: 0,
             },
             filter_inline: None,
+            extent_filter_block: None,
         }
     }
 

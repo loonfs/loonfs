@@ -1,4 +1,5 @@
-//! Loading, decoding, and cache publication for segment index and filter blocks.
+//! Loading, decoding, and cache publication for segment index blocks,
+//! filter blocks, and extent filters.
 //!
 //! Index and filter loads consult the per-view memo and the block cache
 //! before they fetch from object storage.
@@ -104,7 +105,7 @@ pub fn decode_stored_block(
         SegmentBlockKind::Index => Ok(index_cache_block(
             decode_index_block(stored, handle).map_err(codec_error)?,
         )),
-        SegmentBlockKind::Filter => Ok(filter_cache_block(
+        SegmentBlockKind::Filter | SegmentBlockKind::ExtentFilter => Ok(filter_cache_block(
             decode_filter_block(stored, handle).map_err(codec_error)?,
         )),
         SegmentBlockKind::Data => Ok(decoded_data_cache_block(
@@ -142,7 +143,7 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
     let object_bytes = segment_object_bytes(descriptor);
     let whole_object = object_bytes <= MAX_WHOLE_SEGMENT_LOAD_BYTES;
     let fetch_offset = match want {
-        SegmentBlockKind::Data | SegmentBlockKind::Manifest => {
+        SegmentBlockKind::Data | SegmentBlockKind::ExtentFilter | SegmentBlockKind::Manifest => {
             return Err(segment_codec_error(
                 &object_key,
                 "segment section fetch supports only filter and index blocks",
@@ -198,8 +199,9 @@ pub(crate) enum SegmentWriter {
 /// decode.
 ///
 /// A fold inserts every block of its segments. A compaction inserts each
-/// segment's index and filter blocks, and it inserts the segment's data blocks
-/// only when the segment is small enough to fetch whole. The writer that just folded is the
+/// segment's index and filter blocks, and its extent filter when it has one,
+/// and it inserts the segment's data blocks only when the segment is small
+/// enough to fetch whole. The writer that just folded is the
 /// process most likely to read the folded rows next. No read asked for the
 /// rows that a compaction rewrites, so a compaction inserts only the blocks
 /// that the first fetch of the segment would insert. Each inserted block is
@@ -217,6 +219,32 @@ pub(super) fn insert_written_segment(
         }
     };
     publish_segment_sections(Some(segment_cache), None, descriptor, bytes, 0, data_blocks)?;
+    if let Some(handle) = descriptor.extent_filter_block {
+        let object_key = metadata_segment_object_key(descriptor);
+        let start = usize::try_from(handle.offset)
+            .ok()
+            .filter(|start| start + handle.stored_bytes as usize <= bytes.len())
+            .ok_or_else(|| {
+                segment_codec_error(
+                    &object_key,
+                    "extent filter outside the segment object bounds",
+                )
+            })?;
+        let stored = bytes.slice(start..start + handle.stored_bytes as usize);
+        let block = decode_stored_block(
+            &object_key,
+            SegmentBlockKind::ExtentFilter,
+            &handle,
+            &stored,
+        )?;
+        publish_segment_block(
+            Some(segment_cache),
+            None,
+            segment_block_cache_key(descriptor, SegmentBlockKind::ExtentFilter, handle.offset),
+            &block,
+            &stored,
+        );
+    }
     Ok(())
 }
 
@@ -454,4 +482,50 @@ pub(crate) async fn load_segment_filter<S: ObjectStore + ?Sized>(
     };
     memo.record(&cache_key, &block);
     block.into_filter(&metadata_segment_object_key(descriptor))
+}
+
+/// Loads the extent filter of a `content_layouts` segment through
+/// `segment_cache`, with one ranged GET of exactly the filter's bytes when the
+/// cache doesn't have it.
+///
+/// # Panics
+///
+/// Panics if `descriptor` names no extent filter, which manifest validation
+/// rules out for a `content_layouts` segment.
+pub(crate) async fn load_segment_extent_filter<S: ObjectStore + ?Sized>(
+    store: &S,
+    segment_cache: &MetadataSegmentCache,
+    descriptor: &MetadataSegmentRef,
+) -> Result<Arc<SegmentFilter>, ManifestLoadError> {
+    let handle = descriptor
+        .extent_filter_block
+        .expect("a validated content_layouts segment descriptor should name its extent filter");
+    let cache_key =
+        segment_block_cache_key(descriptor, SegmentBlockKind::ExtentFilter, handle.offset);
+    let object_key = metadata_segment_object_key(descriptor);
+    let fetch = async {
+        let stored = Bytes::from(
+            load_section_bytes(
+                store,
+                &object_key,
+                handle.offset,
+                u64::from(handle.stored_bytes),
+            )
+            .await?,
+        );
+        Ok(LoadedSegmentBlock {
+            block: decode_stored_block(
+                &object_key,
+                SegmentBlockKind::ExtentFilter,
+                &handle,
+                &stored,
+            )?,
+            stored,
+        })
+    };
+    segment_cache
+        .blocks()
+        .get_or_load_block(&cache_key, &handle, Box::pin(fetch))
+        .await?
+        .into_filter(&object_key)
 }

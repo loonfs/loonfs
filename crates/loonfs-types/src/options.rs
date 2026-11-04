@@ -633,28 +633,18 @@ pub struct CreateSnapshotOptions {
     pub ttl_ms: Option<NonZeroU64>,
 }
 
-/// Default layout rows one content shard of a garbage collection pass covers.
-/// A pass picks the shard width that splits its layout rows into shards of
-/// about this many, so it keeps the extent keys of about 65,536 rows at once.
-const GC_CONTENT_SHARD_ROWS: usize = 65_536;
-
 /// Options for one garbage collection pass over a namespace.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GcOptions {
     /// How old an unreferenced object must be before the pass deletes it, in
     /// milliseconds. A runtime rejects a window below its derived minimum.
     pub grace_window_ms: u64,
-    /// About how many layout rows one content shard of the pass covers. The
-    /// wire request has no field for it, so a pass that a server runs uses
-    /// the default.
-    pub content_shard_rows: usize,
 }
 
 impl Default for GcOptions {
     fn default() -> Self {
         Self {
             grace_window_ms: GC_DEFAULT_GRACE_WINDOW_MS,
-            content_shard_rows: GC_CONTENT_SHARD_ROWS,
         }
     }
 }
@@ -667,7 +657,6 @@ impl GcOptions {
             grace_window_ms: request
                 .grace_window_ms
                 .unwrap_or(GC_DEFAULT_GRACE_WINDOW_MS),
-            ..Self::default()
         }
     }
 }

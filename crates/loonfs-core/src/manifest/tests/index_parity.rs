@@ -28,12 +28,22 @@ pub(super) async fn rewrite_manifest_segment(
     target_block_bytes: NonZeroUsize,
 ) {
     let mut builder = SegmentBlocksBuilder::new(target_block_bytes);
+    if family == ApiMetadataRowFamily::ContentLayouts {
+        builder = builder.with_extent_filter();
+    }
     for row in &rows {
         let row_key = row.row_key_for_family(family);
         let filter_key = row.filter_key_for_family(family);
         builder
             .push(&row_key, &filter_key, row)
             .expect("rewritten rows should encode");
+        if let MetadataRow::ContentLayout(record) = row {
+            for extent in &record.layout.extents {
+                builder.push_extent_name(&crate::storage::content_location::extent_object_name(
+                    extent,
+                ));
+            }
+        }
     }
     let built = builder.build().expect("rewritten segment");
     replace_object(
@@ -60,6 +70,7 @@ pub(super) async fn rewrite_manifest_segment(
             )
         });
     descriptor.filter_block = built.filter;
+    descriptor.extent_filter_block = built.extent_filter;
 }
 
 fn assert_child_index_mismatch<T>(result: Result<T, ManifestLoadError>) {
@@ -1107,6 +1118,86 @@ async fn manifest_load_rejects_descriptors_off_the_frozen_segment_layout() {
                     && descriptor.min_row_key != descriptor.max_row_key
             })
             .expect("an inline-filtered descriptor spanning several keys");
+        perturb(descriptor);
+        let Err(error) =
+            load_perturbed_manifest(&store, &namespace_id, perturbed, 1 + index as u64).await
+        else {
+            panic!("{label}: perturbed manifest must not load")
+        };
+        assert_matches!(
+            error,
+            ManifestLoadError::SegmentDescriptorMismatch { .. },
+            "{label}: unexpected error {error:?}"
+        );
+    }
+}
+
+/// Checks that a manifest loads only when each `content_layouts` descriptor
+/// names an extent filter that directly precedes its filter, and no other
+/// descriptor names one.
+#[tokio::test]
+async fn an_extent_filter_belongs_to_layout_segments_alone() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_file_bytes("/docs/hello.txt", b"hello\n", None)
+        .await
+        .expect("write hello");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("create checkpoint");
+    let manifest_number = current_manifest_number(&store, &namespace_id).await;
+    let payload =
+        load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest_number)
+            .await
+            .expect("load segments")
+            .manifest()
+            .payload()
+            .clone();
+    let extent_filter = payload
+        .runs
+        .iter()
+        .flat_map(|run| &run.segments)
+        .find(|descriptor| descriptor.family == ApiMetadataRowFamily::ContentLayouts)
+        .and_then(|descriptor| descriptor.extent_filter_block)
+        .expect("a layouts segment with an extent filter");
+    type Perturbation = Box<dyn Fn(&mut MetadataSegmentRef)>;
+    let perturbations: [(&str, ApiMetadataRowFamily, Perturbation); 3] = [
+        (
+            "layouts segment without an extent filter",
+            ApiMetadataRowFamily::ContentLayouts,
+            Box::new(|descriptor| descriptor.extent_filter_block = None),
+        ),
+        (
+            "extent filter not adjacent to the filter",
+            ApiMetadataRowFamily::ContentLayouts,
+            Box::new(|descriptor| {
+                let handle = descriptor
+                    .extent_filter_block
+                    .as_mut()
+                    .expect("extent filter");
+                handle.offset -= 1;
+            }),
+        ),
+        (
+            "inode segment with an extent filter",
+            ApiMetadataRowFamily::Inodes,
+            Box::new(move |descriptor| descriptor.extent_filter_block = Some(extent_filter)),
+        ),
+    ];
+    for (index, (label, family, perturb)) in perturbations.iter().enumerate() {
+        let mut perturbed = payload.clone();
+        let descriptor = perturbed
+            .runs
+            .iter_mut()
+            .flat_map(|run| &mut run.segments)
+            .find(|descriptor| descriptor.family == *family)
+            .expect("a descriptor of the family");
         perturb(descriptor);
         let Err(error) =
             load_perturbed_manifest(&store, &namespace_id, perturbed, 1 + index as u64).await

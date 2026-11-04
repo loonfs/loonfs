@@ -642,7 +642,7 @@ async fn downloads_cover_three_extents_from_inside_the_second_and_create_empty_o
 }
 
 #[tokio::test]
-async fn collection_sweeps_id_shards_and_keeps_a_shared_base_in_another_shard() {
+async fn collection_lists_content_once_and_keeps_a_shared_base_of_another_chain() {
     use crate::gc::GcOptions;
     let (_directory, store, mut engine, context) = setup().await;
     let namespace_id = engine.namespace.namespace_id.clone();
@@ -698,7 +698,7 @@ async fn collection_sweeps_id_shards_and_keeps_a_shared_base_in_another_shard() 
         crate::storage::content_staging::ContentKeyOwner::FreshIdentity,
     )
     .await
-    .expect("other shard content");
+    .expect("other content");
     let candidate = CommitCandidate::prepared(
         CommitIntent::single(
             CommitId::generate(),
@@ -720,7 +720,7 @@ async fn collection_sweeps_id_shards_and_keeps_a_shared_base_in_another_shard() 
     crate::test_support::namespace_store(&store, &namespace_id)
         .fold_wal()
         .await
-        .expect("fold other shard");
+        .expect("fold other file");
     prune_revisions(&store, &namespace_id).await;
     let rooted_span = content_span(&namespace_id, &fresh.content_id, 5, 6);
     let superseded_span = content_span(&namespace_id, &fresh.content_id, 1, 2);
@@ -740,10 +740,7 @@ async fn collection_sweeps_id_shards_and_keeps_a_shared_base_in_another_shard() 
             .expect("unrooted object");
     }
     let aged = MetadataMapStore::aged(store.clone(), KeyPredicate::any());
-    let options = GcOptions {
-        content_shard_rows: 1,
-        ..Default::default()
-    };
+    let options = GcOptions::default();
     store.reset();
     let report = crate::test_support::namespace_store(&aged, &namespace_id)
         .gc(
@@ -769,12 +766,7 @@ async fn collection_sweeps_id_shards_and_keeps_a_shared_base_in_another_shard() 
             _ => None,
         })
         .collect();
-    assert_eq!(
-        listed,
-        (0..8)
-            .map(|shard| format!("{prefix}con_{shard}"))
-            .collect::<Vec<_>>()
-    );
+    assert_eq!(listed, vec![prefix]);
     assert!(store
         .head(&superseded_span)
         .await

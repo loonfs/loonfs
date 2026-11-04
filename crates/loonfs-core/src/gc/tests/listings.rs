@@ -260,13 +260,12 @@ async fn superseded_views_add_segment_reads_only_for_uncovered_layout_segments()
     }
 }
 
-/// Checks that a pass reads each layout segment the same number of times in
-/// each of its two layout scans however many rooted manifests list it, when
-/// every rooted manifest adds one delta run over a base that the current
+/// Checks that a pass reads the extent filter of each layout segment once,
+/// when every rooted manifest adds one delta run over a base that the current
 /// manifest no longer lists, and that it loads those manifests with more than
 /// one read and at most `STORE_READS_IN_FLIGHT` reads in flight.
 #[tokio::test]
-async fn layout_segment_reads_dont_grow_with_the_roots_that_list_a_segment() {
+async fn a_pass_reads_each_extent_filter_once_however_many_roots_list_its_segment() {
     use crate::compaction::CompactionUnitOutcome;
 
     const DELTA_RUNS: usize = 8;
@@ -343,16 +342,14 @@ async fn layout_segment_reads_dont_grow_with_the_roots_that_list_a_segment() {
         .await
         .expect("pass");
 
-    // Without a block cache, each of the pass's two scans reads a small
-    // segment twice: once whole, for its index and filter, and once for its
-    // data blocks, which nothing kept from the first read. A merge per view
-    // would read the base again for each of the eight views that list it.
+    // Each extent filter read is one GET. A read per view would read the
+    // base's filter once for each of the eight views that list it.
     let mut reads = std::collections::BTreeMap::<String, usize>::new();
     for key in store.take_get_keys() {
         *reads.entry(key).or_default() += 1;
     }
     assert_eq!(reads.keys().cloned().collect::<BTreeSet<_>>(), segments);
-    assert!(reads.values().all(|&reads| reads == 4), "{reads:?}");
+    assert!(reads.values().all(|&reads| reads == 1), "{reads:?}");
     let manifest_reads = store.inner().reads();
     assert!(manifest_reads.peak_in_flight > 1);
     assert!(manifest_reads.peak_in_flight <= STORE_READS_IN_FLIGHT);

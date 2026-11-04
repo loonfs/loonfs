@@ -2,7 +2,8 @@
 //!
 //! A segment is a run of data blocks, then one filter block and one index
 //! block, for any CBOR row type, including [`MetadataRow`] and grep index
-//! rows. [Appendix A.7](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a7-block-segment-encoding)
+//! rows. A `content_layouts` segment also has an extent filter between its
+//! data blocks and its filter block. [Appendix A.7](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a7-block-segment-encoding)
 //! defines the byte layout.
 
 use crate::format::manifest::MetadataRow;
@@ -45,6 +46,8 @@ pub const RESTART_INTERVAL: usize = 16;
 pub const FILTER_BITS_PER_KEY: usize = 10;
 /// Bloom filter probe count, chosen for [`FILTER_BITS_PER_KEY`].
 pub const FILTER_HASH_COUNT: u32 = 7;
+/// Extent filter sizing: bits reserved per inserted content object name.
+pub const EXTENT_FILTER_BITS_PER_KEY: usize = 20;
 
 const FILTER_HASH_SEED_ONE: u64 = 0;
 const FILTER_HASH_SEED_TWO: u64 = 0x9e37_79b9_7f4a_7c15;
@@ -80,12 +83,16 @@ pub struct SegmentIndexEntry {
 /// descriptor must include to read them back.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuiltSegmentBlocks {
-    /// Complete immutable object body, with data sections followed by filter and index sections.
+    /// Complete immutable object body: the data sections, the extent filter
+    /// when there is one, the filter, and the index section.
     pub bytes: Vec<u8>,
     /// Handle callers persist in the segment descriptor to bootstrap reads.
     pub index: BlockHandle,
     /// Handle callers persist for negative point-lookup filtering.
     pub filter: BlockHandle,
+    /// Handle of the filter over the content object names that the rows'
+    /// extents reference, present when the builder enabled it.
+    pub extent_filter: Option<BlockHandle>,
     /// Number of rows accepted by the builder, including adjacent duplicate keys.
     pub row_count: u64,
     /// Least row key in the non-empty segment.
@@ -205,6 +212,9 @@ pub struct SegmentBlocksBuilder {
     index: Vec<SegmentIndexEntry>,
     decoded_data_bytes: usize,
     filter_hashes: Vec<(u64, u64)>,
+    /// The hashes of the extent names, or `None` when the segment has no
+    /// extent filter.
+    extent_hashes: Option<Vec<(u64, u64)>>,
     row_count: u64,
     min_row_key: String,
 }
@@ -228,9 +238,30 @@ impl SegmentBlocksBuilder {
             index: Vec::new(),
             decoded_data_bytes: 0,
             filter_hashes: Vec::new(),
+            extent_hashes: None,
             row_count: 0,
             min_row_key: String::new(),
         }
+    }
+
+    /// Returns the builder with an extent filter, which `build` emits even
+    /// when no extent name was pushed.
+    pub fn with_extent_filter(mut self) -> Self {
+        self.extent_hashes = Some(Vec::new());
+        self
+    }
+
+    /// Adds the name of a content object that a row's extent references to
+    /// the extent filter.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the builder has no extent filter.
+    pub fn push_extent_name(&mut self, name: &str) {
+        self.extent_hashes
+            .as_mut()
+            .expect("a segment builder should have an extent filter before it takes extent names")
+            .push(filter_key_hashes(name));
     }
 
     /// Appends one row.
@@ -358,7 +389,17 @@ impl SegmentBlocksBuilder {
         let mut bytes = self.bytes;
         let index = self.index;
 
-        let filter_payload = build_filter_payload(&self.filter_hashes);
+        // The extent filter goes ahead of the filter, so the fetch of a
+        // filter and the index after it doesn't read the extent filter.
+        let extent_filter = match &self.extent_hashes {
+            Some(hashes) => Some(append_section(
+                &mut bytes,
+                &build_filter_payload(hashes, EXTENT_FILTER_BITS_PER_KEY),
+                false,
+            )?),
+            None => None,
+        };
+        let filter_payload = build_filter_payload(&self.filter_hashes, FILTER_BITS_PER_KEY);
         let filter = append_section(&mut bytes, &filter_payload, false)?;
 
         let mut index_payload = Vec::new();
@@ -370,6 +411,7 @@ impl SegmentBlocksBuilder {
             bytes,
             index,
             filter,
+            extent_filter,
             row_count: self.row_count,
             min_row_key: self.min_row_key,
             max_row_key: self.previous_key,
@@ -520,7 +562,8 @@ pub fn decode_data_block_rows<R: serde::de::DeserializeOwned>(
     Ok(DecodedDataBlock { row_keys, rows })
 }
 
-/// Decodes the filter block from exactly the bytes its handle names.
+/// Decodes a filter block or an extent filter from exactly the bytes its
+/// handle names.
 pub fn decode_filter_block(
     stored: &[u8],
     handle: &BlockHandle,
@@ -576,7 +619,13 @@ impl SegmentFilter {
     /// Reports whether a row with this filter key may be in the segment: false
     /// means none is, and true means one may be.
     pub fn may_contain(&self, filter_key: &str) -> bool {
-        let (h1, h2) = filter_key_hashes(filter_key);
+        self.may_contain_hashes(filter_key_hashes(filter_key))
+    }
+
+    /// Reports whether a key whose [`filter_key_hashes`] are `hashes` may be
+    /// in the filter, so a caller that probes many filters with one key
+    /// hashes the key once.
+    pub fn may_contain_hashes(&self, (h1, h2): (u64, u64)) -> bool {
         for probe in 0..u64::from(self.n_hashes) {
             let bit = h1.wrapping_add(probe.wrapping_mul(h2)) % self.bit_len;
             let byte = self.bits[crate::usize_from_u64(bit / 8)];
@@ -698,8 +747,8 @@ fn decode_section(
     Ok(payload)
 }
 
-fn build_filter_payload(hashes: &[(u64, u64)]) -> Vec<u8> {
-    let mut builder = SegmentFilterBuilder::new(hashes.len());
+fn build_filter_payload(hashes: &[(u64, u64)], bits_per_key: usize) -> Vec<u8> {
+    let mut builder = SegmentFilterBuilder::with_bits_per_key(hashes.len(), bits_per_key);
     for hash in hashes {
         builder.insert_hashes(*hash);
     }
@@ -719,7 +768,13 @@ impl SegmentFilterBuilder {
     /// `expected_keys` keys, and at least 64 bits. Inserting more keys than
     /// expected raises the filter's false positive rate.
     pub fn new(expected_keys: usize) -> Self {
-        let bit_len = expected_keys.saturating_mul(FILTER_BITS_PER_KEY).max(64);
+        Self::with_bits_per_key(expected_keys, FILTER_BITS_PER_KEY)
+    }
+
+    /// Returns a builder with `bits_per_key` bits for each of `expected_keys`
+    /// keys, and at least 64 bits.
+    pub fn with_bits_per_key(expected_keys: usize, bits_per_key: usize) -> Self {
+        let bit_len = expected_keys.saturating_mul(bits_per_key).max(64);
         Self {
             bit_len: bit_len as u64,
             bits: vec![0; bit_len.div_ceil(8)],
@@ -749,7 +804,9 @@ impl SegmentFilterBuilder {
     }
 }
 
-fn filter_key_hashes(filter_key: &str) -> (u64, u64) {
+/// Returns the two hashes of `filter_key` that every probe of a filter
+/// derives its bit from.
+pub fn filter_key_hashes(filter_key: &str) -> (u64, u64) {
     (
         xxh64(filter_key.as_bytes(), FILTER_HASH_SEED_ONE),
         xxh64(filter_key.as_bytes(), FILTER_HASH_SEED_TWO),
@@ -1309,6 +1366,65 @@ mod tests {
             built.filter.decoded_bytes as usize,
             12 + ((rows + 1) * FILTER_BITS_PER_KEY).div_ceil(8)
         );
+    }
+
+    /// Checks that an extent filter sits between the data blocks and the
+    /// filter, finds every name pushed into it, and reports few names that
+    /// weren't.
+    #[test]
+    fn an_extent_filter_round_trips_ahead_of_the_filter() {
+        let names = 1_000_usize;
+        let mut builder = SegmentBlocksBuilder::default().with_extent_filter();
+        for index in 0..names {
+            let (key, filter_key, row) = inode_row(index as u64);
+            builder.push(&key, &filter_key, &row).expect("push row");
+            builder.push_extent_name(&format!("con_{index:026}"));
+        }
+        let built = builder.build().expect("segment");
+        let extent_filter = built.extent_filter.expect("an extent filter");
+        assert_eq!(
+            extent_filter.offset + u64::from(extent_filter.stored_bytes),
+            built.filter.offset
+        );
+        assert_eq!(
+            built.filter.offset + u64::from(built.filter.stored_bytes),
+            built.index.offset
+        );
+        assert_eq!(
+            extent_filter.decoded_bytes as usize,
+            12 + (names * EXTENT_FILTER_BITS_PER_KEY).div_ceil(8)
+        );
+        let filter = decode_filter_block(section(&built.bytes, &extent_filter), &extent_filter)
+            .expect("extent filter");
+        for index in 0..names {
+            assert!(filter.may_contain(&format!("con_{index:026}")));
+        }
+        let false_positives = (names..names + 10_000)
+            .filter(|index| filter.may_contain(&format!("con_{index:026}")))
+            .count();
+        assert!(
+            false_positives <= 10,
+            "{false_positives} of 10,000 absent names matched"
+        );
+    }
+
+    /// Checks that a builder with an extent filter and no names emits the
+    /// smallest filter, and that a builder without one emits none.
+    #[test]
+    fn an_empty_extent_filter_is_emitted_only_when_enabled() {
+        for enabled in [false, true] {
+            let mut builder = SegmentBlocksBuilder::default();
+            if enabled {
+                builder = builder.with_extent_filter();
+            }
+            let (key, filter_key, row) = inode_row(1);
+            builder.push(&key, &filter_key, &row).expect("push row");
+            let built = builder.build().expect("segment");
+            assert_eq!(
+                built.extent_filter.map(|handle| handle.decoded_bytes),
+                enabled.then_some(12 + 8)
+            );
+        }
     }
 
     #[test]

@@ -8,19 +8,25 @@ This note explains that layout and the read path. [Block-segment encoding](../sp
 
 ## Segment objects
 
-A segment contains sorted rows from one metadata family. The object contains data blocks, a Bloom filter, and an index, in that order:
+A segment contains sorted rows from one metadata family. The object contains data blocks, a Bloom filter, and an index, in that order. A `content_layouts` segment also has an extent filter between its data blocks and its filter:
 
 ```text
 +------------+------------+-----+------------+--------+-------+
 | data block | data block | ... | data block | filter | index |
 +------------+------------+-----+------------+--------+-------+
+
++------------+-----+------------+---------------+--------+-------+
+| data block | ... | data block | extent filter | filter | index |
++------------+-----+------------+---------------+--------+-------+
 ```
+
+The extent filter is a Bloom filter over the names of the content objects that the segment's layout rows reference, such as `con_3s0drmj8em84yb4mnetqkz2j0x` for a whole object. Garbage collection reads it to keep the objects that a rooted segment references without reading the segment's rows (see [Content collection](content-collection.md)). Lookups don't read it.
 
 The target size of a data block is about 64 KiB before compression. Keys within a family often share long prefixes, so most entries store a shared-prefix length and the rest of the key, instead of another complete key. Entries at restart positions store the full key.
 
-Each data block is compressed separately with zstd. The index block is also compressed, but the Bloom filter block is stored uncompressed. Each section has a CRC32C of its stored bytes. A reader can fetch a section by byte range and check its checksum before it decodes the section.
+Each data block is compressed separately with zstd. The index block is also compressed, but the Bloom filter block and the extent filter are stored uncompressed. Each section has a CRC32C of its stored bytes. A reader can fetch a section by byte range and check its checksum before it decodes the section.
 
-The segment has no header or footer that describes it. Instead, its descriptor in the manifest contains the handles of the index and filter blocks. Each handle records an offset, a stored length, a decoded length, and a checksum. The index entries then describe the locations and checksums of the data blocks.
+The segment has no header or footer that describes it. Instead, its descriptor in the manifest contains the handles of the index and filter blocks, and of the extent filter in a `content_layouts` segment. Each handle records an offset, a stored length, a decoded length, and a checksum. The index entries then describe the locations and checksums of the data blocks.
 
 ```text
 manifest descriptor
@@ -65,7 +71,7 @@ LoonFS caches decoded index, filter, and data blocks in memory, up to a byte bud
 The implementation also combines reads when transferring some extra bytes is cheaper than another object-store round trip:
 
 - A scan fetches the next data blocks of its key range that no cache has in one ranged GET, up to 1 MiB of stored bytes and the decoded bytes that it can reserve from the read working memory (always at least one block), and inserts each block into the block cache, as [What a read fetches](block-cache.md#what-a-read-fetches) describes. A lookup of one key fetches one block.
-- On a cold read, the filter and the index next to it can be fetched together.
+- On a cold read, the filter and the index after it can be fetched together. The extent filter of a `content_layouts` segment comes before the filter, so that fetch doesn’t include it.
 - A small enough segment can be read once and decoded section by section.
 
 These optimizations are limited to the read path. They don't change block boundaries, checksum coverage, or the visibility rules applied to the rows.
@@ -80,7 +86,7 @@ Each published file set replaces the previous one when the put-if-absent of the 
 
 The encoding and the writer's target sizes have different compatibility requirements.
 
-Bloom hashing and the block grammar are rules of the durable format. The filter uses two 64-bit hashes with constant seeds, seven probes, and about ten bits per inserted key. Any change to how stored filters are interpreted requires a new format version.
+Bloom hashing and the block grammar are rules of the durable format. The filter and the extent filter use two 64-bit hashes with constant seeds and seven probes. Any change to how stored filters are interpreted requires a new format version.
 
 Block sizes, segment targets, the scan refill, and ordinary maintenance budgets are implementation settings:
 
@@ -90,6 +96,8 @@ Block sizes, segment targets, the scan refill, and ordinary maintenance budgets 
 | Scan refill | 1 MiB stored | A scan fetches the next blocks of its key range up to this size in one GET, reserves their decoded bytes from the read working memory until it has consumed them, and always takes the first block, even above the limit. |
 | Segment byte target | 8 MiB decoded | A segment can exceed the target by its final row. |
 | Segment row target | 65,536 rows | Segments are also split by row count. |
+| Filter | 10 bits per key | A filter has at least 64 bits. |
+| Extent filter | 20 bits per key | An extent filter has at least 64 bits. |
 | Merge input limit | 8 complete runs | A merge reads at most eight complete runs. |
 | Decoded input memory | 64 MiB decoded SST data | Every compaction keeps at most this much decoded data-block memory across its open inputs. This budget is separate from the size-tiering decisions, which use stored bytes. |
 

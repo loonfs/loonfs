@@ -156,6 +156,7 @@ impl SsdBlockKey {
             SegmentBlockKind::Filter => 1,
             SegmentBlockKind::Data => 2,
             SegmentBlockKind::Manifest => 3,
+            SegmentBlockKind::ExtentFilter => 4,
         }]);
         hasher.update(key.block_offset.to_le_bytes());
         let digest = hasher.finalize();

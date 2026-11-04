@@ -605,6 +605,7 @@ fn sample_manifest_payload() -> NamespaceManifestPayload {
                 // Only small filters are inlined; this descriptor's filter
                 // is read through its handle, so the field is omitted.
                 filter_inline: None,
+                extent_filter_block: None,
             }],
         }],
         extensions: std::collections::BTreeMap::new(),
@@ -616,6 +617,16 @@ fn sample_manifest_payload() -> NamespaceManifestPayload {
     publication.min_row_key = sample_content_layout_row().row_key();
     publication.max_row_key = publication.min_row_key.clone();
     publication.row_count = 1;
+    // A layouts segment's extent filter directly precedes its filter.
+    publication.filter_block.offset = 3_940;
+    publication.filter_block.stored_bytes = 60;
+    publication.filter_block.decoded_bytes = 60;
+    publication.extent_filter_block = Some(loonfs_types::format::segment_blocks::BlockHandle {
+        offset: 3_900,
+        stored_bytes: 40,
+        decoded_bytes: 40,
+        crc32c: 0x2468_ace0,
+    });
     manifest.runs[0].segments.push(publication);
     manifest
 }

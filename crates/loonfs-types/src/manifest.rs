@@ -115,6 +115,10 @@ pub struct MetadataSegmentRef {
     /// identical (same length and CRC32C) or the manifest is corrupt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filter_inline: Option<String>,
+    /// Where the segment's extent filter lives and how to verify it. Present
+    /// exactly when `family` is `content_layouts`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extent_filter_block: Option<BlockHandle>,
 }
 
 /// One extension's entry in a namespace manifest
@@ -1127,6 +1131,7 @@ mod tests {
                 crc32c: 0,
             },
             filter_inline: None,
+            extent_filter_block: None,
         }
     }
 }

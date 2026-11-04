@@ -8,7 +8,6 @@ use super::session_cache::CompletedUploadSessionCache;
 use super::sweep::Sweep;
 use super::GcOptions;
 use crate::error::{CoreError, Result};
-use crate::limits::MAX_BLOOM_FILTER_BYTES;
 use crate::namespace::store::NamespaceStore;
 use crate::time::OperationClock;
 use futures::{future, stream, StreamExt, TryStreamExt};
@@ -26,10 +25,10 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// content and no upload records, because the family root's prefix stores
     /// them.
     ///
-    /// The root scan reads each distinct layout segment of the rooted manifests
-    /// once per scan, through the segment cache, and charges exact content
-    /// roots to that cache's read working memory. The shared base filter has a
-    /// separate byte cap. The pass doesn't read the record of a completed upload
+    /// The content sweep reads the extent filter of each distinct layout
+    /// segment of the rooted manifests through the segment cache, charges the
+    /// filters to that cache's read working memory, and lists the content
+    /// prefix once. The pass doesn't read the record of a completed upload
     /// session that `session_cache` has, and it adds each completed session that
     /// it keeps to `session_cache`.
     pub async fn gc(
@@ -57,8 +56,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             session_cache,
             listed_bytes: AtomicU64::new(0),
         };
-        let content =
-            ContentSweep::load(&sweep, options.content_shard_rows, MAX_BLOOM_FILTER_BYTES).await?;
+        let content = ContentSweep::load(&sweep).await?;
         for family in CandidateFamily::ALL {
             if family == CandidateFamily::Content {
                 if let Some(content) = &content {

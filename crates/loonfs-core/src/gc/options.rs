@@ -5,7 +5,7 @@ use crate::limits::GC_MIN_GRACE_WINDOW_MS;
 pub use loonfs_types::options::GcOptions;
 
 /// Rejects options that would let a pass delete an object that a publication
-/// still in flight wrote, or that would make the pass take no rows per shard.
+/// still in flight wrote.
 pub(super) fn validate_gc_options(options: &GcOptions) -> Result<()> {
     // The minimum grace window is derived from the publication budgets and
     // provider deadlines in `limits`. Below it, a publish still in flight
@@ -16,11 +16,6 @@ pub(super) fn validate_gc_options(options: &GcOptions) -> Result<()> {
             "`grace_window_ms` {} is below the derived safety minimum {}",
             options.grace_window_ms, GC_MIN_GRACE_WINDOW_MS
         )));
-    }
-    if options.content_shard_rows == 0 {
-        return Err(CoreError::InvalidGcOptions(
-            "`content_shard_rows` must be at least 1".to_owned(),
-        ));
     }
     Ok(())
 }

@@ -1,9 +1,4 @@
 use super::*;
-use crate::bloom_filter::BloomFilter;
-use crate::gc::content::ContentSweep;
-use crate::gc::live_set::LiveSet;
-use crate::gc::sweep::Sweep;
-use crate::limits::MAX_BLOOM_FILTER_BYTES;
 use crate::manifest::tests::{
     build_namespace_manifest_from_metadata_state, write_namespace_manifest, ManifestMetadataSource,
 };
@@ -11,28 +6,21 @@ use crate::metadata::MetadataStateBuilder;
 use crate::namespace::state::NamespaceReadState;
 use crate::segment::MetadataRunPolicy;
 use crate::storage::content_location::extent_object_key;
-use loonfs_objectstore::keys::{content_blob, content_prefix, temporary_object};
+use loonfs_objectstore::keys::{content_blob, content_prefix, metadata_segment_object_key};
+use loonfs_objectstore::ByteRange;
 use loonfs_test_support::stores::RecordedOperation;
 use loonfs_types::format::control::{encode_control_state, HintPayload};
-use loonfs_types::format::manifest::{ContentLayoutRecord, NamespaceManifestPayload};
-use loonfs_types::{
-    generated_id_body_prefixes, ChangeSeq, ContentExtent, ContentId, ContentLayout, ExtentObject,
+use loonfs_types::format::manifest::{
+    ContentLayoutRecord, MetadataRowFamily, NamespaceManifestPayload,
 };
-use std::sync::atomic::AtomicU64;
+use loonfs_types::format::segment_blocks::decode_filter_block;
+use loonfs_types::{ChangeSeq, ContentExtent, ContentId, ContentLayout, ExtentObject};
 
-/// Returns the two-character shard prefix that `index` selects, wrapping
-/// around the 256 prefixes.
-fn shard_prefix(index: usize) -> String {
-    generated_id_body_prefixes(2)
-        .nth(index % 256)
-        .expect("a two-character prefix")
-}
-
+/// Returns a layout whose chain reads one byte of another chain's object (a
+/// shared base) before one byte of its own object.
 fn shared_layout(namespace_id: &NamespaceId, index: usize) -> ContentLayoutRecord {
-    let content_id =
-        ContentId::parse(format!("con_{}a{index:023}", shard_prefix(index))).expect("chain id");
-    let base_id =
-        ContentId::parse(format!("con_{}b{index:023}", shard_prefix(index + 1))).expect("base id");
+    let content_id = ContentId::parse(format!("con_1{index:025}")).expect("chain id");
+    let base_id = ContentId::parse(format!("con_2{index:025}")).expect("base id");
     ContentLayoutRecord {
         content_id: content_id.clone(),
         size_bytes: 2,
@@ -125,12 +113,55 @@ async fn publish_layout_manifest(store: &impl ObjectStore, manifest: NamespaceMa
         .expect("write hint");
 }
 
-/// The sharded pass peaks at 244,270 bytes: the live set plus one shard's keys
-/// and scan blocks. An exact set of the 2,048 shared base keys takes 253,968
-/// bytes on its own, so the 244 KiB budget admits the sharded pass and not the
-/// bases held exactly.
+/// Returns the object key and byte range of the extent filter of each layout
+/// segment that `manifest` lists.
+fn extent_filter_reads(manifest: &NamespaceManifestPayload) -> BTreeSet<(String, u64, u64)> {
+    manifest
+        .runs
+        .iter()
+        .flat_map(|run| &run.segments)
+        .filter(|segment| segment.family == MetadataRowFamily::ContentLayouts)
+        .map(|segment| {
+            let handle = segment
+                .extent_filter_block
+                .expect("a layouts segment has an extent filter");
+            (
+                metadata_segment_object_key(segment),
+                handle.offset,
+                handle.offset + u64::from(handle.stored_bytes),
+            )
+        })
+        .collect()
+}
+
+/// Returns the reads in `operations` of a range that `reads` lists.
+fn extent_filter_gets(
+    operations: &[RecordedOperation],
+    reads: &BTreeSet<(String, u64, u64)>,
+) -> Vec<(String, u64, u64)> {
+    operations
+        .iter()
+        .filter_map(|operation| match operation {
+            RecordedOperation::Get {
+                key,
+                range:
+                    Some(ByteRange {
+                        start_inclusive,
+                        end_exclusive,
+                    }),
+                ..
+            } => Some((key.clone(), *start_inclusive, *end_exclusive)),
+            _ => None,
+        })
+        .filter(|read| reads.contains(read))
+        .collect()
+}
+
+/// Checks that a pass reads the extent filter of each distinct layout segment
+/// once, lists the content prefix once, and deletes only the orphans, and that
+/// a second pass through the same segment cache reads no extent filter.
 #[tokio::test]
-async fn distinct_shared_bases_fit_a_small_read_budget_and_orphans_across_the_shards_are_deleted() {
+async fn a_pass_reads_each_extent_filter_once_and_lists_content_once() {
     let directory = tempdir().expect("directory");
     let store = RecordingStore::new(
         MetadataMapStore::aged(
@@ -141,10 +172,12 @@ async fn distinct_shared_bases_fit_a_small_read_budget_and_orphans_across_the_sh
     );
     let namespace_id = NamespaceId::parse("many-shared-bases").expect("namespace");
     let (manifest, protected) = shared_layout_manifest(&store, &namespace_id, 2_048).await;
+    let reads = extent_filter_reads(&manifest);
+    assert_eq!(reads.len(), 256, "eight rows in each layout segment");
     publish_layout_manifest(&store, manifest).await;
     let mut orphans = BTreeSet::new();
-    for shard in generated_id_body_prefixes(2).step_by(33) {
-        let content_id = ContentId::parse(format!("con_{shard}f{:023}", 0)).expect("orphan id");
+    for index in 0..8 {
+        let content_id = ContentId::parse(format!("con_7{index:025}")).expect("orphan id");
         let key = content_blob(&namespace_id, &content_id);
         store
             .put_if_absent(&key, Bytes::from_static(b"orphan"))
@@ -152,47 +185,48 @@ async fn distinct_shared_bases_fit_a_small_read_budget_and_orphans_across_the_sh
             .expect("orphan");
         orphans.insert(key);
     }
-    let memory = Arc::new(crate::cache::ReadWorkingMemory::new(244 * 1024, None));
-    let cache = Arc::new(root_scan_cache(Arc::clone(&memory)));
-    let options = GcOptions {
-        content_shard_rows: 128,
-        ..options()
-    };
-    store.reset();
-    let report = crate::NamespaceStore {
-        segment_cache: Arc::clone(&cache),
-        ..crate::test_support::namespace_store(&store, &namespace_id)
-    }
-    .gc(None, &options, &context(GRACE_MS + 1).clock())
-    .await
-    .expect("pass fits the read budget");
-    assert_eq!(report.deleted.content_objects, 8);
-    assert_eq!(memory.in_use(), 0);
-    let operations = store.snapshot();
-    let deleted: BTreeSet<_> = operations
-        .iter()
-        .filter_map(|operation| match operation {
-            RecordedOperation::Delete { key } => Some(key.clone()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(deleted, orphans);
+    let cache = Arc::new(crate::cache::MetadataSegmentCache::new(
+        Arc::new(crate::cache::SharedSegmentBlocks::new(
+            usize::MAX,
+            usize::MAX,
+        )),
+        crate::cache::ObjectStoreScope::new(0),
+        Arc::new(crate::cache::ReadWorkingMemory::new(64 * 1024 * 1024, None)),
+    ));
     let prefix = content_prefix(&namespace_id);
-    let listed: Vec<_> = operations
-        .iter()
-        .filter_map(|operation| match operation {
-            RecordedOperation::List { prefix: listed } if listed.starts_with(&prefix) => {
-                Some(listed.clone())
-            }
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        listed,
-        generated_id_body_prefixes(2)
-            .map(|shard| format!("{prefix}con_{shard}"))
-            .collect::<Vec<_>>()
-    );
+    for (pass, deleted, filter_gets) in [(1, &orphans, reads.len()), (2, &BTreeSet::new(), 0)] {
+        store.reset();
+        let report = crate::NamespaceStore {
+            segment_cache: Arc::clone(&cache),
+            ..crate::test_support::namespace_store(&store, &namespace_id)
+        }
+        .gc(None, &options(), &context(GRACE_MS + 1).clock())
+        .await
+        .expect("pass");
+        assert_eq!(report.deleted.content_objects, deleted.len() as u64);
+        let operations = store.snapshot();
+        let gets = extent_filter_gets(&operations, &reads);
+        assert_eq!(gets.len(), filter_gets, "pass {pass}");
+        assert_eq!(gets.into_iter().collect::<BTreeSet<_>>().len(), filter_gets);
+        let listed: Vec<_> = operations
+            .iter()
+            .filter_map(|operation| match operation {
+                RecordedOperation::List { prefix: listed } if listed.starts_with(&prefix) => {
+                    Some(listed.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(listed, vec![prefix.clone()], "pass {pass}");
+        let deletes: BTreeSet<_> = operations
+            .iter()
+            .filter_map(|operation| match operation {
+                RecordedOperation::Delete { key } => Some(key.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(&deletes, deleted, "pass {pass}");
+    }
     assert_eq!(
         store
             .list_prefix(&prefix)
@@ -204,179 +238,69 @@ async fn distinct_shared_bases_fit_a_small_read_budget_and_orphans_across_the_sh
     );
 }
 
+/// Checks that an object that an extent filter matches by chance stays while
+/// a rooted manifest lists the filter's segment, and is collected once none
+/// does.
 #[tokio::test]
-async fn a_shared_base_false_positive_is_collected_with_a_later_pass_seed() {
+async fn a_false_match_of_an_extent_filter_stays_until_no_root_lists_its_segment() {
     let directory = tempdir().expect("directory");
-    let store = RecordingStore::new(
-        MetadataMapStore::aged(
-            LocalFsStore::new(directory.path()).expect("store"),
-            KeyPredicate::any(),
-        ),
+    let store = MetadataMapStore::aged(
+        LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
     );
-    let namespace_id = NamespaceId::parse("shared-false-positive").expect("namespace");
+    let namespace_id = NamespaceId::parse("extent-false-match").expect("namespace");
     let (manifest, protected) = shared_layout_manifest(&store, &namespace_id, 1).await;
-    publish_layout_manifest(&store, manifest).await;
-    let base_key = extent_object_key(
-        &namespace_id,
-        &shared_layout(&namespace_id, 0).layout.extents[0],
-    );
-    let mut first = BloomFilter::new(1, GRACE_MS + 1);
-    let mut second = BloomFilter::new(1, GRACE_MS + 2);
-    first.insert(base_key.as_bytes()).expect("insert");
-    second.insert(base_key.as_bytes()).expect("insert");
-    let orphan = (0..100_000)
-        .map(|index| {
-            content_blob(
-                &namespace_id,
-                &ContentId::parse(format!("con_7{index:025}")).expect("orphan id"),
-            )
-        })
-        .find(|key| first.may_contain(key.as_bytes()) && !second.may_contain(key.as_bytes()))
-        .expect("false positive only for the first seed");
+    let segment = manifest
+        .runs
+        .iter()
+        .flat_map(|run| &run.segments)
+        .find(|segment| segment.family == MetadataRowFamily::ContentLayouts)
+        .expect("a layouts segment")
+        .clone();
+    let handle = segment.extent_filter_block.expect("an extent filter");
+    let stored = store
+        .get(
+            &metadata_segment_object_key(&segment),
+            Some(ByteRange {
+                start_inclusive: handle.offset,
+                end_exclusive: handle.offset + u64::from(handle.stored_bytes),
+            }),
+        )
+        .await
+        .expect("read the extent filter")
+        .expect("the segment");
+    let filter = decode_filter_block(&stored, &handle).expect("decode the extent filter");
+    // The filter has the minimum 64 bits for two names, so about one name in
+    // 40,000 matches it by chance.
+    let orphan = (0..2_000_000)
+        .map(|index| ContentId::parse(format!("con_7{index:025}")).expect("orphan id"))
+        .find(|content_id| filter.may_contain(content_id.as_str()))
+        .expect("a name that the filter matches by chance");
+    let orphan = content_blob(&namespace_id, &orphan);
     store
         .put_if_absent(&orphan, Bytes::from_static(b"orphan"))
         .await
         .expect("orphan");
-    for (now_ms, expected) in [(GRACE_MS + 1, 0), (GRACE_MS + 2, 1)] {
-        store.reset();
-        let report = crate::test_support::namespace_store(&store, &namespace_id)
-            .gc(None, &options(), &context(now_ms).clock())
-            .await
-            .expect("pass");
-        assert_eq!(report.deleted.content_objects, expected);
-        let deleted: Vec<_> = store
-            .snapshot()
-            .into_iter()
-            .filter_map(|operation| match operation {
-                RecordedOperation::Delete { key } => Some(key),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            deleted,
-            if expected == 0 {
-                vec![]
-            } else {
-                vec![orphan.clone()]
-            }
-        );
-        let mut survivors = protected.clone();
-        if expected == 0 {
-            survivors.insert(orphan.clone());
-        }
-        assert_eq!(
-            store
-                .list_prefix(&content_prefix(&namespace_id))
-                .await
-                .expect("survivors")
-                .into_iter()
-                .collect::<BTreeSet<_>>(),
-            survivors
-        );
-    }
-}
-
-#[tokio::test]
-async fn a_shared_filter_over_its_cap_skips_content_and_still_sweeps_other_families() {
-    let directory = tempdir().expect("directory");
-    let store = RecordingStore::new(
-        MetadataMapStore::aged(
-            LocalFsStore::new(directory.path()).expect("store"),
-            KeyPredicate::any(),
-        ),
-        KeyPredicate::any(),
-    );
-    let namespace_id = NamespaceId::parse("shared-filter-cap").expect("namespace");
-    let (mut manifest, _) = shared_layout_manifest(&store, &namespace_id, 1).await;
-    manifest.runs[0].segments[0].row_count = MAX_BLOOM_FILTER_BYTES as u64 * 8 / 10 + 1;
     publish_layout_manifest(&store, manifest).await;
-    let orphan = content_blob(&namespace_id, &ContentId::generate());
-    let temporary = temporary_object(&namespace_id);
-    for key in [&orphan, &temporary] {
-        store
-            .put_if_absent(key, Bytes::from_static(b"orphan"))
-            .await
-            .expect("orphan");
-    }
-    let listed_bytes = core_listed_bytes(&store, &namespace_id).await;
-    store.reset();
     let report = crate::test_support::namespace_store(&store, &namespace_id)
         .gc(None, &options(), &context(GRACE_MS + 1).clock())
         .await
-        .expect("pass");
+        .expect("pass with the segment rooted");
     assert_eq!(report.deleted.content_objects, 0);
-    assert_eq!(report.deleted.temporary_objects, 1);
-    assert_eq!(report.listed_bytes, listed_bytes);
-    let prefix = content_prefix(&namespace_id);
-    let segments = metadata_segment_prefix(&namespace_id);
-    let operations = store.snapshot();
-    // The pass lists the content prefix only to measure the content.
-    let content: Vec<_> = operations
-        .iter()
-        .filter(|operation| operation.key().starts_with(&prefix))
-        .collect();
-    assert_matches!(
-        content.as_slice(),
-        [RecordedOperation::List { prefix: listed }] if *listed == prefix
-    );
-    for operation in operations {
-        assert!(
-            !matches!(
-                &operation,
-                RecordedOperation::Get { .. } | RecordedOperation::GetWithMetadata { .. }
-            ) || !operation.key().starts_with(&segments),
-            "{operation:?}"
-        );
-        if let RecordedOperation::Delete { key } = operation {
-            assert_eq!(key, temporary);
-        }
-    }
-}
 
-#[tokio::test]
-async fn shared_filter_growth_over_the_cap_skips_content_before_any_content_requests() {
-    let directory = tempdir().expect("directory");
-    let store = RecordingStore::new(
-        LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::any(),
-    );
-    let namespace_id = NamespaceId::parse("shared-filter-growth-cap").expect("namespace");
-    let mut row = shared_layout(&namespace_id, 0);
-    row.layout
-        .extents
-        .extend((1..16).map(|index| shared_layout(&namespace_id, index).layout.extents[0].clone()));
-    row.size_bytes = row.layout.extents.len() as u64;
-    let (manifest, _) = layout_manifest(&store, &namespace_id, [row]).await;
-    publish_layout_manifest(&store, manifest).await;
-    let clock = context(GRACE_MS + 1).clock();
-    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
-    let live = LiveSet::load(&namespace, None, GRACE_MS, &clock)
+    // The next manifest lists only a layout segment of another chain.
+    let (mut unlisted, _) =
+        layout_manifest(&store, &namespace_id, [shared_layout(&namespace_id, 1)]).await;
+    unlisted.manifest_no = ManifestNo(2);
+    write_namespace_manifest(&store, unlisted)
         .await
-        .expect("roots");
-    let sweep = Sweep {
-        namespace: &namespace,
-        grace_window_ms: GRACE_MS,
-        clock: &clock,
-        live: &live,
-        session_cache: None,
-        listed_bytes: AtomicU64::new(0),
-    };
-    for (max_bytes, expected_sweep) in [(40, true), (18, false)] {
-        store.reset();
-        let content = ContentSweep::load(&sweep, 128, max_bytes)
-            .await
-            .expect("load content roots");
-        assert_eq!(content.is_some(), expected_sweep);
-        assert!(store.counts().gets > 0);
-        assert_eq!(store.counts().puts, 0);
-        assert_eq!(store.counts().deletes, 0);
-        let prefix = content_prefix(&namespace_id);
-        assert!(store
-            .snapshot()
-            .iter()
-            .all(|operation| !operation.key().starts_with(&prefix)));
-    }
+        .expect("a manifest that doesn't list the first layout segment");
+    let report = crate::test_support::namespace_store(&store, &namespace_id)
+        .gc(None, &options(), &context(GRACE_MS + 1).clock())
+        .await
+        .expect("pass with the segment unrooted");
+    assert_eq!(report.deleted.content_objects, protected.len() as u64 + 1);
+    assert!(store.head(&orphan).await.expect("head").is_none());
 }
 
 /// Checks that an extent that only a superseded layout row lists stays

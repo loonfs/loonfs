@@ -47,7 +47,6 @@ async fn open_staged_runtime(store: SharedObjectStore, writer_id: &str) -> TestR
 fn gc_options() -> GcOptions {
     GcOptions {
         grace_window_ms: GRACE_MS,
-        ..Default::default()
     }
 }
 

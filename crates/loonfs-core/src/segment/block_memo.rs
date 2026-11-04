@@ -62,17 +62,6 @@ impl SessionBlockMemo {
             .cloned()
     }
 
-    /// Evicts every block of the memo and releases the memo's charge on the
-    /// read working memory.
-    pub(super) fn clear(&self) {
-        let mut inner = self
-            .inner
-            .lock()
-            .expect("session block memo lock should not be poisoned");
-        self.pool.release(inner.reserved_bytes);
-        *inner = SessionBlockMemoInner::default();
-    }
-
     /// Returns the read working memory that the memo is charged to.
     pub(super) fn pool(&self) -> &Arc<ReadWorkingMemory> {
         &self.pool
@@ -159,7 +148,7 @@ mod tests {
     }
 
     #[test]
-    fn replacement_eviction_and_clearing_release_reservations_without_invalidating_borrows() {
+    fn replacement_and_eviction_release_reservations_without_invalidating_borrows() {
         let pool = Arc::new(ReadWorkingMemory::new(4096, None));
         let memo = SessionBlockMemo::new(Arc::clone(&pool));
         let block = data_block(2048);
@@ -175,10 +164,6 @@ mod tests {
         assert!(pool.in_use() <= 4096);
         memo.record(&key(3), &data_block(4096));
         assert!(memo.get(&key(3)).is_none());
-        assert_eq!(pool.in_use(), 0);
-        memo.record(&key(2), &block);
-        memo.clear();
-        assert!(memo.get(&key(2)).is_none());
         assert_eq!(pool.in_use(), 0);
         assert_eq!(borrowed.weight(), 2048);
         memo.record(&key(2), &block);

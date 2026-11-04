@@ -879,7 +879,7 @@ A GC response contains counts for that call. Concurrent calls can overlap their 
 
 Each GC request runs one complete, stateless pass. `GcRequest` accepts `grace_window_ms`, and it has no cursor. No sweep runs unless `gc` is present.
 
-Every GC call reads the current manifest and uses one clock reading for the whole call. It keeps its live set in memory, and it doesn't write any collection progress. For each object family it sweeps, the call lists the family from the beginning and sweeps it to the end. The call skips the content sweep if the shared base filter would exceed its byte cap, or, on a [family root](glossary.md#family-root), if it couldn't read the roots of every member of the fork family within the time that [Content roots](format.md#119-content-roots) allows. [Reference roots](format.md#112-reference-roots) defines the collection roots, and [Content roots](format.md#119-content-roots) defines the content roots. If a manifest read fails, the call fails before it sweeps anything.
+Every GC call reads the current manifest and uses one clock reading for the whole call. It keeps its live set in memory, and it doesn't write any collection progress. For each object family it sweeps, the call lists the family from the beginning and sweeps it to the end. On a [family root](glossary.md#family-root), the call protects content through the extent filters of the rooted layout segments, and it skips the content sweep if it couldn't read the roots of every member of the fork family within the time that [Content roots](format.md#119-content-roots) allows. [Reference roots](format.md#112-reference-roots) defines the collection roots, and [Content roots](format.md#119-content-roots) defines the content roots. If a manifest read fails, the call fails before it sweeps anything.
 
 A GC response includes `next_reclamation_at_ms` when the pass finds any of these future times:
 
@@ -891,7 +891,7 @@ Upload cleanup times include the lease plus grace, the abort grace, and the comp
 
 A GC response also includes `reclaimable_at_ms` when the current manifest is deleted. It's the deadline defined in [Retirement](format.md#95-retirement), and it's included even when pins still block reclamation. It's absent for an active namespace.
 
-A GC response includes `listed_bytes`: the bytes of every object that the pass listed under the namespace, each object once, as the provider reported them, before the pass's deletes. The core collector lists every object family that it sweeps. A fork's prefix stores no content objects or upload records, so a fork's pass lists neither. The pass on the fork's [family root](glossary.md#family-root) lists the content objects and upload records of the whole fork family. When a family root's pass doesn't sweep the content (because the shared base filter would exceed its byte cap, or because the pass couldn't read every member's roots), it lists the content prefix once to measure the content. So the value is the storage under the namespace's prefix at the time of the pass, except the hint and any extension object that isn't a segment. An application that meters storage samples it on each pass.
+A GC response includes `listed_bytes`: the bytes of every object that the pass listed under the namespace, each object once, as the provider reported them, before the pass's deletes. The core collector lists every object family that it sweeps. A fork's prefix stores no content objects or upload records, so a fork's pass lists neither. The pass on the fork's [family root](glossary.md#family-root) lists the content objects and upload records of the whole fork family. When a family root's pass doesn't sweep the content (because the pass couldn't read every member's roots), it lists the content prefix once to measure the content. So the value is the storage under the namespace's prefix at the time of the pass, except the hint and any extension object that isn't a segment. An application that meters storage samples it on each pass.
 
 A GC response groups related counts:
 
@@ -906,7 +906,7 @@ Every core GC response also includes `retained`, which counts the candidates the
 
 | Reason | Means |
 | --- | --- |
-| `referenced` | Protected by current roots or the shared base filter, or needed for forward manifest discovery. |
+| `referenced` | Protected by current roots, including an extent filter of a rooted layout segment that matches the object (a false match keeps the object until no rooted view lists that segment), or needed for forward manifest discovery. |
 | `within_grace_window` | Unreferenced, but younger than `grace_window_ms` by the object's own provider timestamp. |
 | `no_provider_timestamp` | Unreferenced, and the provider reported no last-modified time, so the object's age is unknown and it's treated as young. |
 | `unrecognized_key` | A key under a swept family that the collector doesn't recognize as one of its own. The collector never deletes it, whatever its age. |
