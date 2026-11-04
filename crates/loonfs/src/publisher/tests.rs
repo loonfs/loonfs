@@ -1364,6 +1364,73 @@ async fn publisher_resolves_unknown_head_outcome_by_replaying_receipt() {
     assert_eq!(response.committed_seq, ChangeSeq(2));
 }
 
+/// Checks that a candidate whose attempt settled keeps that result while the
+/// publisher publishes another candidate of its batch again. A replay of a
+/// committed request settles from its receipt, the new commit's WAL put is
+/// written but loses its answer, and every later request to the namespace
+/// fails, so the new commit stays `commit_outcome_unknown`.
+#[tokio::test]
+async fn a_failed_retry_keeps_the_result_a_batch_already_settled() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let answer_lost = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let lost = Arc::clone(&answer_lost);
+    let namespace_prefix = loonfs_objectstore::keys::namespace_prefix(&namespace_id);
+    let store = Arc::new(FailStore::matching(
+        lost_wal_put_ack_store(temp_dir.path(), &namespace_id),
+        move |operation| {
+            let refused =
+                lost.load(AtomicOrdering::SeqCst) && operation.key().starts_with(&namespace_prefix);
+            if matches!(operation.kind(), OperationKind::Put { bytes, mode: PutMode::CreateIfAbsent } if is_publication(bytes))
+            {
+                lost.store(true, AtomicOrdering::SeqCst);
+            }
+            refused
+        },
+        InjectedError::PermissionDenied("namespace refused".to_owned()),
+    ));
+    let runtime = test_runtime(store.clone());
+    create_namespace(&runtime, &namespace_id).await;
+    let publisher = standalone_publisher_with(&namespace_id, &runtime, TestCore::unpaced());
+    let settled = || create_directory_request("settled", "settled");
+    let first = recv_commit(
+        admit_commit(&publisher, &namespace_id, settled()),
+        "settled",
+    )
+    .await;
+    answer_lost.store(false, AtomicOrdering::SeqCst);
+
+    store.fail_all();
+    store.inner().fail_next(1);
+    let replay = admit_commit(&publisher, &namespace_id, settled());
+    let unresolved = admit_commit(
+        &publisher,
+        &namespace_id,
+        create_directory_request("unresolved", "unresolved"),
+    );
+    let batches = publisher_state(&publisher)
+        .queue
+        .iter()
+        .map(|item| match item {
+            WorkItem::Batch(batch) => batch.candidates.len(),
+            WorkItem::Delete(_) => panic!("expected commit batch"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(batches, [2], "both candidates share one batch");
+
+    let error = unresolved
+        .await
+        .expect("unresolved receiver")
+        .expect_err("the lost answer stays unknown");
+    assert_eq!(error.code(), ErrorCode::CommitOutcomeUnknown);
+    assert_eq!(
+        recv_commit(replay, "replay").await.committed_seq,
+        first.committed_seq,
+        "a settled replay is not replaced by the failed retry"
+    );
+    assert!(answer_lost.load(AtomicOrdering::SeqCst));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn publisher_survives_publish_panic_and_keeps_serving() {
     let temp_dir = tempdir().expect("tempdir");

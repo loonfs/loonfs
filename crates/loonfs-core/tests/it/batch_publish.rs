@@ -162,8 +162,8 @@ async fn batch_delete_then_recreate_of_a_durable_file_layers_over_cached_state()
         .store_bytes_as_content(b"recreated")
         .await
         .expect("stage recreated content");
-    let results = namespace_engine(&store, &namespace_id, &context)
-        .publish_namespace_commits_batch(vec![
+    let results = NamespaceFixture::new(&store, &namespace_id, &context)
+        .publish_candidates(vec![
             CommitCandidate::new(commit_request(
                 "delete-cycled",
                 FilesystemOperation::DeletePath {
@@ -191,8 +191,7 @@ async fn batch_delete_then_recreate_of_a_durable_file_layers_over_cached_state()
             )
             .await,
         ])
-        .await
-        .expect("build mutation context");
+        .await;
     results[0]
         .as_ref()
         .expect("delete of durable file succeeds");
@@ -369,10 +368,9 @@ async fn an_ack_lost_wal_put_commits_once_and_the_one_shot_publish_returns_the_c
     )
     .await;
 
-    let committed = namespace_engine(&store, &namespace_id, &context)
-        .publish_namespace_commits_batch(vec![put])
+    let committed = NamespaceFixture::new(&store, &namespace_id, &context)
+        .publish_candidates(vec![put])
         .await
-        .expect("publish")
         .pop()
         .expect("one result")
         .expect("the retry replays the original commit from its receipt");
@@ -400,10 +398,9 @@ async fn a_failed_retry_keeps_the_result_a_batch_already_settled() {
             },
         ))
     };
-    let first = namespace_engine(&inner, &namespace_id, &context)
-        .publish_namespace_commits_batch(vec![settled()])
+    let first = NamespaceFixture::new(&inner, &namespace_id, &context)
+        .publish_candidates(vec![settled()])
         .await
-        .expect("publish")
         .pop()
         .expect("one result")
         .expect("the first commit succeeds");
@@ -431,10 +428,9 @@ async fn a_failed_retry_keeps_the_result_a_batch_already_settled() {
             parents: false,
         },
     ));
-    let mut results = namespace_engine(&store, &namespace_id, &context)
-        .publish_namespace_commits_batch(vec![settled(), unresolved])
-        .await
-        .expect("publish");
+    let mut results = NamespaceFixture::new(&store, &namespace_id, &context)
+        .publish_candidates(vec![settled(), unresolved])
+        .await;
 
     let unresolved = results.pop().expect("second result");
     assert_eq!(
