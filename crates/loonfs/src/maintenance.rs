@@ -614,20 +614,9 @@ impl Maintenance {
                     .publish_extension(basis, name, entry_at)
                     .await
                     .map_err(Error::from);
-                let publication = self
-                    .publisher
+                self.publisher
                     .finish_publication(namespace_id, result)
-                    .await;
-                // A runtime with no writer session for the namespace checks
-                // its cached head for a successor only once per
-                // `manifest_revalidation_interval_ms`, and an extension's
-                // readers read its entry from that head. So the publication
-                // drops the cached head, as a merge's fold does, and this
-                // runtime's next read finds the published entry.
-                if matches!(publication, Ok(ExtensionPublication::Published(_))) {
-                    self.core.invalidate_namespace_read_cache(namespace_id);
-                }
-                publication
+                    .await
             },
         )
         .await

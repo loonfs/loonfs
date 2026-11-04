@@ -23,7 +23,7 @@ pub use self::error::ManifestLoadError;
 pub use self::extension::{ExtensionBasis, ExtensionPublication};
 pub use self::fold::{next_run_no_after, FoldWalOutcome, FoldWalResponse, FoldedWalTail};
 pub use self::load::load_position_basis;
-pub(crate) use self::published::same_head;
+pub(crate) use self::published::move_read_basis;
 pub use self::published::{PublicationReport, PublishedManifest};
 pub use self::retention::RetentionTarget;
 pub use self::statistics::NamespaceStatistics;

@@ -3,12 +3,14 @@
 //! read found above the position), and the rule for a manifest at the head
 //! of an earlier one.
 
-use crate::namespace::basis::MetadataBasis;
+use crate::namespace::basis::{MetadataBasis, ReadBasis};
 use crate::namespace::state::NamespaceReadState;
 use crate::time::Observation;
+use crate::wal::ProjectedWalTail;
 use loonfs_types::format::control::{ManifestRef, NamespaceStatus};
 use loonfs_types::format::manifest::NamespaceManifestEnvelope;
 use loonfs_types::{ChangeSeq, WalNo, WriterEpoch};
+use std::sync::Arc;
 
 /// A manifest above a writer session's position, with the fields that
 /// determine whether the position can move onto it.
@@ -72,6 +74,57 @@ pub(crate) fn same_head(
         && manifest.writer_epoch == head.writer_epoch
         && manifest.folded_wal_no == head.folded_wal_no
         && manifest.manifest.head_seq == basis.manifest().head_seq
+}
+
+/// Moves `read_basis` and `tail`, the WAL tail projected above the basis,
+/// onto `manifest`, a manifest above the basis, and returns `false` when the
+/// head can't move there.
+///
+/// A manifest at the basis's head (see [`same_head`]) keeps the tail. A fold
+/// moves the head when it's active, has the head's writer epoch, folds a WAL
+/// number above the head's folded number and at most its head's, and its
+/// `head_seq` is the last commit of a chunk of the tail. The tail above the
+/// fold's manifest is then the chunks after its `head_seq`, because a fold
+/// folds whole WAL objects, oldest first. For example, if a fold read the
+/// WAL through the commit at sequence 10, and a session then wrote the
+/// commits at 11 and 12, the tail above the fold's manifest is those two
+/// commits. A fold's manifest lists runs, so the cut also drops the root
+/// directory that replay adds above a manifest without runs. A manifest at
+/// the basis's head keeps that directory, which is why it keeps the tail
+/// instead of cutting it.
+///
+/// The rule doesn't depend on whether this runtime or another process
+/// published the manifest, or on the order in which manifests arrive.
+/// Writer epochs never decrease along manifests, so every manifest between
+/// the basis and a later manifest with the head's writer epoch has that
+/// epoch too, and none of them is another writer's claim. Each of them
+/// folds the same WAL that the tail contains above the basis's folded
+/// number, so the later manifest's folded WAL number and `head_seq` are
+/// enough to find the tail above it, and the head can move onto it without
+/// the manifests between. A manifest between the two that arrives later is
+/// below the new basis, so it leaves the head where it is.
+pub(crate) fn move_read_basis(
+    read_basis: &mut ReadBasis,
+    tail: &mut Arc<ProjectedWalTail>,
+    manifest: &PublishedManifest,
+) -> bool {
+    let ReadBasis { head, basis } = read_basis;
+    if !same_head(basis, head, manifest) {
+        if manifest.status.is_deleted()
+            || manifest.writer_epoch != head.writer_epoch
+            || manifest.folded_wal_no <= head.folded_wal_no
+            || manifest.folded_wal_no > head.wal_no
+        {
+            return false;
+        }
+        let Some(after) = tail.after_seq(manifest.manifest.head_seq, head.seq) else {
+            return false;
+        };
+        head.folded_wal_no = manifest.folded_wal_no;
+        *tail = Arc::new(after);
+    }
+    *basis = MetadataBasis::new(manifest.manifest.clone());
+    true
 }
 
 /// A maintenance call's response, and the manifest the call published.

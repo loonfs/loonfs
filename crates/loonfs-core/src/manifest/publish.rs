@@ -7,6 +7,7 @@ use crate::namespace::basis::PublicationBasis;
 use crate::namespace::control::{ensure_namespace_live, LoadedHint, LoadedManifest};
 use crate::namespace::store::NamespaceStore;
 use crate::phase::Phase;
+use crate::segment::runs::runs_newest_first;
 use crate::time::{Observation, OperationClock};
 use bytes::Bytes;
 use loonfs_objectstore::keys::metadata_manifest_object;
@@ -22,6 +23,7 @@ use loonfs_types::format::manifest::{
 };
 use loonfs_types::{ManifestNo, NamespaceId};
 use std::collections::HashSet;
+use std::sync::Arc;
 
 /// The outcome of one manifest put, with the manifest that's current after
 /// the put.
@@ -388,6 +390,13 @@ impl<S: ObjectStore> NamespaceStore<S> {
         {
             Ok(_) => {
                 ensure_publication_in_budget(&object_key, clock)?;
+                // This process's next read of the namespace starts from the
+                // published manifest.
+                super::load::cache_manifest(
+                    &self.segment_cache,
+                    &candidate,
+                    &Arc::new(runs_newest_first(candidate.payload())),
+                );
                 ManifestPublicationOutcome::Published(candidate.clone())
             }
             Err(ObjectStoreError::PreconditionFailed { .. }) => self

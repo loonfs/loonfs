@@ -102,12 +102,11 @@ impl Fixture {
 ///
 /// A creation folds from the session's position and finds nothing to fold,
 /// so it writes the pin and then loads the current manifest to verify the
-/// pin (5 requests). The first creation after an explicit fold also reads
-/// the fold's manifest into the segment cache with one GET, because nothing
-/// in the session has read it yet. A read at a snapshot checks the writer
-/// position's manifest for a successor with one HEAD and loads the pin, and
-/// the pinned manifest's segments are cached. A deletion loads the pin and
-/// deletes it.
+/// pin (5 requests). The fold's manifest is in the segment cache from its
+/// publication, so the first creation after an explicit fold costs the same.
+/// A read at a snapshot checks the writer position's manifest for a
+/// successor with one HEAD and loads the pin, and the pinned manifest's
+/// segments are cached. A deletion loads the pin and deletes it.
 #[tokio::test]
 async fn snapshot_calls_after_a_fold_cost_a_pin_and_its_verification() {
     for fold in [Fold::Session, Fold::Explicit] {
@@ -123,8 +122,7 @@ async fn snapshot_calls_after_a_fold_cost_a_pin_and_its_verification() {
                 .await;
             snapshots.push(created.expect("create").snapshot_id);
             fixture.namespace.wait_for_fold().await.expect("settle");
-            let manifest_read = usize::from(matches!(fold, Fold::Explicit) && index == 0);
-            fixture.assert_requests(&format!("{fold:?}: create {index}"), 5 + manifest_read);
+            fixture.assert_requests(&format!("{fold:?}: create {index}"), 5);
         }
         let reader = fixture.namespace.read_only();
         for (index, snapshot) in snapshots.iter().enumerate() {

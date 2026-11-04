@@ -12,6 +12,7 @@ use crate::block_cache::{
 };
 use crate::error::CoreError;
 use crate::heap_bytes::{arc_bytes, HeapBytes};
+use crate::manifest::{move_read_basis, PublishedManifest};
 use crate::namespace::basis::ReadBasis;
 use crate::time::Observation;
 use crate::wal::ProjectedWalTail;
@@ -283,6 +284,52 @@ impl HeadAndWalTailCache {
                 next.supersedes(cached)
             })
             .unwrap_or(next)
+    }
+
+    /// Moves the namespace's cached head onto `manifest`, a manifest that
+    /// this runtime published or found current, by the rule a writer
+    /// position moves by (see
+    /// [`NamespaceCommitEngine::record_manifest_published`](crate::publish::NamespaceCommitEngine::record_manifest_published)),
+    /// and caches the WAL tail above the manifest under the moved head's key.
+    /// A manifest at or below the cached head's basis changes nothing.
+    ///
+    /// The moved head is installed through [`Self::replace_head`]. Its head
+    /// confirmation stays, and its manifest check is the younger of the
+    /// cached head's check and the start of the call that published
+    /// `manifest`, because neither check found a manifest after `manifest`.
+    /// When the head can't move, or its tail isn't cached, the cached head is
+    /// dropped, so the next read loads the head by discovery.
+    pub fn move_head(&self, namespace_id: &NamespaceId, manifest: &PublishedManifest) {
+        let Some(cached) = self.get_head(namespace_id) else {
+            return;
+        };
+        if manifest.manifest.manifest_no <= cached.read_basis.basis.manifest_no() {
+            return;
+        }
+        let tail_key = |read_basis: &ReadBasis| WalTailCacheKey {
+            namespace_id: namespace_id.clone(),
+            manifest_no: read_basis.basis.manifest_no(),
+            head_seq: read_basis.head.seq,
+        };
+        let mut read_basis = cached.read_basis.clone();
+        let Some(mut tail) = self.get_tail(&tail_key(&read_basis)) else {
+            self.invalidate_head(namespace_id);
+            return;
+        };
+        if !move_read_basis(&mut read_basis, &mut tail, manifest) {
+            self.invalidate_head(namespace_id);
+            return;
+        }
+        self.insert_tail(tail_key(&read_basis), tail);
+        let basis_checked = match &manifest.started {
+            Some(started) if started.age_ms() < cached.basis_checked.age_ms() => started.clone(),
+            _ => cached.basis_checked.clone(),
+        };
+        self.replace_head(CachedHead {
+            read_basis,
+            basis_checked,
+            head_confirmed: cached.head_confirmed.clone(),
+        });
     }
 
     /// Removes the namespace's cached head, after the runtime learns of a
