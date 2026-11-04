@@ -1,7 +1,7 @@
 //! Authorizes reads and commits against the subject's effective rights.
 
 use crate::error::{CoreError, Result};
-use crate::metadata::access::{effective_rights, is_administrator};
+use crate::metadata::access::{effective_rights, is_administrator, EffectiveRightsMemo};
 use crate::metadata::MetadataViewSession;
 use crate::metadata::{ancestry_allows_read, MetadataVisibilityReads};
 use crate::path::read::LoadedMetadataView;
@@ -118,9 +118,30 @@ where
 /// evaluated. A live read evaluates on the session it reads through. A
 /// snapshot read evaluates at the current head, on a separate view, and
 /// every snapshot read is a history read.
+///
+/// The rights that [`Self::can_read`] finds are memoized for the rest of the
+/// read, so a listing walks the ancestors that its children share once.
 pub(crate) struct ReadAccess<'a, S: ObjectStore + ?Sized> {
     authorizer: Authorizer<'a>,
-    at_head: Option<&'a LoadedMetadataView<'a, S>>,
+    at_head: Option<HeadAccess<'a, S>>,
+    rights: EffectiveRightsMemo,
+}
+
+/// The current head that a snapshot read's checks evaluate at.
+struct HeadAccess<'a, S: ObjectStore + ?Sized> {
+    view: &'a LoadedMetadataView<'a, S>,
+    /// The session that every [`ReadAccess::can_read`] of the read evaluates
+    /// on, so its caches serve every check.
+    session: MetadataViewSession<'a, 'a, S>,
+}
+
+impl<'a, S: ObjectStore + ?Sized> HeadAccess<'a, S> {
+    fn new(view: &'a LoadedMetadataView<'a, S>) -> Self {
+        Self {
+            view,
+            session: view.metadata_view().session(),
+        }
+    }
 }
 
 impl<'a, S: ObjectStore + ?Sized> ReadAccess<'a, S> {
@@ -128,13 +149,25 @@ impl<'a, S: ObjectStore + ?Sized> ReadAccess<'a, S> {
         Self {
             authorizer,
             at_head: None,
+            rights: EffectiveRightsMemo::default(),
         }
     }
 
     pub(crate) fn at_head(authorizer: Authorizer<'a>, head: &'a LoadedMetadataView<'a, S>) -> Self {
         Self {
             authorizer,
-            at_head: Some(head),
+            at_head: Some(HeadAccess::new(head)),
+            rights: EffectiveRightsMemo::default(),
+        }
+    }
+
+    /// Returns the same read's authorization with nothing memoized, for a
+    /// lookup that runs concurrently with the read's other lookups.
+    pub(crate) fn with_empty_memo(&self) -> Self {
+        Self {
+            authorizer: self.authorizer,
+            at_head: self.at_head.as_ref().map(|head| HeadAccess::new(head.view)),
+            rights: EffectiveRightsMemo::default(),
         }
     }
 
@@ -161,10 +194,10 @@ impl<'a, S: ObjectStore + ?Sized> ReadAccess<'a, S> {
         rights: AccessRights,
         absence: Absence<'_>,
     ) -> Result<()> {
-        if let Some(head) = self.at_head {
+        if let Some(head) = &self.at_head {
             let rights = rights.union(AccessRight::History.into());
-            let mut head = head.metadata_view().session();
-            if self.refuses_at_head(&mut head, inode_id).await? {
+            let mut head = head.view.metadata_view().session();
+            if refuses_at_head(&self.authorizer, &mut head, inode_id).await? {
                 return Err(absence.not_found(inode_id));
             }
             require(&self.authorizer, &mut head, inode_id, rights, absence).await
@@ -178,40 +211,42 @@ impl<'a, S: ObjectStore + ?Sized> ReadAccess<'a, S> {
     /// administrator rights when the inode's ancestry at the head refuses the
     /// read, as [`Self::require`] describes.
     pub(crate) async fn can_read(
-        &self,
+        &mut self,
         session: &mut MetadataViewSession<'_, '_, S>,
         inode_id: InodeId,
     ) -> Result<bool> {
-        let Authorizer::Subject { principals } = &self.authorizer else {
+        let Authorizer::Subject { principals } = self.authorizer else {
             return Ok(true);
         };
         let mut rights = AccessRights::from(AccessRight::Read);
-        let effective = if let Some(head) = self.at_head {
+        let effective = if let Some(head) = &mut self.at_head {
             rights = rights.union(AccessRight::History.into());
-            let mut head = head.metadata_view().session();
-            if self.refuses_at_head(&mut head, inode_id).await? {
+            if refuses_at_head(&self.authorizer, &mut head.session, inode_id).await? {
                 return Ok(false);
             }
-            effective_rights(&mut head, principals, inode_id).await?
+            self.rights
+                .effective_rights(&mut head.session, principals, inode_id)
+                .await?
         } else {
-            effective_rights(session, principals, inode_id).await?
+            self.rights
+                .effective_rights(session, principals, inode_id)
+                .await?
         };
         Ok(rights.is_subset_of(effective))
     }
+}
 
-    /// Whether a snapshot read of `inode_id` is refused at the head, as
-    /// [`Self::require`] describes: the namespace is an ACL namespace, the
-    /// subject isn't an administrator, and the inode's ancestry at the head
-    /// refuses the read.
-    async fn refuses_at_head(
-        &self,
-        head: &mut MetadataViewSession<'_, '_, S>,
-        inode_id: InodeId,
-    ) -> Result<bool> {
-        let Authorizer::Subject { principals } = &self.authorizer else {
-            return Ok(false);
-        };
-        Ok(!is_administrator(head, principals).await?
-            && !ancestry_allows_read(head, inode_id).await?)
-    }
+/// Whether a snapshot read of `inode_id` is refused at the head, as
+/// [`ReadAccess::require`] describes: the namespace is an ACL namespace, the
+/// subject isn't an administrator, and the inode's ancestry at the head
+/// refuses the read.
+async fn refuses_at_head<S: ObjectStore + ?Sized>(
+    authorizer: &Authorizer<'_>,
+    head: &mut MetadataViewSession<'_, '_, S>,
+    inode_id: InodeId,
+) -> Result<bool> {
+    let Authorizer::Subject { principals } = authorizer else {
+        return Ok(false);
+    };
+    Ok(!is_administrator(head, principals).await? && !ancestry_allows_read(head, inode_id).await?)
 }

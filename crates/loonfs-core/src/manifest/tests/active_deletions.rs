@@ -359,7 +359,7 @@ async fn trash_page<S: ObjectStore + ?Sized>(
             cursor,
             limit: EffectiveLimit::new(NonZeroU32::new(limit).expect("non-zero limit")),
         },
-        &crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
+        &mut crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted),
     )
     .await
     .expect("list trash page")

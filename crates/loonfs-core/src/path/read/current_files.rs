@@ -63,8 +63,9 @@ pub(crate) fn ensure_stat_batch_within_cap(requested: usize) -> Result<()> {
 /// rows in the inode, binding, and revision families. In a group, each lookup
 /// finds the blocks that the lookups before it read in the read's memo, and
 /// the groups start in different parts of the ID range, so their reads don't
-/// wait on the same blocks. Each inode resolves in its own session over the
-/// same namespace state, because a session's lookups take it by `&mut`.
+/// wait on the same blocks. Each inode resolves in its own session and with
+/// its own memo of effective rights over the same namespace state, because a
+/// session's lookups and a rights check take them by `&mut`.
 pub(crate) async fn stat_current_files_by_inode<S: ObjectStore + ?Sized>(
     view: &LoadedMetadataView<'_, S>,
     inode_ids: &[InodeId],
@@ -80,7 +81,8 @@ pub(crate) async fn stat_current_files_by_inode<S: ObjectStore + ?Sized>(
     // error of the lowest failing ID.
     let resolved = preload_inode_groups(&sorted, |inode_id| async move {
         let mut session = metadata_view.session();
-        Ok(resolve_one(&mut session, &mut HashMap::new(), inode_id, access).await)
+        let mut access = access.with_empty_memo();
+        Ok(resolve_one(&mut session, &mut HashMap::new(), inode_id, &mut access).await)
     })
     .await?;
     let states: HashMap<InodeId, CurrentFileState> = resolved
@@ -102,7 +104,7 @@ async fn resolve_one<S: ObjectStore + ?Sized>(
     session: &mut MetadataViewSession<'_, '_, S>,
     ancestor_paths: &mut HashMap<InodeId, AbsolutePath>,
     inode_id: InodeId,
-    access: &ReadAccess<'_, S>,
+    access: &mut ReadAccess<'_, S>,
 ) -> Result<CurrentFileState> {
     if !access.can_read(session, inode_id).await? {
         return Ok(missing(inode_id, false));

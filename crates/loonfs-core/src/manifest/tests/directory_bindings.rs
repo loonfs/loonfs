@@ -154,7 +154,7 @@ async fn assert_names<S: ObjectStore + ?Sized>(
     view: &LoadedMetadataView<'_, S>,
     expected: &[(&str, InodeId)],
 ) {
-    let access = ReadAccess::live(Authorizer::Unrestricted);
+    let mut access = ReadAccess::live(Authorizer::Unrestricted);
     let page = view
         .list_path_page(
             "/",
@@ -163,7 +163,7 @@ async fn assert_names<S: ObjectStore + ?Sized>(
                 limit: EffectiveLimit::new(NonZeroU32::new(16).expect("nonzero limit")),
             },
             &ListOptions::default(),
-            &access,
+            &mut access,
         )
         .await
         .expect("list root");
