@@ -17,15 +17,12 @@ use super::step::{CompactionUnitOutcome, MetadataCompactionCancellation};
 use crate::bloom_filter::BloomFilter;
 use crate::error::{CoreError, Result};
 use crate::limits::{DIRECTORY_PAGE_RAW_SCAN_LIMIT, MAX_KEPT_INODE_WALK_DEPTH};
-use crate::metadata::manifest_index::{direntry_binds_page, slot_edge_end};
-use crate::metadata::row_decode::active_deletion_from_manifest_row;
+use crate::metadata::manifest_index::{active_deletions_page, direntry_binds_page, slot_edge_end};
 use crate::metadata::{ActiveDeletionRecord, DirentryBindingRecord};
 use crate::segment::runs::MetadataFamilyGroup;
 use crate::segment::scan::VerifiedMetadataSegments;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::manifest::{
-    lookup_keys, ActiveDeletionRowAction, MetadataRow, MetadataRowFamily,
-};
+use loonfs_types::format::manifest::{lookup_keys, ActiveDeletionRowAction, MetadataRow};
 use loonfs_types::format::segment_blocks::string_prefix_upper_bound;
 use loonfs_types::{ChangeSeq, InodeId, InodeKind, NamespaceId, ROOT_INODE_ID};
 use std::collections::VecDeque;
@@ -230,24 +227,19 @@ impl ListedDeletions {
             if cancellation.is_cancelled() {
                 return Ok(ControlFlow::Break(WalkStop::Cancelled));
             }
-            let rows = segments
-                .scan_range(
-                    MetadataRowFamily::ActiveDeletions,
-                    &self.lower_bound,
-                    self.upper_bound.as_deref(),
-                    KEPT_INODE_SCAN_ROWS,
-                    None,
-                    crate::segment::Readahead::Enabled,
-                )
-                .await?;
+            let rows = active_deletions_page(
+                segments,
+                &self.lower_bound,
+                self.upper_bound.as_deref(),
+                KEPT_INODE_SCAN_ROWS,
+            )
+            .await?;
             self.scanned_to_end = rows.len() < KEPT_INODE_SCAN_ROWS;
             if let Some((row_key, _)) = rows.last() {
                 self.lower_bound = lookup_keys::after_row_key(row_key);
             }
-            for (_, row) in rows {
-                self.unread
-                    .push_back(active_deletion_from_manifest_row(row)?);
-            }
+            self.unread
+                .extend(rows.into_iter().map(|(_, deletion)| deletion));
         }
     }
 }

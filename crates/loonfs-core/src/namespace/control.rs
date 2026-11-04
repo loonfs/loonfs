@@ -107,7 +107,9 @@ impl<S: ObjectStore> NamespaceStore<S> {
             &self.store,
             hint(&self.namespace_id),
             ControlObjectKind::Hint,
-            |state: &HintPayload| expect_namespace(&self.namespace_id, &state.namespace_id),
+            |object_key, state: &HintPayload| {
+                expect_namespace(object_key, &self.namespace_id, &state.namespace_id)
+            },
         )
         .await
     }

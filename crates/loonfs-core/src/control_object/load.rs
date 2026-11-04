@@ -15,25 +15,9 @@ pub struct LoadedControl<T> {
     pub state: T,
 }
 
-pub(crate) enum EmbeddedIdentityMismatch {
-    Namespace {
-        expected: NamespaceId,
-        actual: NamespaceId,
-    },
-    Field {
-        field: &'static str,
-        expected: String,
-        actual: String,
-    },
-}
-
-enum ControlLoadFailure {
-    Absent,
-    Decode(EnvelopeCodecError),
-    EmbeddedIdentity(EmbeddedIdentityMismatch),
-    Store(ObjectStoreError),
-}
-
+/// Loads the control object at `object_key`, decodes it as `kind`, and
+/// checks the identity its payload embeds with `validate_identity`, which is
+/// passed the object key and the payload.
 pub(crate) async fn load_control_object<S, T, F>(
     store: &S,
     object_key: String,
@@ -43,25 +27,36 @@ pub(crate) async fn load_control_object<S, T, F>(
 where
     S: ObjectStore + ?Sized,
     T: DeserializeOwned,
-    F: FnOnce(&T) -> Result<(), EmbeddedIdentityMismatch>,
+    F: FnOnce(&str, &T) -> Result<(), ControlObjectLoadError>,
 {
+    let store_error = |error: ObjectStoreError| ControlObjectLoadError::Store {
+        object_key: object_key.clone(),
+        message: error.public_message().into_owned(),
+        kind: error.kind(),
+    };
     let body = store
         .get_with_metadata(&object_key)
         .await
-        .map_err(|error| classify(&object_key, ControlLoadFailure::Store(error)))?
-        .ok_or_else(|| classify(&object_key, ControlLoadFailure::Absent))?;
-    let etag =
-        loonfs_objectstore::required_etag(&object_key, body.metadata.etag).map_err(|error| {
-            ControlObjectLoadError::Store {
-                object_key: object_key.clone(),
-                message: error.to_string(),
-                kind: error.kind(),
-            }
+        .map_err(store_error)?
+        .ok_or_else(|| ControlObjectLoadError::MissingObject {
+            object_key: object_key.clone(),
         })?;
-    let envelope = decode_control_object(&body.bytes, kind)
-        .map_err(|error| classify(&object_key, ControlLoadFailure::Decode(error)))?;
-    validate_identity(envelope.payload())
-        .map_err(|error| classify(&object_key, ControlLoadFailure::EmbeddedIdentity(error)))?;
+    let etag =
+        loonfs_objectstore::required_etag(&object_key, body.metadata.etag).map_err(store_error)?;
+    let envelope = decode_control_object(&body.bytes, kind).map_err(|error| match error {
+        EnvelopeCodecError::ChecksumMismatch { expected, actual } => {
+            ControlObjectLoadError::ChecksumMismatch {
+                object_key: object_key.clone(),
+                expected: expected.to_string(),
+                actual: actual.to_string(),
+            }
+        }
+        error => ControlObjectLoadError::Codec {
+            object_key: object_key.clone(),
+            message: error.to_string(),
+        },
+    })?;
+    validate_identity(&object_key, envelope.payload())?;
     Ok(LoadedControl {
         object_key,
         etag,
@@ -69,74 +64,40 @@ where
     })
 }
 
+/// Returns `namespace_mismatch` for the object at `object_key` when the
+/// namespace its payload embeds isn't `expected`.
 pub(crate) fn expect_namespace(
+    object_key: &str,
     expected: &NamespaceId,
     actual: &NamespaceId,
-) -> Result<(), EmbeddedIdentityMismatch> {
+) -> Result<(), ControlObjectLoadError> {
     if actual == expected {
         return Ok(());
     }
-    Err(EmbeddedIdentityMismatch::Namespace {
+    Err(ControlObjectLoadError::NamespaceMismatch {
+        object_key: object_key.to_owned(),
         expected: expected.clone(),
         actual: actual.clone(),
     })
 }
 
+/// Returns `identity_mismatch` for the object at `object_key` when the
+/// identity field its payload embeds isn't `expected`.
 pub(crate) fn expect_identity_field(
+    object_key: &str,
     field: &'static str,
     expected: &str,
     actual: &str,
-) -> Result<(), EmbeddedIdentityMismatch> {
+) -> Result<(), ControlObjectLoadError> {
     if actual == expected {
         return Ok(());
     }
-    Err(EmbeddedIdentityMismatch::Field {
-        field,
+    Err(ControlObjectLoadError::IdentityMismatch {
+        object_key: object_key.to_owned(),
+        field: field.to_owned(),
         expected: expected.to_owned(),
         actual: actual.to_owned(),
     })
-}
-
-fn classify(object_key: &str, failure: ControlLoadFailure) -> ControlObjectLoadError {
-    match failure {
-        ControlLoadFailure::Absent => ControlObjectLoadError::MissingObject {
-            object_key: object_key.to_owned(),
-        },
-        ControlLoadFailure::Decode(EnvelopeCodecError::ChecksumMismatch { expected, actual }) => {
-            ControlObjectLoadError::ChecksumMismatch {
-                object_key: object_key.to_owned(),
-                expected: expected.to_string(),
-                actual: actual.to_string(),
-            }
-        }
-        ControlLoadFailure::Decode(error) => ControlObjectLoadError::Codec {
-            object_key: object_key.to_owned(),
-            message: error.to_string(),
-        },
-        ControlLoadFailure::EmbeddedIdentity(EmbeddedIdentityMismatch::Namespace {
-            expected,
-            actual,
-        }) => ControlObjectLoadError::NamespaceMismatch {
-            object_key: object_key.to_owned(),
-            expected,
-            actual,
-        },
-        ControlLoadFailure::EmbeddedIdentity(EmbeddedIdentityMismatch::Field {
-            field,
-            expected,
-            actual,
-        }) => ControlObjectLoadError::IdentityMismatch {
-            object_key: object_key.to_owned(),
-            field: field.to_owned(),
-            expected,
-            actual,
-        },
-        ControlLoadFailure::Store(error) => ControlObjectLoadError::Store {
-            object_key: object_key.to_owned(),
-            message: error.public_message().into_owned(),
-            kind: error.kind(),
-        },
-    }
 }
 
 #[cfg(test)]
@@ -192,7 +153,9 @@ mod tests {
             store,
             object_key.to_owned(),
             ControlObjectKind::Hint,
-            |state: &HintPayload| expect_namespace(expected_namespace_id, &state.namespace_id),
+            |object_key, state: &HintPayload| {
+                expect_namespace(object_key, expected_namespace_id, &state.namespace_id)
+            },
         )
         .await
     }
@@ -281,7 +244,7 @@ mod tests {
                 kind: ObjectStoreErrorKind::Other,
                 message,
                 ..
-            } if message.contains("required control-object etag")
+            } if message == ObjectStoreErrorKind::Other.public_message()
         );
     }
 
@@ -390,7 +353,7 @@ mod tests {
             &store,
             object_key.clone(),
             ControlObjectKind::Hint,
-            |_state| expect_identity_field("test id", "expected", "actual"),
+            |object_key, _state| expect_identity_field(object_key, "test id", "expected", "actual"),
         )
         .await
         .expect_err("identity mismatch should fail");

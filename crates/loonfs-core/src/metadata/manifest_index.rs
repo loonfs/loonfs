@@ -338,7 +338,7 @@ pub(super) async fn revisions_page<S: ObjectStore + ?Sized>(
 /// row's stored key. The trash listing's whole durable read: the family is
 /// keyed by deletion position, so a page is a range scan whose cost follows
 /// the page, not the namespace's deletion history.
-pub(super) async fn active_deletions_page<S: ObjectStore + ?Sized>(
+pub(crate) async fn active_deletions_page<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     lower_bound: &str,
     upper_bound: Option<&str>,
