@@ -6,17 +6,13 @@ use super::tls::{self, TlsListener};
 use crate::config::{JobMode, MemorySizing, ServerConfig, TransportConfig, ValidatedServerConfig};
 use crate::sweep::{GrepIndexing, Sweep, SweepState};
 use crate::{Result, ServerError};
-use axum::body::Body;
-use axum::extract::{Request, State};
-use axum::middleware::Next;
-use axum::response::Response;
 use axum::serve::ListenerExt as _;
 use axum::Router;
 use loonfs::metrics::{JsonlObjectStoreMetricsRecorder, ObjectStoreMetricsRecorder};
 use loonfs::{LoonFs, Maintenance, SharedObjectStore, Writable, WriterId};
 use loonfs_grep::{GrepBlockCache, GrepService, GrepWorker};
 use loonfs_http::{
-    BindingConfig, BindingHandles, BindingState, GrepBinding, HttpMetrics, Namespaces,
+    BindingConfig, BindingHandles, BindingState, GrepBinding, HttpMetrics, Namespaces, RequestLimit,
 };
 use loonfs_objectstore::presign::DirectTransferIssuers;
 use loonfs_objectstore::{run_store_contract_probe, StoreProbeReport};
@@ -25,100 +21,11 @@ use std::ffi::OsString;
 use std::future::{Future, IntoFuture};
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpStream;
-use tokio::sync::Notify;
 
 const OBJECT_STORE_METRICS_JSONL_ENV: &str = "LOONFS_OBJECT_STORE_METRICS_JSONL";
-
-#[derive(Clone, Default)]
-struct RequestDrain {
-    inner: Arc<RequestDrainInner>,
-}
-
-#[derive(Default)]
-struct RequestDrainInner {
-    active: AtomicUsize,
-    idle: Notify,
-}
-
-impl RequestDrain {
-    fn start(&self) -> ActiveRequest {
-        self.inner.active.fetch_add(1, Ordering::AcqRel);
-        ActiveRequest {
-            drain: self.clone(),
-        }
-    }
-
-    async fn settle(&self) {
-        loop {
-            let idle = self.inner.idle.notified();
-            if self.inner.active.load(Ordering::Acquire) == 0 {
-                return;
-            }
-            idle.await;
-        }
-    }
-}
-
-struct ActiveRequest {
-    drain: RequestDrain,
-}
-
-impl Drop for ActiveRequest {
-    fn drop(&mut self) {
-        if self.drain.inner.active.fetch_sub(1, Ordering::AcqRel) == 1 {
-            self.drain.inner.idle.notify_waiters();
-        }
-    }
-}
-
-async fn track_request(
-    State(drain): State<RequestDrain>,
-    request: Request,
-    next: Next,
-) -> Response {
-    let active = drain.start();
-    let response = next.run(request).await;
-    response.map(|body| {
-        Body::new(DrainedBody {
-            body,
-            _active: active,
-        })
-    })
-}
-
-/// A response body whose request stays active until the last frame is sent.
-///
-/// Framing passes through untouched — in particular the exact size hint — so
-/// a sized response keeps its `Content-Length` instead of turning chunked.
-struct DrainedBody {
-    body: Body,
-    _active: ActiveRequest,
-}
-
-impl http_body::Body for DrainedBody {
-    type Data = axum::body::Bytes;
-    type Error = axum::Error;
-
-    fn poll_frame(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<std::result::Result<http_body::Frame<Self::Data>, Self::Error>>>
-    {
-        std::pin::Pin::new(&mut self.get_mut().body).poll_frame(cx)
-    }
-
-    fn is_end_stream(&self) -> bool {
-        self.body.is_end_stream()
-    }
-
-    fn size_hint(&self) -> http_body::SizeHint {
-        self.body.size_hint()
-    }
-}
 
 /// Handles and resources whose shutdown belongs to this host.
 #[derive(Clone)]
@@ -385,8 +292,9 @@ pub async fn probe_store(config: &ValidatedServerConfig) -> Result<StoreProbeRep
 /// Serves on the configured address until ctrl-c or SIGTERM, then shuts down
 /// gracefully.
 ///
-/// Admission closes while the listener remains available to reads and probes.
-/// After active requests drain, the listener closes and accepted work settles.
+/// Admission closes while the listener remains available to probes, and a
+/// request that arrives during the drain is answered `shutting_down`. After
+/// admitted requests drain, the listener closes and accepted work settles.
 pub async fn serve(config: ValidatedServerConfig) -> Result<()> {
     let shutdown = shutdown_signal().map_err(ServerError::Signal)?;
     let bind = config.bind;
@@ -466,6 +374,7 @@ where
         state.binding.metrics.recorder().as_ref(),
     );
     let settlement = Settlement {
+        requests: state.binding.request_limit().cloned(),
         runtime: state.binding.runtime,
         sweep: state.sweep,
         deadline_ms,
@@ -476,6 +385,9 @@ where
 /// What a server settles after it stops serving, and how long the drain and
 /// the sweep's stop may take, counted from the shutdown signal.
 pub(super) struct Settlement {
+    /// The admitted requests the drain waits for. A binding without a request
+    /// limit drains nothing before the listener closes.
+    pub(super) requests: Option<RequestLimit>,
     pub(super) runtime: LoonFs<Writable>,
     pub(super) sweep: Option<Sweep>,
     pub(super) deadline_ms: u64,
@@ -500,16 +412,12 @@ where
     L: axum::serve::Listener<Addr = SocketAddr>,
 {
     let Settlement {
+        requests,
         runtime,
         sweep,
         deadline_ms,
     } = settlement;
     let sweep = sweep.map(|sweep| sweep.start());
-    let requests = RequestDrain::default();
-    let router = router.layer(axum::middleware::from_fn_with_state(
-        requests.clone(),
-        track_request,
-    ));
     let (listener_close_tx, listener_close_rx) = tokio::sync::oneshot::channel();
     let mut server = Box::pin(
         axum::serve(listener, router)
@@ -538,7 +446,7 @@ where
             let mut deadline = deadline_from_now();
             let drained = drain_with_deadline(
                 server.as_mut(),
-                &requests,
+                requests.as_ref(),
                 listener_close_tx,
                 deadline.as_mut(),
                 deadline_ms,
@@ -564,7 +472,7 @@ where
 
 async fn drain_with_deadline<S>(
     mut server: Pin<&mut S>,
-    requests: &RequestDrain,
+    requests: Option<&RequestLimit>,
     listener_close_tx: tokio::sync::oneshot::Sender<()>,
     mut deadline: Pin<&mut tokio::time::Sleep>,
     shutdown_deadline_ms: u64,
@@ -574,7 +482,11 @@ where
 {
     let deadline_passed = tokio::select! {
         result = server.as_mut() => return result,
-        () = requests.settle() => false,
+        () = async {
+            if let Some(requests) = requests {
+                requests.settle().await;
+            }
+        } => false,
         () = deadline.as_mut() => true,
     };
     let _ = listener_close_tx.send(());

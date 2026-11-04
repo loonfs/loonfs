@@ -162,6 +162,7 @@ async fn graceful_shutdown_abandons_requests_at_the_deadline_and_settles_the_wri
         listener,
         router,
         Settlement {
+            requests: None,
             runtime: writer.clone(),
             sweep: None,
             deadline_ms: shutdown_deadline_ms,
@@ -312,6 +313,7 @@ async fn a_sweep_stops_between_namespaces_and_cancels_streaming_on_shutdown() {
         listener,
         router,
         Settlement {
+            requests: state.binding.request_limit().cloned(),
             runtime: state.binding.runtime.clone(),
             sweep: state.sweep.clone(),
             deadline_ms: 60_000,
@@ -390,6 +392,7 @@ async fn shutdown_abandons_a_parked_sweep_visit_at_its_deadline_and_settles_the_
         listener,
         router,
         Settlement {
+            requests: state.binding.request_limit().cloned(),
             runtime: state.binding.runtime.clone(),
             sweep: state.sweep.clone(),
             deadline_ms: shutdown_deadline_ms,
@@ -624,15 +627,17 @@ async fn hidden_maintenance_surface_keeps_filesystem_and_query_routes_served() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::disallowed_methods)]
 // Monotonic time is used only to bound this shutdown check.
-async fn shutdown_keeps_readiness_reachable_until_an_active_request_finishes() {
+async fn shutdown_refuses_new_requests_and_keeps_readiness_reachable_until_an_active_request_finishes(
+) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     async fn get(addr: std::net::SocketAddr, path: &str) -> Vec<u8> {
         let mut stream = tokio::net::TcpStream::connect(addr)
             .await
             .expect("connect to serving listener");
-        let request =
-            format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        let request = format!(
+            "GET {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer test-token\r\nConnection: close\r\n\r\n"
+        );
         stream
             .write_all(request.as_bytes())
             .await
@@ -646,7 +651,12 @@ async fn shutdown_keeps_readiness_reachable_until_an_active_request_finishes() {
     }
 
     let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    // The active request is a read of namespace `missing`, parked in the store.
+    let missing = loonfs_objectstore::keys::namespace_prefix(&namespace_id("missing"));
+    let store = Arc::new(BlockingStore::matching(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        move |context| context.key().contains(missing.as_str()),
+    ));
     let mut config = test_config(temp_dir.path(), "readiness-shutdown-writer");
     config.shutdown_deadline_ms = 1_000;
     let shutdown_deadline_ms = config.shutdown_deadline_ms;
@@ -656,33 +666,17 @@ async fn shutdown_keeps_readiness_reachable_until_an_active_request_finishes() {
     let addr = listener.local_addr().expect("listener addr");
     let (router, state) = app(
         config.validate().expect("validate the test config"),
-        options_with_store(store),
+        options_with_store(store.clone()),
     )
     .await
     .expect("build app");
-    let slow_started = Arc::new(tokio::sync::Notify::new());
-    let slow_release = Arc::new(tokio::sync::Notify::new());
-    let router = router.route(
-        "/slow",
-        axum::routing::get({
-            let slow_started = Arc::clone(&slow_started);
-            let slow_release = Arc::clone(&slow_release);
-            move || {
-                let slow_started = Arc::clone(&slow_started);
-                let slow_release = Arc::clone(&slow_release);
-                async move {
-                    slow_started.notify_one();
-                    slow_release.notified().await;
-                    "slow request finished"
-                }
-            }
-        }),
-    );
+    store.arm();
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let server = tokio::spawn(super::serve::serve_and_settle(
         listener,
         router,
         Settlement {
+            requests: state.binding.request_limit().cloned(),
             runtime: state.binding.runtime.clone(),
             sweep: state.sweep.clone(),
             deadline_ms: shutdown_deadline_ms,
@@ -692,10 +686,13 @@ async fn shutdown_keeps_readiness_reachable_until_an_active_request_finishes() {
         },
     ));
 
-    let slow = tokio::spawn(get(addr, "/slow"));
-    loonfs_test_support::clock::bounded(std::time::Duration::from_secs(1), slow_started.notified())
-        .await
-        .expect("slow request starts");
+    let slow = tokio::spawn(get(addr, "/v0/namespaces/missing"));
+    loonfs_test_support::clock::bounded(
+        std::time::Duration::from_secs(1),
+        store.wait_until_blocked(),
+    )
+    .await
+    .expect("slow request parks in the store");
 
     let shutdown_started = tokio::time::Instant::now();
     shutdown_tx.send(()).expect("trigger shutdown");
@@ -721,6 +718,16 @@ async fn shutdown_keeps_readiness_reachable_until_an_active_request_finishes() {
         readiness.contains("retry-after: 1\r\n"),
         "readiness tells callers when to retry: {readiness}"
     );
+    let late = get(addr, "/v0/namespaces/other").await;
+    let late = String::from_utf8(late).expect("late response is utf-8");
+    assert!(
+        late.starts_with("HTTP/1.1 503 Service Unavailable\r\n"),
+        "a request that arrives during the drain is refused: {late}"
+    );
+    assert!(
+        late.contains("\"code\":\"shutting_down\""),
+        "the refusal names the shutdown: {late}"
+    );
     assert!(
         !slow.is_finished(),
         "the original request is still in flight"
@@ -730,14 +737,13 @@ async fn shutdown_keeps_readiness_reachable_until_an_active_request_finishes() {
         "the listener remains serving while the request drains"
     );
 
-    slow_release.notify_one();
+    store.release();
     let slow = loonfs_test_support::clock::bounded(std::time::Duration::from_secs(1), slow)
         .await
         .expect("slow request completes")
         .expect("join slow request");
     let slow = String::from_utf8(slow).expect("slow response is utf-8");
-    assert!(slow.starts_with("HTTP/1.1 200 OK\r\n"), "{slow}");
-    assert!(slow.contains("slow request finished"), "{slow}");
+    assert!(slow.starts_with("HTTP/1.1 404 Not Found\r\n"), "{slow}");
 
     loonfs_test_support::clock::bounded(
         std::time::Duration::from_millis(shutdown_deadline_ms),
