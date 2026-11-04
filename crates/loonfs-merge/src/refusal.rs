@@ -17,16 +17,22 @@ pub const MAX_MERGE_ATTEMPTS: usize = 4;
 
 /// How the loop acts on an error that a merge or a rebase returned.
 pub(crate) enum Refusal {
+    /// The loop sends another request for the range or for a piece of it.
+    Next(NextRequest),
+    /// The merge conflicted.
+    Conflict,
+    /// The loop can't act on the error, or the request had its last attempt.
+    Fail,
+}
+
+/// The request that the loop sends after a refusal that it can act on.
+pub(crate) enum NextRequest {
     /// The request was too large, and the next request goes through the
     /// error's split hint.
     Split(ChangeSeq),
     /// The request failed with a transient error, and the same request goes
     /// again.
     Retry,
-    /// The merge conflicted.
-    Conflict,
-    /// The loop can't act on the error, or the request had its last attempt.
-    Fail,
 }
 
 /// Returns the server's error response for a merge or a rebase that it
@@ -54,14 +60,14 @@ pub(crate) fn refusal(request: &PendingCommit, error: &ErrorResponse) -> Refusal
             // A hint at or above the refused request's end wouldn't shorten
             // the range, and the loop would repeat the request without end.
             Some(split_at_seq) if split_at_seq < request.through_seq => {
-                Refusal::Split(split_at_seq)
+                Refusal::Next(NextRequest::Split(split_at_seq))
             }
             _ => Refusal::Fail,
         },
         ErrorCode::MergeConflict => Refusal::Conflict,
         code if code.is_stale_plan() || code.retryable_without_operator_action() => {
             if request.failed_attempts + 1 < u64_from_usize(MAX_MERGE_ATTEMPTS) {
-                Refusal::Retry
+                Refusal::Next(NextRequest::Retry)
             } else {
                 Refusal::Fail
             }

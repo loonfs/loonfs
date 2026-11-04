@@ -2,13 +2,13 @@
 //! large, rebase a fork whose merge conflicts, hand the new fork to the
 //! resolver, and merge again.
 
-use crate::refusal::{is_gone, refusal, refused, Refusal};
+use crate::refusal::{is_gone, refusal, refused, NextRequest, Refusal};
 use crate::{
     ConflictReport, Mechanics, MergeError, MergeFailure, MergeSessionOutcome, MergeSessionState,
     MergeSessionStatus, PendingCommit, Resolver, Result,
 };
 use loonfs_types::{
-    generated_id, ActorId, ChangeSeq, MergeConflict, NamespaceId, NextMergeRangeOutcome,
+    generated_id, ChangeSeq, ErrorResponse, MergeConflict, NamespaceId, NextMergeRangeOutcome,
 };
 
 /// The most new forks that one session's rebases create.
@@ -18,11 +18,10 @@ use loonfs_types::{
 /// conflicts only if the namespace changed one of the new fork's files after
 /// the rebase created the new fork, so a session that reaches this limit is
 /// merging into a namespace that doesn't stop conflicting. The limit bounds
-/// the state's list of new forks, and the passes that recovery makes over
-/// the namespace's forks.
+/// the state's list of new forks, and the new forks that recovery finds.
 pub const MAX_NEW_FORKS: usize = 8;
 
-/// Options for starting or recovering a merge session.
+/// Options for starting a merge session.
 #[derive(Debug, Clone, Default)]
 pub struct MergeSessionOptions {
     /// The fork sequence to merge the original fork through, or `None` for
@@ -73,38 +72,6 @@ impl Transition {
 }
 
 impl<M: Mechanics, R: Resolver> MergeSession<M, R> {
-    /// Starts a session that merges `fork_id` into `namespace_id` as
-    /// `actor_id`, after it reads where the fork's next merge starts.
-    ///
-    /// The session merges through `options.through_seq`, or through the
-    /// fork's head. When the fork's next merge would start at or after that
-    /// sequence, the session starts `merged`. When a retention floor refuses
-    /// the fork's next merge, or the server returns an outcome that this
-    /// crate doesn't know, the session starts `failed`.
-    pub async fn start(
-        mechanics: M,
-        resolver: R,
-        namespace_id: NamespaceId,
-        fork_id: NamespaceId,
-        actor_id: ActorId,
-        options: &MergeSessionOptions,
-    ) -> Result<Self> {
-        let range = mechanics.next_merge_range(&namespace_id, &fork_id).await?;
-        let through_seq = options.through_seq.unwrap_or(range.source_head_seq);
-        let status = status_after_range(&fork_id, through_seq, &range.outcome, &[]);
-        Ok(Self::resume(
-            mechanics,
-            resolver,
-            MergeSessionState {
-                namespace_id,
-                original_fork_id: fork_id,
-                actor_id,
-                new_fork_ids: Vec::new(),
-                status,
-            },
-        ))
-    }
-
     /// Continues a session from the state that the caller saved after its
     /// last step. Performs no I/O.
     pub fn resume(mechanics: M, resolver: R, state: MergeSessionState) -> Self {
@@ -209,29 +176,13 @@ impl<M: Mechanics, R: Resolver> MergeSession<M, R> {
             }
             Err(error) => refused(error)?,
         };
-        let merging = |merge| MergeSessionStatus::Merging {
-            fork_id: fork_id.clone(),
-            through_seq,
-            merge,
-        };
         Ok(match refusal(merge, &error) {
-            Refusal::Split(split_at_seq) => Transition::new(
-                merging(PendingCommit::new(split_at_seq)),
-                MergeSessionOutcome::Split {
-                    error,
-                    split_at_seq,
-                },
-            ),
-            Refusal::Retry => {
-                let merge = merge.retried();
-                let failed_attempts = merge.failed_attempts;
-                Transition::new(
-                    merging(merge),
-                    MergeSessionOutcome::Retrying {
-                        error,
-                        failed_attempts,
-                    },
-                )
+            Refusal::Next(next) => {
+                next_request(merge, next, error, |merge| MergeSessionStatus::Merging {
+                    fork_id: fork_id.clone(),
+                    through_seq,
+                    merge,
+                })
             }
             Refusal::Conflict => match self.new_fork_id() {
                 Some(new_fork_id) => Transition {
@@ -287,31 +238,15 @@ impl<M: Mechanics, R: Resolver> MergeSession<M, R> {
             },
             Err(error) => refused(error)?,
         };
-        let rebasing = |replay| MergeSessionStatus::Rebasing {
-            fork_id: fork_id.clone(),
-            through_seq,
-            new_fork_id: new_fork_id.clone(),
-            replay,
-            reports: reports.to_vec(),
-        };
         Ok(match refusal(replay, &error) {
-            Refusal::Split(split_at_seq) => Transition::new(
-                rebasing(PendingCommit::new(split_at_seq)),
-                MergeSessionOutcome::Split {
-                    error,
-                    split_at_seq,
-                },
-            ),
-            Refusal::Retry => {
-                let replay = replay.retried();
-                let failed_attempts = replay.failed_attempts;
-                Transition::new(
-                    rebasing(replay),
-                    MergeSessionOutcome::Retrying {
-                        error,
-                        failed_attempts,
-                    },
-                )
+            Refusal::Next(next) => {
+                next_request(replay, next, error, |replay| MergeSessionStatus::Rebasing {
+                    fork_id: fork_id.clone(),
+                    through_seq,
+                    new_fork_id: new_fork_id.clone(),
+                    replay,
+                    reports: reports.to_vec(),
+                })
             }
             // A rebase reports conflicts instead of returning
             // `merge_conflict`, so the loop has nothing to do with one.
@@ -408,6 +343,38 @@ pub(crate) fn new_fork_id(new_fork_ids: &[NamespaceId]) -> Option<NamespaceId> {
         NamespaceId::parse(generated_id("rebase"))
             .expect("a generated ID should be a valid namespace ID")
     })
+}
+
+/// Returns the transition to the request that follows `request` after the
+/// server refused it with `error`: the piece through the split hint, or the
+/// same request again. `status` returns the step's status with the next
+/// request pending.
+fn next_request(
+    request: &PendingCommit,
+    next: NextRequest,
+    error: ErrorResponse,
+    status: impl FnOnce(PendingCommit) -> MergeSessionStatus,
+) -> Transition {
+    match next {
+        NextRequest::Split(split_at_seq) => Transition::new(
+            status(PendingCommit::new(split_at_seq)),
+            MergeSessionOutcome::Split {
+                error,
+                split_at_seq,
+            },
+        ),
+        NextRequest::Retry => {
+            let request = request.retried();
+            let failed_attempts = request.failed_attempts;
+            Transition::new(
+                status(request),
+                MergeSessionOutcome::Retrying {
+                    error,
+                    failed_attempts,
+                },
+            )
+        }
+    }
 }
 
 /// Returns the status after the next-range query of `fork_id` returned

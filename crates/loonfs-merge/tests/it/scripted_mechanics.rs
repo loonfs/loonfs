@@ -302,12 +302,13 @@ pub(crate) fn sandbox() -> NamespaceId {
     namespace_id("sandbox")
 }
 
-/// Starts a session that merges `sandbox` into `main`.
-pub(crate) async fn start<R: Resolver>(
+/// Starts a session that merges `sandbox` into `main`, which first
+/// recovers what an earlier run did from the script's checkpoint listing.
+pub(crate) async fn recover<R: Resolver>(
     mechanics: &ScriptedMechanics,
     resolver: R,
 ) -> MergeSession<ScriptedMechanics, R> {
-    MergeSession::start(
+    MergeSession::recover(
         mechanics.clone(),
         resolver,
         main(),
@@ -316,7 +317,7 @@ pub(crate) async fn start<R: Resolver>(
         &MergeSessionOptions::default(),
     )
     .await
-    .expect("start the session")
+    .expect("recover the session")
 }
 
 /// Runs the session until it has no step left, and returns each step's
