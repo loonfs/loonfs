@@ -926,3 +926,67 @@ fn recursive_transfers_report_a_directory_the_subject_cannot_read() {
         b"alpha"
     );
 }
+
+#[tokio::test]
+async fn a_recursive_put_finishes_the_folds_it_started_before_returning() {
+    const FILES: u64 = 12;
+    let fold_at = loonfs_core::limits::FOLD_AT_WAL_OBJECTS.get();
+    // The put publishes about one WAL object per file and one for its root
+    // directory, and a later publish waits for a fold that an earlier one
+    // started. A tail that the put's last few publishes bring to the fold
+    // threshold leaves that fold running when the put's requests end.
+    for seed_objects in (fold_at - FILES - 1)..=(fold_at - FILES + 1) {
+        let harness = Harness::new();
+        harness.add_embedded_profile("default");
+        assert_success(&harness.run(&["namespace", "create", "demo"]));
+        assert_success(&harness.run(&["use", "demo"]));
+        let store =
+            loonfs_objectstore::local_fs_store::LocalFsStore::new(harness.store_root("default"))
+                .expect("store");
+        let namespace_id = loonfs_types::NamespaceId::parse("demo").expect("namespace id");
+        loonfs_core::test_support::NamespaceFixture::new(
+            &store,
+            &namespace_id,
+            &loonfs_core::test_support::WriterAt {
+                writer_id: loonfs_types::WriterId::parse("tail-seed").expect("writer id"),
+                now_ms: 1_000,
+            },
+        )
+        .append_wal_objects(seed_objects)
+        .await
+        .expect("seed a tail");
+        let tree = harness.temp_dir.path().join("tree");
+        fs::create_dir_all(&tree).expect("create tree");
+        for index in 0..FILES {
+            fs::write(tree.join(format!("{index:02}.txt")), SMALL_TREE_FILE).expect("write file");
+        }
+
+        let put = harness.run(&[
+            "--json",
+            "put",
+            "-r",
+            tree.to_str().expect("utf-8 path"),
+            "/tree",
+        ]);
+        assert_success(&put);
+        assert_eq!(json_data(&put)["files"], FILES);
+        let reader = loonfs::LoonFs::builder_with_store(std::sync::Arc::new(store))
+            .writer_id(loonfs_test_support::ids::writer_id("tail-reader"))
+            .build()
+            .await
+            .expect("build runtime");
+        let tail = reader
+            .maintenance(loonfs_test_support::ids::writer_id(
+                "tail-reader-maintenance",
+            ))
+            .diagnostics(&namespace_id)
+            .await
+            .expect("diagnostics")
+            .wal_tail_objects;
+        assert!(
+            tail < fold_at,
+            "over a tail of {seed_objects} objects, the put returned before its fold finished: {tail}"
+        );
+        reader.shutdown().await.expect("shutdown");
+    }
+}

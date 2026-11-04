@@ -127,12 +127,14 @@ fn embedded_host(target: &ResolvedTarget) -> &crate::backend::MaintenanceHost {
     host
 }
 
+/// Runs `command` as the entry point runs a command: on a Tokio runtime of
+/// its own, then drains the runtimes that the command opened.
 fn run_command<T>(command: impl std::future::Future<Output = T>) -> T {
     tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .build()
         .expect("command runtime")
-        .block_on(command)
+        .block_on(crate::backend::run_then_drain(command))
 }
 
 #[tokio::test]
