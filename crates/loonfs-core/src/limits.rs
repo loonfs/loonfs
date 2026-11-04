@@ -35,7 +35,7 @@ pub const MAX_KEPT_INODE_WALK_DEPTH: usize = 4_096;
 /// Most encoded segment bytes that one fold or compaction keeps in memory
 /// while the segments' puts run.
 ///
-/// The `STORE_WRITES_IN_FLIGHT` count alone allows 128 MiB of 8 MiB segments,
+/// The `STORE_WRITES_IN_FLIGHT` count alone allows 256 MiB of 8 MiB segments,
 /// and 32 MiB is about four such segments and still admits a fold's usual
 /// seven small segments at once.
 pub const MAX_PENDING_SEGMENT_BYTES: usize = 32 * 1024 * 1024;
