@@ -180,10 +180,12 @@ impl Maintenance {
     }
 
     /// Folds the WAL tail at `max_wal_tail_objects` WAL objects, at the
-    /// runtime's inline fold size when this runtime's writer session records
-    /// the tail's inline bytes, or once the tail's newest commit reaches the
-    /// runtime's idle fold age (see
+    /// runtime's inline fold size, or once the tail's newest commit reaches
+    /// the runtime's idle fold age (see
     /// [`RuntimeConfig::idle_fold_after_ms`](crate::RuntimeConfig::idle_fold_after_ms)).
+    /// The check reads the position of this runtime's writer session when
+    /// the session has one, and otherwise the store's object count and the
+    /// tail's idle age.
     /// Then runs one compaction unit whose window lists at most the run
     /// policy's `max_decoded_input_rows_per_step` rows, and reports a larger
     /// window as [`MetadataCompactionOutcome::MetadataCompactionRequired`]. A

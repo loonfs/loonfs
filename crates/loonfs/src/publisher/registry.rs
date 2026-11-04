@@ -475,19 +475,12 @@ impl PublisherRegistry {
         slot.wal_tail_inline_bytes()
     }
 
-    /// Returns the namespace's writer position that reads in this runtime
-    /// start from, or `None` when this runtime has no position for the
-    /// namespace or the namespace's session is fenced.
-    ///
-    /// The function doesn't wait for a publication that the session's
-    /// engine is running, so the position doesn't include that
-    /// publication's commits.
-    pub(crate) fn read_position_fold_input(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Option<WriterPosition> {
-        let position = self.shared.read_position_slot(namespace_id)?.current()?;
-        Some(WriterPosition::clone(&position))
+    /// Returns the namespace's writer position while its last check is
+    /// within the revalidation bound (see
+    /// [`NamespacePublisher::current_position`]), or `None` when this runtime
+    /// has no such position for the namespace.
+    pub(crate) fn current_position(&self, namespace_id: &NamespaceId) -> Option<WriterPosition> {
+        self.live_publisher(namespace_id)?.current_position()
     }
 
     /// Whether [`Self::close_admission`] has run: later submissions fail

@@ -136,10 +136,9 @@ pub enum GarbageCollection {
 /// The daily listing pass runs at start and every `full_sweep_interval_ms`,
 /// alongside ticks. It covers namespaces without held sessions and garbage
 /// still inside its grace window. It makes every call on every namespace it
-/// lists, except the metadata step of a held session with a current writer
-/// position, which the ticks make, and it doesn't wait for a held entry's
-/// retry times. A namespace without a held entry keeps no retry state,
-/// because the next pass is its retry.
+/// lists, and it doesn't wait for a held entry's retry times. A namespace
+/// without a held entry keeps no retry state, because the next pass is its
+/// retry.
 ///
 /// The pass also advances each active namespace's retention floor to the
 /// last commit at or before the current time minus the namespace's retention

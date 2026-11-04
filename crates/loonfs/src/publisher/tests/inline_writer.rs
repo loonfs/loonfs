@@ -1441,6 +1441,78 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_wal_object_co
     }
 }
 
+/// Checks that a maintenance pass folds a tail at the runtime's inline fold
+/// size after the session's position passes the revalidation bound. The
+/// session's own fold fails, the position stays with the tail's inline
+/// bytes, and the pass loads the tail from the store but counts the bytes
+/// from the session's position.
+#[tokio::test]
+async fn a_pass_folds_inline_bytes_that_a_position_past_the_bound_records() {
+    let directory = tempdir().expect("directory");
+    let namespace = NamespaceId::parse("stale-inline").expect("namespace");
+    let store = Arc::new(FailStore::matching(
+        LocalFsStore::new(directory.path()).expect("store"),
+        is_fold,
+        InjectedError::Transport("injected fold failure".to_owned()),
+    ));
+    let timer = Arc::new(ManualClock::new(0));
+    let writer = crate::LoonFs::builder_with_store(store.clone())
+        .writer_id(loonfs_test_support::ids::writer_id("inline-writer"))
+        .config(crate::RuntimeConfig {
+            inline_content: InlineContentPolicy {
+                inline_content_fold_at_bytes: 4,
+                ..policy()
+            },
+            min_publish_interval_ms: 0,
+            ..crate::RuntimeConfig::default()
+        })
+        .monotonic_timer(timer.clone())
+        .build()
+        .await
+        .expect("writer");
+    writer
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .await
+        .expect("namespace");
+    let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
+    store.fail_all();
+    namespace_writer
+        .put_file_with_options(
+            "/file",
+            b"four",
+            &loonfs_test_support::test_actor(),
+            &put_options("inline"),
+        )
+        .await
+        .expect("put");
+    let _ = namespace_writer.wait_for_fold().await;
+    assert!(
+        store.attempts() > 0,
+        "the session's own fold ran and failed"
+    );
+    store.clear();
+    let usage = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace)
+        .load_wal_tail_usage()
+        .await
+        .expect("usage");
+    assert_eq!(usage.wal_tail_inline_bytes, 4);
+    assert!(usage.wal_tail_objects < FOLD_AT_WAL_OBJECTS.get());
+    timer.advance_ms(loonfs_core::limits::READ_REVALIDATION_BOUND_MS);
+    assert!(writer.mode.publisher.current_position(&namespace).is_none());
+    let step = writer
+        .maintenance(loonfs_test_support::ids::writer_id("maintenance"))
+        .maintain_metadata_with_options(&namespace, &MaintainMetadataOptions::default())
+        .await
+        .expect("pass");
+    assert_matches!(step.wal_fold, crate::WalFoldStepOutcome::Folded { .. });
+    let usage = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace)
+        .load_wal_tail_usage()
+        .await
+        .expect("usage after the pass");
+    assert_eq!(usage.wal_tail_objects, 0);
+    writer.shutdown().await.expect("shutdown");
+}
+
 #[tokio::test]
 async fn invalid_inline_policy_is_rejected_before_store_access() {
     use loonfs_types::format::wal::{
