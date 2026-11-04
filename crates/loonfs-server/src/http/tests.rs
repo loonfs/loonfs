@@ -68,10 +68,7 @@ async fn runtime_and_grep_cache_metrics_render_from_the_cache_stats() {
     )
     .await
     .expect("build app");
-    assert!(
-        state.grep_block_cache.is_some(),
-        "the test config serves grep"
-    );
+    assert!(state.binding.grep.serves(), "the test config serves grep");
     let rendered = super::metrics::render(&state);
 
     for name in [
@@ -370,7 +367,7 @@ async fn shutdown_abandons_a_parked_sweep_visit_at_its_deadline_and_settles_the_
     ));
     let shutdown_deadline_ms = 25;
     let mut config = test_config(temp_dir.path(), "parked-sweep-server");
-    config.shutdown_deadline_ms = shutdown_deadline_ms;
+    config.shutdown_deadline_ms = std::num::NonZeroU64::new(shutdown_deadline_ms).expect("nonzero");
     let (router, state) = app(
         config.validate().expect("validate the test config"),
         options_with_store(store.clone()),
@@ -658,8 +655,8 @@ async fn shutdown_refuses_new_requests_and_keeps_readiness_reachable_until_an_ac
         move |context| context.key().contains(missing.as_str()),
     ));
     let mut config = test_config(temp_dir.path(), "readiness-shutdown-writer");
-    config.shutdown_deadline_ms = 1_000;
-    let shutdown_deadline_ms = config.shutdown_deadline_ms;
+    let shutdown_deadline_ms = 1_000;
+    config.shutdown_deadline_ms = std::num::NonZeroU64::new(shutdown_deadline_ms).expect("nonzero");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind listener");

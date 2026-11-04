@@ -3,12 +3,10 @@
 use super::error::ApiResponseError;
 use crate::AuthPolicy;
 use crate::BindingState;
-use axum::extract::rejection::PathRejection;
-use axum::extract::{
-    DefaultBodyLimit, FromRequest, FromRequestParts, Path as AxumPath, RawPathParams,
-};
+use axum::extract::{DefaultBodyLimit, FromRequest, FromRequestParts, RawPathParams};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, StatusCode};
+use axum::RequestExt as _;
 use bytes::Bytes;
 use futures::StreamExt;
 use loonfs::{ByteStream, ErrorCode, MAX_MULTIPART_PARTS, MAX_SIGNED_PARTS_PER_REQUEST};
@@ -102,10 +100,6 @@ pub(super) fn missing_actor() -> ApiResponseError {
     .with_param(headers::ACTOR)
 }
 
-fn parse_namespace_id(value: String) -> Result<NamespaceId, ApiResponseError> {
-    NamespaceId::parse(&value).map_err(ApiResponseError::invalid_namespace_id)
-}
-
 /// The subject a request acts as, or `None` for service authority.
 pub(super) struct SubjectHeaders(pub(super) Option<Subject>);
 
@@ -144,7 +138,7 @@ impl<S: Send + Sync> FromRequestParts<S> for SubjectHeaders {
 /// The `namespace_id` path segment shared by namespace-scoped routes.
 #[derive(Debug, serde::Deserialize)]
 struct NamespaceSegment {
-    namespace_id: String,
+    namespace_id: NamespaceId,
 }
 
 /// Parses the `{namespace_id}` path segment.
@@ -157,20 +151,20 @@ where
     type Rejection = ApiResponseError;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        match AxumPath::<NamespaceSegment>::from_request_parts(parts, state).await {
-            Ok(AxumPath(NamespaceSegment { namespace_id })) => {
-                parse_namespace_id(namespace_id).map(Self)
-            }
-            Err(rejection) => Err(invalid_path_params(&rejection)),
-        }
+        let AppPath(NamespaceSegment { namespace_id }) =
+            AppPath::from_request_parts(parts, state).await?;
+        Ok(Self(namespace_id))
     }
 }
 
-fn invalid_path_params(rejection: &PathRejection) -> ApiResponseError {
-    ApiResponseError::new(
-        ErrorCode::InvalidRequest,
-        &format!("invalid path parameters: {rejection}"),
-    )
+/// Returns the raw `{namespace_id}` path segment of a request on a
+/// namespace route, before any handler parses it.
+pub(super) async fn namespace_id_segment(request: &mut axum::extract::Request) -> Option<String> {
+    let parameters = request.extract_parts::<RawPathParams>().await.ok()?;
+    parameters
+        .iter()
+        .find(|(name, _)| *name == "namespace_id")
+        .map(|(_, segment)| segment.to_owned())
 }
 
 /// Path extractor whose rejections stay inside the error contract and

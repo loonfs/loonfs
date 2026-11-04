@@ -2,15 +2,15 @@
 //! request logs and metrics, and bearer authentication.
 
 use super::error::{ApiResponseError, ServedErrorCode};
-use super::extractors::authorize;
+use super::extractors::{authorize, namespace_id_segment};
 use super::metrics::{route_label, UNMATCHED_ROUTE};
 use super::router::{find_route, method_not_allowed, Deadline};
 use crate::BindingState;
-use axum::extract::{MatchedPath, RawPathParams, Request, State};
+use axum::extract::{MatchedPath, Request, State};
 use axum::http::{HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::{RequestExt as _, Router};
+use axum::Router;
 use futures::FutureExt as _;
 use loonfs::ErrorCode;
 use loonfs_types::ErrorKind;
@@ -112,16 +112,7 @@ async fn catch_handler_panic(mut request: Request, next: Next) -> Response {
         .extensions()
         .get::<MatchedPath>()
         .map(|matched| matched.as_str().to_owned());
-    let namespace_id = request
-        .extract_parts::<RawPathParams>()
-        .await
-        .ok()
-        .and_then(|parameters| {
-            parameters
-                .iter()
-                .find(|(name, _)| *name == "namespace_id")
-                .map(|(_, segment)| segment.to_owned())
-        });
+    let namespace_id = namespace_id_segment(&mut request).await;
     match std::panic::AssertUnwindSafe(next.run(request))
         .catch_unwind()
         .await

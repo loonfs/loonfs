@@ -254,15 +254,11 @@ pub trait WriterSessions: Send + Sync {
     /// Drops the handle of a deleted namespace.
     fn forget(&self, namespace_id: &NamespaceId);
 
-    /// Drops the handle after a request through it found the
-    /// namespace missing or deleted. Another writer can delete a namespace
+    /// Drops the handle after a request through it failed with `error`,
+    /// when the namespace is missing or deleted or the held session is
+    /// fenced. Another writer can delete a namespace, or fence its session,
     /// after this host opened its handle.
-    fn forget_if_gone(&self, namespace_id: &NamespaceId, code: ErrorCode);
-
-    /// Drops the handle when its session is fenced, and returns
-    /// whether a fenced handle was dropped. `error` supplies the winning
-    /// writer for the warning.
-    fn forget_if_fenced(&self, namespace_id: &NamespaceId, error: &loonfs::Error) -> bool;
+    fn forget_after(&self, namespace_id: &NamespaceId, error: &loonfs::Error);
 
     /// Records that the namespace's grep index has work for the host's
     /// maintenance.
@@ -465,13 +461,15 @@ impl<S: HostState> WriterSessions for Namespaces<S> {
         self.lock().remove(namespace_id);
     }
 
-    fn forget_if_gone(&self, namespace_id: &NamespaceId, code: ErrorCode) {
+    fn forget_after(&self, namespace_id: &NamespaceId, error: &loonfs::Error) {
+        let code = error.code();
         if code.is_namespace_gone() {
             self.forget(namespace_id);
+            return;
         }
-    }
-
-    fn forget_if_fenced(&self, namespace_id: &NamespaceId, error: &loonfs::Error) -> bool {
+        if code != ErrorCode::WriterFenced {
+            return;
+        }
         // The status is checked under the table lock, so a late error can't
         // drop a healthy replacement.
         let mut handles = self.lock();
@@ -483,7 +481,7 @@ impl<S: HostState> WriterSessions for Namespaces<S> {
                 .session_status()
                 == NamespaceSessionStatus::Fenced
         }) {
-            return false;
+            return;
         }
         handles.remove(namespace_id);
         drop(handles);
@@ -497,7 +495,6 @@ impl<S: HostState> WriterSessions for Namespaces<S> {
             active_writer_id = active_writer_id.as_ref().map(tracing::field::display),
             "host dropped a fenced writer session"
         );
-        true
     }
 
     fn mark_index_dirty(&self, namespace_id: &NamespaceId) {

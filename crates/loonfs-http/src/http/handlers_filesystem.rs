@@ -241,7 +241,8 @@ pub(super) struct DiffQuery {
     /// reads. A later page passes the `to_seq` that the first page returned.
     to_seq: Option<ChangeSeq>,
     /// The absolute path of the directory whose subtree the diff reports. The default is the root.
-    path: Option<String>,
+    #[cfg_attr(feature = "openapi", param(value_type = Option<String>))]
+    path: Option<AbsolutePath>,
     /// The `next_after_seq` that the previous page returned. The default is `from_seq`.
     after_seq: Option<ChangeSeq>,
     /// Whether a page can end inside a commit that alone touches more inodes than one page
@@ -735,14 +736,8 @@ pub(super) async fn list_diff(
 ) -> Result<Json<DiffResponse>, ApiResponseError> {
     let runtime = state.runtime_for(subject);
     let from_seq = required_query_param(query.from_seq, "from_seq")?;
-    let path = match query.path {
-        Some(path) => AbsolutePath::parse(&path).map_err(|error| {
-            ApiResponseError::new(ErrorCode::InvalidRequest, &error.to_string()).with_param("path")
-        })?,
-        None => AbsolutePath::root(),
-    };
     let options = DiffOptions {
-        path,
+        path: query.path.unwrap_or_else(AbsolutePath::root),
         to_seq: query.to_seq,
         after_seq: query.after_seq,
         event_index: query.event_index.unwrap_or(0),

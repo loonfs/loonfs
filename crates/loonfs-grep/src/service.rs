@@ -91,6 +91,11 @@ impl GrepService {
         Self { block_cache }
     }
 
+    /// The counters and retained bytes of the service's block cache.
+    pub fn block_cache_stats(&self) -> loonfs::engine::DecodedBlockCacheStats {
+        self.block_cache.stats()
+    }
+
     async fn plan_query<'a, S: ObjectStore>(
         &'a self,
         request: &GrepRequest,

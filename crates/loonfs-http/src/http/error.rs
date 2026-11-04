@@ -5,10 +5,7 @@ use crate::WriterSessions;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use loonfs_types::{
-    CommitId, ErrorCode, ErrorDetails, ErrorKind, ErrorResponse, NamespaceId,
-    NamespaceIdValidationError,
-};
+use loonfs_types::{CommitId, ErrorCode, ErrorDetails, ErrorKind, ErrorResponse, NamespaceId};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct ServedErrorCode(pub(super) ErrorCode);
@@ -16,8 +13,6 @@ pub(super) struct ServedErrorCode(pub(super) ErrorCode);
 pub(crate) struct ApiResponseError {
     code: ErrorCode,
     body: Box<ErrorResponse>,
-    /// Emitted as a `Retry-After` header, for retryable capacity errors.
-    retry_after_seconds: Option<u32>,
 }
 
 /// Renders an already sanitized API error using the server's status and retry
@@ -33,15 +28,9 @@ pub fn error_response(code: ErrorCode, mut body: ErrorResponse) -> Response {
 
 impl ApiResponseError {
     pub(super) fn new(code: ErrorCode, message: &str) -> Self {
-        let response = Self {
+        Self {
             code,
             body: Box::new(ErrorResponse::new(code, message)),
-            retry_after_seconds: None,
-        };
-        if code.retryable_without_operator_action() {
-            response.with_retry_after(1)
-        } else {
-            response
         }
     }
 
@@ -49,14 +38,6 @@ impl ApiResponseError {
         let mut response = Self::new(ErrorCode::NotSupported, message);
         response.body.feature = Some(feature.to_owned());
         response
-    }
-
-    /// Stamps a `Retry-After` hint onto the response, HTTP's native shape
-    /// for "come back shortly" so generic clients and proxies pace
-    /// themselves too.
-    pub(super) fn with_retry_after(mut self, seconds: u32) -> Self {
-        self.retry_after_seconds = Some(seconds);
-        self
     }
 
     /// Identifies the request input that caused the error.
@@ -106,10 +87,6 @@ impl ApiResponseError {
         self
     }
 
-    pub(super) fn invalid_namespace_id(error: NamespaceIdValidationError) -> Self {
-        Self::new(ErrorCode::InvalidRequest, &error.to_string()).with_param("namespace_id")
-    }
-
     pub(super) fn from_error_response(code: ErrorCode, body: ErrorResponse) -> Self {
         let mut response = Self::new(code, &body.message);
         response.body = Box::new(body);
@@ -127,10 +104,7 @@ impl ApiResponseError {
         namespace_id: &NamespaceId,
         error: loonfs::Error,
     ) -> Self {
-        namespaces.forget_if_gone(namespace_id, error.code());
-        if error.code() == ErrorCode::WriterFenced {
-            namespaces.forget_if_fenced(namespace_id, &error);
-        }
+        namespaces.forget_after(namespace_id, &error);
         Self::runtime(error)
     }
 
@@ -203,12 +177,13 @@ impl IntoResponse for ApiResponseError {
                     .expect("a content range of digits is a valid header value"),
             );
         }
-        if let Some(seconds) = self.retry_after_seconds {
-            if let Ok(value) = axum::http::HeaderValue::from_str(&seconds.to_string()) {
-                response
-                    .headers_mut()
-                    .insert(axum::http::header::RETRY_AFTER, value);
-            }
+        // `Retry-After` is HTTP's own "come back shortly", so generic clients
+        // and proxies pace themselves too.
+        if self.code.retryable_without_operator_action() {
+            response.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                axum::http::HeaderValue::from_static("1"),
+            );
         }
         response
     }

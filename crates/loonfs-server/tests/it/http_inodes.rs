@@ -646,10 +646,9 @@ async fn inode_routes_reject_invalid_ids_after_authorization() {
             let error: ErrorResponse = serde_json::from_reader(response.into_reader())
                 .expect("decode malformed-inode error");
             assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
+            assert_eq!(error.param.as_deref(), Some("inode_id"), "{method} {url}");
             assert!(
-                error
-                    .message
-                    .starts_with(&format!("invalid inode_id {malformed:?}")),
+                error.message.starts_with("invalid path parameters"),
                 "{}",
                 error.message
             );

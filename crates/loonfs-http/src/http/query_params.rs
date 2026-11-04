@@ -77,14 +77,6 @@ pub(super) fn live_consistency(
     }
 }
 
-pub(super) fn invalid_path_id_error(name: &str, value: &str, reason: &str) -> ApiResponseError {
-    ApiResponseError::new(
-        ErrorCode::InvalidRequest,
-        &format!("invalid {name} {value:?}: {reason}"),
-    )
-    .with_param(name)
-}
-
 pub(super) fn effective_page_limit(
     limit: Option<u32>,
 ) -> Result<loonfs_types::EffectiveLimit, ApiResponseError> {

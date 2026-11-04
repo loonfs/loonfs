@@ -34,9 +34,6 @@ pub struct AppState {
     /// The maintenance sweep of a config that maintains. [`app`] does not
     /// start it.
     pub sweep: Option<Sweep>,
-    /// The grep block cache of a config that serves grep, whose stats a
-    /// scrape of `/metrics` reads.
-    pub grep_block_cache: Option<Arc<GrepBlockCache>>,
 }
 
 /// Optional inputs for building the HTTP application.
@@ -106,16 +103,10 @@ pub async fn app(config: ValidatedServerConfig, options: AppConfig) -> Result<(R
             ),
         )
     };
-    let grep_block_cache = config.grep.mode.serves().then(|| {
-        Arc::new(GrepBlockCache::new(
-            loonfs::engine::DecodedBlockCacheConfig::new(memory.grep.bytes),
-        ))
-    });
     let grep_service = || {
-        let block_cache = grep_block_cache
-            .as_ref()
-            .expect("a config that serves grep should build a grep block cache");
-        Arc::new(GrepService::new(Arc::clone(block_cache)))
+        Arc::new(GrepService::new(Arc::new(GrepBlockCache::new(
+            loonfs::engine::DecodedBlockCacheConfig::new(memory.grep.bytes),
+        ))))
     };
     let grep = match config.grep.mode {
         JobMode::Disabled => GrepBinding::Disabled,
@@ -147,12 +138,12 @@ pub async fn app(config: ValidatedServerConfig, options: AppConfig) -> Result<(R
         BindingConfig {
             serves_maintenance: config.maintenance.serves(),
             max_download_bytes: Some(config.runtime_config().max_read_content_bytes),
-            max_upload_bytes: Some(config.max_upload_bytes),
+            max_upload_bytes: Some(config.max_upload_bytes.get()),
             max_concurrent_uploads: config.max_concurrent_uploads.get(),
             max_concurrent_downloads: config.max_concurrent_downloads.get(),
             max_in_flight_requests: Some(config.max_in_flight_requests),
             content_token_secret: config.content_token_secret.clone(),
-            request_deadline_ms: config.request_deadline_ms,
+            request_deadline_ms: config.request_deadline_ms.get(),
             auth_policy,
         },
         BindingHandles {
@@ -165,11 +156,7 @@ pub async fn app(config: ValidatedServerConfig, options: AppConfig) -> Result<(R
             usage_recorder: None,
         },
     );
-    let state = AppState {
-        binding,
-        sweep,
-        grep_block_cache,
-    };
+    let state = AppState { binding, sweep };
     Ok((router(state.clone()), state))
 }
 
@@ -365,7 +352,7 @@ async fn serve_on<L>(
 where
     L: axum::serve::Listener<Addr = SocketAddr>,
 {
-    let deadline_ms = config.config.shutdown_deadline_ms;
+    let deadline_ms = config.config.shutdown_deadline_ms.get();
     let max_connections = config.config.max_connections.get();
     let (router, state) = app(config, options).await?;
     let listener = super::connection_limit::ConnectionLimit::new(
