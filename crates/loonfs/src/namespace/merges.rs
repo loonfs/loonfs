@@ -173,32 +173,16 @@ impl Namespace<Writable> {
     /// Returns the merge that this namespace committed under the request's
     /// commit ID, or the commit that makes the merge, planned against this
     /// namespace's head under `slot`, or under a merge slot that the plan
-    /// takes.
-    ///
-    /// The receipt lookup comes first, so a retry of a merge that committed
-    /// takes no slot and folds nothing, even after the fork was deleted. The
-    /// plan then takes the slot, checks the fork and the floors and finds
-    /// the range's start, folds the fork, and plans, with the receipt lookup
-    /// and the plan on one view of this namespace. The plan checks the
-    /// merge's size, and then its conflicts.
+    /// takes (see [`Self::plan_commit`]). The plan checks the fork and the
+    /// floors and finds the range's start, folds the fork, and plans. It
+    /// checks the merge's size, and then its conflicts.
     pub(crate) async fn plan_merge(
         &self,
         request: &MergeRequest,
         slot: Option<MergeSlot>,
     ) -> Result<PlannedMerge> {
         let source_namespace_id = &request.source_namespace_id;
-        let main = self
-            .core
-            .pinned_read(&self.namespace_id, Consistency::Strong)
-            .await?;
-        if let Some(commit) = main.engine.find_merge(&main.context, request).await? {
-            return Ok(PlannedMerge::Committed(commit));
-        }
-        let slot = match slot {
-            Some(slot) => slot,
-            None => self.session().acquire_merge_slot()?,
-        };
-        let plan = async {
+        self.plan_commit(request, slot, |main| async move {
             let fork = self
                 .core
                 .pinned_read(source_namespace_id, Consistency::Strong)
@@ -207,7 +191,7 @@ impl Namespace<Writable> {
                 .check_merge(&main.context, &fork.engine, &fork.context, request)
                 .await?;
             let fork = self.fold_and_read(source_namespace_id).await?;
-            Ok(main
+            let plan = main
                 .engine
                 .plan_merge(
                     &main.context,
@@ -217,16 +201,49 @@ impl Namespace<Writable> {
                     self.core.now_ms(),
                     self.session().merge_allowance(),
                 )
-                .await?)
-        }
+                .await?;
+            let record = plan.record().clone();
+            Ok((plan.into_candidate()?, record, ()))
+        })
         .await
-        .map_err(|error| missing_fork(source_namespace_id, error))?;
-        let record = plan.record().clone();
+    }
+
+    /// Returns the merge or replay commit that this namespace committed under
+    /// the request's commit ID, or the commit, its record, and its report
+    /// that `plan` plans from this namespace's head under `slot`, or under a
+    /// merge slot that this call takes.
+    ///
+    /// The receipt lookup comes first, so a retry of a commit that committed
+    /// takes no slot and folds nothing, even after the fork was deleted. The
+    /// receipt lookup and the plan read one view of this namespace.
+    pub(super) async fn plan_commit<R, Plan>(
+        &self,
+        request: &MergeRequest,
+        slot: Option<MergeSlot>,
+        plan: impl FnOnce(PinnedRead) -> Plan,
+    ) -> Result<PlannedMerge<R>>
+    where
+        Plan: std::future::Future<Output = Result<(CommitCandidate, MergeRecord, R)>>,
+    {
+        let target = self
+            .core
+            .pinned_read(&self.namespace_id, Consistency::Strong)
+            .await?;
+        if let Some(commit) = target.engine.find_merge(&target.context, request).await? {
+            return Ok(PlannedMerge::Committed(commit));
+        }
+        let slot = match slot {
+            Some(slot) => slot,
+            None => self.session().acquire_merge_slot()?,
+        };
+        let (candidate, record, report) = plan(target)
+            .await
+            .map_err(|error| missing_fork(&request.source_namespace_id, error))?;
         Ok(PlannedMerge::Candidate(Box::new(PlannedCommit {
-            candidate: plan.into_candidate()?,
+            candidate,
             slot,
             record,
-            report: (),
+            report,
         })))
     }
 
