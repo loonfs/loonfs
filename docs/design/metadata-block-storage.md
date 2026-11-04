@@ -90,8 +90,8 @@ Block sizes, segment targets, the read-ahead window, and ordinary maintenance bu
 | Read-ahead window | 1 MiB stored | A read that misses a data block fetches the blocks after it, up to this size, in the same GET. |
 | Segment byte target | 8 MiB decoded | A segment can exceed the target by its final row. |
 | Segment row target | 65,536 rows | Segments are also split by row count. |
-| Merge input limit | 8 complete runs | Both bounded and streaming merges limit their fan-in. |
-| Bounded-step row budget | 131,072 rows | Larger eligible windows need streaming execution. |
-| Bounded-step data budget | 64 MiB decoded SST data | This budget is separate from the size-tiering decisions, which use stored bytes. |
+| Merge input limit | 8 complete runs | Every compaction limits its fan-in. |
+| Row budget of a `metadata` pass | 131,072 rows | A larger window is reported as `metadata_compaction_required` and runs through `compact_metadata`. |
+| Decoded input memory | 64 MiB decoded SST data | Every compaction keeps at most this much decoded data-block memory across its open inputs. This budget is separate from the size-tiering decisions, which use stored bytes. |
 
 Changing a writer target is different from changing the stored encoding. Readers interpret the actual handles and lengths in each descriptor. The targets don't replace decoder validation or the resource limits that readers enforce.

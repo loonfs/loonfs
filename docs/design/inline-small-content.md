@@ -90,7 +90,7 @@ A fold's objects stay [rooted](../specs/glossary.md#content-root) while a fold c
 
 A fold can pause between reading a tail and writing its content, and the namespace can be deleted and swept in the meantime. A fold call reads a fresh manifest, but a writer's own fold starts from its retained view, and neither one checks its publication budget until its content writes return. So a content object can be written after a sweep. It's found the same way as a late upload, because every later pass on the family root lists the content prefix again, and so does the family root's retirement sweep (see [Sweeping a retired owner's content](../specs/format.md#118-sweeping-a-retired-owners-content)).
 
-A fold becomes due when the unfolded tail reaches 32 WAL objects, or when the bytes of its pieces reach the fold threshold.
+A fold becomes due when the unfolded tail reaches 32 WAL objects, when the bytes of its pieces reach the fold threshold, or when the tail's newest commit reaches the idle fold age (`idle_fold_after_ms`, 15 minutes by default), as [Folding and compacting a namespace](maintenance-hosting.md#folding-and-compacting-a-namespace) describes.
 
 Why is there a byte trigger? It limits how much a cold reader has to download to replay a tail.
 
@@ -107,7 +107,7 @@ Inline content has these costs:
 - A cold reader replays a tail that can contain MiB of data instead of tens of KiB. Metadata-only operations pay this cost too, because a cold stat or listing replays the same tail. The byte trigger limits it.
 - Commits share WAL objects. Inline bytes make an object larger and its PUT slower, and every commit in the batch waits, including commits with no content. This is why the per-object budget is small.
 - A fold does more work, up to thousands of small writes. A copy, restore, or fresh chain that needs pending bytes moves their content write into validation.
-- A WAL object stores a second copy of small content until it's folded and collected. Inline bytes also make change-feed reads larger.
+- A WAL object stores a second copy of small content until it's folded and collected.
 - A direct download, copy, restore, or fresh chain can write pending bytes before the fold. Same-chain appends write only the WAL.
 - The fingerprint contract has a second content form, with its own pinned test vectors.
 - Inlining is a writer policy, so a deployment that must keep file bytes out of its metadata store turns inline writes off.

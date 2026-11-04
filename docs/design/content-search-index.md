@@ -1,6 +1,6 @@
 # Content search index
 
-The [fork-family grep note](grep-fork-family.md) replaces this note's description of the index's postings, its row families, pruning, and the order of a query's results. In that design, the index records content values instead of file revisions, a posting refers to a value by its position in the value table of the posting's run, and matches are ordered by content value. The rest of this note still describes the approach, the index's lifecycle, and collection.
+[Grep across a fork family](grep-fork-family.md) describes the index's postings, its row families, pruning, and the order of a query's results. The index records content values instead of file revisions, a posting refers to a value by its position in the value table of the posting's run, and matches are ordered by content value. This note describes the approach, the index's lifecycle, and collection.
 
 LoonFS supports grep-style regular-expression queries through a derived content index. The index narrows down the files that a query needs to read, and then the query checks those files against the original pattern. Index maintenance runs separately from metadata maintenance, so a file's metadata commit doesn't wait until its content has been indexed.
 
@@ -10,10 +10,10 @@ The index is stored under the namespace's grep extension prefix. It can be rebui
 
 This section describes how a trigram index narrows a regular-expression search.
 
-Many regular expressions require particular literal bytes in every match. A "trigram index" records every three-byte substring (a "gram") of eligible content. To run a query, LoonFS extracts the grams that the pattern requires, uses posting lists to find candidate revisions, and runs the original regular expression over their contents.
+Many regular expressions require particular literal bytes in every match. A "trigram index" records every three-byte substring (a "gram") of eligible content. To run a query, LoonFS extracts the grams that the pattern requires, uses posting lists to find candidate files, and runs the original regular expression over their contents.
 
 ```text
-pattern -> required grams -> candidate revisions
+pattern -> required grams -> candidate files
         -> visibility and scope checks -> content verification -> matches
 ```
 
@@ -51,18 +51,7 @@ This section describes the posting rows that the index stores.
 
 The tokenizer folds ASCII letters to lowercase, and then extracts every overlapping three-byte window. Grams are byte sequences, not Unicode characters. This folding supports common case-insensitive ASCII searches without storing separate postings for each case, but it doesn't implement general Unicode case folding.
 
-Each posting identifies `(inode_id, revision_no)`, and it doesn't contain a path. Paths are resolved from metadata when a query runs, so a rename can change the paths in results without rewriting any postings.
-
-A posting row has this structure:
-
-```text
-key:      gram-{six lowercase hex characters}-{first inode ID, 26-character spelling}
-payload:  a packed batch of (inode_id, revision_no) pairs
-```
-
-The writer's target is about 256 postings per row. The batch stores its count as an unsigned varint, and then each pair as the inode ID's 16 bytes followed by the revision number as an unsigned varint. The low 64 bits of an inode ID are random (see [Namespaces and identity](../specs/format.md#11-namespaces-and-identity)), so storing the difference between two consecutive IDs would save only a few bytes for each posting, and the batch stores each ID whole. The pairs are ordered, and the rows for a gram are read together.
-
-Batching reduces the overhead of each row, and it keeps using the same segment and iteration code as other sorted rows. Readers take the union of posting batches from different runs, so reorganization doesn't need to combine every posting for a gram into one large payload to stay correct.
+A posting identifies a content value and doesn't contain a path, so a rename changes the paths in results without rewriting any postings. [Indexing content, not revisions](grep-fork-family.md#indexing-content-not-revisions) describes the posting rows and the value table of each run.
 
 A fork inherits its source's index. The fork's first manifest copies grep's entry, and the fork pin protects the inherited segments, which stay in the source's prefix. Grep reads the source's commits that the inherited index doesn't cover through the fork pin, and after that it indexes only the fork's own commits. [Grep across a fork family](grep-fork-family.md) describes the rules.
 
@@ -70,7 +59,7 @@ A fork inherits its source's index. The fork's first manifest copies grep's entr
 
 This section describes how the index's objects are stored, and how a query finds the current set of segments.
 
-Grep segments use the layout described in [Metadata block storage](metadata-block-storage.md), which has prefix-compressed row keys, independently compressed data blocks, a Bloom filter, an index, and per-section checksums. Only the row payload is specific to grep. The filter key is the `gram-{hex}` part of the row key, so a negative filter result rules out a segment for that gram.
+Grep segments use the layout described in [Metadata block storage](metadata-block-storage.md), which has prefix-compressed row keys, independently compressed data blocks, a Bloom filter, an index, and per-section checksums. Only the row payload is specific to grep. The filter key is the `gram-{hex}` part of the row key, so a negative filter result shows that a segment has no rows for that gram.
 
 ```text
 namespaces/{owner_namespace_id}/extensions/grep/
@@ -149,9 +138,9 @@ The index doesn't stop the namespace's retention floor from advancing. If the ch
 
 This section describes when the reference server and the CLI run index work.
 
-The reference server runs `GrepWorker` from its maintenance sweep, alongside core metadata maintenance. Each visit runs up to 16 steps, for as long as each step does some work. A step is a reorganization step when a reorganization is due (see [Reorganization](#reorganization)), and a build step otherwise. A collection pass also runs grep garbage collection. A failure for one namespace is logged and retried on the next pass, and it doesn't delay unrelated namespaces.
+The reference server runs `GrepWorker` from its maintenance sweep, alongside core metadata maintenance. Each visit runs up to 16 steps, for as long as each step does some work. A step is a reorganization step when a reorganization is due (see [Reorganization](#reorganization)), and a build step otherwise. Core garbage collection in the sweep also collects the index's unreferenced segments (see [Grep garbage collection](#grep-garbage-collection)). A failure for one namespace is logged, and it doesn't delay unrelated namespaces. For a namespace with a writer session open on the server, the ticks retry a failed index call after the call's failure backoff.
 
-Every five seconds, a second pass checks each writer session that the server has open. If the session's last published sequence has moved since that pass last indexed it, the pass builds that namespace's index, so a commit through that server is indexed within seconds. The sweep and that pass never build the same namespace's index at the same time. Enabling the index publishes the backfill, and the next sweep pass starts it. Queries don't schedule any work.
+The index step is one of the steps that a tick runs for each open writer session, as [Tick and daily pass](maintenance-hosting.md#tick-and-daily-pass) describes. A tick runs the step when the session's entry is marked dirty or the index is behind the session's last published sequence, so a commit through that server is indexed within seconds. Enabling the index marks the entry dirty, so the next tick starts the backfill. Queries don't schedule any work.
 
 A query-only server doesn't build indexes, and it rejects index mutations. No grep operation lists namespaces. The sweep lists them from the store.
 
@@ -184,15 +173,13 @@ The row budget can be exceeded for rows with equal keys. All the rows with the s
 
 Grep's entry records each run's `level` (`0`, `1`, or `2`) and `run_no`, and a change's new runs are assigned their numbers from the manifest's `next_run_no` when the change is published. An in-progress reorganization records its `output_level`, its output `run_no` (which doesn't change once a published entry records it), its selected inputs, its outputs, and its cursor. A replacement worker resumes from the last entry that was published successfully.
 
-Why can queries see both the inputs and the outputs? Postings are add-only, and readers take the union of the batches, so a posting that appears twice doesn't cause a missed candidate. This isn't a general rule for replacing metadata rows that have different retention semantics.
+Why can queries see both the inputs and the outputs? A reorganization's output has no posting that its inputs lack, and readers take the union of the batches, so a posting that appears twice doesn't cause a missed candidate. This isn't a general rule for replacing metadata rows that have different retention semantics.
 
 Why aren't rows with equal keys split across steps? If a step split that group and recorded an exclusive last-key cursor, a resumed reorganization could skip the group's remaining rows.
 
 ### Old postings
 
-The index doesn't remove a posting just because its revision can no longer be observed. Queries filter those candidates against current metadata before they report results. Removing those postings would need a separate, correct liveness policy. Routine segment merging doesn't remove them.
-
-So the index can grow with historical revisions, not just with the files that are currently visible. How much it grows depends on the workload. It should be measured, instead of being hidden by an index-size estimate that's based only on the current files.
+A base-level reorganization drops the postings of a content value that no retained revision references, as [Pruning the index](grep-fork-family.md#pruning-the-index) describes.
 
 ## Queries
 
@@ -219,15 +206,11 @@ By default, LoonFS rejects a valid pattern that has no useful required grams (su
 
 ### Candidate selection and verification
 
-Each page of results uses one read view, and the query works through it in these steps:
+Each page of results uses one read view, and [Querying](grep-fork-family.md#querying) describes how the query turns posting batches into candidate files, checks each file against that read view, and verifies the content.
 
-1. For each required gram, the query skips segments whose key ranges don't include the gram, checks Bloom filters, and reads posting batches. Sorted intersections and unions of those batches produce candidate (inode, revision) pairs.
-2. It resolves the candidates in batches against that read view, to find each one's visibility, current revision, and current path.
-3. For each remaining candidate, it reads the referenced content, verifies it, and runs the original pattern. Content reads use limited concurrency.
+Path-prefix filtering applies to the resolved path, not to a path cached when the posting was created. The response contains line-oriented matches, not a streaming file response.
 
-A posting for an older revision isn't a match against a file's current revision. Path-prefix filtering applies to the resolved path, not to a path cached when the posting was created. The response contains line-oriented matches, not a streaming file response.
-
-Each match identifies the inode, the revision, the derived absolute path, the line number (starting at 1), the byte offset, and the matching line. A line longer than 512 bytes is truncated, and `line_truncated` shows that it was. Matches are ordered by inode ID and byte offset.
+Each match identifies the inode, the revision, the derived absolute path, the line number (starting at 1), the byte offset, and the matching line. A line longer than 512 bytes is truncated, and `line_truncated` shows that it was. Matches are ordered by content value, then inode, then byte offset.
 
 ### Pagination
 
@@ -235,7 +218,7 @@ A page is limited by both its match limit and its budget of verified candidates.
 
 The continuation cursor records the scan's progress, including candidates that produced no matches, not just the last match that was returned. It's bound to the request fields that select results (the pattern, the case flag, the path scope, `allow_scan`, and `allow_stale`), and a request that reuses it with different values for those fields is rejected.
 
-Each page reports the namespace `head_seq` that it used. Every metadata phase within the page uses that view, but later pages can see a newer head. A grep request has no snapshot selector, so a search across several pages isn't kept at one durable snapshot.
+Each page reports the namespace `head_seq` that it used. Every later page reads the namespace at the first page's `head_seq`, which the cursor records, so a search across several pages reads one consistent view ([`GET /grep`](../specs/api.md#617-get-grep)).
 
 Why does a page need a candidate budget as well as a match limit? A pattern with many false-positive candidates produces few matches, and it must not trigger an unlimited content scan just because of that.
 

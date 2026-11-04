@@ -126,7 +126,7 @@ Why keep the tombstone events? Family groups are compacted at different times, s
 
 This section describes how a base compaction finds the inodes that an expired deletion hides.
 
-A compaction tests one row at a time, so it needs a way to check whether each row's inode is hidden, and a hidden subtree can have more inodes than fit in memory. Before a base compaction merges the `inodes`, `revisions`, `attributes`, or `access` group, or the bindings group (`direntry_binds` and `direntry_child_binds`), it builds a "kept inode filter". That filter is a Bloom filter that contains every inode that's visible or under a recoverable deletion in the basis. A bounded compaction step and a streaming compaction job both build the filter before they merge.
+A compaction tests one row at a time, so it needs a way to check whether each row's inode is hidden, and a hidden subtree can have more inodes than fit in memory. Before a base compaction merges the `inodes`, `revisions`, `attributes`, or `access` group, or the bindings group (`direntry_binds` and `direntry_child_binds`), it builds a "kept inode filter". That filter is a Bloom filter that contains every inode that's visible or under a recoverable deletion in the basis. Every base compaction of these groups builds the filter before it merges.
 
 To build the filter, the compaction:
 

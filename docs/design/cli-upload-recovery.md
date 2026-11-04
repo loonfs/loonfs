@@ -23,7 +23,7 @@ The record has two states:
 | State | Stored information | Recovery action |
 | --- | --- | --- |
 | `uploading` | The original options and source metadata, plus the multipart geometry and accepted parts when the transfer is multipart | Continue the existing upload. |
-| `prepared` | The complete commit request, including either its original content reference and proof, or its inline bytes | Resubmit that request through the `create_commit` operation. |
+| `prepared` | The complete commit request, including either its original content reference and proof, or its inline bytes, and the upload ID when the content went through an upload session | Resubmit that request through the `create_commit` operation. |
 
 A resumed command uses the recorded options. If the source metadata or the options have changed, the command stops and keeps the record. It also stops if the record can't be read or its JSON is malformed. It doesn't replace a questionable record with a new upload attempt.
 
@@ -33,13 +33,13 @@ To check the source, the CLI compares file metadata, not a hash of the whole fil
 
 During a transfer, the client's `PutFileJournal` records the multipart geometry and the accepted parts. For every transfer mode, it records the complete commit request before the request is submitted. If a journal callback fails, the operation stops before its next request, so the client doesn't continue from progress that it failed to persist.
 
-Once a request is prepared, recovery doesn't reopen the upload session. The CLI resends the saved request directly. If a multipart session had already completed on the server before the request was prepared, the CLI reads the completed session back and commits without uploading again.
+Once a request is prepared, the CLI resends the saved request directly. If the server refuses the request with `content_not_prepared` because the proof for its content has expired, the CLI reads the recorded upload session back. While that session is still completed, the CLI commits the same request with the session's new content token, so the file isn't uploaded again. If a multipart session had already completed on the server before the request was prepared, the CLI reads the completed session back and commits without uploading again.
 
 For example, suppose an upload finishes and the CLI persists a prepared request with commit ID `c_0123456789abcdef0123456789abcdef`. The server commits it, but the connection closes before the CLI receives the response. On the next run, the CLI submits the same saved request. As long as the server still keeps the commit's receipt, it returns the original commit result instead of creating another file revision.
 
-If the request never committed, and the proof for its uploaded content has expired, the server rejects the retry. Inline content has no proof and doesn't expire. Recovery doesn't silently upload the file again or create a replacement attempt. A caller without a journal can get the same retry behavior for publication by keeping the prepared content and an explicit commit ID in its own process.
+If the request never committed, the proof for its uploaded content has expired, and the upload session is gone or no longer completed, the retry fails. Inline content has no proof and doesn't expire. Recovery doesn't silently upload the file again or create a replacement attempt. A caller without a journal can get the same retry behavior for publication by keeping the prepared content and an explicit commit ID in its own process.
 
-Why doesn't recovery reopen the upload session? If the server committed the request but the response was lost, the upload session might have been removed since then. The durable commit receipt can still establish the original outcome.
+Why does recovery resend the request before it reads the upload session? If the server committed the request but the response was lost, the durable commit receipt establishes the original outcome, and the upload session might have been removed since then. So the CLI reads the session only when the server reports that the request's proof has expired.
 
 ## Persisting a record
 
