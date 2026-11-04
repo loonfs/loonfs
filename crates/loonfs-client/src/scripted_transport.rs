@@ -19,8 +19,8 @@ pub(crate) enum Outcome {
     PartialContent(String, Vec<u8>),
     /// A 503 error envelope with this code.
     Refused(ErrorCode),
-    /// A storage provider's XML error with this status.
-    ProviderRefused(http::StatusCode),
+    /// A storage provider's XML error with this status and code.
+    ProviderRefused(http::StatusCode, &'static str),
 }
 
 struct State {
@@ -170,11 +170,11 @@ impl Service<Request<Body>> for ScriptedTransport {
                         .body(Body::from(Bytes::from(body)))
                         .expect("a 503 response should build"))
                 }
-                Outcome::ProviderRefused(status) => Ok(Response::builder()
+                Outcome::ProviderRefused(status, code) => Ok(Response::builder()
                     .status(status)
-                    .body(Body::from(Bytes::from_static(
-                        b"<Error><Code>AccessDenied</Code></Error>",
-                    )))
+                    .body(Body::from(Bytes::from(format!(
+                        "<Error><Code>{code}</Code></Error>"
+                    ))))
                     .expect("a provider error response should build")),
             }
         })

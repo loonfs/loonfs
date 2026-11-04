@@ -451,11 +451,27 @@ pub(crate) fn map_status_error(status: u16, body: &[u8]) -> ClientError {
         // A status with a non-envelope body is most commonly an intermediary
         // responding for the server (a load balancer's HTML 502): keep the
         // status — it is the only signal in the response.
-        Err(err) => ClientError::HttpStatus {
-            status,
-            detail: err.to_string(),
-        },
+        Err(err) => {
+            let provider_code = provider_error_code(body);
+            ClientError::HttpStatus {
+                status,
+                detail: match &provider_code {
+                    Some(code) => format!("provider error code {code}"),
+                    None => err.to_string(),
+                },
+                provider_code,
+            }
+        }
     }
+}
+
+/// The `<Code>` of a storage provider's XML error body, which S3, GCS and
+/// Azure all write, or `None` when `body` has no such element.
+fn provider_error_code(body: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(body).ok()?;
+    let start = text.find("<Code>")? + "<Code>".len();
+    let length = text[start..].find("</Code>")?;
+    Some(text[start..start + length].to_owned())
 }
 
 fn render_send_error(
@@ -491,12 +507,22 @@ fn render_send_error(
 ///
 /// Network failures are retryable. Server responses are retryable only when
 /// their error code identifies a temporary condition that requires no
-/// operator action.
+/// operator action. A response without the error envelope is retryable when
+/// its status says the responder is busy or failing for the moment, which a
+/// storage provider's SlowDown or InternalError and an intermediary's 502
+/// are; the policy of the request already says it is safe to send again.
 pub(crate) fn retryable_transport_failure(source: FailureSource, error: &ClientError) -> bool {
     source == FailureSource::Network
         || error
             .code()
             .is_some_and(ErrorCode::retryable_without_operator_action)
+        || matches!(
+            error,
+            ClientError::HttpStatus {
+                status: 429 | 500 | 502 | 503 | 504,
+                ..
+            }
+        )
 }
 
 #[allow(

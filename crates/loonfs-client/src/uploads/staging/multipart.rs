@@ -308,7 +308,8 @@ impl Client {
     /// A part's signature is the first thing about it that goes stale, and a
     /// repeated part is last-write-wins at the provider, so nothing is lost
     /// by writing it again. Any other failure returns as is: the transport
-    /// has already retried a transient one with backoff.
+    /// has already retried a transient one, such as the provider's SlowDown,
+    /// with backoff on the same URL.
     async fn upload_one_part(
         &self,
         namespace_id: &NamespaceId,
@@ -349,13 +350,19 @@ impl Client {
 }
 
 /// Reports whether `error` is the storage provider refusing a presigned
-/// URL, which an expired signature causes and a fresh signature fixes.
+/// URL's signature, which a fresh signature fixes: a 401 or 403, or the 400
+/// that S3 and GCS answer when the temporary credential behind the
+/// signature has expired.
 fn refuses_the_signature(error: &ClientError) -> bool {
-    matches!(
-        error,
+    match error {
         ClientError::HttpStatus {
-            status: 401 | 403,
+            status: 401 | 403, ..
+        } => true,
+        ClientError::HttpStatus {
+            status: 400,
+            provider_code: Some(code),
             ..
-        }
-    )
+        } => code == "ExpiredToken" || code == "TokenRefreshRequired",
+        _ => false,
+    }
 }

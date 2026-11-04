@@ -33,7 +33,11 @@ pub enum ClientError {
     HttpStatus {
         /// HTTP status code of the response.
         status: u16,
-        /// Why the body is not the error envelope.
+        /// The `<Code>` of a storage provider's XML error body, when the
+        /// body is one.
+        provider_code: Option<String>,
+        /// The provider's error code, or why the body is not the error
+        /// envelope.
         detail: String,
     },
     /// The server returned a structured API error response.
@@ -97,11 +101,28 @@ mod tests {
     use std::assert_matches;
 
     #[test]
-    fn status_errors_keep_the_status_when_the_body_is_not_the_envelope() {
+    fn status_errors_keep_the_status_and_the_provider_code_when_the_body_is_not_the_envelope() {
         let error = crate::transport::map_status_error(502, b"<html>upstream error</html>");
 
-        assert_matches!(error, ClientError::HttpStatus { status: 502, .. });
+        assert_matches!(
+            error,
+            ClientError::HttpStatus {
+                status: 502,
+                provider_code: None,
+                ..
+            }
+        );
         assert!(error.to_string().contains("non-envelope body"), "{error}");
+
+        let error = crate::transport::map_status_error(
+            400,
+            b"<?xml version=\"1.0\"?><Error><Code>ExpiredToken</Code><Message>The provided token has expired.</Message></Error>",
+        );
+        assert_matches!(
+            &error,
+            ClientError::HttpStatus { status: 400, provider_code: Some(code), .. } if code == "ExpiredToken"
+        );
+        assert!(error.to_string().ends_with("ExpiredToken"), "{error}");
     }
 
     fn api_error(status: u16, code: &str) -> ClientError {
