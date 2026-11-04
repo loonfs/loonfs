@@ -167,7 +167,7 @@ Access changes follow these ordering and revocation rules:
 1. Every authority that commit authorization checks is a row in the same view that the write is validated against (the inode rows and the root row).
 2. Commits are ordered by numbered WAL puts through the namespace's single writer session. A revocation accepted at sequence N applies to every commit validated after it, in the same batch or a later one. A commit that was authorized before N, and isn't published yet, is planned again on retry and refused.
 3. LoonFS acknowledges a revocation only after it loads a view that includes every earlier put, whether or not the earlier put's submitter has received its result. A timeout on the earlier write doesn't show that the write wasn't published.
-4. A reader sees a revocation on its next read after the revocation is published, because every warm read probes the next WAL number.
+4. A `strong` read sees a revocation on its next read after the revocation is published. An `eventual` read sees the revocation within its maximum staleness (1 second by default), and a read in the runtime that holds the writer session sees the revocation at once, because that read starts from the writer position (see [Read consistency](../specs/api.md#read-consistency)). Commit authorization (rule 2) doesn't depend on a read's consistency, because commits are validated against the writer's view.
 5. A snapshot read is authorized at the current head, for the historical inode that it returns.
 6. Replaying a receipt returns the original result to the same subject and actor without authorizing again.
 7. The application is responsible for the freshness of group membership, on each request.

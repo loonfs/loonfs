@@ -22,7 +22,7 @@ This section describes how a change-feed page and a retried commit read commit r
 
 A change-feed page reads through the same read view as every other read, which is the basis manifest, its segments, and the replayed tail. A page has two parts:
 
-- The durable part is one range scan over the `commits` family, starting from the cursor.
+- The durable part is one lookup of the `commits` family for each commit after the cursor. After the first lookup, the view's block memo serves the blocks that the lookups read.
 - The tail part is the projected tail's commit rows above the cursor.
 
 Every manifest row is at or below the basis head, and every tail row is above it, so the page is the durable rows followed by the tail rows, cut off at the limit.

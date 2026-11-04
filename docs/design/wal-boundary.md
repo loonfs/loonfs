@@ -28,7 +28,7 @@ The `wal/` module handles numbered WAL keys, building WAL objects, reads, and pu
 | --- | --- |
 | `frame.rs` | WAL object and tail types, including validation errors |
 | `writer.rs` | Building data and fence WAL objects, and calculating the next WAL number and the resulting head |
-| `publish.rs` | Conditional writes, and classifying their outcomes as successful, conflicting, or uncertain |
+| `publish.rs`, `publish_error.rs` | Conditional writes, and classifying their outcomes as successful, conflicting, or uncertain |
 | `discover.rs` | Windowed discovery that keeps the WAL tail, and incremental updates to cached views |
 | `reader.rs` | Reading consecutive WAL objects, loading bounded tails, and replaying discovered tails |
 | `replay.rs` | Rebuilding metadata state from committed records |
@@ -43,7 +43,7 @@ To publish a commit, LoonFS prepares the next WAL object from the namespace's cu
 
 Several parts of the storage protocol involve both the log and other namespace state:
 
-- **Manifest and hint management.** A hint contains a manifest number, and the runtime that published a manifest raises the hint to that manifest after the publication returns. The code that raises the hint is in the control module, and the runtime's publisher calls that code. The publisher raises a namespace's hint at most once per second, and skips a raise that comes sooner, because some providers accept about one write per second to one object (see the [provider reference](../specs/object-storage-providers.md#1-frequently-used-data-points)), so a publication never waits for the hint. WAL discovery starts at the manifest's folded position and reads forward in windows.
+- **Manifest and hint management.** A hint contains a manifest number, and the runtime that published a manifest raises the hint to that manifest after the publication returns. The code that raises the hint is in the control module, and the runtime's publisher calls that code. The publisher raises a namespace's hint at most once per second, because some providers accept about one write per second to one object (see the [provider reference](../specs/object-storage-providers.md#1-frequently-used-data-points)). A publication skips a raise that comes sooner instead of waiting for the hint, and the publisher raises the hint once more when the second ends, as [The current manifest and WAL tip](../specs/format.md#24-the-current-manifest-and-wal-tip) describes. WAL discovery starts at the manifest's folded position and reads forward in windows.
 - **Garbage collection.** Listing objects, checking their ages, and deleting them are handled in `gc/`. For a live namespace, a WAL object is required if its number is above the folded position. An object at or below that position goes through the remaining collection checks.
 - **Position tracking.** WAL numbers appear in the namespace head and in the durable manifest. The differences between them count the unfolded WAL objects, and LoonFS uses those counts to enforce maintenance and write limits.
 

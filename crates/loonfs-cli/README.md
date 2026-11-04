@@ -601,8 +601,10 @@ Interrupted transfers
   XDG_STATE_HOME is unset), and a rerun sends only the parts that are
   still missing. If the transfer had actually finished and only the commit
   was lost, the rerun commits what's already stored and sends nothing. If
-  the source changed since the record was written, the upload starts over,
-  because the parts already stored came from bytes that no longer exist.
+  the source changed since the record was written, the command stops and
+  prints the record's path, because the parts already stored came from
+  bytes that no longer exist. Pass a new --commit-id or remove the record
+  to start another attempt.
 
   Every file upload, including embedded and proxied uploads, also records
   its prepared commit request before it submits the commit, and a rerun
