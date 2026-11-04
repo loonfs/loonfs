@@ -15,8 +15,8 @@ use loonfs_objectstore::keys::{
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectStore, PutMode};
 use loonfs_test_support::stores::{
-    BlockingStore, FailStore, InjectedError, KeyPredicate, OperationSelector, RecordedOperation,
-    RecordingStore,
+    BlockingStore, FailStore, InjectedError, KeyPredicate, LostCreateStore, OperationSelector,
+    RecordedOperation, RecordingStore,
 };
 use loonfs_types::format::control::{UploadOutcome, UploadSessionMode, UploadSessionPayload};
 use loonfs_types::{
@@ -172,6 +172,59 @@ async fn a_retried_upload_of_the_same_bytes_succeeds_and_other_bytes_conflict() 
         .await
         .expect("complete the upload");
     assert_eq!(completed.response.content_ref(), retry.content_ref());
+}
+
+#[tokio::test]
+async fn owned_staging_over_an_occupied_key_answers_the_same_for_bytes_and_for_a_stream() {
+    use futures::StreamExt;
+
+    let other: &'static [u8] = b"other bytes\n";
+    for streamed in [false, true] {
+        for (occupant, settles) in [(BYTES, true), (other, false)] {
+            let temp_dir = tempdir().expect("tempdir");
+            // Another writer's object lands at the freshly minted key just
+            // as this write's create arrives.
+            let store = LostCreateStore::new(
+                LocalFsStore::new(temp_dir.path()).expect("store"),
+                KeyPredicate::content_blob(),
+                Bytes::from_static(occupant),
+            );
+            let namespace_id = NamespaceId::parse("occupied-owned-key").expect("namespace id");
+            let context = context(1_000);
+            crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+                .create()
+                .await
+                .expect("bootstrap");
+            let catalog = crate::test_support::namespace_store(&store, &namespace_id)
+                .load_catalog_entry()
+                .await
+                .expect("load the catalog");
+            let engine =
+                crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+                    .engine();
+            let staged = if streamed {
+                let body = futures::stream::once(async { Ok(Bytes::from_static(BYTES)) }).boxed();
+                engine.stage_owned_stream(&catalog, None, body).await
+            } else {
+                engine.stage_owned_bytes(&catalog, None, BYTES).await
+            };
+
+            if settles {
+                let prepared = staged.expect("an equal occupant settles the write");
+                assert_eq!(
+                    prepared.content_ref().checksum,
+                    Checksum::compute(store.checksum_algorithm(), BYTES)
+                );
+            } else {
+                assert_matches!(
+                    staged.expect_err("other bytes at a fresh key"),
+                    CoreError::NamespaceCorrupt(message)
+                        if message.ends_with("already exists with different bytes"),
+                    "streamed: {streamed}"
+                );
+            }
+        }
+    }
 }
 
 #[tokio::test]

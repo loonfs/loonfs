@@ -3,17 +3,17 @@
 
 use super::session::{create_upload_session_record, NewUploadSession};
 use crate::engine::{NamespaceEngine, Writable};
-use crate::error::{CoreError, Result};
+use crate::error::Result;
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::namespace::store::NamespaceStore;
 use crate::storage::content_admission::PreparedContent;
 use crate::storage::content_location::ContentLocation;
 use crate::storage::content_staging::{
-    stage_bytes_under_content_id, stage_streamed_under_content_id, StreamedPayloadKind,
+    stage_bytes_under_content_id, stage_streamed_under_content_id, ContentKeyOwner,
+    StreamedPayloadKind,
 };
 use crate::storage::content_stream::open_content_import_reader;
 use crate::time::OperationClock;
-use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::{ByteStream, ObjectStore};
 use loonfs_types::format::control::UploadSessionPayload;
 use loonfs_types::{ContentRef, SubjectId};
@@ -43,6 +43,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             catalog.family_root_id(),
             session.content_id.clone(),
             bytes,
+            ContentKeyOwner::FreshIdentity,
         )
         .await?;
         self.namespace
@@ -126,25 +127,17 @@ impl<S: ObjectStore> NamespaceStore<S> {
         clock: &OperationClock,
     ) -> Result<PreparedContent> {
         let session = open_owned_staging_session(&self.store, catalog, subject_id, clock).await?;
-        let staged = stage_streamed_under_content_id(
+        let content_ref = stage_streamed_under_content_id(
             &self.store,
             catalog.family_root_id(),
             session.content_id.clone(),
             body,
             payload_kind,
+            ContentKeyOwner::FreshIdentity,
             self.ensure_session_still_open(catalog, &session.upload_id, clock),
         )
         .await?;
-        if staged.already_present {
-            // The identity is 128 fresh random bits and this session has made no
-            // earlier attempt, so an occupied key is corruption rather than a
-            // replay, and it fails loudly.
-            return Err(CoreError::NamespaceCorrupt(format!(
-                "content object `{}` already holds bytes under a freshly minted identity",
-                content_blob(catalog.family_root_id(), &staged.content_ref.content_id)
-            )));
-        }
-        self.complete_owned_staging(catalog, &session, staged.content_ref, clock)
+        self.complete_owned_staging(catalog, &session, content_ref, clock)
             .await
     }
 }

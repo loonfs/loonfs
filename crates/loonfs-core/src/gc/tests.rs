@@ -960,6 +960,7 @@ async fn put_file_content_with_id<S: ObjectStore>(
         catalog.family_root_id(),
         content_id,
         bytes,
+        crate::storage::content_staging::ContentKeyOwner::FreshIdentity,
     )
     .await
     .expect("content");
