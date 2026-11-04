@@ -2712,7 +2712,7 @@ Representative response:
 | `commit_id` | The merge's idempotency key. |
 | `message` | Optional. An annotation that's part of the merge's identity. |
 
-The response is the merge's commit, with its `merge` record, as for every route that commits. The events are the ones that the merge's operations produced, and an empty net change has no events. A large merge is one large WAL object, and reads replay the merge from this namespace's WAL tail until a [fold](glossary.md#fold) writes the tail into a manifest, so the server folds the tail through the merge before it responds. If the merge has already run for half of the request deadline (`request_deadline_ms` in the reference server), the server skips that fold, and the next maintenance pass folds the tail.
+The response is the merge's commit, with its `merge` record, as for every route that commits. The events are the ones that the merge's operations produced, and an empty net change has no events. A large merge is one large WAL object, and reads replay the merge from this namespace's WAL tail until a [fold](glossary.md#fold) writes the tail into a manifest, so the server folds the tail through the merge before it responds. If the merge has already run for half of the request deadline (`request_deadline_ms` in the reference server), the server skips that fold, and the tail waits for the fold trigger like any other tail.
 
 To merge a fork, the server:
 
