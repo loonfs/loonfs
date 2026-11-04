@@ -447,9 +447,7 @@ async fn an_undeleted_directory_is_one_entry_and_its_children_are_not() {
         .commit(FilesystemOperation::Undelete {
             inode_id: directory,
             deletion_seq: deletion.committed_seq,
-            destination_path: None,
-            destination_parent_inode_id: None,
-            destination_display_name: None,
+            destination: loonfs_types::options::UndeleteDestination::Recorded,
         })
         .await;
 
@@ -526,9 +524,7 @@ async fn a_deletion_or_undelete_of_a_directory_above_the_path_is_an_entry() {
         .commit(FilesystemOperation::Undelete {
             inode_id: directory,
             deletion_seq: deletion.committed_seq,
-            destination_path: None,
-            destination_parent_inode_id: None,
-            destination_display_name: None,
+            destination: loonfs_types::options::UndeleteDestination::Recorded,
         })
         .await;
     let undeleted = history.diff(deletion.committed_seq, "/a/b", 1000).await;

@@ -196,9 +196,10 @@ impl BindingChange {
             } => FilesystemOperation::Undelete {
                 inode_id,
                 deletion_seq: *deletion_seq,
-                destination_path: None,
-                destination_parent_inode_id: Some(*parent_inode_id),
-                destination_display_name: Some(display_name.clone()),
+                destination: loonfs_types::options::UndeleteDestination::Name {
+                    parent_inode_id: *parent_inode_id,
+                    display_name: display_name.clone(),
+                },
             },
             Self::Delete {
                 expected_binding_version,

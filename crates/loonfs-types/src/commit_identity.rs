@@ -11,12 +11,13 @@
 
 use crate::digest::is_sha256_hex;
 use crate::id_macros::{string_id, validation_error};
+use crate::options::UndeleteDestination;
 use crate::wal::MergeRecord;
 use crate::{
-    AbsolutePath, AccessGrants, AccessRevisionNo, AccessRight, ActorId, AttributeKey,
-    AttributeValue, AttributesRevisionNo, ChangeSeq, CommitPrecondition, ContentId, ContentRef,
-    ContentRefKind, DeleteDirectoryBehavior, DestinationBehavior, FileContent, FilesystemOperation,
-    InodeId, NamespaceId, RevisionNo, SubjectId,
+    AccessGrants, AccessRevisionNo, AccessRight, ActorId, AttributeKey, AttributeValue,
+    AttributesRevisionNo, ChangeSeq, CommitPrecondition, ContentId, ContentRef, ContentRefKind,
+    DeleteDirectoryBehavior, DestinationBehavior, FileContent, FilesystemOperation, InodeId,
+    NamespaceId, RevisionNo, SubjectId,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -562,16 +563,25 @@ fn operation_fingerprint_input<'a>(
         FilesystemOperation::Undelete {
             inode_id,
             deletion_seq,
-            destination_path,
-            destination_parent_inode_id,
-            destination_display_name,
-        } => OperationFingerprintInput::Undelete {
-            inode_id: *inode_id,
-            deletion_seq: *deletion_seq,
-            destination_path: destination_path.as_ref().map(AbsolutePath::as_str),
-            destination_parent_inode_id: *destination_parent_inode_id,
-            destination_display_name: destination_display_name.as_ref().map(|name| name.as_str()),
-        },
+            destination,
+        } => {
+            let (destination_path, destination_parent_inode_id, destination_display_name) =
+                match destination {
+                    UndeleteDestination::Recorded => (None, None, None),
+                    UndeleteDestination::Path(path) => (Some(path.as_str()), None, None),
+                    UndeleteDestination::Name {
+                        parent_inode_id,
+                        display_name,
+                    } => (None, Some(*parent_inode_id), Some(display_name.as_str())),
+                };
+            OperationFingerprintInput::Undelete {
+                inode_id: *inode_id,
+                deletion_seq: *deletion_seq,
+                destination_path,
+                destination_parent_inode_id,
+                destination_display_name,
+            }
+        }
         FilesystemOperation::UpdateAttributes {
             path,
             set,
@@ -788,7 +798,8 @@ mod tests {
     use super::*;
     use crate::options::PutFileOptions;
     use crate::{
-        ActorId, AttributeKey, AttributeValue, Checksum, ContentId, ContentRefKind, DisplayName,
+        AbsolutePath, ActorId, AttributeKey, AttributeValue, Checksum, ContentId, ContentRefKind,
+        DisplayName,
     };
 
     #[test]
@@ -1222,8 +1233,16 @@ mod tests {
                         serde_json::json!("ino_00000000000000000000000008"),
                     ),
                     ("destination_display_name", serde_json::json!("other.txt")),
-                    ("destination_path", serde_json::json!("/report.txt")),
                 ],
+            ),
+            (
+                serde_json::json!({
+                    "kind": "undelete",
+                    "inode_id": "ino_0000000000000000000000001a",
+                    "deletion_seq": 17,
+                    "destination_path": "/report.txt"
+                }),
+                vec![("destination_path", serde_json::json!("/other.txt"))],
             ),
             (
                 serde_json::json!({

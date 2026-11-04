@@ -224,9 +224,9 @@ impl VisibilityHarness {
         self.publish_operation(FilesystemOperation::Undelete {
             inode_id,
             deletion_seq,
-            destination_path: Some(AbsolutePath::parse(path).expect("valid path")),
-            destination_parent_inode_id: None,
-            destination_display_name: None,
+            destination: loonfs_types::options::UndeleteDestination::Path(
+                AbsolutePath::parse(path).expect("valid path"),
+            ),
         })
         .await
     }

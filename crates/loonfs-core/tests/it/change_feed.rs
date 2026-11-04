@@ -153,9 +153,7 @@ async fn creation_and_republication_operations_emit_exact_event_kinds_in_order()
         FilesystemOperation::Undelete {
             inode_id: copied_inode_id,
             deletion_seq: deletion.committed_seq,
-            destination_path: None,
-            destination_parent_inode_id: None,
-            destination_display_name: None,
+            destination: loonfs_types::options::UndeleteDestination::Recorded,
         },
         &context,
     )
