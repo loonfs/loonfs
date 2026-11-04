@@ -43,7 +43,7 @@ pub enum CoreError {
     /// The namespace's WAL tail is at the write stop, so the namespace
     /// refuses publishes until maintenance folds the tail. `reason` says how
     /// long the tail is and when publishes resume.
-    #[error("metadata view for namespace `{namespace_id}` requires maintenance: {reason}")]
+    #[error("writes to namespace `{namespace_id}` are stopped until maintenance runs: {reason}")]
     MaintenanceRequired {
         namespace_id: NamespaceId,
         reason: String,
@@ -401,11 +401,11 @@ impl From<PathError> for CoreError {
 pub fn classify_store_failure(kind: ObjectStoreErrorKind) -> ErrorCode {
     match kind {
         ObjectStoreErrorKind::PermissionDenied => ErrorCode::StoragePermissionDenied,
+        ObjectStoreErrorKind::StoredChecksumMissing => ErrorCode::NamespaceCorrupt,
         ObjectStoreErrorKind::NotFound
         | ObjectStoreErrorKind::InvalidRequest
         | ObjectStoreErrorKind::InvalidKey
         | ObjectStoreErrorKind::PreconditionFailed
-        | ObjectStoreErrorKind::StoredChecksumMissing
         | ObjectStoreErrorKind::Unsupported
         | ObjectStoreErrorKind::Configuration
         | ObjectStoreErrorKind::RetryableTransport
@@ -893,9 +893,9 @@ impl std::fmt::Display for WriterFence {
 #[cfg(test)]
 mod tests {
     use super::{
-        ActiveWriter, CommitValidationError, CommittedReceipt, CoreError, ErrorCode, ErrorKind,
-        ManifestLoadError, MetadataProjectionLoadError, ObjectStoreErrorKind, WriterBlock,
-        WriterFence,
+        classify_store_failure, ActiveWriter, CommitValidationError, CommittedReceipt, CoreError,
+        ErrorCode, ErrorKind, ManifestLoadError, MetadataProjectionLoadError, ObjectStoreErrorKind,
+        WriterBlock, WriterFence,
     };
     use crate::commit::engine::ContentPreparationError;
     use crate::control_object::ControlObjectLoadError;
@@ -1125,6 +1125,10 @@ mod tests {
             assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
             assert_matches!(error, CoreError::NamespaceCorrupt(text) if text == message);
         }
+        assert_eq!(
+            classify_store_failure(ObjectStoreErrorKind::StoredChecksumMissing),
+            ErrorCode::NamespaceCorrupt
+        );
 
         let segment_read = CoreError::from(MetadataProjectionLoadError::ManifestLoad(
             ManifestLoadError::ReadSegment {

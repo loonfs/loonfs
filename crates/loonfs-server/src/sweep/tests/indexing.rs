@@ -10,7 +10,7 @@ use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
 use loonfs_test_support::test_actor;
 use std::assert_matches;
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -44,7 +44,7 @@ async fn ticks_index_publishes_and_lifecycle_changes_then_cost_nothing() {
             .put_file(&format!("/note-{index}"), b"needle", &test_actor())
             .await
             .expect("publish");
-        server.tick_after(config.tick_interval_ms).await;
+        server.tick_after(config.tick_interval_ms.get()).await;
         server.sweep.tick().await;
         store.reset();
         for _ in 0..20 {
@@ -159,7 +159,8 @@ async fn a_session_written_on_every_tick_is_indexed_on_every_tick_and_stays_open
     let store = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
     let mut config = sweep_config(Some(GrepWorkerConfig::default()));
     // Two ticks without an open would make the session idle.
-    config.idle_session_close_after_ms = 2 * config.tick_interval_ms;
+    config.idle_session_close_after_ms =
+        NonZeroU64::new(2 * config.tick_interval_ms.get()).expect("positive");
     let server = SweepServer::start(store, &config, 0).await;
     let namespaces = &server.sweep.inner.namespaces;
     let namespace_id = namespace_id("steady");
@@ -179,7 +180,7 @@ async fn a_session_written_on_every_tick_is_indexed_on_every_tick_and_stays_open
             .put_file(&format!("/note-{index}"), b"needle", &test_actor())
             .await
             .expect("publish");
-        server.tick_after(config.tick_interval_ms).await;
+        server.tick_after(config.tick_interval_ms.get()).await;
         assert_eq!(
             server
                 .grep_status(&namespace_id)
@@ -212,7 +213,7 @@ async fn a_session_written_on_every_tick_still_collects_on_its_interval() {
     let directory = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
     let mut config = sweep_config(Some(GrepWorkerConfig::default()));
-    config.gc_interval_ms = 3 * config.tick_interval_ms;
+    config.gc_interval_ms = NonZeroU64::new(3 * config.tick_interval_ms.get()).expect("positive");
     let server = SweepServer::start(store, &config, 0).await;
     let namespaces = &server.sweep.inner.namespaces;
     let namespace_id = namespace_id("steady-collected");
@@ -238,7 +239,7 @@ async fn a_session_written_on_every_tick_still_collects_on_its_interval() {
             .await
             .expect("publish");
         let before = collected_seq();
-        server.tick_after(config.tick_interval_ms).await;
+        server.tick_after(config.tick_interval_ms.get()).await;
         collections += usize::from(collected_seq() != before);
     }
     assert_eq!(
@@ -278,7 +279,7 @@ async fn ticks_finish_a_backfill_without_a_local_commit_before_closing() {
     let server = SweepServer::start(store.clone(), &config, now_ms).await;
     server.enable_index(&namespace_id).await;
     server
-        .tick_after(config.idle_session_close_after_ms + 1)
+        .tick_after(config.idle_session_close_after_ms.get() + 1)
         .await;
     assert_matches!(
         server.grep_status(&namespace_id).await,
@@ -372,7 +373,7 @@ async fn pending_reorganization_keeps_an_idle_session_open() {
     server.enable_index(&namespace_id).await;
     drop(held);
     server
-        .tick_after(config.idle_session_close_after_ms + 1)
+        .tick_after(config.idle_session_close_after_ms.get() + 1)
         .await;
     server.sweep.tick().await;
     let worker = server.grep_worker.as_ref().expect("worker");

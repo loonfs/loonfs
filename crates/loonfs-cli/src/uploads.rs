@@ -143,15 +143,14 @@ impl UploadJournal {
     ) -> Result<loonfs_types::Commit> {
         let (actor_id, mut request, upload_id) = {
             let state = self.lock();
-            let prepared = match &state.progress {
-                UploadProgress::Prepared { request, upload_id } => {
-                    Some(((**request).clone(), upload_id.clone()))
-                }
-                UploadProgress::Uploading { .. } => None,
+            let UploadProgress::Prepared { request, upload_id } = &state.progress else {
+                return Err(CliError::io(self.error("holds no prepared request")));
             };
-            let (request, upload_id) =
-                prepared.expect("a replayed journal should hold a prepared request");
-            (state.attempt.actor_id.clone(), request, upload_id)
+            (
+                state.attempt.actor_id.clone(),
+                (**request).clone(),
+                upload_id.clone(),
+            )
         };
         let error = match client.commit(namespace_id, &actor_id, &request).await {
             Ok(commit) => return Ok(commit),

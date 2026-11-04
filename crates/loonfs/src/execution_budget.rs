@@ -317,14 +317,6 @@ impl ExecutionBudgetBuilder {
         self
     }
 
-    /// Sets the decoded metadata bytes one compaction keeps in memory at
-    /// once. This is the 0.5 name of [`Self::max_compaction_input_bytes`],
-    /// and 0.7 removes it.
-    #[deprecated(since = "0.6.0", note = "use `max_compaction_input_bytes`")]
-    pub fn max_merge_input_bytes(self, max_merge_input_bytes: NonZeroUsize) -> Self {
-        self.max_compaction_input_bytes(max_merge_input_bytes)
-    }
-
     /// Sets the maximum number of content object writes run at once. Folds,
     /// validation, and direct downloads take a permit for each content
     /// object they write, and staging takes one for each upload, until the
