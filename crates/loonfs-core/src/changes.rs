@@ -4,7 +4,7 @@
 
 use crate::error::{CoreError, HistoryPosition, Result};
 use crate::heap_bytes::HeapBytes;
-use crate::limits::CHANGE_FEED_PAGE_BYTES;
+use crate::limits::{CHANGE_FEED_PAGE_BYTES, COMMIT_SCAN_BATCH_COMMITS};
 use crate::metadata::MetadataView;
 use crate::path::read::LoadedMetadataView;
 use loonfs_objectstore::ObjectStore;
@@ -13,6 +13,7 @@ use loonfs_types::format::wal::{WalCommitDelta, WalCommitPayload, WalDelta};
 use loonfs_types::options::CommitSplitting;
 use loonfs_types::{ChangeFeedPosition, ChangeSeq, EffectiveLimit, NamespaceId};
 use loonfs_types::{Commit, FilesystemChange, ListChangesResponse, Merge};
+use std::collections::VecDeque;
 
 pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
     view: &LoadedMetadataView<'_, S>,
@@ -146,6 +147,13 @@ pub(crate) struct ScannedCommit {
 /// the budget is a page of its own, or, with
 /// [`CommitSplitting::AtPageBudget`], is returned across pages through
 /// [`Self::admit_part`], and the next page resumes it at an event index.
+///
+/// The scan fetches up to [`COMMIT_SCAN_BATCH_COMMITS`] commits in one read
+/// of the view and returns them one at a time. Every commit that the scan
+/// returned before the page ended was admitted, so `through_seq` is the last
+/// commit taken from the batch, and the next read continues after it. A
+/// commit that the caller doesn't admit ends the page, and the scan drops the
+/// commits after it.
 pub(crate) struct CommitScan<'a, 'store, S: ObjectStore + ?Sized> {
     view: MetadataView<'a, 'store, S>,
     limit: EffectiveLimit,
@@ -153,6 +161,9 @@ pub(crate) struct CommitScan<'a, 'store, S: ObjectStore + ?Sized> {
     max_page_bytes: usize,
     /// The last commit on the page, or the page's start before the first.
     through_seq: ChangeSeq,
+    /// The commits after `through_seq` that the scan read and hasn't
+    /// returned yet, in sequence order.
+    fetched: VecDeque<WalCommitPayload>,
     /// The event at which the page resumes the commit at `through_seq`,
     /// until [`Self::next`] returns that commit.
     resume_event_index: Option<u32>,
@@ -180,6 +191,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> CommitScan<'a, 'store, S> {
             splitting,
             max_page_bytes,
             through_seq: position.after_seq,
+            fetched: VecDeque::new(),
             resume_event_index: (position.event_index > 0).then_some(position.event_index),
             next_event_index: None,
             commits: 0,
@@ -209,10 +221,19 @@ impl<'a, 'store, S: ObjectStore + ?Sized> CommitScan<'a, 'store, S> {
             }));
         }
         let end_seq = self.view.visible_seq();
-        if self.full || self.commits >= self.limit.as_usize() || self.through_seq >= end_seq {
+        let left = self.limit.as_usize().saturating_sub(self.commits);
+        if self.full || left == 0 || self.through_seq >= end_seq {
             return Ok(None);
         }
-        let record = self.view.commits_after(self.through_seq, 1).await?.pop();
+        if self.fetched.is_empty() {
+            let batch = left.min(COMMIT_SCAN_BATCH_COMMITS);
+            self.fetched = self
+                .view
+                .commits_after(self.through_seq, batch)
+                .await?
+                .into();
+        }
+        let record = self.fetched.pop_front();
         if record.is_none() {
             self.through_seq = end_seq;
         }

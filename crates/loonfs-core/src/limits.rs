@@ -71,6 +71,15 @@ pub const MAX_COMMIT_OPERATIONS: usize = 4096;
 /// Four MiB of event heap keeps ordinary change pages small while allowing several large commits per page.
 pub const CHANGE_FEED_PAGE_BYTES: usize = 4 * 1024 * 1024;
 
+/// Bounds the commits that one read of a diff or change feed page fetches
+/// ahead.
+///
+/// One read is one scan of the commit records in the metadata segments, so a
+/// page of 1,000 commits costs four scans. A commit record holds the commit's
+/// operations without their inline content, so records of 16 KiB or less keep
+/// what one read fetches ahead within [`CHANGE_FEED_PAGE_BYTES`].
+pub const COMMIT_SCAN_BATCH_COMMITS: usize = 256;
+
 /// Bounds the inodes that one diff page examines.
 ///
 /// The count includes an inode once for each commit that touched it. The diff
