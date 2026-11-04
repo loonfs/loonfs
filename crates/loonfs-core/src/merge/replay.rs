@@ -220,7 +220,7 @@ async fn replay_range_start<'a, S: ObjectStore + ?Sized>(
     let fork_id = &fork_view.head().namespace_id;
     let Some((basis, _)) = rebase_basis(new_fork.head(), fork_id) else {
         return Err(CoreError::InvalidMerge {
-            param: "/new_namespace_id",
+            param: "new_namespace_id",
             message: format!(
                 "namespace `{}` isn't a rebase of fork `{fork_id}`",
                 new_fork.head().namespace_id

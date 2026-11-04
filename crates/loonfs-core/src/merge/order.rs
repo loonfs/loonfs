@@ -115,7 +115,7 @@ const MAX_TEMPORARY_NAME_SUFFIX: u32 = 8;
 /// Returns the error for a merge whose changes the planner can't order.
 fn unordered() -> CoreError {
     CoreError::InvalidMerge {
-        param: "/through_seq",
+        param: "through_seq",
         message: "the planner couldn't order the merge's operations, so merge a shorter range of \
                   the fork's commits"
             .to_owned(),

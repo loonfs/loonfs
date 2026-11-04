@@ -435,6 +435,35 @@ async fn the_next_range_query_reports_where_the_next_merge_starts() {
     family.harness.server.abort();
 }
 
+/// Checks that a merge through a sequence past the fork's head returns
+/// `invalid_request` with `param` set to the JSON Pointer of `through_seq`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_merge_past_the_fork_head_names_the_through_seq_field() {
+    let family = Family::new("http-merge-past-the-head").await;
+    let error = family
+        .harness
+        .client
+        .merge_fork_with_options(
+            &family.main,
+            &family.fork,
+            &actor(),
+            &MergeForkOptions {
+                through_seq: Some(ChangeSeq(1_000)),
+                ..MergeForkOptions::default()
+            },
+        )
+        .await
+        .expect_err("past the fork's head");
+    match error {
+        ClientError::Api { response, .. } => {
+            assert_eq!(response.code, "invalid_request");
+            assert_eq!(response.param.as_deref(), Some("/through_seq"));
+        }
+        other => panic!("expected an API error, got {other:?}"),
+    }
+    family.harness.server.abort();
+}
+
 /// Checks that a namespace that isn't a fork of `main`, one that doesn't
 /// exist, and a fork that was deleted each return `invalid_request` with
 /// `param` set to the request's field, and not a code that reports `main` as

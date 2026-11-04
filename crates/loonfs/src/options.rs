@@ -58,7 +58,7 @@ impl MaintainMetadataOptions {
                     "`max_wal_tail_objects` may not exceed the write-rejection threshold \
                  ({reject_writes_at_wal_objects})"
                 ),
-                param: "/max_wal_tail_objects",
+                param: "max_wal_tail_objects",
             });
         }
         Ok(Self {
@@ -86,7 +86,7 @@ impl AdvanceRetentionFloorOptions {
             (Some(_), Some(_)) => {
                 return Err(Error::InvalidRequest {
                     message: "`to_seq` cannot be combined with `cutoff_at_ms`".to_owned(),
-                    param: "/cutoff_at_ms",
+                    param: "cutoff_at_ms",
                 })
             }
         };

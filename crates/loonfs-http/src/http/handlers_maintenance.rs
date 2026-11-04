@@ -46,8 +46,9 @@ pub(super) async fn run_maintenance(
     let maintenance = &state.maintenance;
     let response = match request {
         RunMaintenanceRequest::Metadata(request) => {
-            let options = MaintainMetadataOptions::from_request(request)
-                .map_err(ApiResponseError::runtime)?;
+            let options = MaintainMetadataOptions::from_request(request).map_err(|error| {
+                ApiResponseError::runtime(error).with_body_field_params(&["/max_wal_tail_objects"])
+            })?;
             maintenance
                 .maintain_metadata_while_due_with_options(
                     &namespace_id,
@@ -62,8 +63,9 @@ pub(super) async fn run_maintenance(
             .await
             .map(RunMaintenanceResponse::Gc),
         RunMaintenanceRequest::Retention(request) => {
-            let options = AdvanceRetentionFloorOptions::from_request(request)
-                .map_err(ApiResponseError::runtime)?;
+            let options = AdvanceRetentionFloorOptions::from_request(request).map_err(|error| {
+                ApiResponseError::runtime(error).with_body_field_params(&["/cutoff_at_ms"])
+            })?;
             maintenance
                 .advance_retention_floor_with_options(&namespace_id, &options)
                 .await

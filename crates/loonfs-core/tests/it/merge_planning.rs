@@ -1589,7 +1589,7 @@ async fn a_temporary_name_search_gives_up_after_eight_suffixes() {
     assert_matches!(
         error,
         CoreError::InvalidMerge {
-            param: "/through_seq",
+            param: "through_seq",
             ..
         }
     );
@@ -1841,7 +1841,7 @@ async fn a_through_seq_outside_the_forks_range_is_an_invalid_request() {
         assert_matches!(
             error,
             CoreError::InvalidMerge {
-                param: "/through_seq",
+                param: "through_seq",
                 ..
             }
         );
@@ -1993,7 +1993,7 @@ async fn a_namespace_that_isnt_a_fork_of_main_is_refused() {
     assert_matches!(
         error,
         CoreError::InvalidMerge {
-            param: "/source_namespace_id",
+            param: "source_namespace_id",
             ..
         }
     );
