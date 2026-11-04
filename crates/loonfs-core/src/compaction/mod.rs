@@ -13,7 +13,6 @@ pub(crate) mod step;
 pub use self::merge_iterator::{
     refill_iterators, select_next_iterator, SegmentBlockLoader, SegmentRowIterator,
 };
-pub use self::plan::metadata_compaction_due;
 pub use self::step::{
     CompactionAdmission, CompactionUnitOutcome, MetadataCompactionCancellation,
     MetadataCompactionPolicy,

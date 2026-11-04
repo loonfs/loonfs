@@ -3167,7 +3167,10 @@ async fn a_backlogged_job_limits_input_and_preserves_unselected_runs() {
     }
     let before = current_metadata_state(&store, &namespace).await;
     let spec = compaction_spec_for_group(&store, &namespace, MetadataFamilyGroup::Bindings).await;
-    assert_eq!(spec.input_runs(), crate::limits::MAX_COMPACTION_INPUT_RUNS);
+    assert_eq!(
+        spec.input_runs(),
+        MetadataRunPolicy::default().max_input_runs_per_step.get()
+    );
     let input = input_keys_now(&store, &namespace, &spec).await;
     let untouched = referenced_segment_keys(&store, &namespace)
         .await

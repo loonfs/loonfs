@@ -47,7 +47,7 @@ pub struct MetadataRunPolicy {
     pub max_rows_per_segment: NonZeroUsize,
     /// Decoded data-byte target; the last row may cross it.
     pub target_segment_bytes: NonZeroUsize,
-    /// Complete logical runs one compaction unit may compact, up to eight.
+    /// Complete logical runs one compaction unit may compact.
     pub max_input_runs_per_step: NonZeroUsize,
     /// Rows, by its runs' descriptor counts, that a window may list when the
     /// call admits only windows within this budget (a `metadata` pass). A

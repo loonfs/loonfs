@@ -2,12 +2,9 @@
 //! window of runs, and the tier and sequence of the output run.
 
 use super::step::MetadataCompactionPolicy;
-use crate::limits::MAX_COMPACTION_INPUT_RUNS;
-use crate::namespace::control::LoadedManifest;
 use crate::segment::index_block_load::segment_object_bytes;
 use crate::segment::runs::{
-    runs_in_compaction_order, runs_newest_first, MetadataFamilyGroup, MetadataRunManifest,
-    MetadataRunPolicy,
+    runs_in_compaction_order, MetadataFamilyGroup, MetadataRunManifest, MetadataRunPolicy,
 };
 use loonfs_types::format::manifest::{
     MetadataRowFamily, MetadataSegmentRef, NamespaceManifestPayload, RunTier,
@@ -34,7 +31,8 @@ const COMPACTION_SIZE_RATIO: u64 = 4;
 pub(crate) struct MetadataCompactionSpec {
     job_id: MetadataCompactionId,
     group: MetadataFamilyGroup,
-    /// A contiguous window of at most eight runs, in oldest-first order.
+    /// A contiguous window of at most the run policy's
+    /// `max_input_runs_per_step` runs, in oldest-first order.
     pub(crate) inputs: Vec<RunNo>,
     /// Rows those runs list for the group, from their descriptors. What the
     /// unit reports it is about to read. The rows it writes are fewer by
@@ -52,10 +50,7 @@ impl MetadataCompactionSpec {
         placement: CompactionPlacement,
         frozen_floor_seq: ChangeSeq,
     ) -> Self {
-        assert!(
-            !inputs.is_empty() && inputs.len() <= crate::limits::MAX_COMPACTION_INPUT_RUNS,
-            "a compaction plan must have bounded, nonempty input"
-        );
+        assert!(!inputs.is_empty(), "a compaction plan must have input");
         Self {
             job_id: MetadataCompactionId::generate(),
             group,
@@ -155,22 +150,6 @@ pub(crate) fn plan_group(
     ))
 }
 
-/// Checks a manifest's descriptors for compaction work without reading the
-/// store.
-pub fn metadata_compaction_due(
-    manifest: &LoadedManifest,
-    compaction_policy: MetadataCompactionPolicy,
-) -> bool {
-    let manifest = manifest.envelope.payload();
-    select_family_group(
-        &runs_newest_first(manifest),
-        manifest,
-        compaction_policy,
-        MetadataRunPolicy::default(),
-    )
-    .is_some()
-}
-
 /// Determines a compaction's output level, sequence, and retention behavior.
 ///
 /// A compaction that includes the group's oldest run writes a base-tier run at the
@@ -243,15 +222,6 @@ fn group_candidates(
     )
 }
 
-/// Returns the run fan-in one unit may compact: the policy's knob, capped by
-/// the ceiling.
-fn effective_max_input_runs(run_policy: MetadataRunPolicy) -> usize {
-    run_policy
-        .max_input_runs_per_step
-        .get()
-        .min(MAX_COMPACTION_INPUT_RUNS)
-}
-
 /// Returns the runs a size tier needs before it's compacted. A compaction above the
 /// group's oldest run needs at least two runs (format spec, "Compaction
 /// windows"), so a minimum of one acts as two.
@@ -269,7 +239,7 @@ fn select_compaction_window(
     run_policy: MetadataRunPolicy,
     compaction_policy: MetadataCompactionPolicy,
 ) -> Option<std::ops::Range<usize>> {
-    let max_runs = effective_max_input_runs(run_policy);
+    let max_runs = run_policy.max_input_runs_per_step.get();
     let stored_bytes = candidates
         .iter()
         .map(|run| {
@@ -340,7 +310,7 @@ fn tiered_window(
             start -= 1;
             smallest = smallest.min(stored_bytes[start]);
         }
-        (end - start >= min_runs).then(|| start..end.min(start + max_runs))
+        (end - start >= min_runs).then(|| start..end.min(start.saturating_add(max_runs)))
     })
 }
 
@@ -536,6 +506,10 @@ mod planning_tests {
         MetadataRunPolicy::default().min_compaction_runs.get()
     }
 
+    fn max_input_runs() -> usize {
+        MetadataRunPolicy::default().max_input_runs_per_step.get()
+    }
+
     #[test]
     fn a_lone_delta_is_promoted_at_the_delta_run_limit_or_on_request_but_a_lone_base_is_not() {
         let at_the_limit = MetadataRunPolicy {
@@ -673,7 +647,7 @@ mod planning_tests {
         }
         // The window keeps its newest runs when more are within the ratio
         // than one unit compacts.
-        let fan_in = MAX_COMPACTION_INPUT_RUNS as u64;
+        let fan_in = max_input_runs() as u64;
         let mut sizes = vec![50_000];
         sizes.extend([1; 10]);
         assert_eq!(capped(&sizes), Some(11 - fan_in..11));
@@ -681,7 +655,7 @@ mod planning_tests {
 
     #[test]
     fn a_backlog_is_compacted_in_contiguous_windows_with_bounded_fan_in() {
-        let fan_in = MAX_COMPACTION_INPUT_RUNS as u64;
+        let fan_in = max_input_runs() as u64;
         assert_eq!(tiered(&[1; 100]), Some(0..fan_in));
         let mut sizes = vec![4096];
         sizes.extend([1; 100]);
@@ -690,7 +664,7 @@ mod planning_tests {
 
     #[test]
     fn immediate_compaction_compacts_deltas_before_rewriting_a_large_base() {
-        let fan_in = MAX_COMPACTION_INPUT_RUNS;
+        let fan_in = max_input_runs();
         for delta_runs in [12, 20] {
             let mut sizes = vec![4096];
             sizes.extend(vec![1; delta_runs]);
@@ -708,7 +682,7 @@ mod planning_tests {
         assert_eq!(immediate(&[8; 12]), Some(0..fan_in as u64));
         // A base joins the runs above it when a tier would take it.
         let mut sizes = vec![4];
-        sizes.extend([1; MAX_COMPACTION_INPUT_RUNS]);
+        sizes.extend(vec![1; fan_in]);
         assert_eq!(immediate(&sizes), Some(0..fan_in as u64));
         sizes[0] = 5;
         assert_eq!(immediate(&sizes), Some(1..1 + fan_in as u64));

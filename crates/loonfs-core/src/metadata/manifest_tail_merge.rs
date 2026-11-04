@@ -23,6 +23,9 @@ pub(super) struct ManifestPage<T> {
 /// A merge of manifest pages, read on demand, with a sorted set of tail
 /// rows.
 ///
+/// A row that both sides hold is one row, so the merge returns each row key
+/// once.
+///
 /// The merge buffers one manifest page at a time, so it keeps at most one
 /// page of manifest rows beside the tail rows.
 pub(super) struct ManifestTailMerge<T> {
@@ -30,6 +33,7 @@ pub(super) struct ManifestTailMerge<T> {
     manifest: VecDeque<(String, T)>,
     tail: VecDeque<(String, T)>,
     ties: TieOrder,
+    last_row_key: Option<String>,
 }
 
 impl<T> ManifestTailMerge<T> {
@@ -41,6 +45,7 @@ impl<T> ManifestTailMerge<T> {
             manifest: VecDeque::new(),
             tail: VecDeque::from(tail),
             ties,
+            last_row_key: None,
         }
     }
 
@@ -77,11 +82,17 @@ impl<T> ManifestTailMerge<T> {
                 (Some(_), None) => false,
                 (None, None) => return Ok(None),
             };
-            return Ok(if take_tail {
-                self.tail.pop_front()
+            let side = if take_tail {
+                &mut self.tail
             } else {
-                self.manifest.pop_front()
-            });
+                &mut self.manifest
+            };
+            let (row_key, row) = side.pop_front().expect("the chosen side holds a row");
+            if self.last_row_key.as_ref() == Some(&row_key) {
+                continue;
+            }
+            self.last_row_key = Some(row_key.clone());
+            return Ok(Some((row_key, row)));
         }
     }
 
@@ -162,5 +173,26 @@ mod tests {
         // The pages after a spent page start at the seek's bound, so `c2` and
         // `c3` are never read.
         assert_eq!(*starts.borrow(), ["a", "a\u{ff}", "c\u{ff}", "d\u{ff}"]);
+    }
+
+    /// Checks that a row both sides hold comes back once.
+    #[tokio::test]
+    async fn a_row_on_both_sides_comes_back_once() {
+        let manifest = ["a", "b", "c"];
+        let refill = |lower_bound: String| {
+            let rows: Vec<(String, ())> = manifest
+                .iter()
+                .filter(|key| **key >= lower_bound.as_str())
+                .map(|key| ((*key).to_owned(), ()))
+                .collect();
+            async move { Ok(ManifestPage { rows, more: false }) }
+        };
+        let tail = vec![("b".to_owned(), ())];
+        let mut merge = ManifestTailMerge::new("a".to_owned(), tail, TieOrder::TailFirst);
+        let mut read = Vec::new();
+        while let Some((row_key, ())) = merge.next(refill).await.expect("next row") {
+            read.push(row_key);
+        }
+        assert_eq!(read, ["a", "b", "c"]);
     }
 }

@@ -4,7 +4,6 @@
 //! memoizes the inputs and results of those rules.
 
 use super::durable_cache::ParentNameCacheKey;
-use super::manifest_index;
 use super::visibility::{self, MetadataVisibilityReads};
 use super::{
     AccessRevisionRecord, ActiveDeletionRange, DirentryBindingRecord, InodeRecord, MetadataView,
@@ -479,16 +478,22 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         Ok(())
     }
 
-    pub(crate) async fn revisions_by_inode_page_desc(
+    /// Returns up to `limit` of the inode's revisions whose row keys are at
+    /// or after `lower_bound`, newest first.
+    pub(crate) async fn inode_revisions_page(
         &mut self,
         inode_id: InodeId,
-        start_after: Option<manifest_index::RevisionPagePosition>,
+        lower_bound: &str,
         limit: usize,
     ) -> Result<Vec<RevisionRecord>> {
         self.counters.scan_range_page_calls = self.counters.scan_range_page_calls.saturating_add(1);
-        self.base
-            .revisions_by_inode_page_desc(inode_id, start_after, limit)
-            .await
+        Ok(self
+            .base
+            .revisions_page(lower_bound, Some(inode_id), limit)
+            .await?
+            .into_iter()
+            .map(|(_, revision)| revision)
+            .collect())
     }
 
     /// Returns the child's active parent binding at the visible sequence.

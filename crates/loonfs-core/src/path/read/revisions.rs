@@ -81,7 +81,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         };
         let mut rows = self
             .metadata_view()
-            .revisions_page(&lower_bound, request.limit.limit_plus_one())
+            .revisions_page(&lower_bound, None, request.limit.limit_plus_one())
             .await?;
         let next_cursor =
             request
@@ -247,17 +247,19 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             validate_file_revisions_cursor(cursor, self.visible_seq, inode_id)?;
         }
 
-        let start_after = request.cursor.as_ref().map(|cursor| {
-            crate::metadata::manifest_index::RevisionPagePosition::after(
+        let lower_bound = match request.cursor.as_ref() {
+            Some(cursor) => lookup_keys::after_row_key(&lookup_keys::revision_row_key(
+                inode_id,
                 cursor.last_revision_no,
                 cursor.last_committed_seq,
                 cursor.last_revision_delta_index,
-            )
-        });
+            )),
+            None => lookup_keys::revision_prefix(inode_id),
+        };
         let mut revision_records = self
             .metadata_view()
             .session()
-            .revisions_by_inode_page_desc(inode_id, start_after, request.limit.limit_plus_one())
+            .inode_revisions_page(inode_id, &lower_bound, request.limit.limit_plus_one())
             .await?;
         let next_cursor =
             request

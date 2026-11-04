@@ -1,26 +1,26 @@
 //! Runs one metadata compaction unit.
 //!
-//! A unit selects one family group and a window of at most eight complete
-//! runs from the current manifest's descriptors (see [`super::plan`]), rewrites
-//! the window into one run with [`super::group_compaction`], and publishes the replacement
+//! A unit selects one family group and a window of at most
+//! `max_input_runs_per_step` complete runs from the current manifest's
+//! descriptors (see [`super::plan`]), rewrites the window into one run with
+//! [`super::group_compaction`], and publishes the replacement
 //! manifest through [`super::publication`]. A base compaction may apply retention,
 //! and a delta compaction drops only superseded layouts. [`MetadataCompactionPolicy`]
 //! sets which runs a group compacts, and when. A unit publishes under the
 //! compactor epoch that [`NamespaceEngine::claim_compactor`] claims.
 
 use super::group_compaction::run_metadata_compaction;
-use super::plan::plan_compaction;
-use super::plan::MetadataCompactionSpec;
+use super::plan::{plan_compaction, select_family_group, MetadataCompactionSpec};
 use super::publication::{input_segment_keys, CompactionPublication};
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::Result;
 use crate::manifest::load::metadata_basis_from_manifest;
 use crate::manifest::publish::ManifestChange;
 use crate::manifest::published::{PublicationReport, PublishedManifest};
-use crate::namespace::control::ensure_namespace_live;
+use crate::namespace::control::{ensure_namespace_live, LoadedManifest};
 use crate::namespace::PublicationBasis;
 use crate::phase::Phase;
-use crate::segment::runs::MetadataFamilyGroup;
+use crate::segment::runs::{runs_newest_first, MetadataFamilyGroup};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::NamespaceManifestPayload;
 use loonfs_types::{CompactorEpoch, NamespaceId};
@@ -89,6 +89,23 @@ pub enum CompactionUnitOutcome {
 }
 
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
+    /// Checks `manifest`'s descriptors for a compaction unit that is due
+    /// under the namespace's run policy, without reading the store.
+    pub fn metadata_compaction_due(
+        &self,
+        manifest: &LoadedManifest,
+        compaction_policy: MetadataCompactionPolicy,
+    ) -> bool {
+        let payload = manifest.envelope.payload();
+        select_family_group(
+            &runs_newest_first(payload),
+            payload,
+            compaction_policy,
+            self.namespace.run_policy,
+        )
+        .is_some()
+    }
+
     /// Runs one metadata compaction unit under the claimed compactor epoch.
     ///
     /// The unit plans from `basis`, a manifest that the caller already has,

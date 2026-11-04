@@ -5,7 +5,7 @@ use loonfs_core::commit::CommitValidationError;
 use loonfs_core::publish::{CommitCandidate, CommitIntent, FilesystemOperation};
 use loonfs_core::test_support::WriterAt;
 use loonfs_core::test_support::{namespace_store, NamespaceFixture};
-use loonfs_core::{CoreError, ErrorCode};
+use loonfs_core::{CoreError, ErrorCode, RuntimeReadContext};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_objectstore::ObjectStoreExtension;
@@ -204,6 +204,36 @@ async fn list_file_revisions_by_inode<S: ObjectStore + ?Sized>(
                 revisions,
                 next_cursor: None,
             });
+        }
+    }
+}
+
+/// Drains the inode's revision listing in pages of two from `context`.
+async fn drain_file_revisions<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    context: &RuntimeReadContext,
+) -> Vec<RevisionNo> {
+    let engine = namespace_engine(store, namespace_id, &default_writer());
+    let mut revisions = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = engine
+            .list_file_revisions_by_inode_page(
+                inode_id,
+                PageRequest {
+                    limit: page_limit(2),
+                    cursor,
+                },
+                context,
+            )
+            .await
+            .expect("list file revisions");
+        revisions.extend(page.items.iter().map(|revision| revision.revision_no));
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            return revisions;
         }
     }
 }
@@ -2652,5 +2682,51 @@ async fn listed_revisions_follow_moves_writes_and_undeletes_across_a_fold() {
     assert_eq!(
         listing_matching_stats(&store, &namespace_id, "/b").await,
         folded
+    );
+}
+
+#[tokio::test]
+async fn a_view_below_the_manifest_head_lists_every_revision_of_a_file_once() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = default_writer();
+    let fixture = NamespaceFixture::new(&store, &namespace_id, &context);
+    fixture.create().await.expect("bootstrap");
+    let mut pinned_seq = None;
+    for revision in 1..=10 {
+        let commit = fixture
+            .write_file_bytes("/docs/rev.txt", format!("{revision}").as_bytes(), None)
+            .await
+            .expect("write revision");
+        if revision == 5 {
+            pinned_seq = Some(commit.committed_seq);
+        }
+        // The manifest holds revisions 1 to 8, and the WAL tail holds 9
+        // and 10.
+        if revision == 8 {
+            namespace_engine(&store, &namespace_id, &context)
+                .fold_wal()
+                .await
+                .expect("fold");
+        }
+    }
+    let inode_id = resolve_path(&store, &namespace_id, "/docs/rev.txt")
+        .await
+        .expect("stat file")
+        .inode_id;
+    let head = read_context(&store, &namespace_id).await;
+    let pinned = RuntimeReadContext {
+        visible_seq: pinned_seq,
+        ..head.clone()
+    };
+
+    assert_eq!(
+        drain_file_revisions(&store, &namespace_id, inode_id, &pinned).await,
+        (1..=5).rev().map(RevisionNo).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        drain_file_revisions(&store, &namespace_id, inode_id, &head).await,
+        (1..=10).rev().map(RevisionNo).collect::<Vec<_>>()
     );
 }
