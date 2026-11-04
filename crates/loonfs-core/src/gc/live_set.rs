@@ -228,19 +228,47 @@ impl LiveSet {
             now_ms: clock.request_at_ms(),
             live_folded_wal_no: live_folded_wal_no(&anchor.read_state),
         };
+        let outcome = live
+            .load_roots(namespace, &anchor, roots, grace_window_ms, clock)
+            .await;
+        tracing::info!(namespace_id = %namespace_id,
+            object_key_bytes = live.objects.reserved_bytes(),
+            content_id_bytes = live.content_ids.reserved_bytes(),
+            completed_session_bytes = live.completed_sessions.reserved_bytes(),
+            pin_record_bytes = live.pin_records.reserved_bytes(),
+            manifest_bytes = live.manifest_charge.reserved_bytes(),
+            member_bytes = live.members.reserved_bytes() + live.member_queue.reserved_bytes(),
+            live_set_bytes = live.memory.held_bytes(),
+            read_memory_limit_bytes = live.memory.limit(),
+            complete = outcome.is_ok(),
+            "read the live set's roots");
+        outcome?;
+        Ok(live)
+    }
+
+    /// Adds the roots of the collected namespace, and on a family root the
+    /// roots of every other member of the fork family.
+    async fn load_roots<S: ObjectStore>(
+        &mut self,
+        namespace: &NamespaceStore<S>,
+        anchor: &NamespaceReadAnchor,
+        roots: Roots,
+        grace_window_ms: u64,
+        clock: &OperationClock,
+    ) -> Result<()> {
         // The collected namespace is a member before its pin listing, so that
         // a fork pin can't add it to the walk's queue.
-        live.members
-            .insert(namespace_id.clone(), MemberState::Collected)?;
-        let pins = live
-            .load_namespace_roots(namespace, &anchor, roots, grace_window_ms, clock)
+        self.members
+            .insert(namespace.namespace_id.clone(), MemberState::Collected)?;
+        let pins = self
+            .load_namespace_roots(namespace, anchor, roots, grace_window_ms, clock)
             .await?;
-        live.has_pins = pins.any_key;
+        self.has_pins = pins.any_key;
         if roots == Roots::CollectedFamilyRoot {
-            live.load_family_roots(namespace, grace_window_ms, clock)
+            self.load_family_roots(namespace, grace_window_ms, clock)
                 .await?;
         }
-        Ok(live)
+        Ok(())
     }
 
     /// Adds the roots of one namespace whose current manifest `anchor`
