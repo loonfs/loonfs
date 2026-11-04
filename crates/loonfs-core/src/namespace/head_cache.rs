@@ -296,19 +296,33 @@ impl HeadAndWalTailCache {
     /// other call makes the checks of the head in flight install nothing,
     /// and then installs the moved head through [`Self::replace_head`], or,
     /// when no head is cached, the head can't move, or its tail isn't cached,
-    /// drops the head as [`Self::invalidate_head`] does.
+    /// drops the head as [`Self::invalidate_head`] does. A head that a check
+    /// installed against an older manifest before the checks were marked is
+    /// dropped too.
     ///
     /// The moved head's head confirmation stays, and its manifest check is
     /// the younger of the cached head's check and the start of the call that
     /// published `manifest`, because neither check found a manifest after
     /// `manifest`.
     pub fn move_head(&self, namespace_id: &NamespaceId, manifest: &PublishedManifest) {
+        if let Some(moved) = self.moved_head(namespace_id, manifest) {
+            self.install_moved_head(namespace_id, manifest, moved);
+        }
+    }
+
+    /// Returns the cached head moved onto `manifest`, and caches its WAL
+    /// tail, or returns `None` when [`Self::move_head`] installs nothing.
+    fn moved_head(
+        &self,
+        namespace_id: &NamespaceId,
+        manifest: &PublishedManifest,
+    ) -> Option<CachedHead> {
         let Some(cached) = self.get_head(namespace_id) else {
             self.invalidate_head(namespace_id);
-            return;
+            return None;
         };
         if manifest.manifest.manifest_no <= cached.read_basis.basis.manifest_no() {
-            return;
+            return None;
         }
         let tail_key = |read_basis: &ReadBasis| WalTailCacheKey {
             namespace_id: namespace_id.clone(),
@@ -318,23 +332,38 @@ impl HeadAndWalTailCache {
         let mut read_basis = cached.read_basis.clone();
         let Some(mut tail) = self.get_tail(&tail_key(&read_basis)) else {
             self.invalidate_head(namespace_id);
-            return;
+            return None;
         };
         if !move_read_basis(&mut read_basis, &mut tail, manifest) {
             self.invalidate_head(namespace_id);
-            return;
+            return None;
         }
         self.insert_tail(tail_key(&read_basis), tail);
         let basis_checked = match &manifest.started {
             Some(started) if started.age_ms() < cached.basis_checked.age_ms() => started.clone(),
             _ => cached.basis_checked.clone(),
         };
-        self.invalidate_head_in_flight(namespace_id);
-        self.replace_head(CachedHead {
+        Some(CachedHead {
             read_basis,
             basis_checked,
             head_confirmed: cached.head_confirmed.clone(),
-        });
+        })
+    }
+
+    /// Marks the checks of the head in flight, installs `moved`, and drops
+    /// the cached head if the head the cache keeps is against a manifest
+    /// older than `manifest`.
+    fn install_moved_head(
+        &self,
+        namespace_id: &NamespaceId,
+        manifest: &PublishedManifest,
+        moved: CachedHead,
+    ) {
+        self.invalidate_head_in_flight(namespace_id);
+        let kept = self.replace_head(moved);
+        if kept.read_basis.basis.manifest_no() < manifest.manifest.manifest_no {
+            self.invalidate_head(namespace_id);
+        }
     }
 
     /// Removes the namespace's cached head, after the runtime learns of a
@@ -747,6 +776,33 @@ mod tests {
             order(&cached),
             (6, 3),
             "an older publication's moved head arriving late changes nothing"
+        );
+    }
+
+    /// Checks that a head a check installs against the older manifest while
+    /// a publication moves the cached head, after the publication read the
+    /// cached head and before it marked the checks in flight, is dropped
+    /// rather than kept above the moved head.
+    #[test]
+    fn a_head_a_check_installs_while_a_publication_moves_the_cached_head_is_dropped() {
+        let now = crate::test_support::observed_now();
+        let demo = namespace("demo");
+        let cache = HeadAndWalTailCache::unshared(1 << 20);
+        cache.replace_head(head_at(6, 1, &now));
+        let tail_key = WalTailCacheKey {
+            namespace_id: demo.clone(),
+            manifest_no: ManifestNo(1),
+            head_seq: ChangeSeq(6),
+        };
+        cache.insert_tail(tail_key, Arc::new(ProjectedWalTail::default()));
+        let published = published_at(2, &now);
+        let moved = cache.moved_head(&demo, &published).expect("the head moves");
+        assert_eq!(order(&moved), (6, 2));
+        cache.replace_head(head_at(7, 1, &now));
+        cache.install_moved_head(&demo, &published, moved);
+        assert!(
+            cache.get_head(&demo).is_none(),
+            "the head against the older manifest is dropped"
         );
     }
 
