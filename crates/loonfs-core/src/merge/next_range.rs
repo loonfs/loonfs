@@ -4,7 +4,7 @@
 
 use super::{ensure_range_start_retained, fork_point, merge_start, rebase_basis};
 use crate::engine::{NamespaceEngine, RuntimeReadContext};
-use crate::error::{CoreError, HistoryPosition, Result};
+use crate::error::Result;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{Merge, NextMergeRangeOutcome, NextMergeRangeResponse};
 
@@ -38,7 +38,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             });
         let fork_point_seq = fork_point(fork_head, source)?;
         let outcome =
-            match merge_start(&main.metadata_view(), main.head(), fork_id, fork_point_seq).await {
+            match merge_start(&main.metadata_view(), main.head(), fork_id, fork_point_seq).await? {
                 Ok(start) => {
                     let merge = start.previous.map(|previous| Merge {
                         source_namespace_id: previous.source_namespace_id,
@@ -51,24 +51,16 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
                             merge,
                             next_after_seq,
                         },
-                        Err(CoreError::RebootstrapRequired {
-                            below: HistoryPosition::RangeStart { .. },
-                            retention_floor_seq,
-                        }) => NextMergeRangeOutcome::RangeStartBelowFloor {
+                        Err(refusal) => NextMergeRangeOutcome::RangeStartBelowFloor {
                             merge,
                             next_after_seq,
-                            retention_floor_seq,
+                            retention_floor_seq: refusal.retention_floor_seq,
                         },
-                        Err(error) => return Err(error),
                     }
                 }
-                Err(CoreError::RebootstrapRequired {
-                    below: HistoryPosition::ForkPoint { .. },
-                    retention_floor_seq,
-                }) => NextMergeRangeOutcome::ForkPointBelowFloor {
-                    retention_floor_seq,
+                Err(refusal) => NextMergeRangeOutcome::ForkPointBelowFloor {
+                    retention_floor_seq: refusal.retention_floor_seq,
                 },
-                Err(error) => return Err(error),
             };
         Ok(NextMergeRangeResponse {
             fork_point_seq,

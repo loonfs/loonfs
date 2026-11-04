@@ -202,7 +202,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             rebase.source_namespace_id,
             rebase.fork_point_seq,
         )
-        .await?
+        .await??
         .after_seq;
         Ok(RebasedFrom {
             source_namespace_id: rebase.source_namespace_id.clone(),

@@ -785,7 +785,7 @@ impl HistoryPosition {
                 source_after_seq,
             } => ErrorDetails {
                 source_namespace_id: Some(source_namespace_id.clone()),
-                actual_after_seq: Some(*source_after_seq),
+                source_after_seq: Some(*source_after_seq),
                 ..ErrorDetails::default()
             },
         }

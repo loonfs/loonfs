@@ -358,7 +358,7 @@ async fn ensure_merge_is_admissible<S: ObjectStore + ?Sized>(
 ) -> Result<()> {
     let source_namespace_id = &merge.record.source_namespace_id;
     let expected_after_seq = merge_start(view, head, source_namespace_id, merge.fork_point_seq)
-        .await?
+        .await??
         .after_seq;
     if merge.record.source_after_seq != expected_after_seq {
         return Err(CoreError::MergeRangeConflict {
