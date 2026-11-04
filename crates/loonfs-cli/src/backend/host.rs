@@ -12,10 +12,41 @@ use loonfs_http::{
     DEFAULT_MAX_CONCURRENT_DOWNLOADS, DEFAULT_MAX_CONCURRENT_UPLOADS, DEFAULT_REQUEST_DEADLINE_MS,
 };
 use loonfs_types::SecretString;
+use std::cell::RefCell;
+use std::future::Future;
 use std::sync::{Arc, OnceLock};
 use tower::ServiceExt as _;
 
 static CONTENT_TOKEN_SECRET: OnceLock<SecretString> = OnceLock::new();
+
+tokio::task_local! {
+    /// The runtimes that embedded profiles opened during the command that
+    /// [`run_then_drain`] runs.
+    static OPENED_RUNTIMES: RefCell<Vec<LoonFs<Writable>>>;
+}
+
+/// Runs `command`, then drains each runtime that an embedded profile opened
+/// while it ran, and returns the command's output.
+///
+/// The process exits when the command does, which would abandon a fold or
+/// compaction that the command's requests started. A runtime opened outside
+/// `command` isn't drained.
+pub(crate) async fn run_then_drain<T>(command: impl Future<Output = T>) -> T {
+    let (output, runtimes) = OPENED_RUNTIMES
+        .scope(RefCell::new(Vec::new()), async {
+            let output = command.await;
+            (output, OPENED_RUNTIMES.with(RefCell::take))
+        })
+        .await;
+    for runtime in runtimes {
+        if let Err(error) = runtime.drain().await {
+            write_stderr_warning(format_args!(
+                "background maintenance did not settle cleanly: {error}"
+            ));
+        }
+    }
+    output
+}
 
 /// The runtime an embedded profile opens, and the maintenance and grep
 /// worker its binding serves.
@@ -58,22 +89,15 @@ pub(crate) fn client(
         },
     );
     let router = loonfs_http::router(state);
-    let runtime = host.runtime.clone();
+    // Only a client opened inside `run_then_drain` has its runtime drained.
+    let _ = OPENED_RUNTIMES.try_with(|runtimes| runtimes.borrow_mut().push(host.runtime.clone()));
     let service = tower::service_fn(move |request: http::Request<Body>| {
         let router = router.clone();
-        let runtime = runtime.clone();
         async move {
             let response = router
                 .oneshot(request)
                 .await
                 .map_err(|never| match never {})?;
-            // The process exits when the command does, which would abandon
-            // a fold or compaction the request started.
-            if let Err(error) = runtime.drain().await {
-                write_stderr_warning(format_args!(
-                    "background maintenance did not settle cleanly: {error}"
-                ));
-            }
             Ok(response.map(|body| Body::new(body.map_err(TransportError::body))))
         }
     });

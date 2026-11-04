@@ -53,7 +53,7 @@ pub async fn main() -> ExitCode {
     let output_format = runtime.output;
 
     // Boxing keeps the public entrypoint's future shallow for downstream binaries.
-    let result = Box::pin(commands::run(cli, runtime)).await;
+    let result = Box::pin(backend::run_then_drain(commands::run(cli, runtime))).await;
     match result {
         Ok(output) => match render::render_success(&output, output_format) {
             // A recursive transfer renders its per-item outcomes as success
