@@ -42,7 +42,7 @@ impl NamespacePublisher {
             candidate,
             &values[..wal_object_inline_values],
             &values[wal_object_inline_values..],
-        )?;
+        );
         Ok(InlineCandidatePlan {
             candidate,
             ordered_inline_content: values,
@@ -93,7 +93,7 @@ impl NamespacePublisher {
             &plan.ordered_inline_content[kept..],
         )
         .await?;
-        PreparedCandidate::new(plan.candidate.candidate).map_err(Into::into)
+        Ok(PreparedCandidate::new(plan.candidate.candidate))
     }
 
     async fn stage_inline_values(

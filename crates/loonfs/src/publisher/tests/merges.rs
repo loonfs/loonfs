@@ -119,8 +119,8 @@ async fn a_merge_is_published_alone_in_its_wal_object() {
 /// Checks that the publisher admits and publishes a merge whose estimated
 /// peak, three times its planned WAL bytes, fits the merge allowance,
 /// although the merge is above the budget's byte total and above its
-/// namespace's byte allowance, which refuse an ordinary commit of about the
-/// same weight with `commit_queue_full`. A second merge while the first is
+/// namespace's byte allowance, which refuse a lighter ordinary commit with
+/// `commit_queue_full`. A second merge while the first is
 /// admitted gets `commit_queue_full`, and it's admitted once the first
 /// settles. A merge whose peak is above the allowance fails with
 /// `merge_too_large`, which reports the peak and the allowance.
@@ -131,12 +131,14 @@ async fn a_merge_is_held_to_the_merge_allowance_and_admitted_one_at_a_time() {
     let store: SharedStore = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
     let runtime = test_runtime(store);
     create_namespace(&runtime, &namespace_id).await;
-    let prepared = PreparedCandidate::new(merge("merge", "merged")).expect("prepare");
-    let request_bytes = prepared.estimated_retained_bytes + 512 + namespace_id.as_str().len();
+    let prepared = PreparedCandidate::new(merge("merge", "merged"));
+    let ordinary = CommitCandidate::new(create_directory_request("ordinary", "ordinary"));
+    assert!(ordinary.estimated_retained_bytes() < prepared.estimated_retained_bytes);
+    let ordinary_bytes = ordinary.estimated_retained_bytes() + 512 + namespace_id.as_str().len();
     let merge_peak = 3 * prepared.wal_record_bytes_upper_bound;
     let publisher_with_allowance = |max_merge_bytes: usize| {
         let mut core = TestCore::unpaced();
-        let below_the_merge = NonZeroUsize::new(request_bytes - 1).expect("limit");
+        let below_the_merge = NonZeroUsize::new(ordinary_bytes - 1).expect("limit");
         core.config.publication.max_estimated_bytes_per_namespace = below_the_merge;
         core.execution_budget = ExecutionBudget::builder()
             .max_admitted_bytes(below_the_merge)

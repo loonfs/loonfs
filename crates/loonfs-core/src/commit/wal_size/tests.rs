@@ -270,11 +270,8 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
             let candidate =
                 CommitCandidate::with_inline_content(request, Vec::new(), vec![inline.clone()]);
             assert!(
-                candidate.estimated_retained_bytes().expect("weight")
-                    >= baseline
-                        .estimated_retained_bytes()
-                        .expect("baseline weight")
-                        + inline.bytes().len()
+                candidate.estimated_retained_bytes()
+                    >= baseline.estimated_retained_bytes() + inline.bytes().len()
             );
             assert!(
                 candidate.wal_record_bytes_upper_bound()

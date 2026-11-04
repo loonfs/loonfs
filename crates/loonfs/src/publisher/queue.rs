@@ -49,25 +49,25 @@ pub(super) struct PreparedCandidate {
 }
 
 impl PreparedCandidate {
-    pub(super) fn new(candidate: CommitCandidate) -> std::result::Result<Self, CoreError> {
-        Ok(Self {
-            estimated_retained_bytes: candidate.estimated_retained_bytes()?,
+    pub(super) fn new(candidate: CommitCandidate) -> Self {
+        Self {
+            estimated_retained_bytes: candidate.estimated_retained_bytes(),
             wal_record_bytes_upper_bound: candidate.wal_record_bytes_upper_bound(),
             inline_content_bytes: candidate.inline_content_bytes(),
             candidate,
-        })
+        }
     }
 
     pub(super) fn with_inline_placement(
         candidate: CommitCandidate,
         retained_inline_content: &[loonfs_core::publish::InlineContent],
         staged_inline_content: &[loonfs_core::publish::InlineContent],
-    ) -> std::result::Result<Self, CoreError> {
-        Ok(Self {
+    ) -> Self {
+        Self {
             estimated_retained_bytes: candidate.estimated_retained_bytes_after_inline_staging(
                 retained_inline_content,
                 staged_inline_content,
-            )?,
+            ),
             wal_record_bytes_upper_bound: candidate
                 .wal_record_bytes_upper_bound_with_inline_content(retained_inline_content),
             inline_content_bytes: retained_inline_content
@@ -76,7 +76,7 @@ impl PreparedCandidate {
                     total.saturating_add(value.bytes().len())
                 }),
             candidate,
-        })
+        }
     }
 }
 
@@ -164,7 +164,7 @@ impl NamespacePublisher {
     /// still owns and publishes the request.
     #[cfg(test)]
     pub(super) async fn submit(&self, candidate: CommitCandidate) -> Result<Commit> {
-        let candidate = PreparedCandidate::new(candidate)?;
+        let candidate = PreparedCandidate::new(candidate);
         let permit = self.acquire_candidate(&candidate)?;
         submit_with_admission(
             &self.namespace_id,
@@ -218,7 +218,7 @@ impl NamespacePublisher {
         permit: &Arc<AdmissionPermit>,
     ) -> Result<Commit> {
         drop(self.admitted_session(&self.lock_state())?);
-        let candidate = PreparedCandidate::new(candidate)?;
+        let candidate = PreparedCandidate::new(candidate);
         self.context
             .admission
             .validate_merge(&candidate.candidate, candidate.wal_record_bytes_upper_bound)?;

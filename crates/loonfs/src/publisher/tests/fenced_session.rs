@@ -180,8 +180,7 @@ async fn a_candidate_charged_before_fencing_is_refused_at_queue_insertion() {
     let publisher = &old.session().publisher;
     let candidate = PreparedCandidate::new(CommitCandidate::new(create_directory_request(
         "late", "late",
-    )))
-    .expect("candidate");
+    )));
     let identity = candidate.candidate.semantic_identity(old.id());
     let permit = publisher
         .context

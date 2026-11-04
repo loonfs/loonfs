@@ -346,8 +346,7 @@ mod tests {
         let permit = admission.acquire(&namespace_id, 0).expect("fill queue");
         let mut candidate = PreparedCandidate::new(CommitCandidate::new(
             super::super::tests::create_directory_request("large", "large"),
-        ))
-        .expect("prepare");
+        ));
         candidate.wal_record_bytes_upper_bound =
             MAX_WAL_OBJECT_BYTES - WAL_OBJECT_OVERHEAD_BYTES + 1;
         let error = admission
@@ -387,8 +386,7 @@ mod tests {
                     std::num::NonZeroU32::MIN,
                 ),
             )]),
-        ))
-        .expect("prepare");
+        ));
         candidate.wal_record_bytes_upper_bound = planned_bytes;
         candidate
     }
@@ -428,8 +426,7 @@ mod tests {
         );
         let mut ordinary = PreparedCandidate::new(CommitCandidate::new(
             super::super::tests::create_directory_request("ordinary", "ordinary"),
-        ))
-        .expect("prepare");
+        ));
         ordinary.estimated_retained_bytes = 2048;
         assert!(matches!(
             admission.acquire_candidate(&namespace_id, &ordinary),
@@ -623,20 +620,13 @@ mod tests {
         let candidate = CommitCandidate::new(super::super::tests::create_directory_request(
             "wide", "wide",
         ));
-        let charge = candidate
-            .estimated_retained_bytes()
-            .expect("request weight")
-            + 512
-            + namespace.as_str().len();
+        let charge = candidate.estimated_retained_bytes() + 512 + namespace.as_str().len();
         let budget = ExecutionBudget::builder()
             .max_admitted_bytes(limit(charge))
             .build();
         let admission = runtime_admission(PublicationPolicy::default(), &budget);
         let permit = admission
-            .acquire(
-                &namespace,
-                candidate.estimated_retained_bytes().expect("weight"),
-            )
+            .acquire(&namespace, candidate.estimated_retained_bytes())
             .expect("exact fit");
         assert_eq!(admitted(&budget), (1, charge));
         assert!(matches!(
@@ -645,20 +635,14 @@ mod tests {
         ));
         drop(permit);
         assert!(admission
-            .acquire(
-                &namespace,
-                candidate.estimated_retained_bytes().expect("weight")
-            )
+            .acquire(&namespace, candidate.estimated_retained_bytes())
             .is_ok());
         let too_small = ExecutionBudget::builder()
             .max_admitted_bytes(limit(charge - 1))
             .build();
         let refused = runtime_admission(PublicationPolicy::default(), &too_small);
         assert!(matches!(
-            refused.acquire(
-                &namespace,
-                candidate.estimated_retained_bytes().expect("weight")
-            ),
+            refused.acquire(&namespace, candidate.estimated_retained_bytes()),
             Err(CoreError::CommitQueueFull)
         ));
         assert!(refused.lock_namespaces().is_empty());

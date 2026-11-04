@@ -6,6 +6,7 @@
 //! it to [`PreparedContent`] and checked again when a publish batch admits the
 //! proof.
 
+use crate::heap_bytes::HeapBytes;
 use crate::limits::{COMPLETED_UPLOAD_RECEIPT_WINDOW_MS, CONTENT_RECEIPT_TTL_MS};
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::storage::inline_content::InlineContent;
@@ -83,6 +84,26 @@ enum PreparedContentKind {
     },
 }
 
+impl HeapBytes for PreparedContent {
+    fn heap_bytes(&self) -> usize {
+        match &self.kind {
+            PreparedContentKind::Inline(value) => value.heap_bytes(),
+            PreparedContentKind::Staged {
+                namespace_id,
+                content_ref,
+                upload_id,
+                ..
+            } => namespace_id.heap_bytes() + content_ref.heap_bytes() + upload_id.heap_bytes(),
+            PreparedContentKind::Shared {
+                namespace_id,
+                content_ref,
+                layout,
+                ..
+            } => namespace_id.heap_bytes() + content_ref.heap_bytes() + layout.heap_bytes(),
+        }
+    }
+}
+
 impl PreparedContent {
     /// Prepares bytes without store access or an expiry.
     pub fn inline(bytes: bytes::Bytes, algorithm: ChecksumAlgorithm) -> Self {
@@ -101,27 +122,6 @@ impl PreparedContent {
             PreparedContentKind::Inline(value) => Some(value),
             PreparedContentKind::Staged { .. } | PreparedContentKind::Shared { .. } => None,
         }
-    }
-
-    pub(crate) fn estimated_payload_bytes(&self) -> usize {
-        match &self.kind {
-            PreparedContentKind::Inline(value) => value.bytes().len(),
-            PreparedContentKind::Staged { content_ref, .. }
-            | PreparedContentKind::Shared { content_ref, .. } => content_ref
-                .content_id
-                .as_str()
-                .len()
-                .saturating_add(content_ref.checksum.value().as_str().len()),
-        }
-    }
-
-    pub(crate) fn estimated_owned_staging_payload_bytes(value: &InlineContent) -> usize {
-        let content_ref = value.content_ref();
-        content_ref
-            .content_id
-            .as_str()
-            .len()
-            .saturating_add(content_ref.checksum.value().as_str().len())
     }
 
     pub(crate) fn content_id(&self) -> &ContentId {

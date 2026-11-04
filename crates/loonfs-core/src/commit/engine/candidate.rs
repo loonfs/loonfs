@@ -5,6 +5,7 @@
 use super::super::CommitFingerprint;
 use crate::authorize::CommitAuthority;
 use crate::error::{CoreError, Result};
+use crate::heap_bytes::{btree_map_node_bytes, HeapBytes};
 use crate::path::write::{
     commit_fingerprint, merge_fingerprint, CommitIntent, FilesystemOperation,
 };
@@ -436,120 +437,44 @@ impl CommitCandidate {
         )
     }
 
-    /// Estimates retained request data and prepared proofs for publication
-    /// admission. Counts inline storage plus JSON payload bytes without
-    /// allocating a second request. Allocator slack and publication working
-    /// copies are excluded; this is a sizing policy, not a heap measurement.
-    pub fn estimated_retained_bytes(&self) -> Result<usize> {
-        self.estimated_retained_bytes_with_inline_content(&self.inline_content)
+    /// Weighs the candidate for publication admission: its own size and the
+    /// heap that it owns, which includes the request, the prepared proofs or
+    /// rejections, and the inline content bytes.
+    pub fn estimated_retained_bytes(&self) -> usize {
+        std::mem::size_of_val(self) + self.heap_bytes()
     }
 
-    /// Estimates retained bytes after selected inline values are staged.
+    /// Weighs the candidate as [`Self::estimated_retained_bytes`] does once
+    /// the publisher keeps `retained_inline_content` inline and stages
+    /// `staged_inline_content`. Staging a value replaces the value with a
+    /// prepared proof and records the value's identity.
     pub fn estimated_retained_bytes_after_inline_staging(
         &self,
         retained_inline_content: &[InlineContent],
         staged_inline_content: &[InlineContent],
-    ) -> Result<usize> {
-        let mut bytes =
-            self.estimated_retained_bytes_with_inline_content(retained_inline_content)?;
-        if matches!(&self.content, ContentPreparation::Ready(_)) {
-            bytes = bytes.saturating_add(
-                staged_inline_content
-                    .len()
-                    .saturating_mul(std::mem::size_of::<PreparedContent>()),
-            );
-            for value in staged_inline_content {
-                bytes = bytes
-                    .saturating_add(PreparedContent::estimated_owned_staging_payload_bytes(
-                        value,
-                    ))
-                    .saturating_add(std::mem::size_of::<ContentId>())
-                    .saturating_add(std::mem::size_of::<InlineContentIdentity>())
-                    .saturating_add(value.content_ref().content_id.as_str().len());
-            }
-        }
-        Ok(bytes)
-    }
-
-    fn estimated_retained_bytes_with_inline_content(
-        &self,
-        retained_inline_content: &[InlineContent],
-    ) -> Result<usize> {
-        let intent = self.intent();
-        let mut bytes = RequestByteCounter(
-            std::mem::size_of_val(self)
-                .saturating_add(std::mem::size_of_val(intent.operations.as_slice()))
-                .saturating_add(std::mem::size_of_val(intent.preconditions.as_slice()))
-                .saturating_add(
-                    self.merge
-                        .as_ref()
-                        .map_or(0, |merge| merge.record.source_namespace_id.as_str().len()),
-                ),
-        );
-        serde_json::to_writer(
-            &mut bytes,
-            &(
-                &intent.commit_id,
-                &intent.actor_id,
-                &intent.message,
-                &intent.operations,
-                &intent.preconditions,
-            ),
-        )
-        .map_err(|error| CoreError::InvalidCommitRequest(error.to_string()))?;
-        if let Some(subject) = &intent.subject {
-            serde_json::to_writer(&mut bytes, &subject.subject_id)
-                .map_err(|error| CoreError::InvalidCommitRequest(error.to_string()))?;
-            for principal_id in subject.principals.iter() {
-                bytes.0 = bytes
-                    .0
-                    .saturating_add(std::mem::size_of::<loonfs_types::PrincipalId>());
-                serde_json::to_writer(&mut bytes, principal_id)
-                    .map_err(|error| CoreError::InvalidCommitRequest(error.to_string()))?;
-            }
-        }
-        match &self.content {
-            ContentPreparation::Ready(proofs) => {
-                bytes.0 = bytes
-                    .0
-                    .saturating_add(std::mem::size_of_val(proofs.as_slice()));
-                for proof in proofs {
-                    bytes.0 = bytes.0.saturating_add(proof.estimated_payload_bytes());
-                }
-            }
-            ContentPreparation::Rejected(ContentPreparationError::ContentToken(rejections)) => {
-                bytes.0 = bytes
-                    .0
-                    .saturating_add(std::mem::size_of_val(rejections.as_slice()));
-                for (content_id, error) in rejections {
-                    bytes.0 = bytes.0.saturating_add(content_id.as_str().len());
-                    if let ContentTokenError::Codec(message) = error {
-                        bytes.0 = bytes.0.saturating_add(message.len());
-                    }
-                }
-            }
-            ContentPreparation::Rejected(ContentPreparationError::ContentNotPrepared {
-                content_id,
-            }) => {
-                bytes.0 = bytes.0.saturating_add(content_id.as_str().len());
-            }
-        }
-        bytes.0 = bytes
-            .0
-            .saturating_add(std::mem::size_of_val(retained_inline_content));
-        for value in retained_inline_content {
-            bytes.0 = bytes.0.saturating_add(value.bytes().len());
-            serde_json::to_writer(&mut bytes, value.content_ref())
-                .map_err(|error| CoreError::InvalidCommitRequest(error.to_string()))?;
-        }
-        for content_id in self.inline_content_identities.keys() {
-            bytes.0 = bytes
-                .0
-                .saturating_add(std::mem::size_of::<ContentId>())
-                .saturating_add(std::mem::size_of::<InlineContentIdentity>())
-                .saturating_add(content_id.as_str().len());
-        }
-        Ok(bytes.0)
+    ) -> usize {
+        let proof_bytes = match &self.content {
+            ContentPreparation::Ready(_) => std::mem::size_of::<PreparedContent>(),
+            ContentPreparation::Rejected(_) => 0,
+        };
+        let staged_bytes = staged_inline_content
+            .iter()
+            .map(|value| {
+                let content_id = &value.content_ref().content_id;
+                proof_bytes
+                    + value.content_ref().heap_bytes()
+                    + std::mem::size_of::<(ContentId, InlineContentIdentity)>()
+                    + content_id.heap_bytes()
+            })
+            .sum::<usize>();
+        let retained_bytes = retained_inline_content
+            .iter()
+            .map(HeapBytes::heap_bytes)
+            .sum::<usize>()
+            + std::mem::size_of_val(retained_inline_content);
+        self.estimated_retained_bytes() - self.inline_content.heap_bytes()
+            + retained_bytes
+            + staged_bytes
     }
 
     /// Bounds the request's WAL bytes before planning adds carried layouts.
@@ -715,15 +640,41 @@ impl CommitCandidate {
     }
 }
 
-struct RequestByteCounter(usize);
-
-impl std::io::Write for RequestByteCounter {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0 = self.0.saturating_add(bytes.len());
-        Ok(bytes.len())
+impl HeapBytes for CommitCandidate {
+    fn heap_bytes(&self) -> usize {
+        self.intent().heap_bytes()
+            + self.merge.as_ref().map_or(0, MergeIntent::heap_bytes)
+            + self.content.heap_bytes()
+            + self.inline_content.heap_bytes()
+            + self
+                .inline_content_identities
+                .keys()
+                .map(HeapBytes::heap_bytes)
+                .fold(
+                    btree_map_node_bytes(&self.inline_content_identities),
+                    usize::saturating_add,
+                )
     }
+}
 
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
+impl HeapBytes for MergeIntent {
+    fn heap_bytes(&self) -> usize {
+        self.record.heap_bytes()
+            + btree_map_node_bytes(&self.created_inode_ids)
+            + btree_map_node_bytes(&self.temporary_moves)
+    }
+}
+
+impl HeapBytes for ContentPreparation {
+    fn heap_bytes(&self) -> usize {
+        match self {
+            Self::Ready(proofs) => proofs.heap_bytes(),
+            Self::Rejected(ContentPreparationError::ContentToken(rejections)) => {
+                rejections.heap_bytes()
+            }
+            Self::Rejected(ContentPreparationError::ContentNotPrepared { content_id }) => {
+                content_id.heap_bytes()
+            }
+        }
     }
 }
