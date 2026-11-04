@@ -617,7 +617,8 @@ impl CoreError {
             CoreError::DurableContent(
                 DurableContentValidationError::MissingContentObject { .. }
                 | DurableContentValidationError::ContentLengthMismatch { .. }
-                | DurableContentValidationError::ContentChecksumMismatch { .. },
+                | DurableContentValidationError::ContentChecksumMismatch { .. }
+                | DurableContentValidationError::StoredChecksumMissing { .. },
             )
             | CoreError::WalPublish(
                 WalPublishError::NumberTaken | WalPublishError::PublishBudgetExceeded { .. },

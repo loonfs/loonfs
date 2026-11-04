@@ -14,7 +14,9 @@ use loonfs::{
 };
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_test_support::stores::{replace_object, BufferWatchStore};
+use loonfs_test_support::stores::{
+    replace_object, BufferWatchStore, FailStore, InjectedError, KeyPredicate, OperationSelector,
+};
 use std::num::NonZeroU64;
 use std::path::Path;
 use std::sync::Arc;
@@ -176,6 +178,35 @@ async fn a_streamed_read_rejects_content_that_stopped_matching_its_reference() {
     }
     .expect("corrupted content must not report a verified end");
     assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_content_read_the_store_refuses_answers_storage_permission_denied() {
+    let temp_dir = tempdir().expect("tempdir");
+    let payload = payload(PAYLOAD_BYTES);
+    let (namespace_id, _watched, _reader) = written_file(temp_dir.path(), &payload).await;
+    let refusing = Arc::new(FailStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+        KeyPredicate::content_blob(),
+        OperationSelector::Read,
+        InjectedError::PermissionDenied("content reads refused".to_owned()),
+    ));
+    refusing.fail_all();
+    let store: SharedObjectStore = refusing.clone();
+    let reader = LoonFs::builder_with_store(store)
+        .read_only()
+        .build()
+        .await
+        .expect("build reader");
+
+    let error = reader
+        .namespace(&namespace_id)
+        .read_file(PATH)
+        .await
+        .expect_err("the store refuses the content read");
+
+    assert_eq!(error.code(), ErrorCode::StoragePermissionDenied);
+    assert!(refusing.attempts() > 0);
 }
 
 #[tokio::test]

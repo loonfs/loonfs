@@ -2,6 +2,7 @@
 //! the stored content objects, and each object's key. The streaming read is in
 //! [`super::content_stream`], and staging is in [`super::content_staging`].
 
+use crate::error::classify_store_failure;
 #[cfg(any(test, feature = "test-support"))]
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 #[cfg(any(test, feature = "test-support"))]
@@ -9,7 +10,7 @@ use crate::storage::content_admission::PreparedContent;
 #[cfg(any(test, feature = "test-support"))]
 use crate::storage::content_location::ContentLocation;
 use loonfs_objectstore::keys::content_blob;
-use loonfs_objectstore::{ObjectStore, ObjectStoreError};
+use loonfs_objectstore::{ObjectStore, ObjectStoreErrorKind};
 use loonfs_types::{Checksum, ContentRef, ErrorCode, NamespaceId};
 use thiserror::Error;
 
@@ -60,8 +61,14 @@ pub enum DurableContentValidationError {
         expected: String,
         actual: String,
     },
+    #[error("immutable object `{object_key}` already exists without a stored checksum")]
+    StoredChecksumMissing { object_key: String },
     #[error("object store error for `{object_key}`: {message}")]
-    Store { object_key: String, message: String },
+    Store {
+        object_key: String,
+        message: String,
+        kind: ObjectStoreErrorKind,
+    },
 }
 
 impl DurableContentValidationError {
@@ -69,8 +76,9 @@ impl DurableContentValidationError {
         match self {
             Self::MissingContentObject { .. }
             | Self::ContentLengthMismatch { .. }
-            | Self::ContentChecksumMismatch { .. } => ErrorCode::NamespaceCorrupt,
-            Self::Store { .. } => ErrorCode::ServerError,
+            | Self::ContentChecksumMismatch { .. }
+            | Self::StoredChecksumMissing { .. } => ErrorCode::NamespaceCorrupt,
+            Self::Store { kind, .. } => classify_store_failure(*kind),
         }
     }
 }
@@ -131,6 +139,7 @@ pub(crate) async fn verify_durable_content_checksum<S: ObjectStore + ?Sized>(
             return Err(DurableContentValidationError::Store {
                 object_key,
                 message: err.public_message().into_owned(),
+                kind: err.kind(),
             })
         }
     };
@@ -142,16 +151,12 @@ pub(crate) async fn verify_durable_content_checksum<S: ObjectStore + ?Sized>(
             actual: stored.size_bytes,
         });
     }
-    let checksum = stored
-        .checksum
-        .ok_or_else(|| DurableContentValidationError::Store {
-            object_key: object_key.clone(),
-            message: ObjectStoreError::StoredChecksumMissing {
+    let checksum =
+        stored
+            .checksum
+            .ok_or_else(|| DurableContentValidationError::StoredChecksumMissing {
                 object_key: object_key.clone(),
-            }
-            .public_message()
-            .into_owned(),
-        })?;
+            })?;
     if checksum != content_ref.checksum {
         return Err(DurableContentValidationError::ContentChecksumMismatch {
             object_key,
