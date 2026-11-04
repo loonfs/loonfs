@@ -695,6 +695,7 @@ async fn collection_sweeps_id_shards_and_keeps_a_shared_base_in_another_shard() 
         &namespace_id,
         ContentId::parse("con_40000000000000000000000000").expect("other id"),
         b"other",
+        crate::storage::content_staging::ContentKeyOwner::FreshIdentity,
     )
     .await
     .expect("other shard content");

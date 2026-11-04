@@ -8,10 +8,10 @@ use bytes::Bytes;
 use futures::StreamExt;
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::{
-    ByteStream, ObjectStore, ObjectStoreError, ObjectStoreErrorKind, PutMode,
+    ByteStream, ObjectStore, ObjectStoreError, ObjectStoreErrorKind, ObjectStoreExtension, PutMode,
 };
 use loonfs_types::{
-    ChecksumAlgorithm, ChecksumDigest, ContentId, ContentRef, ContentRefKind, NamespaceId,
+    ChecksumAlgorithm, ChecksumDigest, ContentId, ContentRef, ContentRefKind, NamespaceId, UploadId,
 };
 use std::future::Future;
 use std::sync::{Arc, Mutex};
@@ -35,18 +35,37 @@ impl<S: ObjectStore> NamespaceStore<S> {
             catalog.family_root_id(),
             ContentId::generate(),
             bytes,
+            ContentKeyOwner::FreshIdentity,
         )
         .await
     }
 }
 
-/// Result of staging streamed content.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct StagedStream {
-    /// Identity, length, and checksum of the complete payload.
-    pub content_ref: ContentRef,
-    /// Whether the object existed before this write.
-    pub already_present: bool,
+/// The writer of a content key, which decides what an occupied key that holds
+/// other bytes means.
+///
+/// An occupied key that holds the same bytes settles the write in either case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ContentKeyOwner<'a> {
+    /// The write is the only writer of a freshly minted identity, so other
+    /// bytes at the key are corruption.
+    FreshIdentity,
+    /// Every request to this proxied upload session writes the session's key,
+    /// so other bytes at the key conflict with an earlier request.
+    ProxiedSession(&'a UploadId),
+}
+
+impl ContentKeyOwner<'_> {
+    fn store_error(self, object_key: &str, error: &ObjectStoreError) -> CoreError {
+        match (self, error) {
+            (Self::ProxiedSession(upload_id), ObjectStoreError::DifferentObject { .. }) => {
+                CoreError::UploadContentConflict {
+                    upload_id: upload_id.clone(),
+                }
+            }
+            _ => CoreError::store(object_key, error),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,15 +79,18 @@ pub(crate) enum StreamedPayloadKind {
 ///
 /// The write is create-only, and the store enforces that atomically with
 /// completion at every size, so when two requests write one content ID,
-/// only one of them creates the object and the other finds it present.
+/// only one of them creates the object. The other request is settled by the
+/// store's rule for an occupied immutable key, against the checksum of the
+/// bytes that passed through this writer.
 pub(crate) async fn stage_streamed_under_content_id<S: ObjectStore + ?Sized>(
     store: &S,
     family_root_id: &NamespaceId,
     content_id: ContentId,
     body: ByteStream,
     payload_kind: StreamedPayloadKind,
+    owner: ContentKeyOwner<'_>,
     check_ownership: impl Future<Output = Result<()>>,
-) -> Result<StagedStream> {
+) -> Result<ContentRef> {
     let object_key = content_blob(family_root_id, &content_id);
     let observed = Arc::new(Mutex::new(StreamedPayload::new(store.checksum_algorithm())));
     let (request_check, check_requested) = oneshot::channel();
@@ -119,38 +141,39 @@ pub(crate) async fn stage_streamed_under_content_id<S: ObjectStore + ?Sized>(
         check,
     );
     checked?;
-    let observed = std::mem::replace(
+    let content_ref = std::mem::replace(
         &mut *observed
             .lock()
             .expect("the streamed payload lock should not be poisoned"),
         StreamedPayload::new(store.checksum_algorithm()),
-    );
-    let already_present = match stored {
-        Ok(stored_bytes) if stored_bytes != observed.size_bytes => {
-            return Err(CoreError::Store {
-                object_key,
-                message: format!(
-                    "the provider stored {stored_bytes} bytes, but {} passed through this writer",
-                    observed.size_bytes
-                ),
-                kind: ObjectStoreErrorKind::Other,
-            });
+    )
+    .into_content_ref(content_id);
+    match stored {
+        Ok(stored_bytes) if stored_bytes != content_ref.size_bytes => Err(CoreError::Store {
+            object_key,
+            message: format!(
+                "the provider stored {stored_bytes} bytes, but {} passed through this writer",
+                content_ref.size_bytes
+            ),
+            kind: ObjectStoreErrorKind::Other,
+        }),
+        Ok(_) => Ok(content_ref),
+        Err(conflict @ ObjectStoreError::PreconditionFailed { .. }) => {
+            match store
+                .verify_occupied(&object_key, &content_ref.checksum, conflict)
+                .await
+            {
+                Ok(_) => Ok(content_ref),
+                Err(error) => Err(owner.store_error(&object_key, &error)),
+            }
         }
-        Ok(_) => false,
-        // The caller compares the stored checksum with the bytes it sent.
-        Err(ObjectStoreError::PreconditionFailed { .. }) => true,
         Err(ObjectStoreError::BodyAborted(message))
             if payload_kind == StreamedPayloadKind::ContentImport =>
         {
-            return Err(CoreError::NamespaceCorrupt(message));
+            Err(CoreError::NamespaceCorrupt(message))
         }
-        Err(err) => return Err(CoreError::store(&object_key, &err)),
-    };
-
-    Ok(StagedStream {
-        content_ref: observed.into_content_ref(content_id),
-        already_present,
-    })
+        Err(error) => Err(owner.store_error(&object_key, &error)),
+    }
 }
 
 #[derive(Debug)]
@@ -190,13 +213,14 @@ pub(crate) async fn stage_bytes_under_content_id<S: ObjectStore + ?Sized>(
     family_root_id: &NamespaceId,
     content_id: ContentId,
     bytes: &[u8],
+    owner: ContentKeyOwner<'_>,
 ) -> Result<StoredContent> {
     let content_ref = ContentRef::blob_v1(content_id, bytes, store.checksum_algorithm());
     let object_key = content_blob(family_root_id, &content_ref.content_id);
     store
         .put_immutable_verified(&object_key, Bytes::copy_from_slice(bytes))
         .await
-        .map_err(|error| CoreError::store(&object_key, &error))?;
+        .map_err(|error| owner.store_error(&object_key, &error))?;
 
     Ok(StoredContent {
         #[cfg(any(test, feature = "test-support"))]
@@ -229,6 +253,7 @@ mod tests {
             &loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
             ContentId::generate(),
             bytes,
+            ContentKeyOwner::FreshIdentity,
         )
         .await
         .expect("first stage");
@@ -237,6 +262,7 @@ mod tests {
             &loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
             ContentId::generate(),
             bytes,
+            ContentKeyOwner::FreshIdentity,
         )
         .await
         .expect("second stage");
@@ -288,10 +314,15 @@ mod tests {
             ),
         ];
         for (store, bytes, reason) in cases {
-            let error =
-                stage_bytes_under_content_id(store, &namespace_id, content_id.clone(), bytes)
-                    .await
-                    .expect_err("occupied key");
+            let error = stage_bytes_under_content_id(
+                store,
+                &namespace_id,
+                content_id.clone(),
+                bytes,
+                ContentKeyOwner::FreshIdentity,
+            )
+            .await
+            .expect_err("occupied key");
             assert_eq!(error.code(), loonfs_types::ErrorCode::NamespaceCorrupt);
             assert_matches!(
                 error,

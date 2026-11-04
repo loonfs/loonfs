@@ -672,6 +672,20 @@ pub trait ObjectStoreExtension: ObjectStore {
         expected_etag: &str,
         bytes: Bytes,
     ) -> impl Future<Output = Result<ObjectMetadata>> + Send;
+
+    /// Settles a create-only write of immutable bytes that failed with
+    /// `conflict` because `key` is occupied.
+    ///
+    /// The stored object is accepted only when its stored checksum equals
+    /// `expected`, the checksum of the bytes the writer sent, and otherwise
+    /// the write fails as [`ObjectStore::put_immutable_verified`] does. A key
+    /// that is empty again returns `conflict`.
+    fn verify_occupied(
+        &self,
+        key: &str,
+        expected: &Checksum,
+        conflict: ObjectStoreError,
+    ) -> impl Future<Output = Result<ObjectMetadata>> + Send;
 }
 
 impl<S: ObjectStore + ?Sized> ObjectStoreExtension for S {
@@ -712,6 +726,15 @@ impl<S: ObjectStore + ?Sized> ObjectStoreExtension for S {
             },
         )
         .await
+    }
+
+    async fn verify_occupied(
+        &self,
+        key: &str,
+        expected: &Checksum,
+        conflict: ObjectStoreError,
+    ) -> Result<ObjectMetadata> {
+        crate::immutable_write::verify_occupied(self, key, expected, conflict).await
     }
 }
 

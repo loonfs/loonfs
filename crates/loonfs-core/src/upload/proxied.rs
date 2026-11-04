@@ -10,10 +10,11 @@ use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::namespace::store::NamespaceStore;
-use crate::storage::content::{verify_durable_content_checksum, DurableContentValidationError};
-use crate::storage::content_staging::{stage_streamed_under_content_id, StreamedPayloadKind};
+use crate::storage::content_staging::{
+    stage_bytes_under_content_id, stage_streamed_under_content_id, ContentKeyOwner,
+    StreamedPayloadKind,
+};
 use crate::time::OperationClock;
-use bytes::Bytes;
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::{ByteStream, ObjectStore, ObjectStoreError};
 use loonfs_types::format::control::{UploadSessionMode, UploadSessionPayload};
@@ -67,9 +68,9 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// The write is create-only and writes no session record. The store makes
     /// the create conditional at every size, so when two requests upload to one
     /// session, only one of them creates the object. A request that finds the
-    /// object already written succeeds if the stored size and checksum match its
-    /// bytes (a retry of the same upload), and returns a content conflict if
-    /// they don't.
+    /// object already written succeeds if the stored checksum matches its bytes
+    /// (a retry of the same upload), and returns a content conflict if the
+    /// checksums differ.
     pub(crate) async fn upload_proxied_content(
         &self,
         upload_id: &UploadId,
@@ -83,31 +84,25 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let loaded = self
             .load_open_proxied_session(&catalog, upload_id, subject, clock)
             .await?;
-        let session = &loaded.session;
+        let content_id = loaded.session.content_id.clone();
+        let owner = ContentKeyOwner::ProxiedSession(upload_id);
         let content_ref = match payload {
             ProxiedPayload::Bytes(bytes) => {
-                write_proxied_bytes(&self.store, family_root_id, session, bytes).await?
+                stage_bytes_under_content_id(&self.store, family_root_id, content_id, bytes, owner)
+                    .await?
+                    .content_ref
             }
             ProxiedPayload::Stream(body) => {
-                let staged = stage_streamed_under_content_id(
+                stage_streamed_under_content_id(
                     &self.store,
                     family_root_id,
-                    session.content_id.clone(),
+                    content_id,
                     body,
                     StreamedPayloadKind::Request,
+                    owner,
                     self.ensure_session_still_open(&catalog, upload_id, clock),
                 )
-                .await?;
-                if staged.already_present {
-                    ensure_stored_content_matches(
-                        &self.store,
-                        family_root_id,
-                        upload_id,
-                        &staged.content_ref,
-                    )
-                    .await?;
-                }
-                staged.content_ref
+                .await?
             }
         };
         // An abort during the write deletes the object it was writing, so the
@@ -144,51 +139,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
 pub(crate) enum ProxiedPayload<'a> {
     Bytes(&'a [u8]),
     Stream(ByteStream),
-}
-
-/// Writes a proxied upload's buffered bytes to the session's content object,
-/// under the prefix of `family_root_id`.
-async fn write_proxied_bytes<S: ObjectStore + ?Sized>(
-    store: &S,
-    family_root_id: &NamespaceId,
-    session: &UploadSessionPayload,
-    bytes: &[u8],
-) -> Result<ContentRef> {
-    let content_ref = ContentRef::blob_v1(
-        session.content_id.clone(),
-        bytes,
-        store.checksum_algorithm(),
-    );
-    let object_key = content_blob(family_root_id, &session.content_id);
-    match store
-        .put_immutable_verified(&object_key, Bytes::copy_from_slice(bytes))
-        .await
-    {
-        Ok(_) => Ok(content_ref),
-        Err(ObjectStoreError::DifferentObject { .. }) => Err(CoreError::UploadContentConflict {
-            upload_id: session.upload_id.clone(),
-        }),
-        Err(error) => Err(CoreError::store(&object_key, &error)),
-    }
-}
-
-/// Accepts a content object that an earlier request already wrote only if
-/// its stored size and checksum match the bytes of this request.
-async fn ensure_stored_content_matches<S: ObjectStore + ?Sized>(
-    store: &S,
-    family_root_id: &NamespaceId,
-    upload_id: &UploadId,
-    content_ref: &ContentRef,
-) -> Result<()> {
-    match verify_durable_content_checksum(store, family_root_id, content_ref).await {
-        Ok(()) => Ok(()),
-        Err(error @ DurableContentValidationError::Store { .. }) => {
-            Err(CoreError::DurableContent(error))
-        }
-        Err(_) => Err(CoreError::UploadContentConflict {
-            upload_id: upload_id.clone(),
-        }),
-    }
 }
 
 /// Builds the reference of a proxied session's content object, under the
