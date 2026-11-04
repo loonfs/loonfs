@@ -22,8 +22,9 @@ pub struct GcRequest {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct RetainedCandidates {
-    /// The candidates that a current root or the shared base filter protected, or that manifest
-    /// discovery needed.
+    /// The candidates that a current root protected, or that manifest discovery needed. A content
+    /// object is protected when an extent filter of a rooted layout segment matches it, and a false
+    /// match keeps the object until no rooted view lists that segment.
     pub referenced: u64,
     /// The unreferenced candidates that were younger than the grace window, according to their
     /// provider timestamps.

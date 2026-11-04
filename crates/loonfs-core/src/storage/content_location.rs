@@ -7,7 +7,7 @@ use crate::object_cache::ObjectCache;
 use crate::wal::ProjectedContent;
 use bytes::Bytes;
 use futures::{stream, StreamExt, TryStreamExt};
-use loonfs_objectstore::keys::{content_blob, content_span};
+use loonfs_objectstore::keys::{content_blob, content_blob_name, content_span, content_span_name};
 use loonfs_objectstore::{ByteRange, ObjectStore};
 use loonfs_types::format::manifest::ContentLayoutRecord;
 use loonfs_types::{ContentExtent, ContentId, ContentRef, ExtentObject, NamespaceId};
@@ -34,6 +34,15 @@ pub(crate) fn extent_object_key(family_root_id: &NamespaceId, extent: &ContentEx
         ExtentObject::Span { start, end } => {
             content_span(family_root_id, &extent.content_id, start, end)
         }
+    }
+}
+
+/// Returns the name of the object that `extent` reads: its key with the
+/// family root's content prefix removed, the same under every family root.
+pub(crate) fn extent_object_name(extent: &ContentExtent) -> String {
+    match extent.object {
+        ExtentObject::Whole => content_blob_name(&extent.content_id),
+        ExtentObject::Span { start, end } => content_span_name(&extent.content_id, start, end),
     }
 }
 

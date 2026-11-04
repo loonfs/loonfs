@@ -206,7 +206,6 @@ async fn content_reclaimed_during_view_load_cannot_be_published() {
         let aged = MetadataMapStore::aged(&store, KeyPredicate::content_blob());
         let options = GcOptions {
             grace_window_ms: GC_MIN_GRACE_WINDOW_MS,
-            ..Default::default()
         };
         crate::test_support::namespace_store(&aged, &namespace_id)
             .gc(None, &options, &reclaimed.clock())

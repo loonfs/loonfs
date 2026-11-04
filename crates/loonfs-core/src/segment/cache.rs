@@ -27,6 +27,9 @@ use std::sync::Arc;
 pub enum SegmentBlockKind {
     Index,
     Filter,
+    /// The filter over the content object names that a `content_layouts`
+    /// segment's extents reference.
+    ExtentFilter,
     Data,
     Manifest,
 }
@@ -249,9 +252,10 @@ impl SharedSegmentBlocks {
     /// Returns the cache that keeps entries of `kind`.
     pub(super) fn entries(&self, kind: SegmentBlockKind) -> &SegmentEntries {
         match kind {
-            SegmentBlockKind::Data | SegmentBlockKind::Index | SegmentBlockKind::Filter => {
-                &self.blocks
-            }
+            SegmentBlockKind::Data
+            | SegmentBlockKind::Index
+            | SegmentBlockKind::Filter
+            | SegmentBlockKind::ExtentFilter => &self.blocks,
             SegmentBlockKind::Manifest => &self.manifests,
         }
     }

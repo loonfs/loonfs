@@ -32,7 +32,7 @@ use loonfs_objectstore::layout::manifest_no_of;
 use loonfs_objectstore::ObjectStore;
 use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_types::format::control::{PinOwner, PinPayload};
-use loonfs_types::format::manifest::{MetadataRowFamily, NamespaceManifestPayload};
+use loonfs_types::format::manifest::NamespaceManifestPayload;
 use loonfs_types::{ContentId, ManifestNo, NamespaceId, UploadId, WalNo};
 use std::collections::{BTreeMap, BTreeSet};
 use std::pin::pin;
@@ -135,9 +135,6 @@ pub(super) struct LiveSet {
     pub(super) manifests: Vec<LoadedManifest>,
     manifest_charge: Charge,
     pub(super) memory: PassMemory,
-    /// The layout rows of the current manifests of every namespace whose
-    /// roots the pass read, which size the shared base filter.
-    pub(super) content_layout_rows: u64,
     /// What the pass read of its fork family's roots.
     pub(super) family: FamilyWalkReport,
     /// The collected namespace, and on a family root's pass every other
@@ -220,7 +217,6 @@ impl LiveSet {
             completed_sessions,
             uploads,
             pin_records: ChargedMap::new(&memory),
-            content_layout_rows: 0,
             family: FamilyWalkReport::own_roots(),
             members: ChargedMap::new(&memory),
             member_queue: ChargedQueue::new(&memory),
@@ -250,9 +246,7 @@ impl LiveSet {
     /// Adds the roots of one namespace whose current manifest `anchor`
     /// loaded: that manifest, the WAL tail above it, the manifests that the
     /// namespace's pins keep, and its manifests whose successor is younger
-    /// than the grace window. It also adds the current manifest's layout rows
-    /// to the count that sizes the shared base filter, and returns what the
-    /// pin listing found.
+    /// than the grace window. It returns what the pin listing found.
     pub(super) async fn load_namespace_roots<S: ObjectStore>(
         &mut self,
         namespace: &NamespaceStore<S>,
@@ -262,9 +256,6 @@ impl LiveSet {
         clock: &OperationClock,
     ) -> Result<ListedPins> {
         let head = anchor.manifest.payload();
-        self.content_layout_rows = self
-            .content_layout_rows
-            .saturating_add(content_layout_rows(head));
         // A tombstone roots its runs like any current manifest: an import from
         // a deleted source is still authorized against its final access state.
         self.protect_manifest(&anchor.manifest, roots)?;
@@ -531,17 +522,6 @@ fn retirement_deadline_ms(
         .deleted_at_ms()
         .expect("a tombstone should carry its deletion stamp")
         .saturating_add(retirement_grace_window_ms)
-}
-
-/// Returns the number of layout rows that `manifest` lists.
-fn content_layout_rows(manifest: &NamespaceManifestPayload) -> u64 {
-    manifest
-        .runs
-        .iter()
-        .flat_map(|run| &run.segments)
-        .filter(|segment| segment.family == MetadataRowFamily::ContentLayouts)
-        .map(|segment| segment.row_count)
-        .sum()
 }
 
 /// Returns the manifest number in a pin key, or `None` for a key that isn't

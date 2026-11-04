@@ -338,7 +338,6 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
     let grace = crate::limits::GC_MIN_GRACE_WINDOW_MS;
     let options = crate::gc::GcOptions {
         grace_window_ms: grace,
-        ..Default::default()
     };
     let store = MetadataMapStore::aged(
         LocalFsStore::new(directory.path()).expect("store"),

@@ -139,10 +139,7 @@ async fn recently_superseded_manifests_keep_old_segments_and_lazy_views_until_th
                     metadata
                 },
             );
-            let options = GcOptions {
-                grace_window_ms,
-                ..Default::default()
-            };
+            let options = GcOptions { grace_window_ms };
             let retained = crate::test_support::namespace_store(&recent, &namespace_id)
                 .gc(
                     None,

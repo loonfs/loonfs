@@ -1,60 +1,41 @@
-//! Content roots from the layout segments of rooted manifests, kept one ID
-//! shard at a time. On a family root, the rooted manifests include the layout
+//! Content roots from the extent filters of the layout segments that rooted
+//! manifests list. On a family root, the rooted manifests include the layout
 //! views of every other member of its fork family.
 
 use super::charged_set::{Charge, ChargedSet};
 use super::fork_family::FamilyWalkOutcome;
 use super::live_set::{LiveSet, RetirementStatus};
 use super::sweep::{ContentReference, Sweep};
-use crate::bloom_filter::BloomFilter;
 use crate::error::{CoreError, Result};
-use crate::metadata::row_decode::content_layout_from_manifest_row;
-use crate::segment::{visit_segment_rows, ScanDescriptor};
-use crate::storage::content_location::extent_object_key;
-use crate::storage::tail_content::is_own_extent;
-use futures::TryStreamExt;
+use crate::in_flight::STORE_READS_IN_FLIGHT;
+use crate::segment::index_block_load::load_segment_extent_filter;
+use futures::{stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::keys::{content_prefix, metadata_segment_object_key};
 use loonfs_objectstore::layout::content_id_of;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::manifest::{ContentLayoutRecord, MetadataRowFamily};
-use loonfs_types::format::segment_blocks::string_prefix_upper_bound;
-use loonfs_types::{generated_id_body_prefixes, u64_from_usize, ContentExtent, GcResponse};
-use std::ops::ControlFlow;
+use loonfs_types::format::manifest::{MetadataRowFamily, MetadataSegmentRef};
+use loonfs_types::format::segment_blocks::{filter_key_hashes, SegmentFilter};
+use loonfs_types::GcResponse;
+use std::sync::Arc;
 
-/// Most characters of a content ID body that one shard prefix covers. At
-/// width 4 a pass makes 262,144 shard listings. Below about 17 billion layout
-/// rows, shards of the default 65,536 rows need no more than four characters,
-/// so the cap doesn't bind.
-const MAX_CONTENT_SHARD_WIDTH: usize = 4;
-
-/// The layout segments that the pass's rooted manifests list, each scanned on
-/// its own to protect the content objects that its layout rows refer to.
+/// The extent filters of the distinct layout segments that the pass's rooted
+/// manifests list, which protect the content objects that those segments'
+/// layout rows refer to.
 ///
-/// Each scan reads the rows of every distinct layout segment once, and doesn't
-/// merge the segments of each rooted manifest. A manifest's merged layout rows
-/// are the rows of its layout segments, with one row kept for a key that two
-/// of its segments repeat. So every row of every manifest's merge is a row of
-/// some distinct segment, and the scan protects at least the extents that each
-/// merge would protect. It protects more only when two segments of one
-/// manifest list the same key, which a valid manifest doesn't do (a compaction
-/// refuses such input). Like a merge, the scan includes superseded layout rows
-/// (a shorter layout of a chain that a later row replaces). An extent that
-/// only a superseded row lists stays protected until a compaction drops that
-/// row and no rooted manifest lists the segment that contains it, which delays
+/// A manifest's merged layout rows are rows of its layout segments, so every
+/// extent of every rooted view is in the extent filter of some distinct
+/// segment. A filter also covers superseded layout rows (a shorter layout of
+/// a chain that a later row replaces), and it can report a name that no row
+/// of its segment refers to. An object that only such a row or such a false
+/// match keeps stays until no rooted manifest lists the segment, which delays
 /// reclamation but never removes an object that a rooted view reads.
-pub(super) struct ContentSweep<'a> {
-    segments: Vec<ScanDescriptor<'a>>,
-    _segments_charge: Charge,
-    shared: BloomFilter,
-    shard_width: usize,
+pub(super) struct ContentSweep {
+    filters: Vec<Arc<SegmentFilter>>,
+    _filters_charge: Charge,
 }
 
-impl<'a> ContentSweep<'a> {
-    pub(super) async fn load<S: ObjectStore>(
-        sweep: &Sweep<'a, S>,
-        shard_rows: usize,
-        max_bytes: usize,
-    ) -> Result<Option<Self>> {
+impl ContentSweep {
+    pub(super) async fn load<S: ObjectStore>(sweep: &Sweep<'_, S>) -> Result<Option<Self>> {
         let live = sweep.live;
         let namespace_id = &sweep.namespace.namespace_id;
         let (family_members, family_members_read) = (live.family.members, live.family.members_read);
@@ -63,8 +44,9 @@ impl<'a> ContentSweep<'a> {
         // retirement lists and deletes the whole content prefix.
         if !live.collects_family_content() || live.retirement_status() == RetirementStatus::Eligible
         {
-            tracing::info!(namespace_id = %namespace_id, shard_width = 0,
-                layout_segments = 0, family_members, family_members_read, "collecting namespace");
+            tracing::info!(namespace_id = %namespace_id, layout_segments = 0,
+                extent_filter_bytes = 0, family_members, family_members_read,
+                "collecting namespace");
             return Ok(None);
         }
         match live.family.outcome {
@@ -80,55 +62,33 @@ impl<'a> ContentSweep<'a> {
                 return Ok(None);
             }
         }
-        let (segments, segments_charge) = distinct_layout_segments(live)?;
-        let mut shard_width = 0;
-        while shard_width < MAX_CONTENT_SHARD_WIDTH
-            && live.content_layout_rows
-                / u64_from_usize(generated_id_body_prefixes(shard_width).len())
-                > u64_from_usize(shard_rows)
-        {
-            shard_width += 1;
+        let segments = distinct_layout_segments(live)?;
+        let mut filters_charge = Charge::new(&live.memory);
+        let store = &sweep.namespace.store;
+        let segment_cache = sweep.namespace.segment_cache.as_ref();
+        let mut filters = Vec::with_capacity(segments.len());
+        let mut extent_filter_bytes = 0;
+        // Unboxed, rustc cannot prove the pass future `Send` through this stream.
+        let mut loads = stream::iter(segments)
+            .map(|descriptor| load_segment_extent_filter(store, segment_cache, descriptor))
+            .buffered(STORE_READS_IN_FLIGHT)
+            .boxed();
+        while let Some(filter) = loads.try_next().await? {
+            filters_charge.add(filter.decoded_bytes())?;
+            extent_filter_bytes += filter.decoded_bytes();
+            filters.push(filter);
         }
-        let expected_entries = live.content_layout_rows;
-        if !BloomFilter::fits_at_full_size(expected_entries, max_bytes) {
-            tracing::info!(namespace_id = %namespace_id, shard_width, layout_segments = 0, expected_entries,
-                family_members, family_members_read,
-                "shared base filter exceeded its byte limit; skipped content sweep");
-            return Ok(None);
-        }
-        // The pass time seeds the filter, so a false match on an unreferenced
-        // object in one pass is unlikely to repeat in the next pass.
-        let mut shared =
-            BloomFilter::with_max_bytes(expected_entries, sweep.clock.request_at_ms(), max_bytes);
-        tracing::info!(namespace_id = %namespace_id, shard_width,
-            layout_segments = segments.len(), family_members, family_members_read,
-            "collecting namespace");
-        let family_root_id = &sweep.namespace.namespace_id;
-        let scanned = scan_layout_extents(sweep, &segments, "", |row, extent| {
-            if !is_own_extent(extent, &row.content_id)
-                && shared
-                    .insert(extent_object_key(family_root_id, extent).as_bytes())
-                    .is_none()
-            {
-                return Ok(ControlFlow::Break(()));
-            }
-            Ok(ControlFlow::Continue(()))
-        })
-        .await?;
-        if scanned.is_break() {
-            tracing::info!(namespace_id = %namespace_id, shard_width, layout_segments = segments.len(), expected_entries,
-                family_members, family_members_read,
-                "shared base filter exceeded its byte limit; skipped content sweep");
-            return Ok(None);
-        }
+        tracing::info!(namespace_id = %namespace_id, layout_segments = filters.len(),
+            extent_filter_bytes, family_members, family_members_read, "collecting namespace");
         Ok(Some(Self {
-            segments,
-            _segments_charge: segments_charge,
-            shared,
-            shard_width,
+            filters,
+            _filters_charge: filters_charge,
         }))
     }
 
+    /// Lists the family root's content prefix once and decides each listed
+    /// object from the extent filters and from the content IDs of the WAL
+    /// tails and upload sessions.
     pub(super) async fn sweep<S: ObjectStore>(
         &self,
         sweep: &Sweep<'_, S>,
@@ -136,97 +96,49 @@ impl<'a> ContentSweep<'a> {
     ) -> Result<()> {
         // Only a family root's pass sweeps content, so the collected
         // namespace's prefix is the family's.
-        let family_root_id = &sweep.namespace.namespace_id;
-        for body_prefix in generated_id_body_prefixes(self.shard_width) {
-            let id_prefix = format!("con_{body_prefix}");
-            let mut keys = ChargedSet::new(&sweep.live.memory);
-            let _ = scan_layout_extents(sweep, &self.segments, &body_prefix, |_, extent| {
-                if extent.content_id.as_str().starts_with(&id_prefix) {
-                    keys.insert(extent_object_key(family_root_id, extent))?;
-                }
-                Ok(ControlFlow::Continue(()))
-            })
-            .await?;
-            let prefix = format!("{}{id_prefix}", content_prefix(family_root_id));
-            let decisions = sweep
-                .namespace
-                .store
-                .list_entries_from_stream(&prefix, None)
-                .map_err(|error| CoreError::store(&prefix, &error))
-                .map_ok(|entry| {
-                    let reference = if keys.contains(entry.key.as_str())
-                        || self.shared.may_contain(entry.key.as_bytes())
-                        || content_id_of(&entry.key)
-                            .is_some_and(|id| sweep.live.content_ids.contains(&id))
-                    {
-                        ContentReference::Referenced
-                    } else {
-                        ContentReference::Unreferenced
-                    };
-                    sweep.content_candidate(entry, reference)
-                });
-            sweep.namespace.apply_decisions(decisions, report).await?;
-        }
-        Ok(())
+        let prefix = content_prefix(&sweep.namespace.namespace_id);
+        let decisions = sweep
+            .namespace
+            .store
+            .list_entries_from_stream(&prefix, None)
+            .map_err(|error| CoreError::store(&prefix, &error))
+            .map_ok(|entry| {
+                let name = entry.key.strip_prefix(prefix.as_str()).unwrap_or_default();
+                let hashes = filter_key_hashes(name);
+                let reference = if self
+                    .filters
+                    .iter()
+                    .any(|filter| filter.may_contain_hashes(hashes))
+                    || content_id_of(&entry.key)
+                        .is_some_and(|id| sweep.live.content_ids.contains(&id))
+                {
+                    ContentReference::Referenced
+                } else {
+                    ContentReference::Unreferenced
+                };
+                sweep.content_candidate(entry, reference)
+            });
+        sweep.namespace.apply_decisions(decisions, report).await
     }
 }
 
-/// Lists each layout segment of the rooted manifests once, with the sequence of
-/// the first run that lists it, and charges the list to the pass.
-fn distinct_layout_segments(live: &LiveSet) -> Result<(Vec<ScanDescriptor<'_>>, Charge)> {
+/// Lists each layout segment of the rooted manifests once, however many
+/// manifests list it.
+fn distinct_layout_segments(live: &LiveSet) -> Result<Vec<&MetadataSegmentRef>> {
     let mut covered = ChargedSet::new(&live.memory);
     let mut segments = Vec::new();
-    for run in live
+    for descriptor in live
         .manifests
         .iter()
         .flat_map(|manifest| &manifest.payload().runs)
+        .flat_map(|run| &run.segments)
+        .filter(|segment| segment.family == MetadataRowFamily::ContentLayouts)
     {
-        for descriptor in run
-            .segments
-            .iter()
-            .filter(|segment| segment.family == MetadataRowFamily::ContentLayouts)
-        {
-            let key = metadata_segment_object_key(descriptor);
-            if !covered.contains(&key) {
-                covered.insert(key)?;
-                segments.push(ScanDescriptor {
-                    descriptor,
-                    max_seq: run.run_seq,
-                });
-            }
+        let key = metadata_segment_object_key(descriptor);
+        if !covered.contains(&key) {
+            covered.insert(key)?;
+            segments.push(descriptor);
         }
     }
-    let mut charge = Charge::new(&live.memory);
-    charge.add(segments.capacity() * std::mem::size_of::<ScanDescriptor<'_>>())?;
-    Ok((segments, charge))
-}
-
-async fn scan_layout_extents<S: ObjectStore>(
-    sweep: &Sweep<'_, S>,
-    segments: &[ScanDescriptor<'_>],
-    body_prefix: &str,
-    mut visit: impl FnMut(&ContentLayoutRecord, &ContentExtent) -> Result<ControlFlow<()>>,
-) -> Result<ControlFlow<()>> {
-    let prefix = format!(
-        "{}{body_prefix}",
-        MetadataRowFamily::ContentLayouts.row_key_prefix()
-    );
-    let upper_bound = string_prefix_upper_bound(&prefix);
-    visit_segment_rows(
-        &sweep.namespace.store,
-        Some(sweep.namespace.segment_cache.as_ref()),
-        segments,
-        &prefix,
-        upper_bound.as_deref(),
-        |row| {
-            let row = content_layout_from_manifest_row(row)?;
-            for extent in &row.layout.extents {
-                if visit(&row, extent)?.is_break() {
-                    return Ok(ControlFlow::Break(()));
-                }
-            }
-            Ok(ControlFlow::Continue(()))
-        },
-    )
-    .await
+    Ok(segments)
 }

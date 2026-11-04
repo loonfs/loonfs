@@ -48,4 +48,3 @@ pub use self::segment_block_cache::{
 };
 
 pub(crate) use self::scan::{BlocksPerRefill, VerifiedMetadataSegments};
-pub(crate) use self::scan_load::{visit_segment_rows, ScanDescriptor};

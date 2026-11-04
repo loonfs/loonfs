@@ -1,5 +1,5 @@
 //! Shared reservations for bytes that reads keep: metadata block memos, the
-//! blocks of a scan's refill, and the collector's table of content roots.
+//! blocks of a scan's refill, and the roots that a garbage collection pass keeps.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;

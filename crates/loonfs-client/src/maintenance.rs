@@ -171,9 +171,7 @@ impl Client {
     /// Runs one garbage collection pass over a namespace with the grace
     /// window that `options` sets.
     ///
-    /// The request has no field for `options.content_shard_rows`, so the
-    /// server's pass uses its default. Retrying this request starts a
-    /// distinct attempt.
+    /// Retrying this request starts a distinct attempt.
     pub async fn gc_with_options(
         &self,
         namespace_id: &NamespaceId,

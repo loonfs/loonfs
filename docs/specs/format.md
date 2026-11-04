@@ -1548,7 +1548,7 @@ If the namespace's own current manifest is invalid or unreadable, the pass stops
 
 A pass on a fork collects its manifests, WAL objects, metadata and extension segments, pins, and temporary objects. Content objects and upload records are stored under the family root's prefix, so the pass on the family root collects them for the whole fork family, with roots gathered from every member (see [Content roots](#119-content-roots)).
 
-The pass then lists each candidate family completely, from the beginning. Unless its shared base filter would be larger than its limit (see [Content roots](#119-content-roots)), it sweeps content one ID shard at a time, where a shard is the content IDs whose first characters after `con_` are the same. The exact sets of content roots use read working memory for one shard, plus the tail and session IDs. Shared base keys use a Bloom filter, with its own 64 MiB limit. The pass stores no durable progress, run, phase, reference table, or cursor. The complete pin listing that establishes the roots is separate from the later pin sweep that determines which pins can be deleted. The session sweep determines which session records can be deleted from the complete session listing that establishes the roots.
+The pass then lists each candidate family completely, from the beginning. To sweep content, it reads the extent filter of each distinct layout segment of the rooted manifests and lists the content prefix once (see [Content roots](#119-content-roots)). The only exact sets of content roots are the chains of the WAL tails and the content IDs of the upload sessions, and they use read working memory together with the extent filters. The pass stores no durable progress, run, phase, reference table, or cursor. The complete pin listing that establishes the roots is separate from the later pin sweep that determines which pins can be deleted. The session sweep determines which session records can be deleted from the complete session listing that establishes the roots.
 
 Every age decision in a pass uses the same `now_ms`, captured when the pass starts. A later pass reads fresh roots and uses its own clock. Concurrent collectors can delete eligible objects independently, and an object that's already gone needs no more cleanup. A failed pass might have deleted some candidates already, but the next pass can safely start over.
 
@@ -1587,7 +1587,7 @@ Being unreferenced makes an object a candidate for deletion, but it doesn't make
 | Metadata or extension segment | No root lists it, and its provider age is strictly greater than 24 hours. |
 | Pin record | The owner-specific rules in [Pin cleanup](#117-pin-cleanup). |
 | Upload session | The status-specific rules in [Upload-session cleanup](#116-upload-session-cleanup). |
-| Content object under a family root's prefix | No content root in the fork family refers to it (see [Content roots](#119-content-roots)), and a provider age of at least `T`. |
+| Content object under a family root's prefix | No extent filter of a layout segment in the fork family's layout views may contain its name, no tail or session root in the fork family refers to its chain (see [Content roots](#119-content-roots)), and a provider age of at least `T`. |
 | Temporary object | A provider age of at least `T`. |
 | An eligible family root's content | See [Retirement](#95-retirement) and [Sweeping a retired owner's content](#118-sweeping-a-retired-owners-content). |
 
@@ -1709,15 +1709,15 @@ Content and source-pin cleanup are idempotent. With no new objects, a later cont
 
 ### 11.9 Content roots
 
-A fork family's content objects are stored under the family root's prefix, and any member can reference any of them, so the pass on the family root `R` protects them with roots gathered from every member. A content object under `R`'s prefix is kept while a layout extent in a member's layout view refers to that object, or a member's tail or session root refers to its chain:
+A fork family's content objects are stored under the family root's prefix, and any member can reference any of them, so the pass on the family root `R` protects them with roots gathered from every member. A content object under `R`'s prefix is kept while the extent filter of a layout segment in a member's layout view may contain the object's name, or a member's tail or session root refers to its chain:
 
 | Root | Content it protects |
 | --- | --- |
-| A member's layout view: its current manifest (active or deleted), every manifest that its pins keep, and every manifest whose immediate successor is younger than `T` (see [Reference roots](#112-reference-roots)) | The objects of every extent in every `content_layouts` row. |
+| A member's layout view: its current manifest (active or deleted), every manifest that its pins keep, and every manifest whose immediate successor is younger than `T` (see [Reference roots](#112-reference-roots)) | The objects whose names the [extent filter](#extent-filter) of any of its `content_layouts` segments may contain, which include the objects of every extent in every layout row. |
 | A member's unfolded WAL tail | Every chain that an `append_file_revision` delta refers to, and every extent in the layouts of the tail's row state. |
 | An upload session record under `R`'s prefix, whatever its status | The session's `content_id`. |
 
-Garbage collection considers every other content object under `namespaces/R/content/` for deletion once its provider age is at least `T`, subject to the shared base filter described below. It keeps an object younger than `T`, and a key that doesn't parse as a content object key. A pass on a fork sweeps no content, and the pass on a family root sweeps the fork family's content whether the family root is active or deleted (see [Retirement](#95-retirement)).
+Garbage collection considers every other content object under `namespaces/R/content/` for deletion once its provider age is at least `T`. It keeps an object younger than `T`, and a key that doesn't parse as a content object key. A pass on a fork sweeps no content, and the pass on a family root sweeps the fork family's content whether the family root is active or deleted (see [Retirement](#95-retirement)).
 
 The members of the fork family are `R` and every namespace forked from a member. The pass finds them by walking fork pins. `R`'s fork pins identify its first-generation forks, and a fork of a fork pins the fork it was created from, not `R`. So the pass lists the pins of each member in turn. Each fork pin in a listing adds the pin's target (`owner.target_namespace_id`) to the members, and the walk ends when a listing adds no new member. The pass lists each member's pins once, and that listing is also the member's pin listing for its reference roots (see [One complete pass](#111-one-complete-pass)).
 
@@ -1729,23 +1729,14 @@ To find the protected objects, the pass:
 
 1. Reads the roots of every member in the order in [One complete pass](#111-one-complete-pass). It lists the upload sessions under `R`'s prefix before it reads any member's WAL tail, and it finds each fork in the pin listing of the member it was forked from.
 2. Lists each layout segment of the members' layout views once, however many views list it. A fork's inherited segments are its source's, so the distinct segments are `R`'s and each member's own.
-3. Scans the rows of each listed segment for extents whose content ID is different from their row's (shared base extents, which can point into any shard), and inserts their object keys into a Bloom filter.
-4. Scans the rows of the listed segments in disjoint content ID ranges, one shard at a time, and protects the exact extent object keys in that shard.
+3. Reads the extent filter of each listed segment, and charges the filters to read working memory.
+4. Lists `R`'s content prefix once. It protects an object when any extent filter may contain the object's name (its key with the content prefix removed), or when a tail or session root refers to its chain.
 
-The pass reads each segment's own rows, and doesn't combine the segments of a view. A view's layout rows are the rows of its segments, so the listed segments include every row of every view. That includes a superseded layout row (a shorter layout of a chain that a longer row replaces), so an object that only a superseded row refers to stays until a compaction drops that row and no layout view lists the segment that contains it.
+The pass reads each segment's extent filter, and doesn't combine the segments of a view. A view's layout rows are the rows of its segments, so the extent filters of the listed segments cover every extent of every view. That includes a superseded layout row (a shorter layout of a chain that a longer row replaces), so an object that only a superseded row refers to stays until a compaction drops that row and no layout view lists the segment that contains it. A filter can also match the name of an object that no row of its segment refers to. The pass keeps that object, and a later pass reclaims it once no layout view lists the segment.
 
 Tail and session IDs protect every object of their chains. A direct download capability issued from a view of a superseded manifest expires before that manifest stops being a root, because `T` covers the revalidation bound plus the capability lifetime (see [Clock and operation assumptions](#114-clock-and-operation-assumptions)).
 
-The shared base filter follows these rules:
-
-- It has no false negatives. A false positive keeps an unreferenced object for this pass.
-- The pass's `now_ms` seeds the filter, so a pass with a different clock uses a different seed.
-- It uses xxh64 double hashing and seven probes.
-- Its initial expected entry count is the sum of the members' current manifests' layout row counts, with a minimum of one. Each insertion counts toward the current level's expectation, including repeated keys. When an insertion would exceed that expectation, the filter adds a level with twice the expectation and a seed derived from the pass seed and the level index. A key matches the filter when any level matches.
-- Each level is sized at ten bits per expected entry, so a filter with `n` levels has roughly `n` times the false-positive rate of one level.
-- The levels' total size is limited to 64 MiB, separate from read working memory. If the initial level or a new level would exceed the limit, garbage collection logs it and skips the fork family's content sweep. (An initial allocation over the limit skips the shared base scan, and growth over the limit stops it.) Neither case sweeps content, and the other candidate families are still swept. The pass lists the content prefix only to measure the content (see [Garbage collection runs](api.md#garbage-collection-runs)).
-
-Why does the pass scan twice? The exact keys for one shard fit in bounded memory, but a shared base extent refers to an object of another chain, which can be in any shard. The first scan collects those keys into the filter, so the second scan can protect them whichever shard they fall in.
+Why does each layout segment carry a filter of its extents instead of the pass reading the rows? The objects that a segment's extents name are fixed when the segment is written, so the writer records them once. A pass then reads one small section for each distinct layout segment, which the segment cache keeps for the next pass, and one listing of the content prefix. A scan of the rows would read every layout row of every rooted view, and exact sets of extent keys would grow with the namespace. At one million files, the extent filters take about 2.5 MB (one million names at 20 bits each).
 
 A tail revision delta can leave out its layout only when its commit includes a piece at offset 0, or a piece that continues a chain with an existing revision. In the second case, the base stays the inode's head until the append is folded, so retention keeps that revision, and layout compaction keeps the chain's row.
 
@@ -2020,6 +2011,7 @@ A run contains `run_no`, `run_seq`, `tier`, and `segments`, and its tier is `del
 | `min_row_key`, `max_row_key` | The inclusive key range. |
 | `index_block`, `filter_block` | The index and filter handles. |
 | `filter_inline?` | The exact stored filter bytes, as lowercase hexadecimal. |
+| `extent_filter_block?` | The extent filter handle, present exactly when `family` is `content_layouts` (see [Block-segment encoding](#a7-block-segment-encoding)). |
 
 An extension entry contains `version`, `runs`, and the members that the extension's specification defines, which core copies without interpreting them. The entry's `runs` lists the extension's runs in list order. A run contains `run_no`, which is allocated from the manifest's `next_run_no`, `level`, which only the extension interprets, and `segments`, the run's segment descriptors in list order. An extension segment descriptor contains:
 
@@ -2208,11 +2200,12 @@ A segment is a concatenation of independently readable sections:
 [zstd data block 0]
 [zstd data block 1]
 ...
+[uncompressed extent filter]  (content_layouts segments only)
 [uncompressed bloom filter]
 [zstd index block]
 ```
 
-There's no segment header or footer. The manifest descriptor provides the filter and index handles, and the index provides the data-block handles, so a segment can't be opened from its own bytes without the descriptor.
+There's no segment header or footer. The manifest descriptor provides the filter, extent filter, and index handles, and the index provides the data-block handles, so a segment can't be opened from its own bytes without the descriptor.
 
 A metadata segment descriptor's `encoding` is the version of this layout and of the rows its data blocks contain. Grep segments take their version from the grep entry that lists them.
 
@@ -2274,11 +2267,19 @@ A valid negative filter result means the lookup can skip the segment. A positive
 
 When `filter_inline` is present in the descriptor, it's the lowercase hexadecimal encoding of these exact stored filter bytes, and it MUST have the filter handle's stored length and checksum. Its presence doesn't remove the filter block from the segment, and a reader without an inline copy fetches the section by its handle.
 
+#### Extent filter
+
+A `content_layouts` segment has an extent filter right before its filter, and a segment of another family has none. A descriptor of a `content_layouts` segment without `extent_filter_block`, or a descriptor of another family with one, is corruption. The extent filter has the filter block's byte layout, header rules, and hashing, and its handle follows the rules of every section, so its `decoded_bytes` equals its `stored_bytes`. The manifest has no inline copy.
+
+The keys of the extent filter are the names of the content objects that the segment's rows' extents reference. A name is the extent's object key with the family root's content prefix (`namespaces/{family_root_id}/content/`) removed: `{content_id}` for a whole object and `{content_id}-{start:020}-{end:020}` for a span object (see [Object keys](#a8-object-keys)). A name doesn't depend on the family root, so a segment that a fork wrote under its own prefix and the family root's content listing agree on the names. The producer inserts the name of every extent of every row in the segment, including shared base extents. The reference producer reserves 20 bits per inserted name, with a minimum of 64 bits, and repeated names count as separate insertions for sizing.
+
+Garbage collection reads the extent filter (see [Content roots](#119-content-roots)), and lookups don't. A lookup's fetch of the filter and the index after it doesn't include the extent filter.
+
 #### Index block
 
 The decoded index is a CBOR list. Each entry contains `last_row_key` and `block`, where `block` is the corresponding data-block handle. The list is zstd-compressed as one section.
 
-Index entries are ordered by their last keys. Data-block byte ranges are contiguous and MUST NOT overflow. The filter comes right after the data region, and the index comes right after the filter, at the end of the object. The descriptor's handles MUST agree with that layout.
+Index entries are ordered by their last keys. Data-block byte ranges are contiguous and MUST NOT overflow. A `content_layouts` segment's extent filter comes right after the data region, the filter comes right after the data region or the extent filter, and the index comes right after the filter, at the end of the object. The descriptor's handles MUST agree with that layout.
 
 A range lookup uses the last keys to find candidate blocks. Readers verify each fetched section before they decode its rows, and they apply the descriptor's family and key-range constraints.
 

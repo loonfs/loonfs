@@ -63,7 +63,6 @@ const GRACE_MS: u64 = 60 * 60 * 1000;
 fn options() -> GcOptions {
     GcOptions {
         grace_window_ms: GRACE_MS,
-        ..Default::default()
     }
 }
 
@@ -191,7 +190,6 @@ async fn gc_rejects_grace_windows_below_the_derived_minimum() {
 
     let too_small = GcOptions {
         grace_window_ms: GC_MIN_GRACE_WINDOW_MS - 1,
-        ..Default::default()
     };
     let error = crate::test_support::namespace_store(&store, &namespace_id)
         .gc(None, &too_small, &context(1_000).clock())
@@ -207,18 +205,6 @@ async fn gc_rejects_grace_windows_below_the_derived_minimum() {
         error.code(),
         crate::error::ErrorCode::InvalidRequest,
         "the rejection surfaces as invalid_request"
-    );
-    let no_rows = GcOptions {
-        content_shard_rows: 0,
-        ..Default::default()
-    };
-    let error = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &no_rows, &context(1_000).clock())
-        .await
-        .expect_err("zero shard target");
-    assert_matches!(
-        error,
-        CoreError::InvalidGcOptions(message) if message == "`content_shard_rows` must be at least 1"
     );
 }
 
@@ -1504,7 +1490,9 @@ async fn content_and_temporary_keys_the_layout_does_not_recognize_are_kept() {
         ),
         (1, 1)
     );
-    assert_eq!(report.retained.unrecognized_key, 1);
+    // The pass lists the whole content prefix, so both unrecognized content
+    // keys are listed and kept, as is the nested temporary key.
+    assert_eq!(report.retained.unrecognized_key, 3);
     for key in &collected {
         assert!(store.head(key).await.expect("head").is_none(), "{key}");
     }
@@ -2704,7 +2692,6 @@ async fn provider_age_reserves_the_clock_margin_before_deletion() {
     store.reset();
     let options = GcOptions {
         grace_window_ms: GC_MIN_GRACE_WINDOW_MS,
-        ..Default::default()
     };
     let publication_bound = GC_MIN_GRACE_WINDOW_MS - GC_SAFETY_MARGIN_MS;
     let now_ms = provider_stamp + publication_bound - 1 + GC_SAFETY_MARGIN_MS;

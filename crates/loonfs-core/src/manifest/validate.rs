@@ -246,6 +246,7 @@ fn validate_extension_runs(
             }
             if let Err(message) = check_block_layout(
                 descriptor.filter_block,
+                None,
                 descriptor.index_block,
                 descriptor.filter_inline.as_deref(),
             ) {
@@ -256,21 +257,36 @@ fn validate_extension_runs(
     Ok(())
 }
 
-/// Checks that a segment's filter block directly precedes its index block
-/// within the address space, and that an inline filter has the filter
-/// block's stored length.
+/// Checks that a segment's extent filter, when it has one, directly precedes
+/// its filter block, that the filter block directly precedes its index block
+/// within the address space, and that an inline filter has the filter block's
+/// stored length.
 fn check_block_layout(
     filter_block: BlockHandle,
+    extent_filter_block: Option<BlockHandle>,
     index_block: BlockHandle,
     filter_inline: Option<&str>,
 ) -> Result<(), String> {
-    for handle in [filter_block, index_block] {
+    for handle in [extent_filter_block, Some(filter_block), Some(index_block)]
+        .into_iter()
+        .flatten()
+    {
         if handle
             .offset
             .checked_add(u64::from(handle.stored_bytes))
             .is_none()
         {
             return Err("section byte range exceeds address space".to_owned());
+        }
+    }
+    if let Some(extent_filter_block) = extent_filter_block {
+        let extent_filter_end =
+            extent_filter_block.offset + u64::from(extent_filter_block.stored_bytes);
+        if extent_filter_end != filter_block.offset {
+            return Err(format!(
+                "extent filter ends at {extent_filter_end} but the filter block starts at {}; the extent filter must directly precede the filter",
+                filter_block.offset
+            ));
         }
     }
     let filter_end = filter_block.offset + u64::from(filter_block.stored_bytes);
@@ -300,8 +316,20 @@ fn validate_segment_block_layout(
     for run in runs {
         for family_segments in ordered_manifest_segments(object_key, &run.segments)? {
             for descriptor in &family_segments.segments {
+                let has_extent_filter = descriptor.family == MetadataRowFamily::ContentLayouts;
+                if descriptor.extent_filter_block.is_some() != has_extent_filter {
+                    return Err(ManifestLoadError::SegmentDescriptorMismatch {
+                        object_key: metadata_segment_object_key(descriptor),
+                        message: format!(
+                            "a `{}` segment descriptor {} an extent filter; only a `content_layouts` segment has one",
+                            descriptor.family.as_str(),
+                            if has_extent_filter { "lacks" } else { "names" }
+                        ),
+                    });
+                }
                 check_block_layout(
                     descriptor.filter_block,
+                    descriptor.extent_filter_block,
                     descriptor.index_block,
                     descriptor.filter_inline.as_deref(),
                 )

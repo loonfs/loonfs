@@ -132,13 +132,7 @@ async fn run_maintenance_gc(
     let response = match args.grace_window_ms {
         Some(grace_window_ms) => {
             client
-                .gc_with_options(
-                    context.namespace(),
-                    &GcOptions {
-                        grace_window_ms,
-                        ..GcOptions::default()
-                    },
-                )
+                .gc_with_options(context.namespace(), &GcOptions { grace_window_ms })
                 .await
         }
         None => client.gc(context.namespace()).await,

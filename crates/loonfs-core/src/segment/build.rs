@@ -11,6 +11,7 @@ use crate::limits::MAX_PENDING_SEGMENT_BYTES;
 use crate::metadata::MetadataState;
 use crate::namespace::store::NamespaceStore;
 use crate::phase::Phase;
+use crate::storage::content_location::extent_object_name;
 use bytes::Bytes;
 use futures::{future::BoxFuture, stream::FuturesUnordered, FutureExt, TryStreamExt};
 use loonfs_objectstore::keys::metadata_segment_object_key;
@@ -149,8 +150,21 @@ fn prepare_manifest_segment(
         index_block: built.index,
         filter_block: built.filter,
         filter_inline,
+        extent_filter_block: built.extent_filter,
     };
     (descriptor, Bytes::from(built.bytes))
+}
+
+/// Returns the builder of one segment of `family`. A `content_layouts`
+/// segment has an extent filter over the names of the content objects that
+/// its rows' extents reference.
+fn segment_blocks_builder(family: MetadataRowFamily) -> SegmentBlocksBuilder {
+    let builder = SegmentBlocksBuilder::default();
+    if family == MetadataRowFamily::ContentLayouts {
+        builder.with_extent_filter()
+    } else {
+        builder
+    }
 }
 
 /// The segment puts in flight for one fold or compaction, bounded by
@@ -266,7 +280,7 @@ impl<'a> MetadataSegmentWriter<'a> {
         Self {
             family,
             namespace_id,
-            builder: SegmentBlocksBuilder::default(),
+            builder: segment_blocks_builder(family),
             last_parent_filter_key: None,
             segments: Vec::new(),
         }
@@ -279,6 +293,11 @@ impl<'a> MetadataSegmentWriter<'a> {
             if self.last_parent_filter_key.as_ref() != Some(&parent_filter_key) {
                 self.builder.push_filter_key(&parent_filter_key);
                 self.last_parent_filter_key = Some(parent_filter_key);
+            }
+        }
+        if let MetadataRow::ContentLayout(record) = &row {
+            for extent in &record.layout.extents {
+                self.builder.push_extent_name(&extent_object_name(extent));
             }
         }
         let encoded = self
@@ -323,7 +342,7 @@ impl<'a> MetadataSegmentWriter<'a> {
         // The next segment has a filter of its own, which needs the parent
         // filter key of its first row.
         self.last_parent_filter_key = None;
-        let built = std::mem::take(&mut self.builder)
+        let built = std::mem::replace(&mut self.builder, segment_blocks_builder(self.family))
             .build()
             .expect("a metadata segment should encode");
         let (descriptor, bytes) = prepare_manifest_segment(self.namespace_id, self.family, built);
@@ -470,6 +489,56 @@ mod tests {
         let mut puts = MetadataSegmentPuts::new(&store, cache, writer);
         puts.put(descriptor, bytes.clone()).await.expect("put");
         puts.finish().await.expect("finish the puts");
+    }
+
+    /// Checks that a layouts segment that a fold or a compaction writes has an
+    /// extent filter over its extents' names, and that the writer inserts the
+    /// filter into the segment cache.
+    #[tokio::test]
+    async fn a_written_layouts_segment_caches_an_extent_filter_of_its_extent_names() {
+        use loonfs_types::{ContentExtent, ContentId, ContentLayout, ExtentObject};
+        let namespace_id = NamespaceId::parse("written-extents").expect("namespace id");
+        let content_id = ContentId::generate();
+        let extent = ContentExtent {
+            content_id: content_id.clone(),
+            object: ExtentObject::Span { start: 0, end: 4 },
+            offset: 0,
+            length: 4,
+        };
+        let row = MetadataRow::ContentLayout(ContentLayoutRecord {
+            content_id: content_id.clone(),
+            committed_seq: ChangeSeq(1),
+            size_bytes: 4,
+            layout: ContentLayout {
+                creator_namespace_id: namespace_id.clone(),
+                extents: vec![extent.clone()],
+            },
+        });
+        for writer in [SegmentWriter::Fold, SegmentWriter::Compaction] {
+            let directory = tempdir().expect("tempdir");
+            let store = LocalFsStore::new(directory.path()).expect("store");
+            let cache = MetadataSegmentCache::unshared(usize::MAX);
+            let mut puts = MetadataSegmentPuts::new(&store, &cache, writer);
+            let mut segments =
+                MetadataSegmentWriter::new(MetadataRowFamily::ContentLayouts, &namespace_id);
+            segments.push(row.clone(), &mut |_| {});
+            let descriptor = segments.finish(&mut puts).await.expect("segment").remove(0);
+            puts.finish().await.expect("finish the puts");
+            let handle = descriptor.extent_filter_block.expect("an extent filter");
+            let filter = cache
+                .get(&segment_block_cache_key(
+                    &descriptor,
+                    SegmentBlockKind::ExtentFilter,
+                    handle.offset,
+                ))
+                .expect("a cached extent filter")
+                .filter()
+                .expect("a filter block");
+            assert!(
+                filter.may_contain(&extent_object_name(&extent)),
+                "{writer:?}"
+            );
+        }
     }
 
     /// Checks that a fold inserts every block of a segment larger than a

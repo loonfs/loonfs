@@ -288,7 +288,6 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                             None,
                             &GcOptions {
                                 grace_window_ms: GC_DEFAULT_GRACE_WINDOW_MS,
-                                ..Default::default()
                             },
                             &WriterAt {
                                 writer_id: loonfs_types::WriterId::parse("retained-views-gc")
