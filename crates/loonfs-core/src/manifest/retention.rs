@@ -232,11 +232,13 @@ async fn last_commit_at_or_before<S: ObjectStore + ?Sized>(
 ) -> Result<ChangeSeq> {
     let basis = metadata_basis_from_manifest(store, Some(segment_cache), current);
     let mut last = current.retention_floor_seq();
-    // One commit per scan, as the change feed reads them: a commit row can
-    // be large, and the memo keeps the block for the next call within the
-    // caller's read budget.
+    // One commit per scan: a commit row can be large, and the memo keeps the
+    // block for the next call within the caller's read budget.
     while last < through {
-        let Some(commit) = commits_after_page(&basis.segments, last, 1).await?.pop() else {
+        let Some(commit) = commits_after_page(&basis.segments, last, 1, usize::MAX)
+            .await?
+            .pop()
+        else {
             break;
         };
         if commit.committed_at_ms > cutoff_at_ms {

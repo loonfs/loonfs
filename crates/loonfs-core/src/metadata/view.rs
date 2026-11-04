@@ -6,6 +6,7 @@ use super::manifest_index;
 use super::view_session::{LeafRevisionPreload, MetadataViewSession};
 use super::visibility::{self, MetadataVisibilityReads};
 use crate::error::{CoreError, Result};
+use crate::heap_bytes::HeapBytes;
 use crate::metadata::{
     AccessRevisionRecord, CommitReceiptRecord, ContentLayoutRecord, DirentryBindingRecord,
     InodeRecord, MetadataState, ResolvedVisiblePath, SubtreeTombstoneRecord,
@@ -414,25 +415,36 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         manifest_index::commit_at_seq(self.manifest_segments(), seq).await
     }
 
+    /// Up to `limit` commits after `after_seq`, from the manifest rows and
+    /// then the tail, ending with the commit that takes the records' heap
+    /// bytes to `max_bytes` or past.
     pub(crate) async fn commits_after(
         &self,
         after_seq: ChangeSeq,
         limit: usize,
+        max_bytes: usize,
     ) -> Result<Vec<WalCommitPayload>> {
         if limit == 0 {
             return Ok(Vec::new());
         }
         let visible_seq = self.visible_seq();
-        let mut page: Vec<WalCommitPayload> =
-            manifest_index::commits_after_page(self.manifest_segments(), after_seq, limit)
-                .await?
-                .into_iter()
-                .filter(|record| record.committed_seq <= visible_seq)
-                .collect();
-        let remaining = limit.saturating_sub(page.len());
-        if remaining == 0 {
+        let mut page: Vec<WalCommitPayload> = manifest_index::commits_after_page(
+            self.manifest_segments(),
+            after_seq,
+            limit,
+            max_bytes,
+        )
+        .await?
+        .into_iter()
+        .filter(|record| record.committed_seq <= visible_seq)
+        .collect();
+        let mut page_bytes: usize = page.iter().map(HeapBytes::heap_bytes).sum();
+        // A manifest page that either bound ended has rows after it, and
+        // every one of them comes before the tail.
+        if page.len() == limit || page_bytes >= max_bytes {
             return Ok(page);
         }
+        let remaining = limit - page.len();
         let mut tail: Vec<&WalCommitPayload> = self
             .row_states()
             .flat_map(MetadataState::commits)
@@ -443,7 +455,13 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         tail.sort_by_key(|record| record.committed_seq);
         // Every manifest row is at or below the basis head and every tail or overlay row is
         // above it, so no sort across the two sides is needed.
-        page.extend(tail.into_iter().take(remaining).cloned());
+        for record in tail.into_iter().take(remaining) {
+            if page_bytes >= max_bytes {
+                break;
+            }
+            page_bytes = page_bytes.saturating_add(record.heap_bytes());
+            page.push(record.clone());
+        }
         Ok(page)
     }
 }

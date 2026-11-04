@@ -47,4 +47,4 @@ pub use self::segment_block_cache::{
     LoadedSegmentBlock, MemorySegmentBlocks, SegmentBlockCache, SegmentBlockLoad,
 };
 
-pub(crate) use self::scan::{BlocksPerRefill, VerifiedMetadataSegments};
+pub(crate) use self::scan::{BlocksPerRefill, PageBounds, VerifiedMetadataSegments};

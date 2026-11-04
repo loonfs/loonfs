@@ -4,7 +4,7 @@
 
 use crate::error::{CoreError, HistoryPosition, Result};
 use crate::heap_bytes::HeapBytes;
-use crate::limits::{CHANGE_FEED_PAGE_BYTES, COMMIT_SCAN_BATCH_COMMITS};
+use crate::limits::CHANGE_FEED_PAGE_BYTES;
 use crate::metadata::MetadataView;
 use crate::path::read::LoadedMetadataView;
 use loonfs_objectstore::ObjectStore;
@@ -148,12 +148,13 @@ pub(crate) struct ScannedCommit {
 /// [`CommitSplitting::AtPageBudget`], is returned across pages through
 /// [`Self::admit_part`], and the next page resumes it at an event index.
 ///
-/// The scan fetches up to [`COMMIT_SCAN_BATCH_COMMITS`] commits in one read
-/// of the view and returns them one at a time. Every commit that the scan
-/// returned before the page ended was admitted, so `through_seq` is the last
-/// commit taken from the batch, and the next read continues after it. A
-/// commit that the caller doesn't admit ends the page, and the scan drops the
-/// commits after it.
+/// The scan fetches the commits left on the page in one read of the view,
+/// within the page's remaining byte budget measured on the records and one
+/// commit past the budget, and returns them one at a time. Every commit that
+/// the scan returned before the page ended was admitted, so `through_seq` is
+/// the last commit taken from the batch, and the next read continues after
+/// it. A commit that the caller doesn't admit ends the page, and the scan
+/// drops the commits after it.
 pub(crate) struct CommitScan<'a, 'store, S: ObjectStore + ?Sized> {
     view: MetadataView<'a, 'store, S>,
     limit: EffectiveLimit,
@@ -226,10 +227,10 @@ impl<'a, 'store, S: ObjectStore + ?Sized> CommitScan<'a, 'store, S> {
             return Ok(None);
         }
         if self.fetched.is_empty() {
-            let batch = left.min(COMMIT_SCAN_BATCH_COMMITS);
+            let budget = self.max_page_bytes.saturating_sub(self.page_bytes);
             self.fetched = self
                 .view
-                .commits_after(self.through_seq, batch)
+                .commits_after(self.through_seq, left, budget)
                 .await?
                 .into();
         }
@@ -828,6 +829,7 @@ mod tests {
             .expect("commit row page");
         assert_eq!(rows.len(), 2);
         assert_eq!(basis.segments.peak_page_rows(), 2);
+        let row_bytes = rows[0].1.heap_bytes();
         assert_eq!(
             rows.into_iter()
                 .map(|(row_key, _)| row_key)
@@ -836,6 +838,127 @@ mod tests {
                 loonfs_types::format::manifest::lookup_keys::commit_row_key(ChangeSeq(seq))
             })
         );
+        // A byte bound ends the page with the row that reaches the bytes,
+        // and the page never holds a row past that one.
+        for (max_bytes, page_rows) in [(1, 1), (row_bytes, 1), (row_bytes + 1, 2)] {
+            let basis = crate::manifest::metadata_basis_from_manifest(&store, None, &manifest);
+            let rows = basis
+                .segments
+                .scan_range_bounded(
+                    loonfs_types::format::manifest::MetadataRowFamily::Commits,
+                    &loonfs_types::format::manifest::lookup_keys::commit_row_key(ChangeSeq(2)),
+                    None,
+                    crate::segment::PageBounds {
+                        max_rows: 1000,
+                        max_bytes,
+                    },
+                    None,
+                    crate::segment::BlocksPerRefill::KeyRange,
+                )
+                .await
+                .expect("commit row page");
+            assert_eq!(rows.len(), page_rows);
+            assert_eq!(basis.segments.peak_page_rows(), page_rows);
+            assert!(rows.iter().map(|(_, row)| row.heap_bytes()).sum::<usize>() >= max_bytes);
+            assert_eq!(
+                rows.into_iter()
+                    .map(|(row_key, _)| row_key)
+                    .collect::<Vec<_>>(),
+                (2..2 + page_rows as u64)
+                    .map(|seq| {
+                        loonfs_types::format::manifest::lookup_keys::commit_row_key(ChangeSeq(seq))
+                    })
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_page_fetches_commits_ahead_within_its_byte_budget() {
+        use crate::heap_bytes::HeapBytes;
+        use crate::publish::FilesystemOperation;
+        use loonfs_types::{AbsolutePath, CommitId};
+
+        let directory = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(directory.path()).expect("store");
+        let namespace_id = namespace_id();
+        let context = WriterAt {
+            writer_id: loonfs_types::WriterId::parse("writer").expect("writer id"),
+            now_ms: 1,
+        };
+        let fixture = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context);
+        fixture.create().await.expect("bootstrap");
+        let file = fixture
+            .write_file_bytes("/file", b"bytes", None)
+            .await
+            .expect("write the file");
+        // Six commits of about 60 KiB of attributes each, half of them folded.
+        let mut seqs = Vec::new();
+        for number in 1..=6 {
+            let commit = fixture
+                .submit_operation(
+                    CommitId::parse(format!("attributes-{number}")).expect("commit id"),
+                    FilesystemOperation::UpdateAttributes {
+                        path: AbsolutePath::parse("/file").expect("path"),
+                        set: (0..15)
+                            .map(|index| {
+                                (
+                                    AttributeKey::parse(format!("key-{index}")).expect("key"),
+                                    AttributeValue::parse(number.to_string().repeat(4_000))
+                                        .expect("value"),
+                                )
+                            })
+                            .collect(),
+                        remove: Vec::new(),
+                        expected_inode_id: None,
+                        expected_attributes_revision_no: None,
+                    },
+                    Vec::new(),
+                )
+                .await
+                .expect("update the attributes");
+            seqs.push(commit.committed_seq);
+            if number == 3 {
+                crate::test_support::namespace_store(&store, &namespace_id)
+                    .fold_wal()
+                    .await
+                    .expect("fold commits");
+            }
+        }
+
+        let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+        let view = namespace
+            .load_current_metadata_view()
+            .await
+            .expect("read view");
+        let record_bytes = view
+            .metadata_view()
+            .commit_at_seq(seqs[0])
+            .await
+            .expect("read the first commit")
+            .expect("the first commit")
+            .heap_bytes();
+        let max_page_bytes = 2 * record_bytes;
+        let mut scan = super::CommitScan::new(
+            view.metadata_view(),
+            loonfs_types::ChangeFeedPosition::after(file.committed_seq),
+            EffectiveLimit::new(NonZeroU32::new(1000).expect("limit")),
+            loonfs_types::options::CommitSplitting::Whole,
+            max_page_bytes,
+        );
+        let mut returned = Vec::new();
+        let mut fetched_ahead = false;
+        while let Some(commit) = scan.next().await.expect("scan") {
+            // What one read fetched ahead of this commit stays within the
+            // page's budget, which the events keep whole here.
+            let ahead: usize = scan.fetched.iter().map(HeapBytes::heap_bytes).sum();
+            assert!(ahead <= max_page_bytes, "{ahead} bytes fetched ahead");
+            fetched_ahead |= !scan.fetched.is_empty();
+            assert!(scan.admit(commit.record.committed_seq, 0));
+            returned.push(commit.record.committed_seq);
+        }
+        assert_eq!(returned, seqs);
+        assert!(fetched_ahead);
     }
 
     #[test]
