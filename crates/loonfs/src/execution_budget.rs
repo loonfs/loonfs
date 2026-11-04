@@ -265,8 +265,8 @@ impl ExecutionBudgetBuilder {
     /// that arrives while one is admitted fails at once with
     /// `commit_queue_full`. A merge whose estimate exceeds the allowance
     /// fails with `merge_too_large`. Defaults to
-    /// [`DEFAULT_MAX_MERGE_BYTES`]; zero turns merges off, so the budget
-    /// admits no merge.
+    /// [`DEFAULT_MAX_MERGE_BYTES`]; zero turns merges off, so a merge, a
+    /// rebase, and the next-range query return `not_supported`.
     pub fn max_merge_bytes(mut self, bytes: usize) -> Self {
         self.max_merge_bytes = bytes;
         self

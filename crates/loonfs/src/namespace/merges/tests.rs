@@ -1,17 +1,18 @@
 //! Merges that race another writer of the namespace they merge into, merges
-//! that keep the merge slot, and merges from a source that isn't a live fork.
+//! that keep the merge slot, merges from a source that isn't a live fork,
+//! and merges on a runtime that has merges turned off.
 
 use super::{missing_fork, MergeOutcome, PlannedCommit, PlannedMerge};
 use crate::publisher::MergeSlot;
 use crate::{
-    ActorId, Commit, CommitId, CoreError, DeleteOptions, ErrorCode, LoonFs, MergeForkOptions,
-    Namespace, NamespaceSessionStatus, Result, Writable,
+    ActorId, Commit, CommitId, CoreError, DeleteOptions, ErrorCode, ExecutionBudget, LoonFs,
+    MergeForkOptions, Namespace, NamespaceSessionStatus, Result, Writable,
 };
 use futures::future::BoxFuture;
 use loonfs_core::MergeRequest;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{namespace_id, writer_id};
-use loonfs_types::{DeleteDirectoryBehavior, ManifestNo, MergeConflictKind};
+use loonfs_types::{DeleteDirectoryBehavior, ManifestNo, MergeConflictKind, FEATURE_MERGES};
 use std::assert_matches;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -134,6 +135,49 @@ impl Family {
             .await?;
         Ok(commit)
     }
+}
+
+/// Checks that a runtime whose merge allowance is zero answers a merge, a
+/// rebase, and the next-range query with `not_supported` for
+/// `filesystem.merges`, and that the rebase creates no new fork.
+#[tokio::test]
+async fn a_zero_allowance_answers_every_merge_route_with_not_supported() {
+    let family = family().await;
+    let store = Arc::new(LocalFsStore::new(family._directory.path()).expect("store"));
+    let runtime = LoonFs::builder_with_store(store)
+        .writer_id(writer_id("merges-off"))
+        .execution_budget(ExecutionBudget::builder().max_merge_bytes(0).build())
+        .build()
+        .await
+        .expect("runtime");
+    let main = runtime.open_namespace(family.main.id()).expect("open main");
+    let new_fork_id = namespace_id("main-rebase");
+    let refused = [
+        main.merge_fork(family.fork.id(), &actor())
+            .await
+            .map(drop)
+            .expect_err("a merge"),
+        runtime
+            .fork_namespace_for_rebase(family.main.id(), family.fork.id(), &new_fork_id, &actor())
+            .await
+            .map(drop)
+            .expect_err("a rebase"),
+        main.next_merge_range(family.fork.id())
+            .await
+            .map(drop)
+            .expect_err("the next-range query"),
+    ];
+    for error in refused {
+        let response = error.to_error_response();
+        assert_eq!(error.code(), ErrorCode::NotSupported, "{error:?}");
+        assert_eq!(response.feature.as_deref(), Some(FEATURE_MERGES));
+    }
+    let missing = runtime
+        .namespace(&new_fork_id)
+        .metadata()
+        .await
+        .expect_err("no new fork");
+    assert_eq!(missing.code(), ErrorCode::NamespaceNotFound);
 }
 
 /// Checks that a merge planned before another merge of the same fork

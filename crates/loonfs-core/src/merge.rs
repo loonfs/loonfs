@@ -33,6 +33,7 @@ use loonfs_types::{
     NamespaceId,
 };
 pub use replay::ReplayPlan;
+pub use size::check_planned_bytes;
 
 /// A request to merge a fork's commits into a namespace.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,12 +100,6 @@ pub struct MergePlan {
 }
 
 impl MergePlan {
-    /// Returns the merge's commit, which its caller checks against the
-    /// publisher's merge allowance before it checks the conflicts.
-    pub fn candidate(&self) -> &CommitCandidate {
-        &self.candidate
-    }
-
     /// Returns the merge's record, with the range of the fork's commits that
     /// the merge applies.
     pub fn record(&self) -> &MergeRecord {

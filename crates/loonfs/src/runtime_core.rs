@@ -17,7 +17,7 @@ use loonfs_core::{
 use loonfs_objectstore::ConfiguredObjectStoreKind;
 use loonfs_types::{
     u64_from_usize, CapabilityDocument, MonotonicTimer, Subject, WriterId, API_GROUP_FILESYSTEM_V0,
-    API_GROUP_MAINTENANCE_V0, FEATURE_CHANGES_SPLIT_COMMITS,
+    API_GROUP_MAINTENANCE_V0, FEATURE_CHANGES_SPLIT_COMMITS, FEATURE_MERGES,
     LIMIT_ACCESS_MAX_PRINCIPALS_PER_REQUEST, LIMIT_COMMIT_MAX_CONTENT_TOKENS,
     LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS, LIMIT_COMMIT_MAX_MESSAGE_BYTES,
     LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_COMMIT_MAX_PRECONDITIONS, LIMIT_GC_MIN_GRACE_WINDOW_MS,
@@ -132,6 +132,20 @@ impl RuntimeCore {
     /// Returns the execution budget that this core's work draws from.
     pub(crate) fn execution_budget(&self) -> &ExecutionBudget {
         &self.inner.execution_budget
+    }
+
+    /// Returns `not_supported` for `filesystem.merges` when the execution
+    /// budget's merge allowance is zero, which turns merges off. A merge, a
+    /// rebase, and the next-range query check this before they read a
+    /// namespace.
+    pub(crate) fn ensure_merges_enabled(&self) -> crate::Result<()> {
+        if self.inner.execution_budget.max_merge_bytes() == 0 {
+            return Err(crate::Error::NotSupported {
+                feature: FEATURE_MERGES,
+                message: "merges are disabled".to_owned(),
+            });
+        }
+        Ok(())
     }
 
     /// Waits for a read permit from the execution budget. Every public read

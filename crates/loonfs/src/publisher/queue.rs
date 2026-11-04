@@ -195,15 +195,6 @@ impl NamespacePublisher {
             .acquire_candidate(&self.namespace_id, candidate)
     }
 
-    /// Refuses a merge that wouldn't fit one WAL object or the merge
-    /// allowance, with `merge_too_large`, and charges nothing.
-    pub(crate) fn validate_merge(&self, candidate: &CommitCandidate) -> Result<()> {
-        Ok(self
-            .context
-            .admission
-            .validate_merge(candidate, candidate.wal_record_bytes_upper_bound())?)
-    }
-
     /// Takes the merge slot for a merge, before the merge is planned, so
     /// that the merge allowance covers the merge's planning and its
     /// publication. A retry of a merge that's still in flight gets

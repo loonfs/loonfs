@@ -24,7 +24,7 @@ const SPLIT_BISECTIONS: usize = 3;
 /// Returns `merge_too_large` when a merge whose planned WAL bytes are
 /// `planned_bytes` doesn't fit one WAL object, or when its estimated peak
 /// doesn't fit `allowance`.
-pub(super) fn check_planned_bytes(planned_bytes: usize, allowance: MergeAllowance) -> Result<()> {
+pub fn check_planned_bytes(planned_bytes: usize, allowance: MergeAllowance) -> Result<()> {
     let document_bytes = planned_bytes.saturating_add(WAL_OBJECT_OVERHEAD_BYTES);
     if document_bytes > MAX_WAL_OBJECT_BYTES {
         return Err(CoreError::MergeTooLarge {
@@ -37,12 +37,41 @@ pub(super) fn check_planned_bytes(planned_bytes: usize, allowance: MergeAllowanc
     allowance.check(planned_bytes)
 }
 
+/// Returns `result` with the split hint added to its refusal for one WAL
+/// object or `allowance`, when the refusal has none.
+///
+/// `result` is a size check of a merge of the fork's commits after the
+/// first sequence of `range` through the second (see [`split_hint`]).
+pub(super) async fn with_split_hint<T, S: ObjectStore + ?Sized>(
+    result: Result<T>,
+    fork_view: &LoadedMetadataView<'_, S>,
+    (after_seq, through_seq): (ChangeSeq, ChangeSeq),
+    fields_bytes: usize,
+    allowance: MergeAllowance,
+) -> Result<T> {
+    match result {
+        Err(CoreError::MergeTooLarge {
+            bound: bound @ (MergeBound::WalObject | MergeBound::MergeAllowance),
+            estimated_bytes,
+            max_bytes,
+            split_at_seq: None,
+        }) => Err(CoreError::MergeTooLarge {
+            bound,
+            estimated_bytes,
+            max_bytes,
+            split_at_seq: split_hint(fork_view, after_seq, through_seq, fields_bytes, allowance)
+                .await?,
+        }),
+        result => result,
+    }
+}
+
 /// Returns the split hint of a merge of the fork's commits after `after_seq`
 /// through `through_seq` that doesn't fit one WAL object or `allowance`: the
 /// largest fork sequence that a probe showed a merge through it to fit (see
 /// [`net_change_fits`]), or `None` when no probe fit. `fields_bytes` bounds
 /// the merge commit's fields other than its operations.
-pub(super) async fn split_hint<S: ObjectStore + ?Sized>(
+async fn split_hint<S: ObjectStore + ?Sized>(
     fork_view: &LoadedMetadataView<'_, S>,
     after_seq: ChangeSeq,
     through_seq: ChangeSeq,

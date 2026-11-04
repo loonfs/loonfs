@@ -2776,7 +2776,7 @@ Errors beyond those that any commit returns:
 | `inode_not_found` | 404 | This namespace changed between the plan and the commit four times in a row, and the last time a deletion hid an inode that the merge changes, or the directory that an inode goes into. Retry the merge. |
 | `commit_queue_full` | 503 | Another merge, into any namespace, has the merge slot while the server plans or commits it, and the server admits one merge at a time. That merge can be an earlier request with the same `commit_id`. Retry later. |
 | `invalid_request` | 400 | The fork doesn't exist, was deleted, or wasn't made from this namespace (`param` is `/source_namespace_id`). Or `through_seq` isn't above the range's start and at or below the fork's head, or the planner couldn't order the merge's operations (`param` is `/through_seq`). |
-| `not_supported` | 501 | The deployment has merges disabled (in the reference server, `max_merge_bytes` is zero). The error has `filesystem.merges` in its `feature` field, and the server reads and writes nothing. |
+| `not_supported` | 501 | The deployment has merges disabled (in the reference server, `max_merge_bytes` is zero). The error has `filesystem.merges` in its `feature` field, and the server writes nothing. |
 
 ### 6.15 `GET /merges`
 

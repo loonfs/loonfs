@@ -133,12 +133,6 @@ impl NamespaceSession {
         self.publisher.submit_candidate(candidate).await
     }
 
-    /// Refuses a merge that wouldn't fit one WAL object or the merge
-    /// allowance, with `merge_too_large`, and charges nothing.
-    pub(crate) fn validate_merge(&self, candidate: &CommitCandidate) -> Result<()> {
-        self.publisher.validate_merge(candidate)
-    }
-
     /// Takes the merge slot for a merge, before the merge is planned.
     /// Another merge, into any namespace that shares the execution budget,
     /// including a retry of this merge, gets `commit_queue_full` until the
