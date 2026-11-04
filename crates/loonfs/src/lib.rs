@@ -134,8 +134,8 @@ pub mod engine {
         READ_REVALIDATION_BOUND_MS, UNREFERENCED_SEGMENT_GRACE_WINDOW_MS,
     };
     pub use loonfs_core::{
-        next_run_no_after, refill_iterators, select_next_iterator, ExtensionBasis,
-        ExtensionPublication, SegmentBlockLoader, SegmentRowIterator,
+        next_run_no_after, refill_iterators, select_next_iterator, BudgetPermit, ExtensionBasis,
+        ExtensionPublication, PermitPool, PoolCounts, SegmentBlockLoader, SegmentRowIterator,
     };
 }
 

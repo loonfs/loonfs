@@ -6,7 +6,8 @@ mod prometheus;
 use self::caches::{render_grep_block_cache, render_metadata_cache};
 use self::prometheus::{render_snapshot, write_counter, write_gauge};
 use super::AppState;
-use loonfs_grep::{GrepPassBudgetStats, GrepPublicationStats};
+use loonfs::engine::PoolCounts;
+use loonfs_grep::GrepPublicationStats;
 use loonfs_http::RequestLimit;
 
 /// Renders the recorder's snapshot, then the values that a scrape reads from
@@ -64,12 +65,12 @@ fn render_grep_publications(rendered: &mut String, stats: GrepPublicationStats) 
 /// process RSS, and available transfer slots.
 fn render_scrape_gauges(
     rendered: &mut String,
-    grep_steps: Option<GrepPassBudgetStats>,
+    grep_steps: Option<PoolCounts>,
     upload_permits: usize,
     download_permits: usize,
     in_flight_requests: usize,
 ) {
-    if let Some(GrepPassBudgetStats { running, waiting }) = grep_steps {
+    if let Some(PoolCounts { running, waiting }) = grep_steps {
         for (name, description, value) in [
             (
                 "loonfs_grep_steps_running",
