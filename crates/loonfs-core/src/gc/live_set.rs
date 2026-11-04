@@ -9,7 +9,7 @@ use super::families::CandidateFamily;
 use super::fork_family::{FamilyWalkReport, MemberState};
 use super::pins::{GraceAge, PinSweep};
 use super::session_cache::{CompletedUploadSession, CompletedUploadSessionCache};
-use super::uploads::ListedUploadSession;
+use super::uploads::{ListedUpload, ListedUploadSession};
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::heap_bytes::manifest_heap_bytes;
 use crate::in_flight::STORE_READS_IN_FLIGHT;
@@ -122,6 +122,10 @@ pub(super) struct LiveSet {
     /// sessions, keyed by upload ID. An outcome record can't change, so the
     /// session sweep uses these facts instead of reading the records again.
     pub(super) completed_sessions: ChargedMap<UploadId, CompletedUploadSession>,
+    /// The entries of the uploads prefix that the pass listed to root the
+    /// sessions' content, which the session sweep decides from instead of
+    /// listing the prefix again. Only the pass on a family root lists them.
+    pub(super) uploads: ChargedQueue<ListedUpload>,
     /// The records of the namespace's own pins that the pass read while it
     /// loaded its roots, keyed by object key, which the pin sweep uses
     /// instead of reading each record again. The pass on a family root reads
@@ -155,10 +159,11 @@ impl LiveSet {
     /// the discovery hint. On a family root, it then loads the same roots of
     /// every other member of the fork family. Reads go through the
     /// namespace's segment cache, with up to `STORE_READS_IN_FLIGHT` root
-    /// manifests loading at once, and the object keys, content IDs, completed
-    /// sessions, manifests, and fork family members that the pass keeps are
-    /// charged to its read working memory as they arrive. The pass doesn't
-    /// read the record of a completed session that `session_cache` has.
+    /// manifests loading at once, and the object keys, content IDs, listed
+    /// upload records, completed sessions, manifests, and fork family members
+    /// that the pass keeps are charged to its read working memory as they
+    /// arrive. The pass doesn't read the record of a completed session that
+    /// `session_cache` has.
     pub(super) async fn load<S: ObjectStore>(
         namespace: &NamespaceStore<S>,
         session_cache: Option<&CompletedUploadSessionCache>,
@@ -184,16 +189,21 @@ impl LiveSet {
         );
         let mut content_ids = ChargedSet::new(&memory);
         let mut completed_sessions = ChargedMap::new(&memory);
+        let mut uploads = ChargedQueue::new(&memory);
         if roots == Roots::CollectedFamilyRoot {
             namespace
-                .load_upload_sessions(session_cache, |listed| match listed {
-                    ListedUploadSession::Completed { upload_id, session } => {
-                        content_ids.insert(session.content_id.clone())?;
-                        completed_sessions.insert(upload_id, session)
+                .load_upload_sessions(session_cache, |listed, session| {
+                    match session {
+                        Some(ListedUploadSession::Completed { upload_id, session }) => {
+                            content_ids.insert(session.content_id.clone())?;
+                            completed_sessions.insert(upload_id, session)?;
+                        }
+                        Some(ListedUploadSession::Incomplete { content_id }) => {
+                            content_ids.insert(content_id)?;
+                        }
+                        None => {}
                     }
-                    ListedUploadSession::Incomplete { content_id } => {
-                        content_ids.insert(content_id)
-                    }
+                    uploads.push_back(listed)
                 })
                 .await?;
         }
@@ -208,6 +218,7 @@ impl LiveSet {
             objects: ChargedSet::new(&memory),
             content_ids,
             completed_sessions,
+            uploads,
             pin_records: ChargedMap::new(&memory),
             content_layout_rows: 0,
             family: FamilyWalkReport::own_roots(),

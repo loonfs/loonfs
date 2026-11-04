@@ -1133,13 +1133,13 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
     // as roots, as a live namespace's pass does.
     let heads = 2;
     for (namespace, metadata_requests, metadata_error, gc_requests, gc_error) in [
-        (&idle, [4, heads, 0, 0], None, [4, heads, 11, 0], None),
-        (&claimed, [4, heads, 0, 0], None, [4, heads, 11, 0], None),
+        (&idle, [4, heads, 0, 0], None, [4, heads, 10, 0], None),
+        (&claimed, [4, heads, 0, 0], None, [4, heads, 10, 0], None),
         (
             &retired,
             [2, 0, 0, 0],
             Some(crate::ErrorCode::NamespaceDeleted),
-            [2, 0, 11, 0],
+            [2, 0, 10, 0],
             None,
         ),
         (

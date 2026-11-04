@@ -654,8 +654,8 @@ async fn a_session_completed_in_a_fork_installed_during_the_pass_keeps_its_grace
     let inner = LocalFsStore::new(directory.path()).expect("store");
     let root = family(&inner, &["root"]).await.remove(0);
     let fork_id = NamespaceId::parse("fork").expect("namespace");
-    // The pass lists the temporary objects after its walk and before it
-    // sweeps the upload sessions.
+    // The pass lists the temporary objects after it lists the upload sessions
+    // and walks the fork family.
     let store = BlockingStore::new(
         inner,
         KeyPredicate::exact(temporary_prefix(&root)),
@@ -670,8 +670,14 @@ async fn a_session_completed_in_a_fork_installed_during_the_pass_keeps_its_grace
         store.release();
         upload_id
     });
-    // The walk didn't find the fork, and the fork can still commit the
-    // session's content, so the session keeps its completed-content grace.
+    // The pass listed the sessions before the session existed, so it leaves
+    // the session to the next pass.
+    assert_eq!(report.deleted.upload_sessions, 0);
+    assert_eq!(report.retained.upload_session_window, 0);
+    assert!(exists(store.inner(), &upload_session(&root, &upload_id)).await);
+    // The fork can still commit the session's content, so the next pass keeps
+    // the session for its completed-content grace.
+    let report = collect(store.inner(), &root, 1_000).await;
     assert_eq!(report.deleted.upload_sessions, 0);
     assert_eq!(report.retained.upload_session_window, 1);
     assert!(exists(store.inner(), &upload_session(&root, &upload_id)).await);
