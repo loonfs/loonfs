@@ -110,58 +110,23 @@ impl GrepService {
         // build's capture and a reorganization's pruning floor.
         let head = namespace_reads.read_view().await?;
         let snapshot = active_index(head.grep_entry().await?)?;
-        let head_seq = head.head_seq();
         let fingerprint = request.fingerprint();
-        let (reads, resume, cursor_cut_seq, later) = match cursor {
-            Some(cursor) => {
-                let cursor: GrepPageCursor = decode_cursor(cursor)
-                    .map_err(|error| CoreError::InvalidCursor(error.to_string()))?;
-                if cursor.fingerprint != fingerprint {
-                    return Err(CoreError::InvalidCursor(
-                        "the cursor was issued by a different request; replaying it under new criteria would silently skip results"
-                            .to_owned(),
-                    )
-                    .into());
-                }
-                if cursor.head_seq > head_seq {
-                    return Err(CoreError::InvalidCursor(format!(
-                        "the cursor was minted at seq `{}`, ahead of the serving head `{head_seq}`",
-                        cursor.head_seq
-                    ))
-                    .into());
-                }
-                if cursor.index_captured_seq != snapshot.captured_seq {
-                    return Err(CoreError::InvalidCursor(
-                        "the cursor was issued by an earlier build of the grep index; start the search again"
-                            .to_owned(),
-                    )
-                    .into());
-                }
-                // Every page after the first reads at the first page's
-                // sequence, so a file whose content changed between pages
-                // keeps its place in content order.
-                let at_cursor = head.at_seq(cursor.head_seq).await?;
-                let later = LaterPage {
-                    members: namespace_reads.membership_view(cursor.head_seq).await?,
-                    head,
-                };
-                (
-                    at_cursor,
-                    Some(GrepResume::from_cursor(&cursor)),
-                    Some(cursor.cut_seq),
-                    Some(later),
-                )
-            }
-            None => (head, None, None, None),
-        };
-        let read_seq = reads.head_seq();
+        let page = page_reads(
+            cursor,
+            head,
+            namespace_reads,
+            fingerprint,
+            snapshot.captured_seq,
+        )
+        .await?;
+        let read_seq = page.reads.head_seq();
         let CompiledPattern {
             regex: pattern,
             plan: gram_plan,
         } = compile_pattern(request)?;
         // A later page decides its cut at its read sequence as the service,
         // and that includes the scope.
-        let member_reads = later.as_ref().map_or(&reads, |later| &later.members);
+        let member_reads = page.member_reads();
         let scope = match &request.scope {
             GrepScope::PathPrefix(prefix) => Some(member_reads.resolve_path(prefix).await?),
             GrepScope::Inode(inode_id) => Some(member_reads.resolve_inode(*inode_id).await?),
@@ -172,53 +137,14 @@ impl GrepService {
             namespace_id: namespace_reads.namespace_id(),
             block_cache: Some(&self.block_cache),
         };
-        let mut candidates = GrepCandidates::default();
-        let mut cut_seq = read_seq;
-        let mut tail_scanned = true;
-        match gram_plan {
-            GramPlanOutcome::Indexable(plan) => {
-                candidates.indexed = index
-                    .indexed_candidates(snapshot.entry.runs(), &plan)
-                    .await?;
-                match cursor_cut_seq.filter(|cursor_cut_seq| *cursor_cut_seq < read_seq) {
-                    // An earlier page of this stale search left out the
-                    // commits after its cut, so this page leaves them out
-                    // too, however far the index has moved since. The cut
-                    // stays at or below what this page's index covers in
-                    // full.
-                    Some(cursor_cut_seq) => {
-                        tail_scanned = false;
-                        cut_seq = cursor_cut_seq.min(stale_cut_seq(snapshot.resume));
-                    }
-                    None => match tail_revisions(&reads, snapshot.resume).await? {
-                        TailScan::Within(tail) => {
-                            add_tail_files(&index, snapshot.entry.runs(), &mut candidates, tail)
-                                .await?;
-                        }
-                        TailScan::OverBudget if request.allow_stale => {
-                            tail_scanned = false;
-                            cut_seq = cut_seq.min(stale_cut_seq(snapshot.resume));
-                        }
-                        TailScan::OverBudget => {
-                            return Err(GrepError::IndexLagging {
-                                behind_commits: read_seq
-                                    .0
-                                    .saturating_sub(snapshot.resume.built_through_seq().0),
-                            });
-                        }
-                    },
-                }
-            }
-            GramPlanOutcome::Unindexable => {
-                if !request.allow_scan {
-                    return Err(GrepError::QueryUnindexable(
-                        "the pattern has no run of at least 3 literal bytes for the trigram index; set `allow_scan` to search without it"
-                            .to_owned(),
-                    ));
-                }
-                candidates.files = scan_candidate_files(member_reads, scope.as_ref()).await?;
-            }
-        }
+        let (candidates, cut_seq, tail_scanned) =
+            plan_candidates(request, gram_plan, &snapshot, &index, &page, scope.as_ref()).await?;
+        let PageReads {
+            reads,
+            resume,
+            later,
+            ..
+        } = page;
         Ok(QueryPlan {
             reads,
             later,
@@ -272,7 +198,150 @@ impl GrepService {
     }
 }
 
-/// Checks the shape of a grep request: the pattern length and the scope fields.
+/// The views and resume position of one page: the head and no resume for a
+/// first page, and for a later page the views at the cursor's sequence and
+/// the cursor's position and cut.
+struct PageReads<'a> {
+    reads: NamespaceReadView<'a>,
+    resume: Option<GrepResume>,
+    cursor_cut_seq: Option<ChangeSeq>,
+    later: Option<LaterPage<'a>>,
+}
+
+impl PageReads<'_> {
+    /// The view that the page decides its cut and scope through: the view at
+    /// the read sequence as the service.
+    fn member_reads(&self) -> &NamespaceReadView<'_> {
+        self.later
+            .as_ref()
+            .map_or(&self.reads, |later| &later.members)
+    }
+}
+
+/// Decodes and checks `cursor` against the request's `fingerprint`, the
+/// serving `head`, and the index's `captured_seq`, and returns the views
+/// that the page reads with.
+async fn page_reads<'a>(
+    cursor: Option<&str>,
+    head: NamespaceReadView<'a>,
+    namespace_reads: &'a NamespaceReads,
+    fingerprint: u64,
+    captured_seq: ChangeSeq,
+) -> Result<PageReads<'a>> {
+    let Some(cursor) = cursor else {
+        return Ok(PageReads {
+            reads: head,
+            resume: None,
+            cursor_cut_seq: None,
+            later: None,
+        });
+    };
+    let head_seq = head.head_seq();
+    let cursor: GrepPageCursor =
+        decode_cursor(cursor).map_err(|error| CoreError::InvalidCursor(error.to_string()))?;
+    if cursor.fingerprint != fingerprint {
+        return Err(CoreError::InvalidCursor(
+            "the cursor was issued by a different request; replaying it under new criteria would silently skip results"
+                .to_owned(),
+        )
+        .into());
+    }
+    if cursor.head_seq > head_seq {
+        return Err(CoreError::InvalidCursor(format!(
+            "the cursor was minted at seq `{}`, ahead of the serving head `{head_seq}`",
+            cursor.head_seq
+        ))
+        .into());
+    }
+    if cursor.index_captured_seq != captured_seq {
+        return Err(CoreError::InvalidCursor(
+            "the cursor was issued by an earlier build of the grep index; start the search again"
+                .to_owned(),
+        )
+        .into());
+    }
+    // Every page after the first reads at the first page's sequence, so a
+    // file whose content changed between pages keeps its place in content
+    // order.
+    let at_cursor = head.at_seq(cursor.head_seq).await?;
+    let later = LaterPage {
+        members: namespace_reads.membership_view(cursor.head_seq).await?,
+        head,
+    };
+    Ok(PageReads {
+        reads: at_cursor,
+        resume: Some(GrepResume::from_cursor(&cursor)),
+        cursor_cut_seq: Some(cursor.cut_seq),
+        later: Some(later),
+    })
+}
+
+/// Returns a page's candidates, its cut sequence, and whether the page
+/// scanned the unindexed tail: index lookups plus the tail for an indexable
+/// pattern, and a scan of the scope's files for an `allow_scan` pattern
+/// without one.
+async fn plan_candidates<S: ObjectStore>(
+    request: &GrepRequest,
+    gram_plan: GramPlanOutcome,
+    snapshot: &ActiveIndex,
+    index: &GrepSegments<'_, S>,
+    page: &PageReads<'_>,
+    scope: Option<&PathEntry>,
+) -> Result<(GrepCandidates, ChangeSeq, bool)> {
+    let mut candidates = GrepCandidates::default();
+    let read_seq = page.reads.head_seq();
+    let mut cut_seq = read_seq;
+    let mut tail_scanned = true;
+    match gram_plan {
+        GramPlanOutcome::Indexable(plan) => {
+            candidates.indexed = index
+                .indexed_candidates(snapshot.entry.runs(), &plan)
+                .await?;
+            match page
+                .cursor_cut_seq
+                .filter(|cursor_cut_seq| *cursor_cut_seq < read_seq)
+            {
+                // An earlier page of this stale search left out the
+                // commits after its cut, so this page leaves them out
+                // too, however far the index has moved since. The cut
+                // stays at or below what this page's index covers in
+                // full.
+                Some(cursor_cut_seq) => {
+                    tail_scanned = false;
+                    cut_seq = cursor_cut_seq.min(stale_cut_seq(snapshot.resume));
+                }
+                None => match tail_revisions(&page.reads, snapshot.resume).await? {
+                    TailScan::Within(tail) => {
+                        add_tail_files(index, snapshot.entry.runs(), &mut candidates, tail).await?;
+                    }
+                    TailScan::OverBudget if request.allow_stale => {
+                        tail_scanned = false;
+                        cut_seq = cut_seq.min(stale_cut_seq(snapshot.resume));
+                    }
+                    TailScan::OverBudget => {
+                        return Err(GrepError::IndexLagging {
+                            behind_commits: read_seq
+                                .0
+                                .saturating_sub(snapshot.resume.built_through_seq().0),
+                        });
+                    }
+                },
+            }
+        }
+        GramPlanOutcome::Unindexable => {
+            if !request.allow_scan {
+                return Err(GrepError::QueryUnindexable(
+                    "the pattern has no run of at least 3 literal bytes for the trigram index; set `allow_scan` to search without it"
+                        .to_owned(),
+                ));
+            }
+            candidates.files = scan_candidate_files(page.member_reads(), scope).await?;
+        }
+    }
+    Ok((candidates, cut_seq, tail_scanned))
+}
+
+/// Checks the shape of a grep request: the pattern length.
 fn validate_grep_request(request: &GrepRequest) -> Result<()> {
     const MAX_GREP_PATTERN_BYTES: usize = 1024;
     if request.pattern.len() > MAX_GREP_PATTERN_BYTES {

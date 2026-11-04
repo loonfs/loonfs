@@ -14,6 +14,7 @@ use super::tables::{
 use super::{GramIndexBuildPolicy, GrepReorganizeOutcome, GrepSteps};
 use crate::codec::{lookup, IndexRow, TextRow};
 use crate::entry::{GrepEntry, GrepReorganizeState};
+use crate::reads::NamespaceReads;
 use crate::segments::{GrepSegments, RunWriter};
 use crate::{GrepError, Result};
 use loonfs::engine::{
@@ -28,6 +29,7 @@ use loonfs_types::format::segment_blocks::{
 use loonfs_types::{IndexSegmentId, RunNo};
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 pub(super) const INDEX_GRAMS_DELTA_LEVEL: u32 = 0;
@@ -98,7 +100,6 @@ impl<S: ObjectStore + Clone> GrepSteps<'_, S> {
             }
         };
         let input_runs = input_runs(&entry, &reorganize);
-        let inputs: Vec<ExtensionSegmentRef> = input_runs.values().flatten().cloned().collect();
         let _permit = self.worker.step_budget.permit().await;
         let segments = GrepSegments {
             store: &self.worker.store,
@@ -106,53 +107,15 @@ impl<S: ObjectStore + Clone> GrepSteps<'_, S> {
             block_cache: Some(&self.worker.reorganize_blocks),
         };
         let reads = self.worker.reads(&self.namespace_id);
-        let base = reorganize.output_level == INDEX_GRAMS_BASE_LEVEL;
-        let first_step = reorganize.row_key_cursor.is_empty();
-        let mut new_segments = Vec::new();
-        let (translations, filters) = if first_step {
-            let filters = if base {
-                Some(first_step_filters(&reads, &mut reorganize, &inputs).await?)
-            } else {
-                None
-            };
-            // The first step writes the output run's filter and value table
-            // in segments of their own as it decides them, so it keeps
-            // neither table.
-            let mut writer = RunWriter::new(&segments, policy.max_rows_per_segment);
-            for row in filters
-                .as_ref()
-                .map(RetainedReferences::filter_rows)
-                .unwrap_or_default()
-            {
-                writer.push(&row).await?;
-            }
-            let translations =
-                decide_output_table(&segments, &input_runs, filters.as_ref(), &mut writer).await?;
-            new_segments = writer.finish().await?;
-            (translations, filters)
-        } else {
-            let outputs: Vec<ExtensionSegmentRef> = entry
-                .segments()
-                .filter(|segment| reorganize.output_segment_ids.contains(&segment.segment_id))
-                .cloned()
-                .collect();
-            let translations =
-                read_translations(&segments, &input_runs, reorganize.run_no, &outputs).await?;
-            let filters = if base {
-                let revisions = run_filter(&segments, &outputs).await?.ok_or_else(|| {
-                    GrepError::IndexCorrupt {
-                        message: format!(
-                            "the outputs of grep reorganization run {} have no revision filter",
-                            reorganize.run_no
-                        ),
-                    }
-                })?;
-                Some(RetainedReferences::written(revisions))
-            } else {
-                None
-            };
-            (translations, filters)
-        };
+        let (translations, filters, mut new_segments) = step_tables(
+            &segments,
+            &reads,
+            &entry,
+            &mut reorganize,
+            &input_runs,
+            policy.max_rows_per_segment,
+        )
+        .await?;
         let merged = segments
             .merge_range(
                 &input_runs,
@@ -237,6 +200,75 @@ impl<S: ObjectStore + Clone> GrepSteps<'_, S> {
                 .expect("dropping a reorganization should keep a valid entry valid"),
         );
         Ok(())
+    }
+}
+
+/// Returns the posting translations and revision filters that one reorganize
+/// step merges with, and the segments that the step writes for them.
+///
+/// The first step decides the output run's value table, and for a base
+/// reorganization its revision filter. A later step reads the translations
+/// and the filter back from the outputs that the first step wrote, and
+/// writes no segments.
+async fn step_tables<S: ObjectStore>(
+    segments: &GrepSegments<'_, S>,
+    reads: &NamespaceReads,
+    entry: &GrepEntry,
+    reorganize: &mut GrepReorganizeState,
+    input_runs: &BTreeMap<RunNo, Vec<ExtensionSegmentRef>>,
+    max_rows_per_segment: NonZeroUsize,
+) -> Result<(
+    BTreeMap<RunNo, Translation>,
+    Option<RetainedReferences>,
+    Vec<ExtensionSegmentRef>,
+)> {
+    let inputs: Vec<ExtensionSegmentRef> = input_runs.values().flatten().cloned().collect();
+    let base = reorganize.output_level == INDEX_GRAMS_BASE_LEVEL;
+    let first_step = reorganize.row_key_cursor.is_empty();
+    if first_step {
+        let filters = if base {
+            Some(first_step_filters(reads, reorganize, &inputs).await?)
+        } else {
+            None
+        };
+        // The first step writes the output run's filter and value table
+        // in segments of their own as it decides them, so it keeps
+        // neither table.
+        let mut writer = RunWriter::new(segments, max_rows_per_segment);
+        for row in filters
+            .as_ref()
+            .map(RetainedReferences::filter_rows)
+            .unwrap_or_default()
+        {
+            writer.push(&row).await?;
+        }
+        let translations =
+            decide_output_table(segments, input_runs, filters.as_ref(), &mut writer).await?;
+        let new_segments = writer.finish().await?;
+        Ok((translations, filters, new_segments))
+    } else {
+        let outputs: Vec<ExtensionSegmentRef> = entry
+            .segments()
+            .filter(|segment| reorganize.output_segment_ids.contains(&segment.segment_id))
+            .cloned()
+            .collect();
+        let translations =
+            read_translations(segments, input_runs, reorganize.run_no, &outputs).await?;
+        let filters = if base {
+            let revisions =
+                run_filter(segments, &outputs)
+                    .await?
+                    .ok_or_else(|| GrepError::IndexCorrupt {
+                        message: format!(
+                            "the outputs of grep reorganization run {} have no revision filter",
+                            reorganize.run_no
+                        ),
+                    })?;
+            Some(RetainedReferences::written(revisions))
+        } else {
+            None
+        };
+        Ok((translations, filters, Vec::new()))
     }
 }
 
