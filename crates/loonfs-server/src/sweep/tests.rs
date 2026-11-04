@@ -1078,9 +1078,9 @@ enum Grep {
 /// garbage, then one that does, and how many of the latter are lists. The
 /// docs quote these numbers.
 const IDLE_VISIT_REQUESTS: [(Grep, usize, usize, usize); 3] = [
-    (Grep::NotMaintained, 14, 31, 11),
-    (Grep::Maintained, 18, 35, 11),
-    (Grep::Enabled, 19, 37, 11),
+    (Grep::NotMaintained, 14, 30, 10),
+    (Grep::Maintained, 18, 34, 10),
+    (Grep::Enabled, 19, 36, 10),
 ];
 
 #[tokio::test(start_paused = true)]
