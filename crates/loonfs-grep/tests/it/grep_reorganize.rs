@@ -202,14 +202,12 @@ async fn reorganize_with_cache(warm_cache: bool) -> usize {
     recording.reset();
     let outcome = host
         .worker
-        .reorganize_step(
-            &namespace_id,
-            GramIndexBuildPolicy {
-                max_delta_runs: nonzero_usize(8),
-                max_decoded_input_rows_per_step: nonzero_usize(65_536),
-                ..Default::default()
-            },
-        )
+        .steps(&namespace_id, 0)
+        .reorganize_step(GramIndexBuildPolicy {
+            max_delta_runs: nonzero_usize(8),
+            max_decoded_input_rows_per_step: nonzero_usize(65_536),
+            ..Default::default()
+        })
         .await
         .expect("reorganize");
     // The merge reads every input row but the value tables, which the

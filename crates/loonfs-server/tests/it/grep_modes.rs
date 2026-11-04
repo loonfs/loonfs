@@ -427,13 +427,11 @@ async fn one_sweep_after_restart_resumes_stale_and_mid_backfill_namespaces() {
         .await
         .expect("enable backfill namespace");
     worker
-        .build_step(
-            &backfill,
-            GramIndexBuildPolicy {
-                max_files_per_step: NonZeroUsize::MIN,
-                ..GramIndexBuildPolicy::default()
-            },
-        )
+        .steps(&backfill, 0)
+        .build_step(GramIndexBuildPolicy {
+            max_files_per_step: NonZeroUsize::MIN,
+            ..GramIndexBuildPolicy::default()
+        })
         .await
         .expect("leave mid-backfill manifest");
     let manifest = entry_of(&store, &backfill).await;
@@ -935,11 +933,13 @@ async fn drive_worker_to_current(
 ) {
     for _ in 0..64 {
         let build = worker
-            .build_step(namespace_id, policy)
+            .steps(namespace_id, 0)
+            .build_step(policy)
             .await
             .expect("build step");
         let fold = worker
-            .reorganize_step(namespace_id, policy)
+            .steps(namespace_id, 0)
+            .reorganize_step(policy)
             .await
             .expect("fold step");
         if matches!(build, GrepBuildOutcome::UpToDate { .. })

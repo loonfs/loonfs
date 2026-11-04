@@ -128,7 +128,8 @@ impl ContentFixture {
     pub(crate) async fn build_step(&self) -> GrepBuildOutcome {
         self.host
             .worker
-            .build_step(&self.namespace_id, GramIndexBuildPolicy::default())
+            .steps(&self.namespace_id, 0)
+            .build_step(GramIndexBuildPolicy::default())
             .await
             .expect("grep build step")
     }
@@ -140,7 +141,8 @@ impl ContentFixture {
     ) -> GrepReorganizeOutcome {
         self.host
             .worker
-            .reorganize_step(&self.namespace_id, policy)
+            .steps(&self.namespace_id, 0)
+            .reorganize_step(policy)
             .await
             .expect("grep reorganize step")
     }

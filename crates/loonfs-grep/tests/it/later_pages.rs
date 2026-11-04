@@ -352,7 +352,8 @@ async fn a_base_reorganization_of_an_acl_namespace_scans_as_the_service() {
         pages
             .host
             .worker
-            .reorganize_step(&pages.namespace_id, to_base)
+            .steps(&pages.namespace_id, 0)
+            .reorganize_step(to_base)
             .await
             .expect("a reorganize step");
         levels.extend(

@@ -235,7 +235,12 @@ async fn a_step_that_loses_its_put_to_a_copy_of_its_entry_is_published_over_it()
 
     gate.block_next();
     let (rebuilt, winner) = tokio::join!(
-        host.worker.build_step(&namespace_id, one_file_steps()),
+        async {
+            host.worker
+                .steps(&namespace_id, 0)
+                .build_step(one_file_steps())
+                .await
+        },
         async {
             gate.wait_until_blocked().await;
             publish_rival(&base, &namespace_id, 60_000).await;
@@ -303,13 +308,19 @@ async fn a_step_that_loses_its_put_to_another_change_of_its_entry_publishes_noth
 
     gate.block_next();
     let (lost, ()) = tokio::join!(
-        host.worker.build_step(&namespace_id, one_file_steps()),
+        async {
+            host.worker
+                .steps(&namespace_id, 0)
+                .build_step(one_file_steps())
+                .await
+        },
         async {
             gate.wait_until_blocked().await;
             assert_matches!(
                 rival
                     .worker
-                    .build_step(&namespace_id, one_file_steps())
+                    .steps(&namespace_id, 0)
+                    .build_step(one_file_steps())
                     .await,
                 Ok(GrepBuildOutcome::Indexed { .. })
             );
@@ -424,7 +435,8 @@ async fn a_reorganization_that_starts_in_a_rebuilt_change_gets_its_run_number_at
         .expect("index the fold's commit");
     while !matches!(
         host.worker
-            .reorganize_step(&namespace_id, policy)
+            .steps(&namespace_id, 0)
+            .reorganize_step(policy)
             .await
             .expect("reorganize"),
         GrepReorganizeOutcome::NotNeeded { .. }

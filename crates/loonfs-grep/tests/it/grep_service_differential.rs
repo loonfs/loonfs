@@ -121,11 +121,13 @@ async fn drive_worker_step(
     policy: GramIndexBuildPolicy,
 ) {
     worker
-        .build_step(namespace_id, policy)
+        .steps(namespace_id, 0)
+        .build_step(policy)
         .await
         .expect("grep build step");
     worker
-        .reorganize_step(namespace_id, policy)
+        .steps(namespace_id, 0)
+        .reorganize_step(policy)
         .await
         .expect("grep reorganize step");
 }
@@ -137,11 +139,13 @@ async fn drive_worker_to_current(
 ) {
     for _ in 0..512 {
         let build = worker
-            .build_step(namespace_id, policy)
+            .steps(namespace_id, 0)
+            .build_step(policy)
             .await
             .expect("grep build step");
         let reorganize = worker
-            .reorganize_step(namespace_id, policy)
+            .steps(namespace_id, 0)
+            .reorganize_step(policy)
             .await
             .expect("grep reorganize step");
         if matches!(build, GrepBuildOutcome::UpToDate { .. })

@@ -106,7 +106,8 @@ async fn a_fork_answers_from_the_inherited_index_before_any_step() {
         fixture
             .host
             .worker
-            .build_step(&fork_id, GramIndexBuildPolicy::default())
+            .steps(&fork_id, 0)
+            .build_step(GramIndexBuildPolicy::default())
             .await,
         Ok(GrepBuildOutcome::Indexed {
             indexed_revisions: 1,
@@ -164,7 +165,8 @@ async fn the_gap_below_the_fork_point_is_read_through_the_fork_pin() {
         match fixture
             .host
             .worker
-            .build_step(&fork_id, GramIndexBuildPolicy::default())
+            .steps(&fork_id, 0)
+            .build_step(GramIndexBuildPolicy::default())
             .await
             .expect("fork build step")
         {
@@ -256,7 +258,8 @@ async fn a_fork_reads_the_gap_and_then_its_own_commits() {
         match fixture
             .host
             .worker
-            .build_step(&fork_id, GramIndexBuildPolicy::default())
+            .steps(&fork_id, 0)
+            .build_step(GramIndexBuildPolicy::default())
             .await
             .expect("fork build step")
         {
@@ -307,7 +310,8 @@ async fn a_fork_restarts_an_inherited_backfill_and_keeps_its_segments() {
     fixture
         .host
         .worker
-        .build_step(&fixture.namespace_id, one_file)
+        .steps(&fixture.namespace_id, 0)
+        .build_step(one_file)
         .await
         .expect("index one file");
     let source_entry = entry(&fixture, &fixture.namespace_id).await;
@@ -324,7 +328,7 @@ async fn a_fork_restarts_an_inherited_backfill_and_keeps_its_segments() {
     let fork_head = control::head(&fixture.store, &fork_id).await.seq;
     fixture.content_reads();
     assert_matches!(
-        fixture.host.worker.build_step(&fork_id, one_file).await,
+        fixture.host.worker.steps(&fork_id, 0).build_step(one_file).await,
         Ok(GrepBuildOutcome::BackfillRestarted { captured_seq }) if captured_seq == fork_head
     );
     let restarted = entry(&fixture, &fork_id).await;
@@ -398,7 +402,8 @@ async fn a_forks_first_step_clears_an_inherited_reorganization() {
         fixture
             .host
             .worker
-            .build_step(&fork_id, GramIndexBuildPolicy::default())
+            .steps(&fork_id, 0)
+            .build_step(GramIndexBuildPolicy::default())
             .await,
         Ok(GrepBuildOutcome::UpToDate { .. })
     );
@@ -411,7 +416,8 @@ async fn a_forks_first_step_clears_an_inherited_reorganization() {
             fixture
                 .host
                 .worker
-                .reorganize_step(&fork_id, small_steps)
+                .steps(&fork_id, 0)
+                .reorganize_step(small_steps)
                 .await
                 .expect("fork reorganize step"),
             GrepReorganizeOutcome::NotNeeded { .. }

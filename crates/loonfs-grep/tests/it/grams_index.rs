@@ -79,11 +79,13 @@ async fn drive_worker_step(
     policy: GramIndexBuildPolicy,
 ) {
     worker
-        .build_step(namespace_id, policy)
+        .steps(namespace_id, 0)
+        .build_step(policy)
         .await
         .expect("grep build step");
     worker
-        .reorganize_step(namespace_id, policy)
+        .steps(namespace_id, 0)
+        .reorganize_step(policy)
         .await
         .expect("grep reorganization step");
 }
@@ -331,7 +333,8 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
         .expect("open namespace");
     host.enable_grep_index(&namespace_id).await.expect("enable");
     first_worker
-        .build_step(&namespace_id, GramIndexBuildPolicy::default())
+        .steps(&namespace_id, 0)
+        .build_step(GramIndexBuildPolicy::default())
         .await
         .expect("materialize empty backfill");
 
@@ -384,7 +387,8 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
     raw_store.reset();
     raw_store.inner().reset();
     let first = first_worker
-        .build_step(&namespace_id, policy)
+        .steps(&namespace_id, 0)
+        .build_step(policy)
         .await
         .expect("first bounded build");
     assert_matches!(
@@ -449,7 +453,8 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
     raw_store.reset();
     raw_store.inner().reset();
     let second = resumed_worker
-        .build_step(&namespace_id, policy)
+        .steps(&namespace_id, 0)
+        .build_step(policy)
         .await
         .expect("resumed bounded build");
     assert_matches!(
@@ -973,7 +978,8 @@ async fn reorganization_does_not_warm_the_query_cache() {
             .await
             .expect("write file");
         host.worker
-            .build_step(&namespace_id, GramIndexBuildPolicy::default())
+            .steps(&namespace_id, 0)
+            .build_step(GramIndexBuildPolicy::default())
             .await
             .expect("build delta segment");
     }
@@ -988,7 +994,8 @@ async fn reorganization_does_not_warm_the_query_cache() {
     let stats_before_reorganization = host.block_cache.stats();
     let reorganization = host
         .worker
-        .reorganize_step(&namespace_id, reorganize_policy)
+        .steps(&namespace_id, 0)
+        .reorganize_step(reorganize_policy)
         .await
         .expect("partial reorganization");
     assert_matches!(
@@ -1064,7 +1071,8 @@ async fn a_cold_reorganization_fans_out_its_segment_opens_within_the_io_cap() {
             .expect("write file");
         assert_matches!(
             host.worker
-                .build_step(&namespace_id, policy)
+                .steps(&namespace_id, 0)
+                .build_step(policy)
                 .await
                 .expect("grep build step"),
             GrepBuildOutcome::Indexed { .. }
@@ -1082,7 +1090,8 @@ async fn a_cold_reorganization_fans_out_its_segment_opens_within_the_io_cap() {
     assert_matches!(
         reorganizer
             .worker
-            .reorganize_step(&namespace_id, policy)
+            .steps(&namespace_id, 0)
+            .reorganize_step(policy)
             .await
             .expect("grep reorganization step"),
         GrepReorganizeOutcome::UnitWritten {
