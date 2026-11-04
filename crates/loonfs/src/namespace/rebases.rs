@@ -2,7 +2,7 @@
 //! and the replay commit that replays the fork's unmerged commits into it
 //! ([design note](https://github.com/loonfs/loonfs/blob/main/docs/design/merge.md#rebasing)).
 
-use super::merges::{missing_fork, MergeOutcome, PlannedCommit, PlannedMerge};
+use super::merges::{missing_fork, MergeOutcome, PlannedMerge};
 use crate::publisher::MergeSlot;
 use crate::trace::{self, operation_span};
 use crate::{
@@ -183,10 +183,8 @@ impl Namespace<Writable> {
     }
 
     /// Returns the replay commit that this namespace committed under the
-    /// request's commit ID, or the replay commit planned against this
-    /// namespace's head under `slot`, or under a merge slot that the plan
-    /// takes, with its conflict report, as [`Self::plan_merge`] does for a
-    /// merge.
+    /// request's commit ID, or the replay commit with its conflict report,
+    /// planned as [`Self::plan_merge`] plans a merge.
     ///
     /// The plan checks that this namespace is a rebase's new fork for the
     /// fork and checks both floors, folds the fork, and plans against this
@@ -198,22 +196,7 @@ impl Namespace<Writable> {
         slot: Option<MergeSlot>,
     ) -> Result<PlannedMerge<Vec<MergeConflict>>> {
         let source_namespace_id = &request.source_namespace_id;
-        let new_fork = self
-            .core
-            .pinned_read(&self.namespace_id, Consistency::Strong)
-            .await?;
-        if let Some(commit) = new_fork
-            .engine
-            .find_merge(&new_fork.context, request)
-            .await?
-        {
-            return Ok(PlannedMerge::Committed(commit));
-        }
-        let slot = match slot {
-            Some(slot) => slot,
-            None => self.session().acquire_merge_slot()?,
-        };
-        let plan = async {
+        self.plan_commit(request, slot, |new_fork| async move {
             let fork = self
                 .core
                 .pinned_read(source_namespace_id, Consistency::Strong)
@@ -227,7 +210,7 @@ impl Namespace<Writable> {
                 .core
                 .pinned_read_at_snapshot(&basis.manifest.owner_namespace_id, &basis.source_pin_id)
                 .await?;
-            Ok(new_fork
+            let plan = new_fork
                 .engine
                 .plan_replay(
                     &new_fork.context,
@@ -239,18 +222,12 @@ impl Namespace<Writable> {
                     self.core.now_ms(),
                     self.session().merge_allowance(),
                 )
-                .await?)
-        }
+                .await?;
+            let record = plan.record().clone();
+            let report = plan.conflicts().to_vec();
+            Ok((plan.into_candidate(), record, report))
+        })
         .await
-        .map_err(|error| missing_fork(source_namespace_id, error))?;
-        let record = plan.record().clone();
-        let report = plan.conflicts().to_vec();
-        Ok(PlannedMerge::Candidate(Box::new(PlannedCommit {
-            candidate: plan.into_candidate(),
-            slot,
-            record,
-            report,
-        })))
     }
 }
 
