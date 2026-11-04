@@ -1,6 +1,6 @@
 //! Publish-time metadata and the numbered WAL tip retained between batches.
 
-use crate::error::{CoreError, Result};
+use crate::error::Result;
 use crate::limits::MAX_UNFOLDED_WAL_OBJECTS;
 use crate::manifest::same_head;
 use crate::manifest::{
@@ -18,7 +18,6 @@ use crate::namespace::writer_epoch::AcquiredWriter;
 use crate::segment::VerifiedMetadataSegments;
 use crate::storage::tail_content::ContentWrites;
 use crate::time::Observation;
-use crate::wal::replay_discovered_tail;
 use crate::wal::ProjectedWalTail;
 use crate::PermitPool;
 use loonfs_objectstore::ObjectStore;
@@ -243,9 +242,7 @@ fn load_writer_position<S: ObjectStore + ?Sized>(
     basis: MetadataBasis,
     loaded_basis: &LoadedMetadataBasis<'_, S>,
 ) -> Result<WriterPosition> {
-    let manifest_head = loaded_basis.replay_head(&anchor.read_state);
-    let replayed = replay_discovered_tail(&manifest_head, &loaded_basis.base_state, &anchor.tail)
-        .map_err(CoreError::MetadataProjection)?;
+    let tail = loaded_basis.project_tail(anchor)?;
     Ok(WriterPosition {
         read_basis: ReadBasis {
             head: anchor.read_state.clone(),
@@ -256,7 +253,7 @@ fn load_writer_position<S: ObjectStore + ?Sized>(
             .manifest()
             .payload()
             .retention_floor_seq,
-        tail: Arc::new(replayed.projected_tail),
+        tail,
         basis_checked: anchor.checked.clone(),
     })
 }

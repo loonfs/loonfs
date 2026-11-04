@@ -9,9 +9,7 @@ use crate::namespace::control::{LoadedHint, LoadedManifest};
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
 use crate::segment::MetadataSegmentCache;
-use crate::wal::{
-    discover_tail, replay_discovered_tail, DiscoveredTail, ProjectedWalTail, ValidatedWalTail,
-};
+use crate::wal::{discover_tail, DiscoveredTail, ProjectedWalTail, ValidatedWalTail};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::ManifestRef;
 use loonfs_types::{ChangeSeq, ManifestNo, WriterEpoch};
@@ -166,12 +164,5 @@ pub fn project_anchor_tail<S: ObjectStore + ?Sized>(
     segment_cache: &MetadataSegmentCache,
     anchor: &NamespaceReadAnchor,
 ) -> CoreResult<Arc<ProjectedWalTail>> {
-    let loaded_basis = metadata_basis_from_manifest(store, Some(segment_cache), &anchor.manifest);
-    let replayed = replay_discovered_tail(
-        &loaded_basis.replay_head(&anchor.read_state),
-        &loaded_basis.base_state,
-        &anchor.tail,
-    )
-    .map_err(CoreError::MetadataProjection)?;
-    Ok(Arc::new(replayed.projected_tail))
+    metadata_basis_from_manifest(store, Some(segment_cache), &anchor.manifest).project_tail(anchor)
 }

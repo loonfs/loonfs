@@ -3,8 +3,7 @@
 use crate::commit::publish_view::WriterPosition;
 use crate::error::{CoreError, Result};
 use crate::manifest::publish::{ManifestChange, ManifestUpdate};
-use crate::manifest::{load_position_basis, PublicationReport, PublishedManifest};
-use crate::namespace::basis::MetadataBasis;
+use crate::manifest::{load_position_basis, PublicationReport};
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::store::NamespaceStore;
 use crate::namespace::writer_epoch::ensure_writer_not_fenced;
@@ -24,8 +23,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// that builds on the position's manifest takes the head from the position
     /// instead of reading the WAL tail, and the attempt's fold folds the
     /// position's tail. After that fold, the position moves onto the fold's
-    /// manifest when that manifest has folded the WAL through the position's
-    /// head, under the session's writer epoch.
+    /// manifest by [`WriterPosition::move_to`], and the deletion drops the
+    /// position when the position can't move.
     pub(crate) async fn delete_namespace(
         &self,
         options: DeleteNamespaceOptions,
@@ -72,13 +71,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     let folded = self.fold_wal_tail(held.clone(), clock).await?;
                     *position
                         .lock()
-                        .expect("the deletion's position lock should not be poisoned") = held
-                        .filter(|_| folds_head(&folded.manifest, &head))
-                        .map(|mut held| {
-                            held.read_basis.basis =
-                                MetadataBasis::new(folded.manifest.manifest.clone());
-                            held
-                        });
+                        .expect("the deletion's position lock should not be poisoned") =
+                        held.and_then(|mut held| held.move_to(&folded.manifest).then_some(held));
                     return Ok(ManifestChange::Again);
                 }
                 payload.status = NamespaceStatus::Deleted {
@@ -100,16 +94,4 @@ impl<S: ObjectStore> NamespaceStore<S> {
         .await
         .map(ManifestUpdate::into_report)
     }
-}
-
-/// Returns whether `manifest` is an active manifest, with the writer epoch
-/// of `head`, that has folded the WAL through `head`, so `head` is also the
-/// head at `manifest`.
-fn folds_head(
-    manifest: &PublishedManifest,
-    head: &crate::namespace::state::NamespaceReadState,
-) -> bool {
-    !manifest.status.is_deleted()
-        && manifest.writer_epoch == head.writer_epoch
-        && manifest.folded_wal_no == head.wal_no
 }

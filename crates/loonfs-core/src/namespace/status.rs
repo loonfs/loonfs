@@ -1,7 +1,5 @@
 //! Reads namespace state and storage diagnostics.
 
-#[cfg(any(test, feature = "test-support"))]
-use crate::error::CoreError;
 use crate::error::Result;
 use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::namespace::state::NamespaceReadState;
@@ -30,37 +28,27 @@ impl<S: ObjectStore> NamespaceStore<S> {
     #[cfg(any(test, feature = "test-support"))]
     pub async fn load_wal_tail_usage(&self) -> Result<NamespaceWalTailUsage> {
         let loaded = self
-            .load_read_anchor(crate::test_support::observed_now())
+            .load_live_read_anchor(crate::test_support::observed_now())
             .await?;
-        super::control::ensure_namespace_live(
-            &loaded.read_state.namespace_id,
-            loaded.read_state.status,
-        )?;
-        let basis =
-            crate::manifest::load_basis_metadata_segments(&self.store, None, &loaded.basis())
-                .await?;
-        let tail = crate::wal::replay_discovered_tail(
-            &basis.replay_head(&loaded.read_state),
-            &basis.base_state,
-            &loaded.tail,
+        // A diagnostic leaves the namespace's segment cache as it was.
+        let tail = crate::manifest::load::metadata_basis_from_manifest(
+            &self.store,
+            None,
+            &loaded.manifest,
         )
-        .map_err(CoreError::MetadataProjection)?;
+        .project_tail(&loaded)?;
         Ok(NamespaceWalTailUsage {
             head_seq: loaded.read_state.seq,
             wal_tail_objects: loaded.read_state.unfolded_wal_objects(),
-            wal_tail_inline_bytes: tail.projected_tail.inline_bytes(),
+            wal_tail_inline_bytes: tail.inline_bytes(),
         })
     }
 
     /// Loads the current state of a live namespace.
     pub async fn load_metadata(&self) -> Result<NamespaceMetadata> {
         let anchor = self
-            .load_read_anchor(Observation::now(Arc::clone(&self.timer)))
+            .load_live_read_anchor(Observation::now(Arc::clone(&self.timer)))
             .await?;
-        super::control::ensure_namespace_live(
-            &anchor.read_state.namespace_id,
-            anchor.read_state.status,
-        )?;
         Ok(namespace_metadata(
             anchor.read_state,
             anchor.manifest.payload(),
