@@ -21,9 +21,16 @@ async fn overlapping_retirement_retries_a_lost_pin_delete_and_preserves_a_live_s
         .expect("bootstrap source");
     let source_keys = publish_owned_content(&inner, &source, 2).await;
     for fork in [&target, &sibling] {
-        crate::test_support::NamespaceFixture::new(&inner, &source, &setup)
+        let fixture = crate::test_support::NamespaceFixture::new(&inner, &source, &setup);
+        fixture
             .engine()
-            .fork_namespace(fork, &loonfs_test_support::test_actor(), None)
+            .fork_namespace(
+                fork,
+                &loonfs_test_support::test_actor(),
+                crate::test_support::folded_manifest(&fixture.namespace)
+                    .await
+                    .expect("fold the WAL tail"),
+            )
             .await
             .expect("fork");
     }

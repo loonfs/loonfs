@@ -108,17 +108,16 @@ impl Namespace<Writable> {
                     .ttl_ms
                     .map(|ttl_ms| expires_at_ms(self.core.now_ms(), ttl_ms));
                 self.ensure_administrator().await?;
-                let result = self
-                    .mode
-                    .publisher
-                    .pin_after_fold(&self.namespace_id, |manifest| {
-                        let engine = self.engine().with_folded_manifest(manifest);
-                        async move { engine.create_snapshot(name.to_owned(), expires_at_ms).await }
-                    })
-                    .await;
                 self.mode
                     .publisher
-                    .finish_publication(&self.namespace_id, result)
+                    .pin_after_fold(&self.namespace_id, |manifest| {
+                        let engine = self.engine();
+                        async move {
+                            engine
+                                .create_snapshot(name.to_owned(), expires_at_ms, manifest)
+                                .await
+                        }
+                    })
                     .await
             },
         )

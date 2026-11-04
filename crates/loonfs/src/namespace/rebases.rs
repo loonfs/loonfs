@@ -60,16 +60,21 @@ impl LoonFs<Writable> {
                 }
                 .await
                 .map_err(|error| missing_fork(source_namespace_id, error))?;
-                self.install_fork(namespace_id, new_namespace_id, true, |engine| async move {
-                    engine
-                        .fork_namespace_for_rebase(
-                            new_namespace_id,
-                            actor,
-                            source_namespace_id,
-                            fork_point_seq,
-                        )
-                        .await
-                })
+                self.install_fork(
+                    namespace_id,
+                    new_namespace_id,
+                    |engine, manifest| async move {
+                        engine
+                            .fork_namespace_for_rebase(
+                                new_namespace_id,
+                                actor,
+                                source_namespace_id,
+                                fork_point_seq,
+                                manifest,
+                            )
+                            .await
+                    },
+                )
                 .await
             },
         )

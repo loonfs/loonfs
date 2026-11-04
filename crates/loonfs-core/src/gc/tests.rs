@@ -476,9 +476,16 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
         .await
         .expect("bootstrap");
     write_test_file(&store, &source, "/docs/shared.txt", "gc-shared", &setup).await;
-    crate::test_support::NamespaceFixture::new(&store, &source, &setup)
+    let fixture = crate::test_support::NamespaceFixture::new(&store, &source, &setup);
+    fixture
         .engine()
-        .fork_namespace(&clone, &loonfs_test_support::test_actor(), None)
+        .fork_namespace(
+            &clone,
+            &loonfs_test_support::test_actor(),
+            crate::test_support::folded_manifest(&fixture.namespace)
+                .await
+                .expect("fold the WAL tail"),
+        )
         .await
         .expect("fork");
     crate::test_support::NamespaceFixture::new(&store, &source, &setup)
@@ -1391,9 +1398,16 @@ async fn a_source_keeps_content_its_fork_inherited_while_the_fork_pin_exists() {
         .await
         .expect("bootstrap");
     put_file_content(&store, &source, "/file", b"inherited").await;
-    crate::test_support::NamespaceFixture::new(&store, &source, &setup)
+    let fixture = crate::test_support::NamespaceFixture::new(&store, &source, &setup);
+    fixture
         .engine()
-        .fork_namespace(&clone, &loonfs_test_support::test_actor(), None)
+        .fork_namespace(
+            &clone,
+            &loonfs_test_support::test_actor(),
+            crate::test_support::folded_manifest(&fixture.namespace)
+                .await
+                .expect("fold the WAL tail"),
+        )
         .await
         .expect("fork");
     put_file_content(&store, &source, "/file", b"replaced").await;
@@ -1955,29 +1969,35 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
         .await
         .expect("bootstrap");
     write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
-    let first = crate::test_support::namespace_store(&store, &namespace_id)
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let first = namespace
         .create_pin(
             PinOwner::User {
                 name: "keeper".to_owned(),
                 expires_at_ms: None,
             },
-            None,
+            crate::test_support::folded_manifest(&namespace)
+                .await
+                .expect("fold the WAL tail"),
             &setup.clock(),
         )
         .await
-        .map(|report| crate::pin::checkpoint_summary(report.response))
+        .map(crate::pin::checkpoint_summary)
         .expect("first owner");
-    let second = crate::test_support::namespace_store(&store, &namespace_id)
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let second = namespace
         .create_pin(
             PinOwner::User {
                 name: "releaser".to_owned(),
                 expires_at_ms: None,
             },
-            None,
+            crate::test_support::folded_manifest(&namespace)
+                .await
+                .expect("fold the WAL tail"),
             &setup.clock(),
         )
         .await
-        .map(|report| crate::pin::checkpoint_summary(report.response))
+        .map(crate::pin::checkpoint_summary)
         .expect("second owner");
     assert_ne!(first.checkpoint_id, second.checkpoint_id);
     assert_eq!(first.manifest_no, second.manifest_no);
@@ -2118,9 +2138,16 @@ async fn retired_targets_release_their_source_pins_and_retry_failed_deletes() {
         .await
         .expect("bootstrap");
     write_test_file(&store, &source, "/docs/one.txt", "gc-one", &setup).await;
-    crate::test_support::NamespaceFixture::new(&store, &source, &setup)
+    let fixture = crate::test_support::NamespaceFixture::new(&store, &source, &setup);
+    fixture
         .engine()
-        .fork_namespace(&clone, &loonfs_test_support::test_actor(), None)
+        .fork_namespace(
+            &clone,
+            &loonfs_test_support::test_actor(),
+            crate::test_support::folded_manifest(&fixture.namespace)
+                .await
+                .expect("fold the WAL tail"),
+        )
         .await
         .expect("fork");
     let target_pin = create_checkpoint(&store, &clone, &setup)
@@ -2243,9 +2270,16 @@ async fn an_unreadable_or_corrupt_fork_target_keeps_its_pin_and_the_pass_continu
         .await
         .expect("bootstrap");
     write_test_file(&store, &source, "/docs/one.txt", "gc-one", &setup).await;
-    crate::test_support::NamespaceFixture::new(&store, &source, &setup)
+    let fixture = crate::test_support::NamespaceFixture::new(&store, &source, &setup);
+    fixture
         .engine()
-        .fork_namespace(&clone, &loonfs_test_support::test_actor(), None)
+        .fork_namespace(
+            &clone,
+            &loonfs_test_support::test_actor(),
+            crate::test_support::folded_manifest(&fixture.namespace)
+                .await
+                .expect("fold the WAL tail"),
+        )
         .await
         .expect("fork");
     let fork_record = read_fork_record(store.inner(), &source).await;
@@ -2283,9 +2317,16 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
         .await
         .expect("bootstrap");
     write_test_file(&store, &source, "/docs/one.txt", "gc-one", &setup).await;
-    crate::test_support::NamespaceFixture::new(&store, &source, &setup)
+    let fixture = crate::test_support::NamespaceFixture::new(&store, &source, &setup);
+    fixture
         .engine()
-        .fork_namespace(&clone, &loonfs_test_support::test_actor(), None)
+        .fork_namespace(
+            &clone,
+            &loonfs_test_support::test_actor(),
+            crate::test_support::folded_manifest(&fixture.namespace)
+                .await
+                .expect("fold the WAL tail"),
+        )
         .await
         .expect("fork");
     let fork_record = read_fork_record(&store, &source).await;
@@ -2349,21 +2390,31 @@ async fn a_fork_retry_keeps_young_pins_and_reclaims_the_abandoned_one_after_grac
         .await
         .expect("bootstrap");
     write_test_file(&store, &source, "/docs/one.txt", "gc-one", &setup).await;
-    let abandoned = crate::test_support::namespace_store(&store, &source)
+    let namespace = crate::test_support::namespace_store(&store, &source);
+    let abandoned = namespace
         .create_pin(
             PinOwner::Fork {
                 target_namespace_id: clone.clone(),
             },
-            None,
+            crate::test_support::folded_manifest(&namespace)
+                .await
+                .expect("fold the WAL tail"),
             &setup.clock(),
         )
         .await
-        .map(|report| crate::pin::checkpoint_summary(report.response))
+        .map(crate::pin::checkpoint_summary)
         .expect("fork pin from the abandoned attempt");
 
-    crate::test_support::NamespaceFixture::new(&store, &source, &setup)
+    let fixture = crate::test_support::NamespaceFixture::new(&store, &source, &setup);
+    fixture
         .engine()
-        .fork_namespace(&clone, &loonfs_test_support::test_actor(), None)
+        .fork_namespace(
+            &clone,
+            &loonfs_test_support::test_actor(),
+            crate::test_support::folded_manifest(&fixture.namespace)
+                .await
+                .expect("fold the WAL tail"),
+        )
         .await
         .expect("fork retry after abandonment");
     let retry = store
@@ -3107,11 +3158,18 @@ async fn expiry_and_creation_grace_delete_pins_without_a_released_state() {
             target_namespace_id: target.clone(),
         },
     ] {
+        let namespace = crate::test_support::namespace_store(&store, &namespace_id);
         pins.push(
-            crate::test_support::namespace_store(&store, &namespace_id)
-                .create_pin(owner, None, &setup.clock())
+            namespace
+                .create_pin(
+                    owner,
+                    crate::test_support::folded_manifest(&namespace)
+                        .await
+                        .expect("fold the WAL tail"),
+                    &setup.clock(),
+                )
                 .await
-                .map(|report| crate::pin::checkpoint_summary(report.response))
+                .map(crate::pin::checkpoint_summary)
                 .expect("pin"),
         );
     }
@@ -3185,17 +3243,20 @@ async fn a_pin_naming_an_absent_manifest_is_corruption_before_sweeping() {
         .create()
         .await
         .expect("bootstrap");
-    let initial = crate::test_support::namespace_store(&store, &namespace_id)
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let initial = namespace
         .create_pin(
             PinOwner::User {
                 name: "initial".to_owned(),
                 expires_at_ms: None,
             },
-            None,
+            crate::test_support::folded_manifest(&namespace)
+                .await
+                .expect("fold the WAL tail"),
             &setup.clock(),
         )
         .await
-        .map(|report| crate::pin::checkpoint_summary(report.response))
+        .map(crate::pin::checkpoint_summary)
         .expect("pin");
     write_test_file(&store, &namespace_id, "/file", "new", &setup).await;
     crate::test_support::namespace_store(&store, &namespace_id)
@@ -3244,17 +3305,31 @@ async fn fork_pin_grace_skips_targets_and_aged_pins_read_only_manifest_discovery
         .expect("bootstrap");
     // A fork's pass reads no other member's roots, so only pin cleanup reads
     // the targets.
-    crate::test_support::NamespaceFixture::new(&store, &root, &setup)
+    let fixture = crate::test_support::NamespaceFixture::new(&store, &root, &setup);
+    fixture
         .engine()
-        .fork_namespace(&source, &loonfs_test_support::test_actor(), None)
+        .fork_namespace(
+            &source,
+            &loonfs_test_support::test_actor(),
+            crate::test_support::folded_manifest(&fixture.namespace)
+                .await
+                .expect("fold the WAL tail"),
+        )
         .await
         .expect("fork the source");
     let mut targets = Vec::new();
     for number in 0..6 {
         let target = NamespaceId::parse(format!("target-{number}")).expect("target");
-        crate::test_support::NamespaceFixture::new(&store, &source, &setup)
+        let fixture = crate::test_support::NamespaceFixture::new(&store, &source, &setup);
+        fixture
             .engine()
-            .fork_namespace(&target, &loonfs_test_support::test_actor(), None)
+            .fork_namespace(
+                &target,
+                &loonfs_test_support::test_actor(),
+                crate::test_support::folded_manifest(&fixture.namespace)
+                    .await
+                    .expect("fold the WAL tail"),
+            )
             .await
             .expect("fork");
         targets.push(target);

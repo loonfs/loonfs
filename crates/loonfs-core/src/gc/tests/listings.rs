@@ -61,9 +61,17 @@ async fn a_pass_heads_only_the_discovery_probe_and_successor() {
     expected.push(metadata_manifest_object(&namespace_id, &successor));
     assert_eq!(heads, expected);
     let target = NamespaceId::parse("retired-no-heads").expect("target");
-    crate::test_support::NamespaceFixture::new(&recorded, &namespace_id, &context(1_000))
+    let fixture =
+        crate::test_support::NamespaceFixture::new(&recorded, &namespace_id, &context(1_000));
+    fixture
         .engine()
-        .fork_namespace(&target, &loonfs_test_support::test_actor(), None)
+        .fork_namespace(
+            &target,
+            &loonfs_test_support::test_actor(),
+            crate::test_support::folded_manifest(&fixture.namespace)
+                .await
+                .expect("fold the WAL tail"),
+        )
         .await
         .expect("fork");
     crate::test_support::NamespaceFixture::new(&recorded, &target, &context(1_000))

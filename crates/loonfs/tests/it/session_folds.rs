@@ -335,14 +335,29 @@ async fn a_delete_waits_for_a_requested_fold() {
     family.runtime.shutdown().await.expect("shutdown");
 }
 
-/// Checks that a snapshot whose fold a fold of the namespace's session
-/// replaces before the snapshot's pin is verified folds and pins again
-/// through the namespace's fold path. The snapshot's pin put is parked while
-/// the session folds the commits after the snapshot's fold. The retry's fold
-/// then starts from the session's position, so it reads no WAL object, and
-/// each content object is written once.
+/// A pin of a namespace's current head, which folds the namespace's WAL tail
+/// before the pin.
+#[derive(Debug, Clone, Copy)]
+enum HeadPin {
+    Snapshot,
+    Fork,
+}
+
+/// Checks that a snapshot or a fork whose fold a fold of the namespace's
+/// session replaces before the pin is verified folds and pins again through
+/// the namespace's fold path. The pin put is parked while the session folds
+/// the commits after the pin's fold. The retry's fold then starts from the
+/// session's position, so it reads no WAL object, and each content object is
+/// written once.
 #[tokio::test]
-async fn a_snapshot_whose_fold_is_replaced_retries_through_the_fold_path() {
+async fn a_snapshot_or_a_fork_whose_fold_is_replaced_retries_through_the_fold_path() {
+    for head_pin in [HeadPin::Snapshot, HeadPin::Fork] {
+        pin_after_a_replaced_fold(head_pin).await;
+    }
+}
+
+async fn pin_after_a_replaced_fold(head_pin: HeadPin) {
+    let fork_id = namespace_id("pin-retry-fork");
     let namespace_id = namespace_id("pin-retry");
     let blocking = Arc::new(BlockingStore::new(
         MemoryStore::new(ChecksumAlgorithm::Crc64nvme),
@@ -382,10 +397,27 @@ async fn a_snapshot_whose_fold_is_replaced_retries_through_the_fold_path() {
     store.reset();
     write(0, FILES - 1).await;
     blocking.block_next();
-    let snapshot = namespace.create_snapshot("retried");
-    tokio::pin!(snapshot);
+    let pinned = async {
+        match head_pin {
+            HeadPin::Snapshot => namespace
+                .create_snapshot("retried")
+                .await
+                .expect("the snapshot")
+                .snapshot_id
+                .manifest_no(),
+            HeadPin::Fork => runtime
+                .fork_namespace(&namespace_id, &fork_id, &actor())
+                .await
+                .expect("the fork")
+                .fork_basis
+                .expect("a fork basis")
+                .source_pin_id
+                .manifest_no(),
+        }
+    };
+    tokio::pin!(pinned);
     tokio::select! {
-        _ = &mut snapshot => panic!("the snapshot finished without writing its pin"),
+        _ = &mut pinned => panic!("{head_pin:?}: the pin finished without writing its record"),
         () = blocking.wait_until_blocked() => {}
     }
     write(FILES - 1, FILES).await;
@@ -399,20 +431,27 @@ async fn a_snapshot_whose_fold_is_replaced_retries_through_the_fold_path() {
         .expect("a manifest");
     let operations = store.take();
     blocking.release();
-    let snapshot = snapshot.await.expect("the snapshot");
-    assert_eq!(snapshot.snapshot_id.manifest_no(), folded);
+    assert_eq!(pinned.await, folded, "{head_pin:?}");
     let retry = store.take();
     let wal_prefix = loonfs_objectstore::keys::wal_prefix(&namespace_id);
     assert!(
         retry
             .iter()
             .all(|operation| !operation.key().starts_with(&wal_prefix)),
-        "the retry folds from the session's position: {retry:#?}"
+        "{head_pin:?}: the retry folds from the session's position: {retry:#?}"
     );
     let operations = [operations, retry].concat();
     let content_puts = write_keys(&operations, &KeyPredicate::content_blob());
     let distinct: BTreeSet<_> = content_puts.iter().collect();
-    assert_eq!(distinct.len(), 2 * FILES - 1, "{content_puts:#?}");
-    assert_eq!(content_puts.len(), distinct.len(), "{content_puts:#?}");
+    assert_eq!(
+        distinct.len(),
+        2 * FILES - 1,
+        "{head_pin:?}: {content_puts:#?}"
+    );
+    assert_eq!(
+        content_puts.len(),
+        distinct.len(),
+        "{head_pin:?}: {content_puts:#?}"
+    );
     runtime.shutdown().await.expect("shutdown");
 }

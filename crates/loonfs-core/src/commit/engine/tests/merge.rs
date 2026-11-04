@@ -532,7 +532,13 @@ async fn merge_a_forks_file() -> (tempfile::TempDir, MergedFile) {
     main_fixture.create().await.expect("create main");
     main_fixture
         .engine()
-        .fork_namespace(&fork, &loonfs_test_support::test_actor(), None)
+        .fork_namespace(
+            &fork,
+            &loonfs_test_support::test_actor(),
+            crate::test_support::folded_manifest(&main_fixture.namespace)
+                .await
+                .expect("fold the WAL tail"),
+        )
         .await
         .expect("fork");
     let fork_point_seq = crate::test_support::namespace_store(&store, &fork)

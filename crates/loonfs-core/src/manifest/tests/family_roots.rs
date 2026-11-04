@@ -17,12 +17,18 @@ async fn every_member_of_a_fork_family_records_the_family_root() {
         .expect("create the root");
     assert_eq!(created.family_root_id, root);
     for (source, target) in [(&root, &fork), (&fork, &grandchild)] {
-        let forked = crate::test_support::NamespaceFixture::new(&store, source, &setup)
+        let fixture = crate::test_support::NamespaceFixture::new(&store, source, &setup);
+        let forked = fixture
             .engine()
-            .fork_namespace(target, &loonfs_test_support::test_actor(), None)
+            .fork_namespace(
+                target,
+                &loonfs_test_support::test_actor(),
+                crate::test_support::folded_manifest(&fixture.namespace)
+                    .await
+                    .expect("fold the WAL tail"),
+            )
             .await
-            .expect("fork")
-            .response;
+            .expect("fork");
         assert_eq!(forked.family_root_id, root, "the fork `{target}`");
     }
     // A successor of the first manifest keeps the value.
@@ -59,9 +65,16 @@ async fn a_successor_that_changes_the_family_root_is_refused() {
         .create()
         .await
         .expect("create the root");
-    crate::test_support::NamespaceFixture::new(&store, &root, &setup)
+    let fixture = crate::test_support::NamespaceFixture::new(&store, &root, &setup);
+    fixture
         .engine()
-        .fork_namespace(&fork, &loonfs_test_support::test_actor(), None)
+        .fork_namespace(
+            &fork,
+            &loonfs_test_support::test_actor(),
+            crate::test_support::folded_manifest(&fixture.namespace)
+                .await
+                .expect("fold the WAL tail"),
+        )
         .await
         .expect("fork");
     let first = crate::test_support::namespace_store(&store, &fork)

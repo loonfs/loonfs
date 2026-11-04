@@ -37,9 +37,17 @@ async fn live_grandchild_keeps_deleted_ancestors_pinned_until_retirement_runs_le
                 .await
                 .expect("bootstrap root");
         } else {
-            crate::test_support::NamespaceFixture::new(&store, &namespaces[index - 1], &setup)
+            let fixture =
+                crate::test_support::NamespaceFixture::new(&store, &namespaces[index - 1], &setup);
+            fixture
                 .engine()
-                .fork_namespace(namespace_id, &loonfs_test_support::test_actor(), None)
+                .fork_namespace(
+                    namespace_id,
+                    &loonfs_test_support::test_actor(),
+                    crate::test_support::folded_manifest(&fixture.namespace)
+                        .await
+                        .expect("fold the WAL tail"),
+                )
                 .await
                 .expect("fork");
         }

@@ -212,10 +212,15 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
         .expect("write");
     let engine = namespace_engine(&store, &parent, &context);
     let snapshot = engine
-        .create_snapshot("baseline".to_owned(), Some(u64::MAX / 2))
+        .create_snapshot(
+            "baseline".to_owned(),
+            Some(u64::MAX / 2),
+            loonfs_core::test_support::folded_manifest(&namespace_store(&store, &parent))
+                .await
+                .expect("fold the WAL tail"),
+        )
         .await
-        .expect("snapshot")
-        .response;
+        .expect("snapshot");
     let baseline = namespace_store(&store, &parent)
         .load_checkpoint_statistics(&snapshot.snapshot_id)
         .await
@@ -240,10 +245,15 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
     );
     engine.fold_wal().await.expect("fold parent");
     let layout_snapshot = engine
-        .create_snapshot("layout".to_owned(), Some(u64::MAX / 2))
+        .create_snapshot(
+            "layout".to_owned(),
+            Some(u64::MAX / 2),
+            loonfs_core::test_support::folded_manifest(&namespace_store(&store, &parent))
+                .await
+                .expect("fold the WAL tail"),
+        )
         .await
-        .expect("layout snapshot")
-        .response;
+        .expect("layout snapshot");
     let current = namespace_store(&store, &parent)
         .load_current_manifest()
         .await
@@ -296,10 +306,10 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
         layout
     );
     engine
-        .fork_namespace(
+        .fork_namespace_at_snapshot(
             &child,
             &loonfs_test_support::test_actor(),
-            Some(&snapshot.snapshot_id),
+            &snapshot.snapshot_id,
         )
         .await
         .expect("fork old snapshot");
@@ -337,7 +347,13 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
         }
     );
     child_engine
-        .fork_namespace(&grandchild, &loonfs_test_support::test_actor(), None)
+        .fork_namespace(
+            &grandchild,
+            &loonfs_test_support::test_actor(),
+            loonfs_core::test_support::folded_manifest(&namespace_store(&store, &child))
+                .await
+                .expect("fold the WAL tail"),
+        )
         .await
         .expect("nested fork");
     let nested = namespace_store(&store, &grandchild)

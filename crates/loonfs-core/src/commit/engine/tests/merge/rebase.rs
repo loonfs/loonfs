@@ -30,16 +30,19 @@ async fn fork_for_rebase(
     writer: &WriterAt,
     target: &NamespaceId,
 ) -> Result<loonfs_types::NamespaceMetadata> {
-    NamespaceFixture::new(store, main, writer)
+    let fixture = NamespaceFixture::new(store, main, writer);
+    fixture
         .engine()
         .fork_namespace_for_rebase(
             target,
             &loonfs_test_support::test_actor(),
             &fork(),
             FORK_POINT,
+            crate::test_support::folded_manifest(&fixture.namespace)
+                .await
+                .expect("fold the WAL tail"),
         )
         .await
-        .map(|report| report.response)
 }
 
 /// Checks that a rebase's new fork records the fork sequence that the fork's

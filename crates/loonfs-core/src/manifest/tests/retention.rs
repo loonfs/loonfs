@@ -1407,10 +1407,17 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
         .await
         .expect("write");
 
-    let first = crate::test_support::namespace_store(&store, &namespace_id)
-        .create_pin(owner(Some(10_000)), None, &context.clock())
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let first = namespace
+        .create_pin(
+            owner(Some(10_000)),
+            crate::test_support::folded_manifest(&namespace)
+                .await
+                .expect("fold the WAL tail"),
+            &context.clock(),
+        )
         .await
-        .map(|report| crate::pin::checkpoint_summary(report.response))
+        .map(crate::pin::checkpoint_summary)
         .expect("create checkpoint");
     assert_eq!(first.expires_at_ms, Some(10_000));
 
@@ -1418,10 +1425,17 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
     later_context.now_ms = 2_000;
     let mut minted = BTreeSet::from([first.checkpoint_id.clone()]);
     for expiry in [Some(99_000), Some(5_000), None] {
-        let next = crate::test_support::namespace_store(&store, &namespace_id)
-            .create_pin(owner(expiry), None, &later_context.clock())
+        let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+        let next = namespace
+            .create_pin(
+                owner(expiry),
+                crate::test_support::folded_manifest(&namespace)
+                    .await
+                    .expect("fold the WAL tail"),
+                &later_context.clock(),
+            )
             .await
-            .map(|report| crate::pin::checkpoint_summary(report.response))
+            .map(crate::pin::checkpoint_summary)
             .expect("create checkpoint");
         assert!(
             minted.insert(next.checkpoint_id.clone()),
@@ -1466,17 +1480,20 @@ async fn an_expired_pin_serves_no_reads_but_stays_until_a_pass_deletes_it() {
         .write_file_bytes("/docs/file.txt", b"body\n", None)
         .await
         .expect("write");
-    let already_expired = crate::test_support::namespace_store(&store, &namespace_id)
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let already_expired = namespace
         .create_pin(
             loonfs_types::format::control::PinOwner::User {
                 name: "test-pin".to_owned(),
                 expires_at_ms: Some(context.now_ms),
             },
-            None,
+            crate::test_support::folded_manifest(&namespace)
+                .await
+                .expect("fold the WAL tail"),
             &context.clock(),
         )
         .await
-        .map(|report| crate::pin::checkpoint_summary(report.response))
+        .map(crate::pin::checkpoint_summary)
         .expect("create checkpoint whose expiry has already passed");
     assert!(crate::test_support::namespace_store(&store, &namespace_id)
         .load_pin(&already_expired.checkpoint_id)
@@ -1605,7 +1622,7 @@ async fn checkpoint_creation_deletes_its_pin_when_the_floor_passed_its_manifest(
         loonfs_test_support::stores::KeyPredicate::prefix(pin_prefix(&namespace_id)),
     );
     let error = crate::test_support::namespace_store(&store, &namespace_id)
-        .create_pin_at_basis(
+        .create_pin(
             loonfs_types::format::control::PinOwner::User {
                 name: "old".to_owned(),
                 expires_at_ms: None,
@@ -1692,7 +1709,7 @@ async fn pin_basis_verification_store_failure_deletes_the_record() {
     );
     store.fail_next(1);
     let error = crate::test_support::namespace_store(&store, &namespace_id)
-        .create_pin_at_basis(
+        .create_pin(
             loonfs_types::format::control::PinOwner::User {
                 name: "failed".to_owned(),
                 expires_at_ms: None,

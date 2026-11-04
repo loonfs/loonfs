@@ -16,18 +16,20 @@ async fn snapshot_expiry_after_the_renewal_cas_starts_preserves_success() {
         bootstrap_namespace(&inner, &namespace_id, &context)
             .await
             .expect("bootstrap");
-        let pin = crate::test_support::namespace_store(&inner, &namespace_id)
+        let namespace = crate::test_support::namespace_store(&inner, &namespace_id);
+        let pin = namespace
             .create_pin(
                 PinOwner::User {
                     name: "short lease".to_owned(),
                     expires_at_ms: Some(1_001),
                 },
-                None,
+                crate::test_support::folded_manifest(&namespace)
+                    .await
+                    .expect("fold the WAL tail"),
                 &context.clock(),
             )
             .await
-            .expect("snapshot")
-            .response;
+            .expect("snapshot");
         let key = keys::pin(&namespace_id, &pin.pin_id);
         let failing = FailStore::new(
             inner.clone(),
@@ -91,18 +93,20 @@ async fn snapshot_expiring_during_renewal_load_cannot_be_extended_or_reported_li
         bootstrap_namespace(&inner, &namespace_id, &context)
             .await
             .expect("bootstrap");
-        let pin = crate::test_support::namespace_store(&inner, &namespace_id)
+        let namespace = crate::test_support::namespace_store(&inner, &namespace_id);
+        let pin = namespace
             .create_pin(
                 PinOwner::User {
                     name: "short lease".to_owned(),
                     expires_at_ms: Some(1_001),
                 },
-                None,
+                crate::test_support::folded_manifest(&namespace)
+                    .await
+                    .expect("fold the WAL tail"),
                 &context.clock(),
             )
             .await
-            .expect("snapshot")
-            .response;
+            .expect("snapshot");
         let store = BlockingStore::new(
             inner.clone(),
             KeyPredicate::exact(keys::pin(&namespace_id, &pin.pin_id)),
@@ -156,18 +160,20 @@ async fn snapshot_renewal_contention_does_not_restart_the_expiry_clock() {
     bootstrap_namespace(&inner, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    let pin = crate::test_support::namespace_store(&inner, &namespace_id)
+    let namespace = crate::test_support::namespace_store(&inner, &namespace_id);
+    let pin = namespace
         .create_pin(
             PinOwner::User {
                 name: "short lease".to_owned(),
                 expires_at_ms: Some(1_001),
             },
-            None,
+            crate::test_support::folded_manifest(&namespace)
+                .await
+                .expect("fold the WAL tail"),
             &context.clock(),
         )
         .await
-        .expect("snapshot")
-        .response;
+        .expect("snapshot");
     let store = BlockingStore::new(
         inner.clone(),
         KeyPredicate::exact(keys::pin(&namespace_id, &pin.pin_id)),

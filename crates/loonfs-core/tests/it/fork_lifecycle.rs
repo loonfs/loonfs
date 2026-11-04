@@ -35,10 +35,16 @@ async fn fork_namespace<S: ObjectStore + ?Sized>(
     new_namespace_id: &NamespaceId,
     context: &WriterAt,
 ) -> Result<loonfs_types::NamespaceMetadata, CoreError> {
+    let manifest =
+        loonfs_core::test_support::folded_manifest(&namespace_store(store, source_namespace_id))
+            .await?;
     namespace_engine(store, source_namespace_id, context)
-        .fork_namespace(new_namespace_id, &loonfs_test_support::test_actor(), None)
+        .fork_namespace(
+            new_namespace_id,
+            &loonfs_test_support::test_actor(),
+            manifest,
+        )
         .await
-        .map(|report| report.response)
 }
 
 async fn load_pin<S: ObjectStore + ?Sized>(
@@ -92,10 +98,15 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
     seed_source_namespace_for_fork(&store, &source, &context).await;
     let engine = namespace_engine(&store, &source, &context);
     let snapshot = engine
-        .create_snapshot("basis".to_owned(), Some(u64::MAX / 2))
+        .create_snapshot(
+            "basis".to_owned(),
+            Some(u64::MAX / 2),
+            loonfs_core::test_support::folded_manifest(&namespace_store(&store, &source))
+                .await
+                .expect("fold the WAL tail"),
+        )
         .await
-        .expect("snapshot")
-        .response;
+        .expect("snapshot");
     let snapshot_record = load_pin(&store, &source, &snapshot.snapshot_id).await;
     NamespaceFixture::new(&store, &source, &context)
         .write_file_bytes("/docs/later.txt", b"later", Some(&commit_id("later")))
@@ -135,15 +146,14 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
         .expect("collect source before fork");
     assert!(collected.deleted.metadata_segments > 0);
     let fork = engine
-        .fork_namespace(
+        .fork_namespace_at_snapshot(
             &target,
             &loonfs_test_support::test_actor(),
-            Some(&snapshot.snapshot_id),
+            &snapshot.snapshot_id,
         )
         .await
         .expect("fork snapshot");
-    assert_eq!(fork.response.head_seq, snapshot.captured_seq);
-    assert_eq!(fork.published, None, "a fork of a snapshot doesn't fold");
+    assert_eq!(fork.head_seq, snapshot.captured_seq);
     let head = head_state(&store, &target).await;
     assert_eq!(
         head.fork_basis.as_ref().expect("fork basis").manifest,
@@ -192,26 +202,32 @@ async fn invalid_snapshot_forks_write_nothing() {
     seed_source_namespace_for_fork(&store, &other, &context).await;
     let engine = namespace_engine(&store, &source, &context);
     let expired = engine
-        .create_snapshot("expired".to_owned(), Some(1))
+        .create_snapshot(
+            "expired".to_owned(),
+            Some(1),
+            loonfs_core::test_support::folded_manifest(&namespace_store(&store, &source))
+                .await
+                .expect("fold the WAL tail"),
+        )
         .await
-        .expect("expired snapshot")
-        .response;
+        .expect("expired snapshot");
     let foreign = namespace_engine(&store, &other, &context)
-        .create_snapshot("foreign".to_owned(), Some(u64::MAX / 2))
+        .create_snapshot(
+            "foreign".to_owned(),
+            Some(u64::MAX / 2),
+            loonfs_core::test_support::folded_manifest(&namespace_store(&store, &other))
+                .await
+                .expect("fold the WAL tail"),
+        )
         .await
-        .expect("foreign snapshot")
-        .response;
+        .expect("foreign snapshot");
     for (snapshot_id, expected_code) in [
         (expired.snapshot_id, ErrorCode::SnapshotNotFound),
         (foreign.snapshot_id, ErrorCode::SnapshotNotFound),
     ] {
         store.take();
         let error = engine
-            .fork_namespace(
-                &target,
-                &loonfs_test_support::test_actor(),
-                Some(&snapshot_id),
-            )
+            .fork_namespace_at_snapshot(&target, &loonfs_test_support::test_actor(), &snapshot_id)
             .await
             .expect_err("invalid snapshot");
         assert_eq!(error.code(), expected_code);
@@ -231,10 +247,15 @@ async fn snapshot_deletion_during_fork_deletes_the_attempt_without_installing_a_
     seed_source_namespace_for_fork(&store, &source, &context).await;
     let engine = namespace_engine(&store, &source, &context);
     let snapshot = engine
-        .create_snapshot("basis".to_owned(), Some(u64::MAX / 2))
+        .create_snapshot(
+            "basis".to_owned(),
+            Some(u64::MAX / 2),
+            loonfs_core::test_support::folded_manifest(&namespace_store(&store, &source))
+                .await
+                .expect("fold the WAL tail"),
+        )
         .await
-        .expect("snapshot")
-        .response;
+        .expect("snapshot");
     let store = BlockingStore::new(
         BlockingStore::new(
             store,
@@ -250,7 +271,7 @@ async fn snapshot_deletion_during_fork_deletes_the_attempt_without_installing_a_
     let engine = namespace_engine(&store, &source, &context);
     store.block_next();
     let actor_id = loonfs_test_support::test_actor();
-    let forking = engine.fork_namespace(&target, &actor_id, Some(&snapshot.snapshot_id));
+    let forking = engine.fork_namespace_at_snapshot(&target, &actor_id, &snapshot.snapshot_id);
     let deleting = async {
         store.wait_until_blocked().await;
         store.inner().block_next();
@@ -567,7 +588,16 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
     .await
     .expect("seed shared file");
     namespace_engine(&store, &source_namespace_id, &context)
-        .create_snapshot("test-pin".to_owned(), None)
+        .create_snapshot(
+            "test-pin".to_owned(),
+            None,
+            loonfs_core::test_support::folded_manifest(&namespace_store(
+                &store,
+                &source_namespace_id,
+            ))
+            .await
+            .expect("fold the WAL tail"),
+        )
         .await
         .expect("create source checkpoint before fork");
 
@@ -1126,10 +1156,18 @@ async fn fork_namespace_rejects_corrupt_source_manifest_descriptors() {
 
     seed_source_namespace_for_fork(&store, &source_namespace_id, &context).await;
     let checkpoint = namespace_engine(&store, &source_namespace_id, &context)
-        .create_snapshot("test-pin".to_owned(), None)
+        .create_snapshot(
+            "test-pin".to_owned(),
+            None,
+            loonfs_core::test_support::folded_manifest(&namespace_store(
+                &store,
+                &source_namespace_id,
+            ))
+            .await
+            .expect("fold the WAL tail"),
+        )
         .await
-        .expect("create source checkpoint")
-        .response;
+        .expect("create source checkpoint");
 
     let source_record = load_pin(&store, &source_namespace_id, &checkpoint.snapshot_id).await;
     let manifest_key =

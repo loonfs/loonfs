@@ -45,17 +45,20 @@ async fn pin_named<S: ObjectStore + ?Sized>(
     expires_at_ms: Option<u64>,
     context: &WriterAt,
 ) -> PinId {
-    crate::test_support::namespace_store(store, namespace_id)
+    let namespace = crate::test_support::namespace_store(store, namespace_id);
+    namespace
         .create_pin(
             PinOwner::User {
                 name: name.to_owned(),
                 expires_at_ms,
             },
-            None,
+            crate::test_support::folded_manifest(&namespace)
+                .await
+                .expect("fold the WAL tail"),
             &context.clock(),
         )
         .await
-        .map(|report| crate::pin::checkpoint_summary(report.response))
+        .map(crate::pin::checkpoint_summary)
         .expect("create checkpoint")
         .checkpoint_id
 }
@@ -498,8 +501,15 @@ async fn the_snapshot_listing_returns_user_pins_and_leaves_out_fork_pins() {
             )
             .await,
         );
-        crate::test_support::namespace_store(&store, &namespace_id)
-            .create_pin(fork_owner.clone(), None, &context.clock())
+        let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+        namespace
+            .create_pin(
+                fork_owner.clone(),
+                crate::test_support::folded_manifest(&namespace)
+                    .await
+                    .expect("fold the WAL tail"),
+                &context.clock(),
+            )
             .await
             .expect("create fork pin");
     }
@@ -558,10 +568,17 @@ async fn a_refused_owner_writes_no_record_to_find() {
         },
     ];
     for owner in refused {
-        let error = crate::test_support::namespace_store(&store, &namespace_id)
-            .create_pin(owner.clone(), None, &context.clock())
+        let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+        let error = namespace
+            .create_pin(
+                owner.clone(),
+                crate::test_support::folded_manifest(&namespace)
+                    .await
+                    .expect("fold the WAL tail"),
+                &context.clock(),
+            )
             .await
-            .map(|report| crate::pin::checkpoint_summary(report.response))
+            .map(crate::pin::checkpoint_summary)
             .expect_err("the owner is not creatable");
         assert_eq!(error.code(), ErrorCode::InvalidRequest, "owner: {owner:?}");
     }
@@ -587,17 +604,19 @@ async fn a_pin_read_by_id_matches_its_listed_row_and_a_read_through_it_checks_ex
     let unexpiring = pin_named(&store, &namespace_id, "nightly", None, &context).await;
     let expires_at_ms = context.now_ms + 10;
     let expiring = pin_named(&store, &namespace_id, "view", Some(expires_at_ms), &context).await;
-    let fork = crate::test_support::namespace_store(&store, &namespace_id)
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let fork = namespace
         .create_pin(
             PinOwner::Fork {
                 target_namespace_id: NamespaceId::parse("clone").expect("namespace id"),
             },
-            None,
+            crate::test_support::folded_manifest(&namespace)
+                .await
+                .expect("fold the WAL tail"),
             &context.clock(),
         )
         .await
         .expect("create fork pin")
-        .response
         .pin_id;
 
     let listed = list_all_checkpoints(&store, &namespace_id)
@@ -683,17 +702,19 @@ async fn deleting_a_missing_snapshot_succeeds_and_a_fork_pin_is_not_a_snapshot()
         .await
         .expect("bootstrap namespace");
     let snapshot = pin_named(&store, &namespace_id, "nightly", None, &context).await;
-    let fork = crate::test_support::namespace_store(&store, &namespace_id)
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let fork = namespace
         .create_pin(
             PinOwner::Fork {
                 target_namespace_id: NamespaceId::parse("clone").expect("namespace id"),
             },
-            None,
+            crate::test_support::folded_manifest(&namespace)
+                .await
+                .expect("fold the WAL tail"),
             &context.clock(),
         )
         .await
         .expect("create fork pin")
-        .response
         .pin_id;
 
     for attempt in 0..2 {

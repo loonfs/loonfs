@@ -143,10 +143,11 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     context: &WriterAt,
 ) -> Result<loonfs_types::Snapshot, CoreError> {
+    let manifest =
+        loonfs_core::test_support::folded_manifest(&namespace_store(store, namespace_id)).await?;
     namespace_engine(store, namespace_id, context)
-        .create_snapshot("test-pin".to_owned(), None)
+        .create_snapshot("test-pin".to_owned(), None, manifest)
         .await
-        .map(|report| report.response)
 }
 
 /// Publishes one operation as a whole request, which is the shape almost

@@ -7,8 +7,12 @@ use loonfs_test_support::stores::MetadataMapStore;
 use loonfs_types::format::control::PinOwner;
 use std::assert_matches;
 
+/// Checks that a pin of a manifest that compaction, or a fold of a newer
+/// head, replaces before the pin's verification returns
+/// `checkpoint_unavailable` and deletes the pin, so the caller folds and pins
+/// again.
 #[tokio::test]
-async fn pin_creation_retries_after_compaction_and_collection() {
+async fn a_pin_of_a_manifest_replaced_before_verification_is_refused_and_deleted() {
     for advance_head in [false, true] {
         let directory = tempdir().expect("directory");
         let namespace_id = NamespaceId::parse("demo").expect("namespace");
@@ -39,7 +43,7 @@ async fn pin_creation_retries_after_compaction_and_collection() {
             .await
             .expect("selected manifest");
         store.block_next();
-        let (created, current) =
+        let (created, ()) =
             tokio::join!(create_checkpoint(&store, &namespace_id, &context), async {
                 store.wait_until_blocked().await;
                 if advance_head {
@@ -59,34 +63,14 @@ async fn pin_creation_retries_after_compaction_and_collection() {
                     advance_head
                 );
                 store.release();
-                current
             });
-        let checkpoint = created.expect("retry against the current manifest");
-        let page = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
-            .namespace
-            .list_checkpoint_files_page(
-                &checkpoint.checkpoint_id,
-                loonfs_types::PageRequest {
-                    cursor: None,
-                    limit: loonfs_test_support::ids::page_limit(10),
-                },
-                crate::pin::ListCheckpointFilesOptions::default(),
-            )
+        let error = created.expect_err("the selected manifest is no longer current");
+        assert_eq!(error.code(), ErrorCode::CheckpointUnavailable);
+        assert!(store
+            .list_prefix(&pin_prefix(&namespace_id))
             .await
-            .expect("acknowledged checkpoint remains readable");
-        assert_eq!(page.files.len(), if advance_head { 3 } else { 2 });
-        assert_eq!(checkpoint.manifest_no, current.manifest_no);
-        assert_eq!(checkpoint.captured_seq, current.head_seq);
-        assert_eq!(
-            store
-                .list_prefix(&pin_prefix(&namespace_id))
-                .await
-                .expect("pins"),
-            [loonfs_objectstore::keys::pin(
-                &namespace_id,
-                &checkpoint.checkpoint_id
-            )]
-        );
+            .expect("pins")
+            .is_empty());
     }
 }
 
@@ -196,7 +180,7 @@ async fn namespace_deletion_during_pin_verification_deletes_the_pin() {
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let clock = context.clock();
     let (result, ()) = tokio::join!(
-        namespace.create_pin_at_basis(
+        namespace.create_pin(
             PinOwner::User {
                 name: "racing".to_owned(),
                 expires_at_ms: None
@@ -342,11 +326,17 @@ async fn a_fork_pin_id_is_read_like_a_snapshot_and_refused_by_every_other_snapsh
             target_namespace_id: NamespaceId::parse("clone").expect("namespace id"),
         },
     ] {
-        let pin = crate::test_support::namespace_store(&store, &namespace_id)
-            .create_pin(owner, None, &setup.clock())
+        let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+        let pin = namespace
+            .create_pin(
+                owner,
+                crate::test_support::folded_manifest(&namespace)
+                    .await
+                    .expect("fold the WAL tail"),
+                &setup.clock(),
+            )
             .await
-            .expect("pin")
-            .response;
+            .expect("pin");
         pins.push(pin.pin_id);
     }
     let [user, snapshot, fork] = &pins[..] else {

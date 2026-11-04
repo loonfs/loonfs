@@ -3,7 +3,7 @@
 
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
-use crate::manifest::{load_namespace_manifest_envelope, PublicationReport};
+use crate::manifest::load_namespace_manifest_envelope;
 use crate::merge::merge_start;
 use crate::metadata::MetadataView;
 use crate::namespace::state::NamespaceReadState;
@@ -12,7 +12,7 @@ use crate::pin::record::write_pin;
 use crate::pin::{ensure_unexpired, load_pin_basis};
 use crate::time::OperationClock;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::control::{ForkBasis, PinOwner, PinPayload, RebasedFrom};
+use loonfs_types::format::control::{ForkBasis, ManifestRef, PinOwner, PinPayload, RebasedFrom};
 use loonfs_types::format::manifest::NamespaceManifestPayload;
 use loonfs_types::{ChangeSeq, NamespaceId, NamespaceMetadata, PinId};
 
@@ -24,29 +24,52 @@ struct Rebase<'a> {
     fork_point_seq: ChangeSeq,
 }
 
+/// The state that a fork pins.
+enum ForkAt<'a> {
+    /// The manifest that the caller's fold of the WAL tail published or
+    /// found current.
+    Head(ManifestRef),
+    /// An unexpired snapshot of this namespace.
+    Snapshot(&'a PinId),
+}
+
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
-    /// Creates a new namespace at this namespace's current head or an unexpired snapshot.
+    /// Creates a new namespace at `manifest`, the manifest that the caller's
+    /// fold of this namespace's WAL tail published or found current.
     ///
     /// The fork shares immutable file bytes but gets its own metadata history.
-    /// Returns the target's status at the fork point. A fork of the current
-    /// head folds this namespace's WAL tail first, unless
-    /// [`Self::with_folded_manifest`] set the manifest of the caller's own
-    /// fold, and then a manifest that stopped being current before the fork
-    /// pin's verification returns `checkpoint_unavailable`. The report
-    /// includes the manifest of this namespace that the fork's fold
-    /// published, if it published one.
+    /// Returns the target's status at the fork point. A manifest that stopped
+    /// being current before the fork pin's verification returns
+    /// `checkpoint_unavailable`, so the caller folds and forks again.
     pub async fn fork_namespace(
         &self,
         new_namespace_id: &NamespaceId,
         actor_id: &loonfs_types::ActorId,
-        snapshot_id: Option<&PinId>,
-    ) -> Result<PublicationReport<NamespaceMetadata>> {
-        self.install_fork(new_namespace_id, actor_id, snapshot_id, None)
+        manifest: ManifestRef,
+    ) -> Result<NamespaceMetadata> {
+        self.install_fork(new_namespace_id, actor_id, ForkAt::Head(manifest), None)
             .await
     }
 
-    /// Creates a new namespace at this namespace's current head for a rebase
-    /// of `source_namespace_id`, a fork of this namespace made at
+    /// Creates a new namespace at the unexpired snapshot `snapshot_id`, as
+    /// [`Self::fork_namespace`] does at a manifest.
+    pub async fn fork_namespace_at_snapshot(
+        &self,
+        new_namespace_id: &NamespaceId,
+        actor_id: &loonfs_types::ActorId,
+        snapshot_id: &PinId,
+    ) -> Result<NamespaceMetadata> {
+        self.install_fork(
+            new_namespace_id,
+            actor_id,
+            ForkAt::Snapshot(snapshot_id),
+            None,
+        )
+        .await
+    }
+
+    /// Creates a new namespace at `manifest` for a rebase of
+    /// `source_namespace_id`, a fork of this namespace made at
     /// `fork_point_seq`, as [`Self::fork_namespace`] does
     /// ([design note](https://github.com/loonfs/loonfs/blob/main/docs/design/merge.md#rebasing)).
     ///
@@ -61,43 +84,41 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         actor_id: &loonfs_types::ActorId,
         source_namespace_id: &NamespaceId,
         fork_point_seq: ChangeSeq,
-    ) -> Result<PublicationReport<NamespaceMetadata>> {
+        manifest: ManifestRef,
+    ) -> Result<NamespaceMetadata> {
         let rebase = Rebase {
             source_namespace_id,
             fork_point_seq,
         };
-        self.install_fork(new_namespace_id, actor_id, None, Some(rebase))
-            .await
+        self.install_fork(
+            new_namespace_id,
+            actor_id,
+            ForkAt::Head(manifest),
+            Some(rebase),
+        )
+        .await
     }
 
     async fn install_fork(
         &self,
         new_namespace_id: &NamespaceId,
         actor_id: &loonfs_types::ActorId,
-        snapshot_id: Option<&PinId>,
+        at: ForkAt<'_>,
         rebase: Option<Rebase<'_>>,
-    ) -> Result<PublicationReport<NamespaceMetadata>> {
+    ) -> Result<NamespaceMetadata> {
         let clock = self.namespace.start_clock();
         let target = self.namespace.with_namespace(new_namespace_id.clone());
         target.ensure_absent().await?;
         let owner = PinOwner::Fork {
             target_namespace_id: new_namespace_id.clone(),
         };
-        let PublicationReport {
-            response: source_record,
-            published,
-        } = if let Some(snapshot_id) = snapshot_id {
-            PublicationReport {
-                response: self
-                    .namespace
+        let source_record = match at {
+            ForkAt::Head(manifest) => self.namespace.create_pin(owner, manifest, &clock).await?,
+            ForkAt::Snapshot(snapshot_id) => {
+                self.namespace
                     .create_snapshot_fork_pin(snapshot_id, owner, &clock)
-                    .await?,
-                published: None,
+                    .await?
             }
-        } else {
-            self.namespace
-                .create_pin(owner, self.folded_manifest.clone(), &clock)
-                .await?
         };
         let source_manifest = load_namespace_manifest_envelope(
             &self.namespace.store,
@@ -157,10 +178,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             }
             return Err(error);
         }
-        Ok(PublicationReport {
-            response: crate::namespace::status::created_namespace(&manifest),
-            published,
-        })
+        Ok(crate::namespace::status::created_namespace(&manifest))
     }
 }
 

@@ -229,6 +229,17 @@ pub fn namespace_store<S>(store: S, namespace_id: &NamespaceId) -> NamespaceStor
     )
 }
 
+/// Folds the namespace's WAL tail and returns the manifest that covers it,
+/// the manifest that a snapshot or a fork of the current head pins.
+pub async fn folded_manifest<S: ObjectStore>(
+    namespace: &NamespaceStore<S>,
+) -> crate::Result<loonfs_types::format::control::ManifestRef> {
+    let folded = namespace
+        .fold_wal_tail(None, &namespace.start_clock())
+        .await?;
+    Ok(folded.manifest.manifest)
+}
+
 /// Returns the inode ID of the item visible at `absolute_path` in the
 /// namespace's current view, for a test that needs the ID a commit generated.
 #[cfg(test)]
