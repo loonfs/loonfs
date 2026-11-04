@@ -44,10 +44,11 @@ pub(super) struct ScanLoader<'a, S: ObjectStore + ?Sized> {
 /// list arrives once from each. Up to `STORE_READS_IN_FLIGHT` segments are
 /// open and loading through `segment_cache` at once. Each refill loads the
 /// next blocks of each open segment's key range, up to
-/// `MAX_SCAN_REFILL_BYTES` of stored bytes, and inserts each block that it
+/// `MAX_SCAN_REFILL_BYTES` of stored bytes and the decoded bytes that the
+/// cache's read working memory has left, and inserts each block that it
 /// fetches into the block cache. The blocks of a refill are charged to the
-/// cache's read working memory while they load, and the charge is released
-/// before `visit` sees their rows.
+/// read working memory while they load, and the charge is released before
+/// `visit` sees their rows.
 pub(crate) async fn visit_segment_rows<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,
@@ -86,7 +87,7 @@ pub(crate) async fn visit_segment_rows<S: ObjectStore + ?Sized>(
         if iterators.is_empty() {
             return Ok(ControlFlow::Continue(()));
         }
-        refill_iterators(&loader, &mut iterators, 1).await?;
+        refill_iterators(&loader, &mut iterators, block_memo.refill_budget()).await?;
         // The memo releases its charge before `visit` runs, so the caller's
         // sets can take the read working memory.
         block_memo.clear();
@@ -118,20 +119,27 @@ impl<S: ObjectStore + ?Sized> SegmentBlockLoader<MetadataRow, ScanDescriptor<'_>
 {
     type Error = ManifestLoadError;
 
-    fn data_block_count(&self, entries: &[SegmentIndexEntry], _decoded_byte_limit: usize) -> usize {
+    fn data_block_count(&self, entries: &[SegmentIndexEntry], max_decoded_bytes: usize) -> usize {
         if self.blocks_per_refill == BlocksPerRefill::One {
             return entries.len().min(1);
         }
         let needed = index_blocks_for_key_range(entries, "", self.upper_bound);
         let mut stored_bytes = 0;
+        let mut decoded_bytes = 0;
         entries[needed]
             .iter()
             .take_while(|entry| {
-                let next_bytes = stored_bytes + u64::from(entry.block.stored_bytes);
-                if stored_bytes > 0 && next_bytes > MAX_SCAN_REFILL_BYTES {
+                let next_stored_bytes = stored_bytes + u64::from(entry.block.stored_bytes);
+                let next_decoded_bytes = decoded_bytes + entry.block.decoded_bytes as usize;
+                // A refill holds its first block whatever its size.
+                if stored_bytes > 0
+                    && (next_stored_bytes > MAX_SCAN_REFILL_BYTES
+                        || next_decoded_bytes > max_decoded_bytes)
+                {
                     return false;
                 }
-                stored_bytes = next_bytes;
+                stored_bytes = next_stored_bytes;
+                decoded_bytes = next_decoded_bytes;
                 true
             })
             .count()

@@ -38,8 +38,9 @@ pub(crate) enum BlocksPerRefill {
     /// which fetches the block that has the key.
     One,
     /// The next blocks of the scan's remaining key range, up to
-    /// `MAX_SCAN_REFILL_BYTES` of stored bytes, for a scan of a key range,
-    /// so a cold page of up to 1 MiB of blocks loads in one GET.
+    /// `MAX_SCAN_REFILL_BYTES` of stored bytes and the decoded bytes that the
+    /// read working memory has left, for a scan of a key range, so a cold
+    /// page of up to 1 MiB of blocks loads in one GET.
     KeyRange,
 }
 
@@ -458,7 +459,7 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
             if iterators.is_empty() {
                 break;
             }
-            refill_iterators(&loader, &mut iterators, 1).await?;
+            refill_iterators(&loader, &mut iterators, self.block_memo.refill_budget()).await?;
             if filter_admitted {
                 for iterator in &iterators[previously_open..] {
                     let matched = iterator

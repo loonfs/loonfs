@@ -73,6 +73,18 @@ impl SessionBlockMemo {
         *inner = SessionBlockMemoInner::default();
     }
 
+    /// Returns the decoded bytes that one refill of the memo's read may load:
+    /// what the read working memory has left, plus the memo's own reservation,
+    /// which the memo recycles oldest block first to hold the refill.
+    pub(super) fn refill_budget(&self) -> usize {
+        let reserved_bytes = self
+            .inner
+            .lock()
+            .expect("session block memo lock should not be poisoned")
+            .reserved_bytes;
+        self.pool.available_bytes().saturating_add(reserved_bytes)
+    }
+
     pub(super) fn record(
         &self,
         cache_key: &MetadataSegmentCacheKey,

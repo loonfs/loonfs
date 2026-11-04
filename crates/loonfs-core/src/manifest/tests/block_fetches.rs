@@ -230,6 +230,96 @@ async fn a_bounded_scan_fetches_the_blocks_of_its_key_range_and_nothing_past_the
     }
 }
 
+/// Checks that a cold scan under a small read working memory fetches its key
+/// range in refills that each decode to no more than the memory left, rather
+/// than in one GET of blocks that its memo can't keep.
+#[tokio::test]
+async fn a_scan_refill_loads_no_more_than_the_read_working_memory_has_left() {
+    let temp = tempdir().expect("tempdir");
+    let store = RecordingStore::metadata_segments(LocalFsStore::new(temp.path()).expect("store"));
+    let expected = rows(0, 8_192, 1);
+    let (descriptor, index) = segment_with_block_target(&store, &expected, 12 * 1024).await;
+    let (first, last) = (10, 40);
+    let lower = format!("{}\0", index[first - 1].last_row_key);
+    let upper = index[last].last_row_key.clone();
+    let decoded_bytes = |blocks: std::ops::Range<usize>| -> usize {
+        index[blocks]
+            .iter()
+            .map(|entry| entry.block.decoded_bytes as usize)
+            .sum()
+    };
+    // Room for four of the range's blocks, which all decode to about the
+    // same size.
+    let limit = decoded_bytes(first..first + 4);
+    let cache = MetadataSegmentCache::new(
+        Arc::new(crate::segment::cache::SharedSegmentBlocks::new(
+            usize::MAX,
+            usize::MAX,
+        )),
+        crate::block_cache::ObjectStoreScope::new(0),
+        Arc::new(crate::read_working_memory::ReadWorkingMemory::new(
+            limit, None,
+        )),
+    );
+    let wanted: Vec<_> = expected
+        .iter()
+        .filter(|row| {
+            let key = row.row_key_for_family(FAMILY);
+            key >= lower && key < upper
+        })
+        .cloned()
+        .collect();
+    let view = scan::VerifiedMetadataSegments::from_runs(
+        &store,
+        &cache,
+        one_segment_runs(descriptor.clone()),
+    );
+    store.reset();
+    let page: Vec<_> = view
+        .scan_range(
+            FAMILY,
+            &lower,
+            Some(&upper),
+            usize::MAX,
+            None,
+            scan::BlocksPerRefill::KeyRange,
+        )
+        .await
+        .expect("scan the key range")
+        .into_iter()
+        .map(|(_, row)| row)
+        .collect();
+    assert_eq!(page, wanted);
+
+    let mut gets = data_gets(&store, &descriptor);
+    gets.sort_unstable();
+    let (range_start, range_end) = stored_range(&index, first..last + 1);
+    assert_eq!(gets.first().map(|get| get.0), Some(range_start));
+    assert_eq!(gets.last().map(|get| get.1), Some(range_end));
+    assert!(
+        gets.windows(2).all(|pair| pair[0].1 == pair[1].0),
+        "the GETs cover blocks {first}..={last} once: {gets:?}"
+    );
+    assert!(
+        gets.len() > 1,
+        "the range loads in several refills: {gets:?}"
+    );
+    for (start, end) in &gets {
+        let blocks = index
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.block.offset >= *start && entry.block.offset < *end)
+            .map(|(position, _)| position);
+        let (lowest, highest) = blocks.fold((usize::MAX, 0), |(lowest, highest), position| {
+            (lowest.min(position), highest.max(position + 1))
+        });
+        assert!(
+            decoded_bytes(lowest..highest) <= limit,
+            "the refill of blocks {lowest}..{highest} decodes to more than {limit} bytes: {gets:?}"
+        );
+    }
+}
+
 /// Checks that a cold page of a directory listing whose entries span several
 /// blocks of one segment fetches those blocks in one GET, and that the same
 /// page through a fresh view sends no GET.
