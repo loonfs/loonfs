@@ -215,30 +215,13 @@ pub(crate) enum Backend {
     Embedded {
         host: Box<MaintenanceHost>,
         /// The digest of the store config, which upload journals key on.
-        journal_identity: String,
+        target_identity: String,
     },
     /// A LoonFS server.
     Remote { server_url: String },
 }
 
 impl ResolvedTarget {
-    pub(crate) async fn remote_connectivity(&self) -> Result<()> {
-        if let Backend::Remote { .. } = self.backend {
-            match self.client.get_health().await {
-                Ok(()) | Err(loonfs_client::ClientError::Api { .. }) => {}
-                Err(error) => return Err(error.into()),
-            }
-        }
-        Ok(())
-    }
-
-    pub(crate) async fn remote_health(&self) -> Result<()> {
-        if let Backend::Remote { .. } = self.backend {
-            self.client.get_health().await?;
-        }
-        Ok(())
-    }
-
     pub(crate) async fn resolve(
         profile_name: &str,
         profile: &ProfileConfig,
@@ -269,11 +252,11 @@ impl ResolvedTarget {
         }
     }
 
-    pub(crate) fn journal_identity(&self) -> &str {
+    pub(crate) fn target_identity(&self) -> &str {
         match &self.backend {
             Backend::Embedded {
-                journal_identity, ..
-            } => journal_identity,
+                target_identity, ..
+            } => target_identity,
             Backend::Remote { server_url } => server_url,
         }
     }
@@ -295,7 +278,7 @@ impl ResolvedTarget {
             .configured_object_store()
             .map_err(|err| CliError::invalid_config(err.public_message().into_owned()))?
             .into_shared();
-        let journal_identity = loonfs_types::sha256_hex(
+        let target_identity = loonfs_types::sha256_hex(
             &serde_json::to_vec(store_config)
                 .map_err(|error| CliError::invalid_config(error.to_string()))?,
         );
@@ -305,7 +288,7 @@ impl ResolvedTarget {
             store_config.kind(),
             loonfs::InlineContentPolicy::default(),
             transient_retry,
-            journal_identity,
+            target_identity,
         )
         .await
     }
@@ -321,7 +304,7 @@ impl ResolvedTarget {
         store_kind: loonfs_objectstore::ConfiguredObjectStoreKind,
         inline_content: loonfs::InlineContentPolicy,
         transient_retry: TransientRetry,
-        journal_identity: String,
+        target_identity: String,
     ) -> Result<Self> {
         let writer_id = writer_id
             .map(ToOwned::to_owned)
@@ -366,7 +349,7 @@ impl ResolvedTarget {
             client,
             backend: Backend::Embedded {
                 host: Box::new(host),
-                journal_identity,
+                target_identity,
             },
         })
     }

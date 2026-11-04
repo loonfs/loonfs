@@ -22,6 +22,16 @@ pub(crate) fn state_directory(kind: &str) -> Option<PathBuf> {
     Some(home.join(".local/state").join(XDG_STATE_SUBDIR).join(kind))
 }
 
+/// Returns the path of the record of one `kind` whose identity is `key`:
+/// `<sha256 of key as JSON>.json` under [`state_directory`], or `None` when
+/// there is no state directory.
+pub(crate) fn keyed_path(kind: &str, key: &impl Serialize) -> Option<PathBuf> {
+    let key = loonfs_types::sha256_hex(
+        &serde_json::to_vec(key).expect("a record key should encode as JSON"),
+    );
+    Some(state_directory(kind)?.join(format!("{key}.json")))
+}
+
 /// Whether [`lock_sidecar`] waits for a lock another command holds or fails
 /// at once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

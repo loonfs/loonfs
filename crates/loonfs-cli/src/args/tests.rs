@@ -118,6 +118,27 @@ fn revision_preconditions_require_matching_inode_preconditions() {
     }
 }
 
+#[test]
+fn an_index_enable_that_does_not_wait_takes_no_wait_budget() {
+    for budget in ["--max-steps", "--deadline-ms"] {
+        let error = Cli::try_parse_from([
+            "loonfs",
+            "maintenance",
+            "index",
+            "enable",
+            "--no-wait",
+            budget,
+            "3",
+        ])
+        .expect_err("a budget for a wait that does not happen");
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::ArgumentConflict,
+            "{budget}"
+        );
+    }
+}
+
 fn assert_selected_target(cli: &Cli, profile: &str, namespace: &str) {
     let selectors = cli.selectors();
     assert_eq!(selectors.profile.as_deref(), Some(profile));

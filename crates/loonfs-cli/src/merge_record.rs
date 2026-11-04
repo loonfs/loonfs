@@ -2,7 +2,7 @@
 //! every step so that a rerun resumes the session where it stopped.
 
 use crate::error::{CliError, Result};
-use crate::state_file::{state_directory, OwnedStateFile};
+use crate::state_file::{keyed_path, OwnedStateFile};
 use loonfs_merge::MergeSessionState;
 use loonfs_types::{ActorId, ChangeSeq, NamespaceId, Subject};
 use serde::{Deserialize, Serialize};
@@ -40,28 +40,27 @@ pub(crate) struct MergeRecordFile {
 
 impl MergeRecordFile {
     /// Opens the record of the session that merges `fork_id` into
-    /// `namespace_id` through the profile `profile` and its `target`, at
+    /// `namespace_id` through the profile `profile` and its target, at
     /// `explicit_path`, or under the CLI's state directory.
     pub(crate) fn open(
         explicit_path: Option<&Path>,
         profile: &str,
-        target: &str,
+        target_identity: &str,
         namespace_id: &NamespaceId,
         fork_id: &NamespaceId,
     ) -> Result<Self> {
         let path = match explicit_path {
             Some(path) => path.to_owned(),
-            None => state_directory(MERGES_SUBDIR)
-                .ok_or_else(|| {
-                    CliError::io_error(
-                        "merge records require an absolute XDG_STATE_HOME or HOME, or `--record`",
-                    )
-                    .with_param("--record")
-                })?
-                .join(format!(
-                    "{}.json",
-                    record_key(profile, target, namespace_id, fork_id)
-                )),
+            None => keyed_path(
+                MERGES_SUBDIR,
+                &(profile, target_identity, namespace_id, fork_id),
+            )
+            .ok_or_else(|| {
+                CliError::io_error(
+                    "merge records require an absolute XDG_STATE_HOME or HOME, or `--record`",
+                )
+                .with_param("--record")
+            })?,
         };
         let file = OwnedStateFile::open(path.clone(), "merge session")
             .map_err(|error| record_error(&path, error))?;
@@ -129,16 +128,4 @@ impl MergeRecordFile {
 
 fn record_error(path: &Path, error: impl std::fmt::Display) -> CliError {
     CliError::io_error(format!("merge record `{}`: {error}", path.display()))
-}
-
-fn record_key(
-    profile: &str,
-    target: &str,
-    namespace_id: &NamespaceId,
-    fork_id: &NamespaceId,
-) -> String {
-    loonfs_types::sha256_hex(
-        &serde_json::to_vec(&(profile, target, namespace_id, fork_id))
-            .expect("a tuple of strings should encode as JSON"),
-    )
 }
