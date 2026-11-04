@@ -2,13 +2,13 @@
 //! views and change feed that every read family uses, and the diff.
 
 use crate::downloads::DirectDownloadTarget;
-use crate::execution_budget::BudgetPermit;
 use crate::pagers::{
     decode_list_page_request, decode_page_request, encode_next_cursor, ChangesPager,
     PathEntriesPager, TrashPager,
 };
 use crate::pinned_read::PinnedRead;
-use crate::read_view::{ReadSource, ReadView};
+use crate::read_view::{validate_view_directory_cursor, ReadSource, ReadView};
+use crate::runtime_core::classify_read_result;
 use crate::trace::{self, operation_span};
 use crate::{
     ChangeSeq, Consistency, ContentRef, CoreError, DiffOptions, DiffResponse, DownloadOptions,
@@ -43,6 +43,23 @@ pub(crate) fn ensure_revision_read_at(at: &ReadAt, revision_no: Option<RevisionN
     }
 }
 
+/// Rejects a directory cursor that a listing of a snapshot can't resume: one
+/// minted at another head, or bound to another pin or to none. A cursor for a
+/// listing of the live head passes, because the listing checks the cursor
+/// with [`reject_pinned_directory_cursor`] before the read.
+pub(crate) fn validate_snapshot_directory_cursor(
+    request: &PageRequest<ListPageCursor>,
+    pinned: &PinnedRead,
+    source: &ReadSource,
+) -> Result<()> {
+    match source {
+        ReadSource::Head => Ok(()),
+        ReadSource::Snapshot(pin_id) => {
+            validate_view_directory_cursor(request.cursor.as_ref(), pinned.head_seq(), Some(pin_id))
+        }
+    }
+}
+
 pub(crate) fn reject_pinned_directory_cursor(cursor: Option<&ListPageCursor>) -> Result<()> {
     let Some(pin_id) = cursor.and_then(ListPageCursor::pin_id) else {
         return Ok(());
@@ -54,31 +71,33 @@ pub(crate) fn reject_pinned_directory_cursor(cursor: Option<&ListPageCursor>) ->
 }
 
 impl<M: crate::Mode> Namespace<M> {
-    /// Runs a read at the state that `at` selects: `live` at the live head,
-    /// confirmed as `at` asks, or `snapshot` through a read view of the
-    /// snapshot that `at` selects, under the caller's `permit`.
-    pub(crate) async fn read_at<'p, 'b, T, Live, LiveFuture, Snapshot, SnapshotFuture>(
-        &self,
-        at: &ReadAt,
-        permit: &'p BudgetPermit<'b>,
-        live: Live,
-        snapshot: Snapshot,
-    ) -> Result<T>
+    /// Runs `read` at the state that `at` selects, with the state's source.
+    ///
+    /// A live read reads the live head, confirmed as `at` asks, and runs once
+    /// more at a reloaded head if a newer manifest replaced the read's basis.
+    /// A snapshot read reads the snapshot that `at` selects.
+    pub(crate) async fn read_at<T, Read, ReadFuture>(&self, at: &ReadAt, read: Read) -> Result<T>
     where
-        Live: Fn(PinnedRead) -> LiveFuture,
-        LiveFuture: Future<Output = Result<T>>,
-        Snapshot: FnOnce(ReadView, &'p BudgetPermit<'b>) -> SnapshotFuture,
-        SnapshotFuture: Future<Output = Result<T>>,
+        Read: Fn(PinnedRead, ReadSource) -> ReadFuture,
+        ReadFuture: Future<Output = Result<T>>,
     {
         match at {
             ReadAt::Live(consistency) => {
-                self.core.read(&self.namespace_id, *consistency, live).await
+                self.core
+                    .read(&self.namespace_id, *consistency, |pinned| {
+                        read(pinned, ReadSource::Head)
+                    })
+                    .await
             }
             ReadAt::Snapshot(snapshot_id) => {
-                let view = self
-                    .read_view_at_snapshot_with_permit(snapshot_id, permit)
+                let pinned = self
+                    .core
+                    .pinned_read_at_snapshot(&self.namespace_id, snapshot_id)
                     .await?;
-                snapshot(view, permit).await
+                let context = pinned.context.clone();
+                let source = ReadSource::Snapshot(snapshot_id.clone());
+                let result = read(pinned, source.clone()).await;
+                classify_read_result(&self.core, &context, &source, result).await
             }
         }
     }
@@ -115,27 +134,18 @@ impl<M: crate::Mode> Namespace<M> {
             snapshot_id = %snapshot_id
         );
         trace::in_operation(span, async {
-            let permit = self.core.read_permit().await;
-            self.read_view_at_snapshot_with_permit(snapshot_id, &permit)
-                .await
+            let _permit = self.core.read_permit().await;
+            let pinned = self
+                .core
+                .pinned_read_at_snapshot(&self.namespace_id, snapshot_id)
+                .await?;
+            Ok(ReadView::new(
+                self.core.clone(),
+                pinned,
+                ReadSource::Snapshot(snapshot_id.clone()),
+            ))
         })
         .await
-    }
-
-    async fn read_view_at_snapshot_with_permit(
-        &self,
-        snapshot_id: &PinId,
-        _permit: &BudgetPermit<'_>,
-    ) -> Result<ReadView> {
-        let pinned = self
-            .core
-            .pinned_read_at_snapshot(&self.namespace_id, snapshot_id)
-            .await?;
-        Ok(ReadView::new(
-            self.core.clone(),
-            pinned,
-            ReadSource::Snapshot(snapshot_id.clone()),
-        ))
     }
 
     /// Returns this namespace's metadata: its access mode, creation, fork
@@ -172,15 +182,10 @@ impl<M: crate::Mode> Namespace<M> {
         trace::in_operation(
             operation_span!(self.core, "stat", self.namespace_id),
             async {
-                let permit = self.core.read_permit().await;
-                self.read_at(
-                    &options.at,
-                    &permit,
-                    |pinned| async move { pinned.stat(absolute_path, options).await },
-                    |view, permit| async move {
-                        view.stat_with_permit(absolute_path, options, permit).await
-                    },
-                )
+                let _permit = self.core.read_permit().await;
+                self.read_at(&options.at, |pinned, _| async move {
+                    pinned.stat(absolute_path, options).await
+                })
                 .await
             },
         )
@@ -223,38 +228,27 @@ impl<M: crate::Mode> Namespace<M> {
         trace::in_operation(
             operation_span!(self.core, "list", self.namespace_id),
             async {
-                let permit = self.core.read_permit().await;
+                let _permit = self.core.read_permit().await;
                 if matches!(options.at, ReadAt::Live(_)) {
                     reject_pinned_directory_cursor(request.cursor.as_ref())?;
                 }
                 let listed_path = AbsolutePath::parse(absolute_path).map_err(CoreError::from)?;
-                self.read_at(
-                    &options.at,
-                    &permit,
-                    |pinned| {
-                        let request = request.clone();
-                        let options = options.clone();
-                        let listed_path = listed_path.clone();
-                        async move {
-                            // Give awakened validation waiters a turn before
-                            // synchronous page work. The head is already
-                            // captured and the validation guard has been
-                            // released.
-                            tokio::task::yield_now().await;
-                            pinned
-                                .path_entries_page(listed_path, request, options, None)
-                                .await
-                        }
-                    },
-                    |view, permit| {
-                        let request = request.clone();
-                        let options = options.clone();
-                        async move {
-                            view.path_entries_page(absolute_path, request, options, permit)
-                                .await
-                        }
-                    },
-                )
+                self.read_at(&options.at, |pinned, source| {
+                    let request = request.clone();
+                    let options = options.clone();
+                    let listed_path = listed_path.clone();
+                    async move {
+                        validate_snapshot_directory_cursor(&request, &pinned, &source)?;
+                        // Give awakened validation waiters a turn before
+                        // synchronous page work. The head is already
+                        // captured and the validation guard has been
+                        // released.
+                        tokio::task::yield_now().await;
+                        pinned
+                            .path_entries_page(listed_path, request, options, source.snapshot_id())
+                            .await
+                    }
+                })
                 .await
             },
         )
@@ -277,16 +271,11 @@ impl<M: crate::Mode> Namespace<M> {
         trace::in_operation(
             operation_span!(self.core, "read_file", self.namespace_id),
             async {
-                let permit = self.core.read_permit().await;
+                let _permit = self.core.read_permit().await;
                 let max_bytes = self.core.max_read_content_bytes();
-                self.read_at(
-                    &options.at,
-                    &permit,
-                    |pinned| async move { pinned.read_file(absolute_path, max_bytes).await },
-                    |view, permit| async move {
-                        view.read_file_with_permit(absolute_path, permit).await
-                    },
-                )
+                self.read_at(&options.at, |pinned, _| async move {
+                    pinned.read_file(absolute_path, max_bytes).await
+                })
                 .await
             },
         )
@@ -334,21 +323,13 @@ impl<M: crate::Mode> Namespace<M> {
         revision_no: Option<RevisionNo>,
         options: &ReadFileStreamOptions,
     ) -> Result<FileContentStream<SharedObjectStore>> {
-        let permit = self.core.read_permit().await;
+        let _permit = self.core.read_permit().await;
         ensure_revision_read_at(&options.at, revision_no)?;
-        self.read_at(
-            &options.at,
-            &permit,
-            |pinned| async move {
-                pinned
-                    .read_file_stream(absolute_path, revision_no, options)
-                    .await
-            },
-            |view, permit| async move {
-                view.read_file_stream_with_permit(absolute_path, options, permit)
-                    .await
-            },
-        )
+        self.read_at(&options.at, |pinned, _| async move {
+            pinned
+                .read_file_stream(absolute_path, revision_no, options)
+                .await
+        })
         .await
     }
 
@@ -382,21 +363,13 @@ impl<M: crate::Mode> Namespace<M> {
         revision_no: Option<RevisionNo>,
         options: &DownloadOptions,
     ) -> Result<DirectDownloadTarget> {
-        let permit = self.core.read_permit().await;
+        let _permit = self.core.read_permit().await;
         ensure_revision_read_at(&options.at, revision_no)?;
-        self.read_at(
-            &options.at,
-            &permit,
-            |pinned| async move {
-                pinned
-                    .create_download(absolute_path, revision_no, options)
-                    .await
-            },
-            |view, permit| async move {
-                view.create_download_with_permit(absolute_path, options, permit)
-                    .await
-            },
-        )
+        self.read_at(&options.at, |pinned, _| async move {
+            pinned
+                .create_download(absolute_path, revision_no, options)
+                .await
+        })
         .await
     }
 
@@ -529,15 +502,10 @@ impl<M: crate::Mode> Namespace<M> {
         trace::in_operation(
             operation_span!(self.core, "list_changes", self.namespace_id),
             async {
-                let permit = self.core.read_permit().await;
-                self.read_at(
-                    at,
-                    &permit,
-                    |pinned| async move { pinned.changes_page(position, limit, splitting).await },
-                    |view, permit| async move {
-                        view.changes_page(position, limit, splitting, permit).await
-                    },
-                )
+                let _permit = self.core.read_permit().await;
+                self.read_at(at, |pinned, _| async move {
+                    pinned.changes_page(position, limit, splitting).await
+                })
                 .await
             },
         )

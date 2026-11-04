@@ -3,7 +3,7 @@
 
 use crate::downloads::DirectDownloadByInodeTarget;
 use crate::namespace::reads::ensure_revision_read_at;
-use crate::namespace::reads::reject_pinned_directory_cursor;
+use crate::namespace::reads::{reject_pinned_directory_cursor, validate_snapshot_directory_cursor};
 use crate::pagers::{decode_list_page_request, InodeChildrenPager};
 use crate::trace::{self, operation_span};
 use crate::{
@@ -30,16 +30,10 @@ impl<M: crate::Mode> Namespace<M> {
         trace::in_operation(
             operation_span!(self.core, "stat_by_inode", self.namespace_id),
             async {
-                let permit = self.core.read_permit().await;
-                self.read_at(
-                    &options.at,
-                    &permit,
-                    |pinned| async move { pinned.stat_by_inode(inode_id, options).await },
-                    |view, permit| async move {
-                        view.stat_by_inode_with_permit(inode_id, options, permit)
-                            .await
-                    },
-                )
+                let _permit = self.core.read_permit().await;
+                self.read_at(&options.at, |pinned, _| async move {
+                    pinned.stat_by_inode(inode_id, options).await
+                })
                 .await
             },
         )
@@ -81,36 +75,25 @@ impl<M: crate::Mode> Namespace<M> {
         trace::in_operation(
             operation_span!(self.core, "list_by_inode", self.namespace_id),
             async {
-                let permit = self.core.read_permit().await;
+                let _permit = self.core.read_permit().await;
                 if matches!(options.at, ReadAt::Live(_)) {
                     reject_pinned_directory_cursor(request.cursor.as_ref())?;
                 }
-                self.read_at(
-                    &options.at,
-                    &permit,
-                    |pinned| {
-                        let request = request.clone();
-                        let options = options.clone();
-                        async move {
-                            // Give awakened validation waiters a turn before
-                            // synchronous page work. The head is already
-                            // captured and the validation guard has been
-                            // released.
-                            tokio::task::yield_now().await;
-                            pinned
-                                .inode_children_page(inode_id, request, options, None)
-                                .await
-                        }
-                    },
-                    |view, permit| {
-                        let request = request.clone();
-                        let options = options.clone();
-                        async move {
-                            view.inode_children_page(inode_id, request, options, permit)
-                                .await
-                        }
-                    },
-                )
+                self.read_at(&options.at, |pinned, source| {
+                    let request = request.clone();
+                    let options = options.clone();
+                    async move {
+                        validate_snapshot_directory_cursor(&request, &pinned, &source)?;
+                        // Give awakened validation waiters a turn before
+                        // synchronous page work. The head is already
+                        // captured and the validation guard has been
+                        // released.
+                        tokio::task::yield_now().await;
+                        pinned
+                            .inode_children_page(inode_id, request, options, source.snapshot_id())
+                            .await
+                    }
+                })
                 .await
             },
         )
@@ -147,21 +130,13 @@ impl<M: crate::Mode> Namespace<M> {
         revision_no: Option<RevisionNo>,
         options: &DownloadOptions,
     ) -> Result<DirectDownloadByInodeTarget> {
-        let permit = self.core.read_permit().await;
+        let _permit = self.core.read_permit().await;
         ensure_revision_read_at(&options.at, revision_no)?;
-        self.read_at(
-            &options.at,
-            &permit,
-            |pinned| async move {
-                pinned
-                    .create_download_by_inode(inode_id, revision_no, options)
-                    .await
-            },
-            |view, permit| async move {
-                view.create_download_by_inode_with_permit(inode_id, options, permit)
-                    .await
-            },
-        )
+        self.read_at(&options.at, |pinned, _| async move {
+            pinned
+                .create_download_by_inode(inode_id, revision_no, options)
+                .await
+        })
         .await
     }
 
@@ -208,16 +183,11 @@ impl<M: crate::Mode> Namespace<M> {
         trace::in_operation(
             operation_span!(self.core, "read_file_by_inode", self.namespace_id),
             async {
-                let permit = self.core.read_permit().await;
+                let _permit = self.core.read_permit().await;
                 let max_bytes = self.core.max_read_content_bytes();
-                self.read_at(
-                    &options.at,
-                    &permit,
-                    |pinned| async move { pinned.read_file_by_inode(inode_id, max_bytes).await },
-                    |view, permit| async move {
-                        view.read_file_by_inode_with_permit(inode_id, permit).await
-                    },
-                )
+                self.read_at(&options.at, |pinned, _| async move {
+                    pinned.read_file_by_inode(inode_id, max_bytes).await
+                })
                 .await
             },
         )
@@ -255,20 +225,12 @@ impl<M: crate::Mode> Namespace<M> {
         revision_no: Option<RevisionNo>,
         options: &ReadFileStreamOptions,
     ) -> Result<FileContentStream<SharedObjectStore>> {
-        let permit = self.core.read_permit().await;
-        self.read_at(
-            &options.at,
-            &permit,
-            |pinned| async move {
-                pinned
-                    .read_file_stream_by_inode(inode_id, revision_no, options)
-                    .await
-            },
-            |view, permit| async move {
-                view.read_file_stream_by_inode_with_permit(inode_id, revision_no, options, permit)
-                    .await
-            },
-        )
+        let _permit = self.core.read_permit().await;
+        self.read_at(&options.at, |pinned, _| async move {
+            pinned
+                .read_file_stream_by_inode(inode_id, revision_no, options)
+                .await
+        })
         .await
     }
 }

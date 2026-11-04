@@ -4,8 +4,8 @@ use crate::common::{
     assert_core_error_kind, metadata_options, open_runtime_async, open_runtime_with_async, store,
 };
 use loonfs::{
-    ChangeSeq, CreateSnapshotOptions, CurrentFile, DestinationBehavior, ErrorCode, LoonFs,
-    NamespaceId, PutFileOptions, RevisionNo,
+    ChangeSeq, CreateSnapshotOptions, CurrentFile, DestinationBehavior, ErrorCode, ListOptions,
+    LoonFs, NamespaceId, PutFileOptions, ReadAt, RevisionNo,
 };
 use std::assert_matches;
 use tempfile::tempdir;
@@ -429,6 +429,129 @@ async fn snapshot_views_with_and_without_an_expiry_report_their_deleted_pin_when
         ErrorCode::SnapshotNotFound,
     );
     runtime.writer.shutdown().await.expect("shutdown");
+}
+
+/// Checks that `result` is the cursor rejection whose message has `reason`.
+fn assert_cursor_rejected<T: std::fmt::Debug>(result: loonfs::Result<T>, reason: &str) {
+    match result {
+        Err(loonfs::Error::Core(loonfs::CoreError::InvalidCursor(message))) => {
+            assert!(message.contains(reason), "{message}");
+            assert_eq!(
+                loonfs::CoreError::InvalidCursor(message).code(),
+                ErrorCode::InvalidRequest
+            );
+        }
+        other => panic!("expected a rejected cursor, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_namespace_listing_at_a_snapshot_resumes_only_a_cursor_of_that_snapshot() {
+    let temp_dir = tempdir().expect("tempdir");
+    let runtime = open_runtime_async(store(temp_dir.path()), "snapshot-listing-cursor").await;
+    let namespace_id = NamespaceId::parse("snapshot-listing-cursor").expect("namespace id");
+    let namespace = runtime.reader.namespace(&namespace_id);
+    runtime
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("create namespace");
+    let namespace_writer = runtime
+        .writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    for name in ["a", "c", "e", "g"] {
+        runtime
+            .put_file(
+                &namespace_id,
+                &format!("/{name}.txt"),
+                name.as_bytes(),
+                &loonfs_test_support::test_actor(),
+            )
+            .await
+            .expect("seed file");
+    }
+    let first = namespace_writer
+        .create_snapshot("first")
+        .await
+        .expect("create first snapshot");
+    let twin = namespace_writer
+        .create_snapshot("twin")
+        .await
+        .expect("create a snapshot of the same head");
+    runtime
+        .put_file(
+            &namespace_id,
+            "/d.txt",
+            b"d",
+            &loonfs_test_support::test_actor(),
+        )
+        .await
+        .expect("change the directory");
+    let later = namespace_writer
+        .create_snapshot("later")
+        .await
+        .expect("create later snapshot");
+    let at = |snapshot: &loonfs::Snapshot| ListOptions {
+        at: ReadAt::Snapshot(snapshot.snapshot_id.clone()),
+        ..ListOptions::default()
+    };
+    let limit = loonfs_types::EffectiveLimit::from_requested(Some(2)).expect("page limit");
+    let first_page = namespace
+        .list_with_options("/", &at(&first))
+        .page_limit(limit)
+        .page()
+        .await
+        .expect("list the first snapshot");
+    let cursor = first_page.next_cursor.clone().expect("next cursor");
+    let root = first_page.entries[0].parent_inode_id.expect("root inode");
+
+    for (snapshot, reason) in [
+        (&twin, "does not match requested pin"),
+        (&later, "does not match the read view head"),
+    ] {
+        assert_cursor_rejected(
+            namespace
+                .list_with_options("/", &at(snapshot))
+                .page_limit(limit)
+                .cursor(Some(cursor.clone()))
+                .page()
+                .await,
+            reason,
+        );
+        assert_cursor_rejected(
+            namespace
+                .list_by_inode_with_options(root, &at(snapshot))
+                .page_limit(limit)
+                .cursor(Some(cursor.clone()))
+                .page()
+                .await,
+            reason,
+        );
+    }
+
+    let resumed = namespace
+        .list_with_options("/", &at(&first))
+        .page_limit(limit)
+        .cursor(Some(cursor.clone()))
+        .page()
+        .await
+        .expect("resume the first snapshot by path");
+    let by_inode = namespace
+        .list_by_inode_with_options(root, &at(&first))
+        .page_limit(limit)
+        .cursor(Some(cursor))
+        .page()
+        .await
+        .expect("resume the first snapshot by inode");
+    for entries in [&resumed.entries, &by_inode.entries] {
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.path.as_str())
+                .collect::<Vec<_>>(),
+            ["/e.txt", "/g.txt"]
+        );
+    }
 }
 
 #[tokio::test]
