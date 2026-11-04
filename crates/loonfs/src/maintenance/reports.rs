@@ -1,41 +1,6 @@
 //! What a metadata maintenance pass and a compaction unit report.
 
-use crate::{ChangeSeq, ManifestNo, NamespaceId};
-
-/// What the WAL fold step of a maintenance pass did.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WalFoldStepOutcome {
-    /// The tail was below the threshold, so there was nothing to fold.
-    NotNeeded,
-    /// The step folded the WAL tail and published the next current manifest.
-    Folded {
-        /// The last sequence that the published manifest includes.
-        manifest_head_seq: ChangeSeq,
-    },
-    /// The current manifest already included the captured WAL tail, so this
-    /// step didn't publish a manifest.
-    AlreadyPublished {
-        /// The sequence that this step tried to fold through.
-        attempted_seq: ChangeSeq,
-        /// The number of the namespace's current manifest.
-        current_manifest_no: ManifestNo,
-    },
-}
-
-impl WalFoldStepOutcome {
-    /// Returns the outcome of a fold step whose fold returned `folded`.
-    pub(crate) fn of(folded: &crate::FoldWalResponse) -> Self {
-        match folded.outcome {
-            crate::FoldWalOutcome::Published => Self::Folded {
-                manifest_head_seq: folded.manifest_head_seq,
-            },
-            crate::FoldWalOutcome::AlreadyCurrent => Self::AlreadyPublished {
-                attempted_seq: folded.target_head_seq,
-                current_manifest_no: folded.manifest_no,
-            },
-        }
-    }
-}
+use crate::{FoldWalResponse, ManifestNo, NamespaceId};
 
 /// What the WAL fold and the compaction unit of one metadata maintenance
 /// pass did.
@@ -43,8 +8,8 @@ impl WalFoldStepOutcome {
 pub struct MetadataPassReport {
     /// The namespace that this pass maintained.
     pub namespace_id: NamespaceId,
-    /// What the WAL fold did.
-    pub wal_fold: WalFoldStepOutcome,
+    /// The fold's response, or `None` when no fold was due.
+    pub wal_fold: Option<FoldWalResponse>,
     /// What the compaction unit did.
     pub compaction: MetadataCompactionOutcome,
 }

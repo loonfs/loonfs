@@ -5,9 +5,10 @@ use loonfs::engine::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS;
 use loonfs::AccessState;
 use loonfs::AttributeChanges;
 use loonfs::{
-    CreateDirectoryOptions, CreateNamespaceOptions, DestinationBehavior, GcOptions,
-    InlineContentPolicy, LoonFs, MaintainMetadataOptions, MetadataCompactionOutcome,
-    MetadataCompactionPolicy, PutFileOptions, WalFoldStepOutcome, GC_DEFAULT_GRACE_WINDOW_MS,
+    CreateDirectoryOptions, CreateNamespaceOptions, DestinationBehavior, FoldWalOutcome,
+    FoldWalResponse, GcOptions, InlineContentPolicy, LoonFs, MaintainMetadataOptions,
+    MetadataCompactionOutcome, MetadataCompactionPolicy, PutFileOptions,
+    GC_DEFAULT_GRACE_WINDOW_MS,
 };
 use loonfs_core::test_support::WriterAt;
 use loonfs_objectstore::keys::metadata_segment_object_key;
@@ -203,11 +204,13 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                     .maintain_metadata_with_options(&source, &metadata_options(1))
                     .await
                     .expect("fold WAL");
-                assert_eq!(
+                assert_matches!(
                     step.wal_fold,
-                    WalFoldStepOutcome::Folded {
-                        manifest_head_seq: head_seq,
-                    }
+                    Some(FoldWalResponse {
+                        outcome: FoldWalOutcome::Published,
+                        manifest_head_seq,
+                        ..
+                    }) if manifest_head_seq == head_seq
                 );
             }
             "forked" => {

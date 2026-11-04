@@ -27,20 +27,17 @@ use loonfs_types::{u64_from_usize, ExtensionName, PageRequest, RunNo, WriterId};
 use std::num::NonZeroU64;
 use std::sync::Arc;
 
-mod compactor;
+mod compaction;
 mod floor_acknowledgment;
 pub(crate) mod metrics;
 mod reports;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use compactor::Compactor;
 pub use floor_acknowledgment::{
     AcknowledgeRetentionFloorOutcome, AcknowledgeRetentionFloorReport, RetentionFloors,
 };
-pub use reports::{
-    MetadataCompactionOutcome, MetadataCompactionReport, MetadataPassReport, WalFoldStepOutcome,
-};
+pub use reports::{MetadataCompactionOutcome, MetadataCompactionReport, MetadataPassReport};
 
 /// Explicit maintenance: namespace diagnostics, operator checkpoints, WAL
 /// folds, metadata compaction, garbage collection, and retention.
@@ -52,10 +49,24 @@ pub use reports::{
 /// compactor claim and execution budget with its writer sessions.
 #[derive(Clone)]
 pub struct Maintenance {
-    pub(crate) compactor: Compactor,
+    pub(crate) core: RuntimeCore,
+    pub(crate) publisher: PublisherRegistry,
+    pub(crate) writer: Arc<WriterState>,
+    pub(crate) writer_id: WriterId,
+    /// A narrowed row budget for the tests that need a family group whose
+    /// window is too large for a `metadata` pass. See
+    /// [`Self::starve_compaction_row_budget`].
+    #[cfg(test)]
+    compaction_row_budget: Option<std::num::NonZeroUsize>,
+    /// A narrowed per-segment row budget for the tests that need many
+    /// compacted segments. See [`Self::narrow_segment_row_budget`].
+    #[cfg(test)]
+    segment_row_budget: Option<std::num::NonZeroUsize>,
 }
 
 impl Maintenance {
+    /// Returns the maintenance of the runtime that `core`, `publisher`, and
+    /// `writer` belong to, acting as `writer_id`.
     pub(crate) fn new(
         core: RuntimeCore,
         publisher: PublisherRegistry,
@@ -63,7 +74,14 @@ impl Maintenance {
         writer_id: WriterId,
     ) -> Self {
         Self {
-            compactor: Compactor::new(core, publisher, writer, writer_id),
+            core,
+            publisher,
+            writer,
+            writer_id,
+            #[cfg(test)]
+            compaction_row_budget: None,
+            #[cfg(test)]
+            segment_row_budget: None,
         }
     }
 
@@ -80,7 +98,7 @@ impl Maintenance {
         mut self,
         max_decoded_input_rows_per_step: std::num::NonZeroUsize,
     ) -> Self {
-        self.compactor.compaction_row_budget = Some(max_decoded_input_rows_per_step);
+        self.compaction_row_budget = Some(max_decoded_input_rows_per_step);
         self
     }
 
@@ -96,23 +114,22 @@ impl Maintenance {
         mut self,
         max_rows_per_segment: std::num::NonZeroUsize,
     ) -> Self {
-        self.compactor.segment_row_budget = Some(max_rows_per_segment);
+        self.segment_row_budget = Some(max_rows_per_segment);
         self
     }
 
     /// Reads the runtime's wall clock as unix milliseconds.
     pub fn now_ms(&self) -> u64 {
-        self.compactor.core.now_ms()
+        self.core.now_ms()
     }
 
     /// Returns namespace state and storage details used by maintenance.
     pub async fn diagnostics(&self, namespace_id: &NamespaceId) -> Result<NamespaceDiagnostics> {
         trace::in_operation(
-            operation_span!(self.compactor.core, "diagnostics", namespace_id),
+            operation_span!(self.core, "diagnostics", namespace_id),
             async {
-                let _permit = self.compactor.core.read_permit().await;
+                let _permit = self.core.read_permit().await;
                 let diagnostics = self
-                    .compactor
                     .core
                     .namespace_store(namespace_id)
                     .load_diagnostics()
@@ -125,12 +142,11 @@ impl Maintenance {
     }
 
     async fn count_live_snapshots(&self, namespace_id: &NamespaceId) -> Result<u64> {
-        let now_ms = self.compactor.core.now_ms();
+        let now_ms = self.core.now_ms();
         let mut cursor = None;
         let mut live_snapshots = 0_u64;
         loop {
             let page = self
-                .compactor
                 .engine(namespace_id)
                 .list_snapshots_page(PageRequest {
                     limit: loonfs_types::EffectiveLimit::MAX,
@@ -197,18 +213,13 @@ impl Maintenance {
         options: &MaintainMetadataOptions,
     ) -> Result<MetadataPassReport> {
         trace::in_operation(
-            operation_span!(self.compactor.core, "maintain_metadata", namespace_id),
+            operation_span!(self.core, "maintain_metadata", namespace_id),
             async {
                 let (wal_fold, observed) = match self.fold_when_due(namespace_id, options).await? {
-                    NamespaceFold::NotDue { observed, .. } => {
-                        (WalFoldStepOutcome::NotNeeded, observed)
-                    }
-                    NamespaceFold::Folded(folded) => {
-                        (WalFoldStepOutcome::of(&folded.response), None)
-                    }
+                    NamespaceFold::NotDue { observed, .. } => (None, observed),
+                    NamespaceFold::Folded(folded) => (Some(folded.response), None),
                 };
                 let compaction = self
-                    .compactor
                     .compact_once(
                         namespace_id,
                         options.compaction_policy,
@@ -242,10 +253,7 @@ impl Maintenance {
         let when = FoldWhen::Due {
             max_wal_tail_objects: options.max_wal_tail_objects.get(),
         };
-        self.compactor
-            .publisher
-            .fold_namespace(namespace_id, when)
-            .await
+        self.publisher.fold_namespace(namespace_id, when).await
     }
 
     /// Runs [`Self::maintain_metadata_while_due_with_options`] with the
@@ -320,7 +328,6 @@ impl Maintenance {
                 NamespaceFold::Folded(_) => (true, None),
             };
             let mut maintained = self
-                .compactor
                 .compact_namespace(
                     namespace_id,
                     options.compaction_policy,
@@ -337,11 +344,7 @@ impl Maintenance {
         // that awaits this call inside its own scheduling futures exceeds
         // rustc's type-recursion depth.
         Box::pin(trace::in_operation(
-            operation_span!(
-                self.compactor.core,
-                "maintain_metadata_while_due",
-                namespace_id
-            ),
+            operation_span!(self.core, "maintain_metadata_while_due", namespace_id),
             maintained,
         ))
         .await
@@ -363,9 +366,8 @@ impl Maintenance {
         cancellation: &MaintenanceCancellation,
     ) -> Result<MetadataCompactionReport> {
         trace::in_operation(
-            operation_span!(self.compactor.core, "compact_metadata", namespace_id),
-            self.compactor
-                .run_compaction_unit(namespace_id, cancellation.metadata_compaction()),
+            operation_span!(self.core, "compact_metadata", namespace_id),
+            self.run_compaction_unit(namespace_id, cancellation.metadata_compaction()),
         )
         .await
     }
@@ -387,33 +389,29 @@ impl Maintenance {
         namespace_id: &NamespaceId,
         options: &crate::GcOptions,
     ) -> Result<crate::GcResponse> {
-        trace::in_operation(
-            operation_span!(self.compactor.core, "gc", namespace_id),
-            async {
-                let namespace = self.compactor.core.namespace_store(namespace_id);
-                let report = namespace
-                    .gc(
-                        Some(self.compactor.core.completed_upload_sessions()),
-                        options,
-                        &namespace.start_clock(),
-                    )
-                    .await
-                    .map_err(Error::from)?;
-                // A caller may drop the response, so its counts survive only when
-                // this shared pass records them here.
-                self.compactor.core.instruments().gc.pass(&report);
-                // A pass publishes no manifest, so the head didn't move. The
-                // publisher keeps its position, and the cached head stays confirmed.
-                // The collection grace covers the revalidation bound, so a head
-                // inside its bound never lists a segment that a pass deleted
-                // (format.md sections 11.2 and 11.4).
-                self.compactor
-                    .publisher
-                    .invalidate_namespace(namespace_id, NamespaceChange::Unchanged)
-                    .await;
-                Ok(report)
-            },
-        )
+        trace::in_operation(operation_span!(self.core, "gc", namespace_id), async {
+            let namespace = self.core.namespace_store(namespace_id);
+            let report = namespace
+                .gc(
+                    Some(self.core.completed_upload_sessions()),
+                    options,
+                    &namespace.start_clock(),
+                )
+                .await
+                .map_err(Error::from)?;
+            // A caller may drop the response, so its counts survive only when
+            // this shared pass records them here.
+            self.core.instruments().gc.pass(&report);
+            // A pass publishes no manifest, so the head didn't move. The
+            // publisher keeps its position, and the cached head stays confirmed.
+            // The collection grace covers the revalidation bound, so a head
+            // inside its bound never lists a segment that a pass deleted
+            // (format.md sections 11.2 and 11.4).
+            self.publisher
+                .invalidate_namespace(namespace_id, NamespaceChange::Unchanged)
+                .await;
+            Ok(report)
+        })
         .await
     }
 
@@ -438,11 +436,10 @@ impl Maintenance {
         request: PageRequest<CheckpointPageCursor>,
     ) -> Result<ListCheckpointsResponse> {
         trace::in_operation(
-            operation_span!(self.compactor.core, "list_checkpoints", namespace_id),
+            operation_span!(self.core, "list_checkpoints", namespace_id),
             async {
-                let _permit = self.compactor.core.read_permit().await;
+                let _permit = self.core.read_permit().await;
                 let page = self
-                    .compactor
                     .engine(namespace_id)
                     .list_checkpoints_page(request)
                     .await
@@ -466,11 +463,10 @@ impl Maintenance {
         checkpoint_id: &PinId,
     ) -> Result<Checkpoint> {
         trace::in_operation(
-            operation_span!(self.compactor.core, "get_checkpoint", namespace_id),
+            operation_span!(self.core, "get_checkpoint", namespace_id),
             async {
-                let _permit = self.compactor.core.read_permit().await;
-                self.compactor
-                    .engine(namespace_id)
+                let _permit = self.core.read_permit().await;
+                self.engine(namespace_id)
                     .get_checkpoint(checkpoint_id)
                     .await
                     .map_err(Error::from)
@@ -493,10 +489,9 @@ impl Maintenance {
     /// runtime has a session for the namespace, so it reads no WAL objects.
     pub async fn fold_wal(&self, namespace_id: &NamespaceId) -> Result<FoldWalResponse> {
         trace::in_operation(
-            operation_span!(self.compactor.core, "fold_wal", namespace_id),
+            operation_span!(self.core, "fold_wal", namespace_id),
             async {
                 let folded = self
-                    .compactor
                     .publisher
                     .fold_namespace(namespace_id, FoldWhen::Always)
                     .await?;
@@ -539,16 +534,14 @@ impl Maintenance {
         options: &AdvanceRetentionFloorOptions,
     ) -> Result<AdvanceRetentionResponse> {
         trace::in_operation(
-            operation_span!(self.compactor.core, "advance_retention_floor", namespace_id),
+            operation_span!(self.core, "advance_retention_floor", namespace_id),
             async {
                 let result = self
-                    .compactor
                     .engine(namespace_id)
                     .advance_retention_floor(options.target)
                     .await
                     .map_err(Error::from);
-                self.compactor
-                    .publisher
+                self.publisher
                     .finish_publication(namespace_id, result)
                     .await
             },
@@ -565,11 +558,10 @@ impl Maintenance {
     /// namespace.
     pub async fn load_extension_basis(&self, namespace_id: &NamespaceId) -> Result<ExtensionBasis> {
         trace::in_operation(
-            operation_span!(self.compactor.core, "load_extension_basis", namespace_id),
+            operation_span!(self.core, "load_extension_basis", namespace_id),
             async {
-                let _permit = self.compactor.core.read_permit().await;
-                self.compactor
-                    .engine(namespace_id)
+                let _permit = self.core.read_permit().await;
+                self.engine(namespace_id)
                     .load_extension_basis()
                     .await
                     .map_err(Error::from)
@@ -602,16 +594,14 @@ impl Maintenance {
     ) -> Result<ExtensionPublication> {
         let namespace_id = &basis.manifest().namespace_id;
         trace::in_operation(
-            operation_span!(self.compactor.core, "publish_extension", namespace_id),
+            operation_span!(self.core, "publish_extension", namespace_id),
             async {
                 let result = self
-                    .compactor
                     .engine(namespace_id)
                     .publish_extension(basis, name, entry_at)
                     .await
                     .map_err(Error::from);
                 let publication = self
-                    .compactor
                     .publisher
                     .finish_publication(namespace_id, result)
                     .await;
@@ -622,9 +612,7 @@ impl Maintenance {
                 // drops the cached head, as a merge's fold does, and this
                 // runtime's next read finds the published entry.
                 if matches!(publication, Ok(ExtensionPublication::Published(_))) {
-                    self.compactor
-                        .core
-                        .invalidate_namespace_read_cache(namespace_id);
+                    self.core.invalidate_namespace_read_cache(namespace_id);
                 }
                 publication
             },
@@ -647,16 +635,14 @@ impl Maintenance {
         retention_window_ms: Option<NonZeroU64>,
     ) -> Result<SetRetentionWindowResponse> {
         trace::in_operation(
-            operation_span!(self.compactor.core, "set_retention_window", namespace_id),
+            operation_span!(self.core, "set_retention_window", namespace_id),
             async {
                 let result = self
-                    .compactor
                     .engine(namespace_id)
                     .set_retention_window(retention_window_ms)
                     .await
                     .map_err(Error::from);
-                self.compactor
-                    .publisher
+                self.publisher
                     .finish_publication(namespace_id, result)
                     .await
             },

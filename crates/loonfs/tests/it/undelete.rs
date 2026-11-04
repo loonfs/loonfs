@@ -400,7 +400,10 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
             .expect("checkpoint the revoke into durable segments");
         assert_matches!(
             step.wal_fold,
-            loonfs::WalFoldStepOutcome::Folded { .. },
+            Some(loonfs::FoldWalResponse {
+                outcome: loonfs::FoldWalOutcome::Published,
+                ..
+            }),
             "step must materialize the tail, got {:?}",
             step.wal_fold
         );
@@ -436,7 +439,10 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
             .expect("checkpoint the deletion");
         assert_matches!(
             step.wal_fold,
-            loonfs::WalFoldStepOutcome::Folded { .. },
+            Some(loonfs::FoldWalResponse {
+                outcome: loonfs::FoldWalOutcome::Published,
+                ..
+            }),
             "step must materialize the tail, got {:?}",
             step.wal_fold
         );
@@ -457,7 +463,10 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
             .expect("checkpoint the second revoke");
         assert_matches!(
             step.wal_fold,
-            loonfs::WalFoldStepOutcome::Folded { .. },
+            Some(loonfs::FoldWalResponse {
+                outcome: loonfs::FoldWalOutcome::Published,
+                ..
+            }),
             "step must materialize the tail, got {:?}",
             step.wal_fold
         );

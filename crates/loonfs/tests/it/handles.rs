@@ -5,9 +5,9 @@
 
 use crate::common::collect_path_entries;
 use loonfs::{
-    CommitId, CreateDirectoryOptions, Error, ErrorCode, LoonFs, MaintainMetadataOptions,
-    ManifestNo, NamespaceId, PutFileOptions, SharedObjectStore, StoreConfig, WalFoldStepOutcome,
-    Writable,
+    CommitId, CreateDirectoryOptions, Error, ErrorCode, FoldWalOutcome, FoldWalResponse, LoonFs,
+    MaintainMetadataOptions, ManifestNo, NamespaceId, PutFileOptions, SharedObjectStore,
+    StoreConfig, Writable,
 };
 use loonfs_core::test_support::WriterAt;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -260,7 +260,14 @@ fn maintenance_invalidates_the_runtimes_shared_read_caches() {
             )
             .await
             .expect("fold what the writer left");
-        assert_matches!(step.wal_fold, WalFoldStepOutcome::Folded { .. }, "{step:?}");
+        assert_matches!(
+            step.wal_fold,
+            Some(FoldWalResponse {
+                outcome: FoldWalOutcome::Published,
+                ..
+            }),
+            "{step:?}"
+        );
 
         // Reads and writes on the writer's own runtime see the state the
         // step left behind, with no stale-cache error in between.
