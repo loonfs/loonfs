@@ -445,15 +445,14 @@ impl CommitCandidate {
     }
 
     /// Weighs the candidate as [`Self::estimated_retained_bytes`] does once
-    /// the publisher keeps `retained_inline_content` inline and stages
-    /// `staged_inline_content`. Staging a value replaces the value with a
-    /// prepared proof and records the value's identity. This is the weight
+    /// the publisher stages `staged_inline_content`. Staging a value replaces
+    /// the value's heap with a prepared proof and records the value's
+    /// identity, and the inline vector keeps its capacity. This is the weight
     /// that admission guesses before staging; once the values are staged, the
     /// charge moves to the staged candidate's
     /// [`Self::estimated_retained_bytes`].
     pub fn estimated_retained_bytes_after_inline_staging(
         &self,
-        retained_inline_content: &[InlineContent],
         staged_inline_content: &[InlineContent],
     ) -> usize {
         let proof_bytes = match &self.content {
@@ -470,14 +469,11 @@ impl CommitCandidate {
                     + content_id.heap_bytes()
             })
             .sum::<usize>();
-        let retained_bytes = retained_inline_content
+        let left_bytes = staged_inline_content
             .iter()
             .map(HeapBytes::heap_bytes)
-            .sum::<usize>()
-            + std::mem::size_of_val(retained_inline_content);
-        self.estimated_retained_bytes() - self.inline_content.heap_bytes()
-            + retained_bytes
-            + staged_bytes
+            .sum::<usize>();
+        self.estimated_retained_bytes() - left_bytes + staged_bytes
     }
 
     /// Bounds the request's WAL bytes before planning adds carried layouts.

@@ -1042,6 +1042,53 @@ async fn a_staged_commit_is_charged_the_weight_of_the_staged_candidate() {
     writer.shutdown().await.expect("shutdown");
 }
 
+/// Checks that a commit whose inline value stays inline is charged, while it
+/// waits in the queue, the admission bytes of its own weight, which counts the
+/// inline vector's capacity as well as its values.
+#[tokio::test]
+async fn a_commit_whose_values_stay_inline_is_charged_its_own_weight() {
+    let (_directory, _store, writer, namespace, namespace_writer) =
+        writer_with_policy(InlineContentPolicy {
+            inline_content_threshold_bytes: Some(8),
+            ..policy()
+        })
+        .await;
+    let publisher = namespace_writer.session().publisher.clone();
+    let prepared = namespace_writer
+        .prepare_content(b"longer")
+        .await
+        .expect("prepare");
+    let candidate = CommitCandidate::prepared(
+        CommitIntent {
+            commit_id: CommitId::parse("inline").expect("commit"),
+            actor_id: loonfs_test_support::test_actor(),
+            subject: None,
+            message: None,
+            preconditions: Vec::new(),
+            operations: vec![put_operation("/file", &prepared)],
+        },
+        vec![prepared],
+    );
+    let expected = estimated_admission_bytes(&namespace, candidate.estimated_retained_bytes());
+    let slots = hold_every_publication_permit(&writer).await;
+    let (commit, ()) = tokio::join!(namespace_writer.commit_candidate(candidate), async {
+        bounded(
+            Duration::from_secs(10),
+            wait_for_queued_candidates(&publisher, 1),
+        )
+        .await
+        .expect("the inline commit is queued");
+        assert_eq!(
+            publisher.context.admission.namespace_usage(&namespace),
+            (1, expected, b"longer".len())
+        );
+        assert_eq!(writer.execution_budget().stats().admitted_bytes, expected);
+        drop(slots);
+    });
+    commit.expect("commit");
+    writer.shutdown().await.expect("shutdown");
+}
+
 /// Checks that a commit whose estimate before staging fits its namespace's
 /// byte allowance, and whose staged candidate doesn't, is refused with
 /// `commit_queue_full` once its value is staged, and that admission charges

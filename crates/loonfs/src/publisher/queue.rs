@@ -64,10 +64,8 @@ impl PreparedCandidate {
         staged_inline_content: &[loonfs_core::publish::InlineContent],
     ) -> Self {
         Self {
-            estimated_retained_bytes: candidate.estimated_retained_bytes_after_inline_staging(
-                retained_inline_content,
-                staged_inline_content,
-            ),
+            estimated_retained_bytes: candidate
+                .estimated_retained_bytes_after_inline_staging(staged_inline_content),
             wal_record_bytes_upper_bound: candidate
                 .wal_record_bytes_upper_bound_with_inline_content(retained_inline_content),
             inline_content_bytes: retained_inline_content
