@@ -231,9 +231,10 @@ pub(crate) fn provider_name(provider: ProfileProvider) -> &'static str {
 mod tests {
     use super::build_profile_from_command;
     use crate::args::{
-        Cli, Command, LocalStoreArgs, ProfileActorArgs, ProfileCommand, ProfileLocalArgs,
-        ProfileProviderCommand, ProfileR2Args, ProfileRemoteArgs, ProfileS3Args, R2StoreArgs,
-        RemoteServerArgs, RuntimeBehavior, S3StoreArgs, SubjectSelectors, TopLevelCommand,
+        Cli, Command, CredentialSource, LocalStoreArgs, ProfileActorArgs, ProfileCommand,
+        ProfileLocalArgs, ProfileProviderCommand, ProfileR2Args, ProfileRemoteArgs, ProfileS3Args,
+        R2StoreArgs, RemoteServerArgs, RuntimeBehavior, S3StoreArgs, SubjectSelectors,
+        TopLevelCommand,
     };
     use crate::commands::profile_update::apply_update_flags;
 
@@ -304,7 +305,7 @@ mod tests {
         .expect("build ambient r2 profile");
         let command = r2(R2StoreArgs {
             bucket: Some("archive".to_owned()),
-            credential_source: Some("static".to_owned()),
+            credential_source: Some(CredentialSource::Static),
             access_key_id: Some("access".to_owned()),
             secret_access_key: Some("secret".to_owned()),
             key_prefix: Some("tenant-b".to_owned()),
@@ -326,7 +327,7 @@ mod tests {
         );
         let reset = r2(R2StoreArgs {
             bucket: Some("documents".to_owned()),
-            credential_source: Some("ambient".to_owned()),
+            credential_source: Some(CredentialSource::Ambient),
             key_prefix: Some(String::new()),
             ..R2StoreArgs::default()
         });
@@ -514,7 +515,7 @@ mod tests {
         }));
 
         let incomplete = s3(S3StoreArgs {
-            credential_source: Some("static".to_owned()),
+            credential_source: Some(CredentialSource::Static),
             access_key_id: Some("access".to_owned()),
             ..S3StoreArgs::default()
         });
@@ -529,7 +530,7 @@ mod tests {
         );
 
         let complete = s3(S3StoreArgs {
-            credential_source: Some("static".to_owned()),
+            credential_source: Some(CredentialSource::Static),
             access_key_id: Some("access".to_owned()),
             secret_access_key: Some("secret".to_owned()),
             ..S3StoreArgs::default()

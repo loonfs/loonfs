@@ -21,7 +21,8 @@ use crate::uploads::staging::UploadContinuity;
 /// uploading at once.
 pub(super) const DIRECT_MULTIPART_PARTS_IN_FLIGHT: usize = 4;
 
-/// Maximum attempts for one part, including refreshed authorization.
+/// Maximum attempts for one part, counting each fresh authorization after
+/// the provider refuses one.
 const DIRECT_MULTIPART_PART_ATTEMPTS: usize = 3;
 
 /// In-memory or streaming input for a multipart upload.
@@ -301,11 +302,14 @@ impl Client {
             .collect()
     }
 
-    /// Uploads one part, re-asking for its URL if the upload fails.
+    /// Uploads one part, re-asking for its URL when the provider refuses the
+    /// URL's signature.
     ///
-    /// Re-asking is the retry: a part's signature is the first thing about
-    /// it that goes stale, and a repeated part is last-write-wins at the
-    /// provider, so nothing is lost by writing it again.
+    /// A part's signature is the first thing about it that goes stale, and a
+    /// repeated part is last-write-wins at the provider, so nothing is lost
+    /// by writing it again. Any other failure returns as is: the transport
+    /// has already retried a transient one, such as the provider's SlowDown,
+    /// with backoff on the same URL.
     async fn upload_one_part(
         &self,
         namespace_id: &NamespaceId,
@@ -325,21 +329,40 @@ impl Client {
                 .await
             {
                 Ok(uploaded) => return Ok(uploaded),
-                Err(error) => {
+                Err(error) if refuses_the_signature(&error) => {
                     tracing::warn!(
                         part_number,
                         attempt,
                         error = %error,
-                        "part upload failed; refreshing authorization before retry"
+                        "provider refused the part's signature; refreshing authorization before retry"
                     );
                     let signed = self
                         .sign_upload_parts(namespace_id, upload_id, vec![part.claim.clone()])
                         .await?;
                     access = signed_access(&signed.parts, part_number)?;
                 }
+                Err(error) => return Err(error),
             }
         }
         self.upload_part_via_presigned_url(part_number, &access, part.claim.checksum, part.bytes)
             .await
+    }
+}
+
+/// Reports whether `error` is the storage provider refusing a presigned
+/// URL's signature, which a fresh signature fixes: a 401 or 403, or the 400
+/// that S3 and GCS answer when the temporary credential behind the
+/// signature has expired.
+fn refuses_the_signature(error: &ClientError) -> bool {
+    match error {
+        ClientError::HttpStatus {
+            status: 401 | 403, ..
+        } => true,
+        ClientError::HttpStatus {
+            status: 400,
+            provider_code: Some(code),
+            ..
+        } => code == "ExpiredToken" || code == "TokenRefreshRequired",
+        _ => false,
     }
 }

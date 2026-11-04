@@ -67,6 +67,15 @@ pub(crate) enum BucketAddressing {
     Path,
 }
 
+/// Where a store's provider credentials come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum CredentialSource {
+    /// The provider's default credential chain.
+    Ambient,
+    /// The access key flags, stored in the profile.
+    Static,
+}
+
 #[derive(Debug, Clone, Default, Args)]
 pub(crate) struct S3StoreArgs {
     /// S3 bucket name.
@@ -76,8 +85,8 @@ pub(crate) struct S3StoreArgs {
     #[arg(long, value_hint = ValueHint::Other)]
     pub region: Option<String>,
     /// AWS credential source.
-    #[arg(long, value_name = "ambient|static", value_hint = ValueHint::Other)]
-    pub credential_source: Option<String>,
+    #[arg(long, value_enum)]
+    pub credential_source: Option<CredentialSource>,
     /// Static access key ID.
     #[arg(long, value_hint = ValueHint::Other)]
     pub access_key_id: Option<String>,
@@ -132,8 +141,8 @@ pub(crate) struct R2StoreArgs {
     #[arg(long, value_hint = ValueHint::Url)]
     pub endpoint_url: Option<String>,
     /// R2 credential source.
-    #[arg(long, value_name = "ambient|static", value_hint = ValueHint::Other)]
-    pub credential_source: Option<String>,
+    #[arg(long, value_enum)]
+    pub credential_source: Option<CredentialSource>,
     /// Static access key ID.
     #[arg(long, value_hint = ValueHint::Other)]
     pub access_key_id: Option<String>,

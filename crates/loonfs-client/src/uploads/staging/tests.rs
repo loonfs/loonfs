@@ -935,6 +935,118 @@ impl PutFileJournal for FailingJournal {
     }
 }
 
+/// Checks the two retries of a direct multipart part: the provider's refusal
+/// of the part's signature, a 403 or the 400 for an expired temporary
+/// credential, gets a fresh signature, and the provider's SlowDown is sent
+/// again on the same URL by the transport. A transport failure, which the
+/// transport has already retried, is neither.
+#[tokio::test]
+async fn a_part_is_signed_again_after_the_provider_refuses_it_and_not_after_a_transport_failure() {
+    let bytes = payload(loonfs_types::usize_from_u64(TEST_PART_BYTES));
+    let source = || {
+        let bytes = Bytes::from(bytes.clone());
+        PayloadSource::stream(futures::stream::once(async move { Ok(bytes) }).boxed())
+    };
+
+    for refusal in [
+        Outcome::ProviderRefused(http::StatusCode::FORBIDDEN, "AccessDenied"),
+        Outcome::ProviderRefused(http::StatusCode::BAD_REQUEST, "ExpiredToken"),
+    ] {
+        let transport = scripted_transport::script([
+            capabilities(true),
+            begin_multipart(),
+            signed_parts(1, 1),
+            refusal,
+            signed_parts(1, 1),
+            Outcome::PartAccepted("\"etag-1\"".to_owned()),
+            completed(content_ref(&bytes)),
+            commit_succeeded(),
+        ]);
+        client_without_retry(&transport)
+            .put_file_stream_resumable(
+                &spec(),
+                source(),
+                &loonfs_test_support::test_actor(),
+                &PutFileOptions::default(),
+                &RecordingJournal::default(),
+                None,
+            )
+            .await
+            .expect("a fresh signature uploads the part");
+        let sent = transport.sent();
+        let part_uploads = sent
+            .iter()
+            .filter(|sent| sent.url.ends_with("/part/1"))
+            .count();
+        let signatures = sent
+            .iter()
+            .filter(|sent| sent.url.ends_with("/parts"))
+            .count();
+        assert_eq!((part_uploads, signatures), (2, 2));
+    }
+
+    let transport = scripted_transport::script([
+        capabilities(true),
+        begin_multipart(),
+        signed_parts(1, 1),
+        Outcome::ProviderRefused(http::StatusCode::SERVICE_UNAVAILABLE, "SlowDown"),
+        Outcome::PartAccepted("\"etag-1\"".to_owned()),
+        completed(content_ref(&bytes)),
+        commit_succeeded(),
+    ]);
+    client(&transport)
+        .put_file_stream_resumable(
+            &spec(),
+            source(),
+            &loonfs_test_support::test_actor(),
+            &PutFileOptions::default(),
+            &RecordingJournal::default(),
+            None,
+        )
+        .await
+        .expect("the transport sends the part again after SlowDown");
+    let sent = transport.sent();
+    let part_uploads = sent
+        .iter()
+        .filter(|sent| sent.url.ends_with("/part/1"))
+        .count();
+    let signatures = sent
+        .iter()
+        .filter(|sent| sent.url.ends_with("/parts"))
+        .count();
+    assert_eq!(
+        (part_uploads, signatures),
+        (2, 1),
+        "SlowDown is retried on the same signature"
+    );
+
+    let script = vec![
+        capabilities(true),
+        begin_multipart(),
+        signed_parts(1, 1),
+        Outcome::TransportFailure,
+    ];
+    let expected_attempts = script.len();
+    let transport = scripted_transport::script(script);
+    let error = client_without_retry(&transport)
+        .put_file_stream_resumable(
+            &spec(),
+            source(),
+            &loonfs_test_support::test_actor(),
+            &PutFileOptions::default(),
+            &RecordingJournal::default(),
+            None,
+        )
+        .await
+        .expect_err("the part upload failed");
+    assert_matches!(error, ClientError::Http(_));
+    assert_eq!(
+        transport.attempts(),
+        expected_attempts,
+        "a transport failure is not signed again"
+    );
+}
+
 #[tokio::test]
 async fn journal_failures_stop_uploads_without_aborting_the_resumable_session() {
     for fail_at_begin in [true, false] {

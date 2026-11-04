@@ -608,9 +608,28 @@ fn retryable_transport_failure_covers_transport_and_unavailability_only() {
         FailureSource::Response,
         &api("deadline_exceeded")
     ));
+    // A non-envelope status is retried when it says the responder is busy
+    // or failing for the moment, and not when it refuses the request.
+    let non_envelope = |status: u16, provider_code: Option<&str>| ClientError::HttpStatus {
+        status,
+        provider_code: provider_code.map(str::to_owned),
+        detail: "expected value at line 1 column 1".to_owned(),
+    };
+    assert!(retryable_transport_failure(
+        FailureSource::Response,
+        &non_envelope(502, None)
+    ));
+    assert!(retryable_transport_failure(
+        FailureSource::Response,
+        &non_envelope(503, Some("SlowDown"))
+    ));
     assert!(!retryable_transport_failure(
         FailureSource::Response,
-        &ClientError::Http("http status 502 with a non-envelope body".to_owned())
+        &non_envelope(400, Some("ExpiredToken"))
+    ));
+    assert!(!retryable_transport_failure(
+        FailureSource::Response,
+        &non_envelope(403, Some("AccessDenied"))
     ));
 }
 

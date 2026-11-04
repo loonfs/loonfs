@@ -26,6 +26,20 @@ pub enum ClientError {
     /// Sending an HTTP request or reading its response failed.
     #[error("http error: {0}")]
     Http(String),
+    /// A response had an error status and a body that is not the API's error
+    /// envelope, such as a storage provider's refusal of a presigned URL or
+    /// a load balancer's HTML 502.
+    #[error("http status {status} with a non-envelope body: {detail}")]
+    HttpStatus {
+        /// HTTP status code of the response.
+        status: u16,
+        /// The `<Code>` of a storage provider's XML error body, when the
+        /// body is one.
+        provider_code: Option<String>,
+        /// The provider's error code, or why the body is not the error
+        /// envelope.
+        detail: String,
+    },
     /// The server returned a structured API error response.
     #[error("server returned {status} {}: {}", response.code, response.message)]
     Api {
@@ -84,16 +98,31 @@ impl ClientError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     #[test]
-    fn status_errors_keep_the_status_when_the_body_is_not_the_envelope() {
+    fn status_errors_keep_the_status_and_the_provider_code_when_the_body_is_not_the_envelope() {
         let error = crate::transport::map_status_error(502, b"<html>upstream error</html>");
 
-        let ClientError::Http(message) = error else {
-            panic!("expected Http error, got {error:?}");
-        };
-        assert!(message.contains("502"), "{message}");
-        assert!(message.contains("non-envelope body"), "{message}");
+        assert_matches!(
+            error,
+            ClientError::HttpStatus {
+                status: 502,
+                provider_code: None,
+                ..
+            }
+        );
+        assert!(error.to_string().contains("non-envelope body"), "{error}");
+
+        let error = crate::transport::map_status_error(
+            400,
+            b"<?xml version=\"1.0\"?><Error><Code>ExpiredToken</Code><Message>The provided token has expired.</Message></Error>",
+        );
+        assert_matches!(
+            &error,
+            ClientError::HttpStatus { status: 400, provider_code: Some(code), .. } if code == "ExpiredToken"
+        );
+        assert!(error.to_string().ends_with("ExpiredToken"), "{error}");
     }
 
     fn api_error(status: u16, code: &str) -> ClientError {
