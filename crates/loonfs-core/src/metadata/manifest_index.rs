@@ -13,7 +13,7 @@ use crate::metadata::{
     ContentLayoutRecord, DirentryBindingRecord, InodeRecord, RevisionRecord,
     SubtreeTombstoneRecord,
 };
-use crate::segment::{BlocksPerRefill, VerifiedMetadataSegments};
+use crate::segment::{BlocksPerRefill, PageBounds, VerifiedMetadataSegments};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::lookup_keys;
 use loonfs_types::format::manifest::{MergeIndexRecord, MetadataRow, MetadataRowFamily};
@@ -49,17 +49,23 @@ pub(super) async fn commit_at_seq<S: ObjectStore + ?Sized>(
         .transpose()
 }
 
+/// Up to `limit` commit records after `after_seq`, ending with the record
+/// that takes the records' heap bytes to `max_bytes` or past.
 pub(crate) async fn commits_after_page<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     after_seq: ChangeSeq,
     limit: usize,
+    max_bytes: usize,
 ) -> Result<Vec<WalCommitPayload>> {
     segments
-        .scan_range(
+        .scan_range_bounded(
             MetadataRowFamily::Commits,
             &lookup_keys::after_row_key(&lookup_keys::commit_row_key(after_seq)),
             string_prefix_upper_bound(lookup_keys::COMMIT_ROW_PREFIX).as_deref(),
-            limit,
+            PageBounds {
+                max_rows: limit,
+                max_bytes,
+            },
             None,
             BlocksPerRefill::KeyRange,
         )

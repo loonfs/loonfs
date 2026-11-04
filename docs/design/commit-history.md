@@ -22,7 +22,7 @@ This section describes how a change-feed page and a retried commit read commit r
 
 A change-feed page reads through the same read view as every other read, which is the basis manifest, its segments, and the replayed tail. A page has two parts:
 
-- The durable part is one lookup of the `commits` family for each commit after the cursor. After the first lookup, the view's block memo serves the blocks that the lookups read.
+- The durable part is one scan of the `commits` family for each batch of commits after the cursor. A batch holds the commits left on the page, within the page's remaining byte budget measured on the commit records and one commit past the budget, so a page of small commits costs one scan and a page of large commits costs one scan for every budget of commits. After the first scan, the view's block memo serves the index and filter blocks that the later scans read again.
 - The tail part is the projected tail's commit rows above the cursor.
 
 Every manifest row is at or below the basis head, and every tail row is above it, so the page is the durable rows followed by the tail rows, cut off at the limit.

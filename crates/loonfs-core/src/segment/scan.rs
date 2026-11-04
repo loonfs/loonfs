@@ -7,6 +7,7 @@ use super::index_block_load::load_segment_filter;
 use super::runs::{MetadataFamilySegments, MetadataRunManifest};
 use super::scan_load::{ScanDescriptor, ScanLoader};
 use crate::compaction::merge_iterator::{refill_iterators, SegmentRowIterator};
+use crate::heap_bytes::HeapBytes;
 use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::manifest::error::ManifestLoadError;
 #[cfg(test)]
@@ -26,6 +27,20 @@ use std::sync::Arc;
 /// opens every segment that starts no later than the sixteenth, so their
 /// first blocks load in one refill.
 const SCAN_ITERATORS_OPEN: usize = 16;
+
+/// The bounds of one scan page: at most `max_rows` rows, and the rows'
+/// decoded heap bytes at most `max_bytes` and one row, because the page ends
+/// with the row that takes its bytes to `max_bytes` or past.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PageBounds {
+    pub(crate) max_rows: usize,
+    pub(crate) max_bytes: usize,
+}
+
+/// Whether a page of `rows` holding `rows_bytes` is at either of `bounds`.
+fn page_full(rows: &BTreeMap<String, MetadataRow>, rows_bytes: usize, bounds: PageBounds) -> bool {
+    rows.len() == bounds.max_rows || (!rows.is_empty() && rows_bytes >= bounds.max_bytes)
+}
 
 /// How many data blocks of a segment one refill of a scan asks for.
 ///
@@ -274,7 +289,10 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
                     admitted,
                     lower_bound,
                     upper_bound,
-                    limit,
+                    PageBounds {
+                        max_rows: limit,
+                        max_bytes: usize::MAX,
+                    },
                     blocks_per_refill,
                     true,
                 )
@@ -342,9 +360,33 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
         filter_probe: Option<&str>,
         blocks_per_refill: BlocksPerRefill,
     ) -> Result<Vec<(String, MetadataRow)>, ManifestLoadError> {
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
+        self.scan_range_bounded(
+            family,
+            lower_bound,
+            upper_bound,
+            PageBounds {
+                max_rows: limit,
+                max_bytes: usize::MAX,
+            },
+            filter_probe,
+            blocks_per_refill,
+        )
+        .await
+    }
+
+    /// [`Self::scan_range`] with a byte bound as well: the page ends with
+    /// the row that takes the rows' decoded heap bytes to `bounds.max_bytes`
+    /// or past, so a page of large rows holds at most that many bytes and one
+    /// row.
+    pub(crate) async fn scan_range_bounded(
+        &self,
+        family: MetadataRowFamily,
+        lower_bound: &str,
+        upper_bound: Option<&str>,
+        bounds: PageBounds,
+        filter_probe: Option<&str>,
+        blocks_per_refill: BlocksPerRefill,
+    ) -> Result<Vec<(String, MetadataRow)>, ManifestLoadError> {
         let mut candidates = Vec::new();
         for run in self.scan_runs.iter() {
             self.push_run_candidates(&mut candidates, run, family, lower_bound, upper_bound)?;
@@ -356,7 +398,7 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
             admitted,
             lower_bound,
             upper_bound,
-            limit,
+            bounds,
             blocks_per_refill,
             filter_probe.is_some(),
         )
@@ -397,7 +439,7 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
     }
 
     /// Merges the rows of `descriptors` in `[lower_bound, upper_bound)` into
-    /// one page of at most `limit` rows in row-key order. When a filter
+    /// one page within `bounds` in row-key order. When a filter
     /// admitted the descriptors, a descriptor with no row in the range is
     /// recorded as a false positive.
     async fn merge_segment_rows(
@@ -405,10 +447,13 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
         mut descriptors: Vec<ScanDescriptor<'_>>,
         lower_bound: &str,
         upper_bound: Option<&str>,
-        limit: usize,
+        bounds: PageBounds,
         blocks_per_refill: BlocksPerRefill,
         filter_admitted: bool,
     ) -> Result<Vec<(String, MetadataRow)>, ManifestLoadError> {
+        if bounds.max_rows == 0 {
+            return Ok(Vec::new());
+        }
         descriptors.sort_by(|left, right| {
             left.descriptor
                 .min_row_key
@@ -433,11 +478,12 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
         let mut iterators = Vec::new();
         let mut descriptors = descriptors.into_iter();
         let mut rows: BTreeMap<String, MetadataRow> = BTreeMap::new();
+        let mut rows_bytes = 0_usize;
         loop {
             let mut open_through = rows
                 .last_key_value()
                 .map_or(lower_bound, |(key, _)| key.as_str());
-            if iterators.is_empty() && rows.len() < limit {
+            if iterators.is_empty() && !page_full(&rows, rows_bytes, bounds) {
                 if let Some(candidate) =
                     descriptors.as_slice()[..descriptors.len().min(SCAN_ITERATORS_OPEN)].last()
                 {
@@ -477,16 +523,34 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
                     if upper_bound.is_some_and(|upper| key >= upper) {
                         break;
                     }
-                    if rows.len() == limit {
+                    if page_full(&rows, rows_bytes, bounds) {
                         if rows
                             .last_key_value()
                             .is_some_and(|(last, _)| key >= last.as_str())
                         {
                             break;
                         }
-                        rows.pop_last();
+                        if rows.len() == bounds.max_rows {
+                            let (_, dropped) = rows.pop_last().expect("a full page has a last row");
+                            rows_bytes -= dropped.heap_bytes();
+                        }
                     }
-                    rows.insert(key.to_owned(), iterator.take_head());
+                    let key = key.to_owned();
+                    let row = iterator.take_head();
+                    rows_bytes = rows_bytes.saturating_add(row.heap_bytes());
+                    rows.insert(key, row);
+                    // The page ends with the row that takes it to its bytes,
+                    // so the rows after that one leave.
+                    while rows.len() > 1 {
+                        let last_bytes = rows
+                            .last_key_value()
+                            .map_or(0, |(_, last)| last.heap_bytes());
+                        if rows_bytes - last_bytes < bounds.max_bytes {
+                            break;
+                        }
+                        rows.pop_last();
+                        rows_bytes -= last_bytes;
+                    }
                     #[cfg(test)]
                     self.peak_page_rows
                         .fetch_max(rows.len(), std::sync::atomic::Ordering::Relaxed);
@@ -501,7 +565,7 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
                         .current_segment()
                         .is_some_and(|segment| last_key < segment.descriptor.max_row_key.as_str())
                     && upper_bound.is_none_or(|upper| last_key < upper)
-                    && (rows.len() < limit
+                    && (!page_full(&rows, rows_bytes, bounds)
                         || rows
                             .last_key_value()
                             .is_some_and(|(last, _)| last_key < last.as_str()))

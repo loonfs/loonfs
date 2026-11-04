@@ -99,7 +99,9 @@ pub(super) async fn touched_inodes<S: ObjectStore + ?Sized>(
     // Each pass reads the next page of the range's commits, and the view
     // ends at the range's end, so the loop ends when a page is empty.
     loop {
-        let page = view.commits_after(after_seq, MERGE_COMMITS_PAGE).await?;
+        let page = view
+            .commits_after(after_seq, MERGE_COMMITS_PAGE, usize::MAX)
+            .await?;
         if page.is_empty() {
             return Ok(touched);
         }

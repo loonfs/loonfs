@@ -6,6 +6,7 @@ use crate::commit::engine::CommitCandidate;
 use crate::path::write::{CommitIntent, FilesystemOperation};
 use crate::test_support::{namespace_store, writer_at, NamespaceFixture};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_test_support::stores::RecordingStore;
 use loonfs_types::{
     AccessGrants, AccessRight, AccessRights, AttributeKey, AttributeValue, Commit, CommitId,
     EffectiveLimit, EntryInodeKind, FilesystemChange, NamespaceAccess, PrincipalId, PrincipalScope,
@@ -22,7 +23,7 @@ const COMMITTED_AT_MS: u64 = 1_000;
 
 /// A namespace that a test writes history into and then diffs.
 struct History {
-    _directory: TempDir,
+    directory: TempDir,
     store: LocalFsStore,
     namespace_id: NamespaceId,
 }
@@ -32,7 +33,7 @@ impl History {
         let directory = tempfile::tempdir().expect("tempdir");
         let store = LocalFsStore::new(directory.path()).expect("store");
         let history = Self {
-            _directory: directory,
+            directory,
             store,
             namespace_id: NamespaceId::parse("diff").expect("namespace id"),
         };
@@ -922,4 +923,104 @@ async fn a_diff_refuses_an_event_index_without_split_commits_or_at_from_seq() {
             .expect_err("an invalid position");
         assert_matches!(error, CoreError::InvalidEventIndex(_));
     }
+}
+
+/// A history of 211 commits to `/log.txt`, in three folds, so the commits
+/// are in more than one metadata segment. Returns the history and the
+/// sequence of the file's creation.
+async fn history_of_appends_in_segments() -> (History, ChangeSeq) {
+    let history = History::unrestricted().await;
+    let from_seq = history.write("/log.txt").await.committed_seq;
+    for _ in 0..3 {
+        for _ in 0..70 {
+            history.append("/log.txt").await;
+        }
+        history.fold().await;
+    }
+    (history, from_seq)
+}
+
+/// The two pages that read commits through the commit scan.
+#[derive(Clone, Copy)]
+enum ScanPage {
+    Diff,
+    ChangeFeed,
+}
+
+/// Reads one `page` of `limit` commits after `from_seq`, over a store that
+/// records metadata segment reads and caches no blocks, and returns how many
+/// GETs the page sent for each segment, after the view's load.
+async fn segment_gets(
+    history: &History,
+    page: ScanPage,
+    from_seq: ChangeSeq,
+    limit: u32,
+) -> BTreeMap<String, usize> {
+    let store = RecordingStore::metadata_segments(
+        LocalFsStore::new(history.directory.path()).expect("store"),
+    );
+    let namespace = namespace_store(&store, &history.namespace_id);
+    let view = namespace
+        .load_current_metadata_view()
+        .await
+        .expect("load the current view");
+    store.reset();
+    let limit = EffectiveLimit::new(NonZeroU32::new(limit).expect("a nonzero limit"));
+    let commits = match page {
+        ScanPage::Diff => {
+            let options = DiffOptions {
+                limit,
+                ..DiffOptions::default()
+            };
+            let page = diff_page(&view, from_seq, &options)
+                .await
+                .expect("a diff page");
+            usize::try_from(page.commits_scanned).expect("commits fit usize")
+        }
+        ScanPage::ChangeFeed => {
+            let position = ChangeFeedPosition {
+                after_seq: from_seq,
+                event_index: 0,
+            };
+            crate::changes::list_changes_after(&view, position, limit, CommitSplitting::Whole)
+                .await
+                .expect("a change feed page")
+                .changes
+                .len()
+        }
+    };
+    assert_eq!(commits, limit.as_usize());
+    let mut gets = BTreeMap::new();
+    for key in store.take_get_keys() {
+        *gets.entry(key).or_insert(0) += 1;
+    }
+    gets
+}
+
+/// Checks that a diff page reads its commits in batches: a page over 200
+/// commits reads each metadata segment as many times as a page over 2.
+#[tokio::test]
+async fn a_diff_page_reads_each_segment_as_often_over_200_commits_as_over_2() {
+    let (history, from_seq) = history_of_appends_in_segments().await;
+    let short = segment_gets(&history, ScanPage::Diff, from_seq, 2).await;
+    let long = segment_gets(&history, ScanPage::Diff, from_seq, 200).await;
+    assert!(
+        long.len() > 1,
+        "the commits span several segments: {long:?}"
+    );
+    assert_eq!(short, long);
+}
+
+/// Checks that a change feed page reads its commits in batches: a page over
+/// 200 commits reads each metadata segment as many times as a page over 2.
+#[tokio::test]
+async fn a_change_feed_page_reads_each_segment_as_often_over_200_commits_as_over_2() {
+    let (history, from_seq) = history_of_appends_in_segments().await;
+    let short = segment_gets(&history, ScanPage::ChangeFeed, from_seq, 2).await;
+    let long = segment_gets(&history, ScanPage::ChangeFeed, from_seq, 200).await;
+    assert!(
+        long.len() > 1,
+        "the commits span several segments: {long:?}"
+    );
+    assert_eq!(short, long);
 }
