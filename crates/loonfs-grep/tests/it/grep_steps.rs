@@ -15,6 +15,7 @@ use loonfs_test_support::ids::{namespace_id, nonzero_usize};
 use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
 use loonfs_types::{AbsolutePath, NamespaceId};
 use std::assert_matches;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -110,6 +111,33 @@ impl StepsFixture {
             )
             .await
             .expect("commit the files");
+    }
+
+    /// Copies the `count` files under `/dir-000/` to `/copy-{copy}/` in one
+    /// commit. A copy keeps its source's content value.
+    async fn copy_files(&self, copy: usize, count: usize) {
+        let mut operations = vec![FilesystemOperation::CreateDirectory {
+            path: AbsolutePath::parse(format!("/copy-{copy}")).expect("path"),
+            parents: false,
+        }];
+        operations.extend((0..count).map(|index| FilesystemOperation::CopyPath {
+            source_path:
+                AbsolutePath::parse(format!("/dir-000/file-{index:03}.txt")).expect("path"),
+            destination_path:
+                AbsolutePath::parse(format!("/copy-{copy}/file-{index:03}.txt")).expect("path"),
+            precondition: Default::default(),
+        }));
+        self.namespace
+            .commit(CommitIntent {
+                commit_id: CommitId::generate(),
+                actor_id: loonfs_test_support::test_actor(),
+                subject: None,
+                message: None,
+                operations,
+                preconditions: Vec::new(),
+            })
+            .await
+            .expect("commit the copies");
     }
 
     /// Returns the published entry's status and its number of delta runs.
@@ -238,5 +266,62 @@ async fn build_step_index_reads_stay_bounded_while_a_writer_keeps_committing() {
     assert!(
         most_reads <= 16,
         "a build step read {most_reads} segment objects"
+    );
+}
+
+/// Checks that a worker's build steps read index segments through one cache
+/// of the worker's. Two build steps that look up the same content values in
+/// the same runs read each `texts` block of those runs from the store once.
+#[tokio::test]
+async fn two_build_steps_over_the_same_runs_read_each_texts_block_once() {
+    let fixture = StepsFixture::new("worker-block-cache").await;
+    fixture.commit_files(0, 64).await;
+    fixture
+        .host
+        .enable_grep_index(&fixture.namespace_id)
+        .await
+        .expect("enable grep");
+    let backfilled: BTreeSet<String> = control::grep_entry(&fixture.store, &fixture.namespace_id)
+        .await
+        .expect("grep's entry")
+        .segments()
+        .map(|segment| {
+            loonfs_objectstore::keys::extension_segment(
+                &fixture.namespace_id,
+                &grep_extension_name(),
+                &segment.segment_id,
+            )
+        })
+        .collect();
+    let mut steps = fixture.host.worker.steps(&fixture.namespace_id, 0);
+    let mut backfill_gets = Vec::new();
+    // Each commit copies the backfilled files, so each build step looks up
+    // every backfilled value in the backfill's runs.
+    for copy in 1..=2 {
+        fixture.copy_files(copy, 64).await;
+        fixture.segment_reads.reset();
+        assert_matches!(
+            steps.build_step(GramIndexBuildPolicy::default()).await,
+            Ok(GrepBuildOutcome::Indexed {
+                indexed_revisions: 0,
+                skipped_revisions: 64,
+                ..
+            })
+        );
+        let gets = fixture.segment_reads.take_gets();
+        backfill_gets.push(
+            gets.into_iter()
+                .filter(|(key, _)| backfilled.contains(key))
+                .collect::<Vec<_>>(),
+        );
+    }
+    assert!(
+        !backfill_gets[0].is_empty(),
+        "the first build step reads the backfill's `texts` blocks"
+    );
+    assert_eq!(
+        backfill_gets[1],
+        Vec::new(),
+        "the second build step reads the same blocks from the worker's cache"
     );
 }

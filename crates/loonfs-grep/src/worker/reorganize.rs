@@ -104,7 +104,7 @@ impl<S: ObjectStore + Clone> GrepSteps<'_, S> {
         let segments = GrepSegments {
             store: &self.worker.store,
             namespace_id: &self.namespace_id,
-            block_cache: Some(&self.worker.reorganize_blocks),
+            block_cache: Some(&self.worker.blocks),
         };
         let reads = self.worker.reads(&self.namespace_id);
         let (translations, filters, mut new_segments) = step_tables(

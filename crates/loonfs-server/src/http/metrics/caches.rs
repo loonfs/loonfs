@@ -167,6 +167,14 @@ const GREP_BLOCKS: CacheNames = CacheNames {
     budget: "grep",
 };
 
+const GREP_WORKER_BLOCKS: CacheNames = CacheNames {
+    metric: "grep_worker",
+    lookups: "Grep worker",
+    entries_title: "Decoded grep blocks",
+    entries: "decoded grep blocks of the worker cache",
+    budget: "grep worker",
+};
+
 /// Writes one cache's lookups, inserts, evictions, and rejections as
 /// counters, and the bytes it keeps as a gauge.
 ///
@@ -303,4 +311,13 @@ pub(super) fn render_metadata_cache(rendered: &mut String, stats: &MetadataCache
 /// Writes the grep cache's stats as counters and a gauge.
 pub(super) fn render_grep_block_cache(rendered: &mut String, stats: &DecodedBlockCacheStats) {
     render_cache(rendered, &GREP_BLOCKS, stats);
+}
+
+/// Writes the stats of the grep worker's block cache, which its build and
+/// reorganize steps read through, as counters and a gauge.
+pub(super) fn render_grep_worker_block_cache(
+    rendered: &mut String,
+    stats: &DecodedBlockCacheStats,
+) {
+    render_cache(rendered, &GREP_WORKER_BLOCKS, stats);
 }

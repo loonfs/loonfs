@@ -217,6 +217,7 @@ fn each_cache_stats_field_renders_into_its_own_series() {
         },
     );
     render_grep_block_cache(&mut rendered, &cache(600));
+    render_grep_worker_block_cache(&mut rendered, &cache(700));
 
     let mut expected = vec![
         "loonfs_segment_cache_gets_total{tier=\"memory\",result=\"hit\"} 1".to_owned(),
@@ -240,6 +241,7 @@ fn each_cache_stats_field_renders_into_its_own_series() {
         ("wal_tail", 300),
         ("content_object", 400),
         ("grep", 600),
+        ("grep_worker", 700),
     ] {
         expected.extend([
             format!(

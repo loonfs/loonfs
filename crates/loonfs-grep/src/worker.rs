@@ -17,11 +17,12 @@ use crate::cache::GrepBlockCache;
 use crate::entry::{GrepEntry, GrepIndexStatus};
 use crate::reads::NamespaceReads;
 use crate::{GrepError, GrepPassBudget, Result};
-use loonfs::engine::{next_run_no_after, DecodedBlockCacheConfig};
+use loonfs::engine::{next_run_no_after, DecodedBlockCacheConfig, DecodedBlockCacheStats};
 use loonfs::{CoreError, CreateSnapshotOptions, LoonFs, Maintenance, ReadOnly, Writable};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::segment_blocks::{
     DEFAULT_MAX_COMPACTION_INPUT_ROWS, DEFAULT_MAX_DELTA_RUNS, DEFAULT_MAX_ROWS_PER_SEGMENT,
+    DEFAULT_TARGET_BLOCK_BYTES,
 };
 use loonfs_types::GrepIndex;
 use loonfs_types::{ChangeSeq, NamespaceId, PinId, RunNo};
@@ -47,6 +48,12 @@ const GREP_BACKFILL_MAX_CONTENT_BYTES_PER_STEP: NonZeroU64 =
 /// reads of files at the 8 MiB eligibility cap keep at most 64 MiB, the same
 /// as one backfill step's content budget.
 pub(crate) const GREP_WORKER_REQUESTS_IN_FLIGHT: usize = 8;
+/// Decoded bytes of the block cache that a worker's build and reorganize
+/// steps read index segments through. It fits 256 data blocks, enough for
+/// the blocks that a build step's lookups of 256 values read, and it keeps
+/// the blocks of a small segment that a lookup loads whole until the lookup
+/// reads them.
+const GREP_WORKER_BLOCK_CACHE_DECODED_BYTES: usize = 256 * DEFAULT_TARGET_BLOCK_BYTES.get();
 // Keep grep's fold threshold independent of metadata reorganization limits.
 const GREP_MAX_MID_RUNS: NonZeroUsize = NonZeroUsize::new(8).unwrap();
 
@@ -171,10 +178,11 @@ pub struct GrepWorker<S> {
     writer: LoonFs<Writable>,
     maintenance: Maintenance,
     step_budget: GrepPassBudget,
-    /// The blocks that reorganize steps read, which keeps the blocks of the
-    /// value tables that the steps of one reorganization read again within a
-    /// bounded size. Clones of a worker share it.
-    reorganize_blocks: Arc<GrepBlockCache>,
+    /// The index blocks that build and reorganize steps read, which keeps
+    /// the `texts` blocks that later build steps look up again, and the value
+    /// table blocks that the steps of one reorganization read again, within
+    /// a bounded size. Clones of a worker share it.
+    blocks: Arc<GrepBlockCache>,
     /// How the worker's publications ended. Clones of a worker share it.
     publications: Arc<steps::PublicationCounts>,
 }
@@ -208,8 +216,8 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             writer,
             maintenance,
             step_budget,
-            reorganize_blocks: Arc::new(GrepBlockCache::new(DecodedBlockCacheConfig::new(
-                build::GREP_STEP_BLOCK_CACHE_DECODED_BYTES,
+            blocks: Arc::new(GrepBlockCache::new(DecodedBlockCacheConfig::new(
+                GREP_WORKER_BLOCK_CACHE_DECODED_BYTES,
             ))),
             publications: Arc::default(),
         }
@@ -218,6 +226,12 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     /// The budget this worker's build and reorganize steps draw from.
     pub fn step_budget(&self) -> &GrepPassBudget {
         &self.step_budget
+    }
+
+    /// The counters and retained bytes of the block cache that this worker's
+    /// steps and its clones' steps read index segments through.
+    pub fn block_cache_stats(&self) -> DecodedBlockCacheStats {
+        self.blocks.stats()
     }
 
     /// Reports how the publications of grep's entry by this worker and its
