@@ -466,7 +466,7 @@ async fn group_rows_from_manifest<S: ObjectStore + ?Sized>(
                 None,
                 usize::MAX,
                 None,
-                scan::Readahead::Enabled,
+                scan::BlocksPerRefill::One,
             )
             .await
             .expect("scan the group")
@@ -1711,16 +1711,11 @@ async fn a_compaction_reads_byte_sized_spans_concurrently_within_its_configured_
             index_block_load::load_segment_index_for_compaction(local, None, None, descriptor)
                 .await
                 .expect("output index");
-        for entry in index.iter() {
-            let block = data_block_load::load_segment_data_block_with_readahead(
-                local,
-                None,
-                None,
-                descriptor,
-                std::slice::from_ref(entry),
-            )
-            .await
-            .expect("output block");
+        let blocks =
+            data_block_load::load_segment_data_block_span(local, None, None, descriptor, &index)
+                .await
+                .expect("output blocks");
+        for block in blocks {
             actual.extend(block.rows.iter().cloned());
         }
     }
@@ -3418,16 +3413,12 @@ async fn layout_compactions_prune_absent_chains_only_at_the_base_even_past_the_f
                 )
                 .await
                 .expect("index");
-                for entry in index.iter() {
-                    let block = data_block_load::load_segment_data_block_with_readahead(
-                        &store,
-                        None,
-                        None,
-                        descriptor,
-                        std::slice::from_ref(entry),
-                    )
-                    .await
-                    .expect("block");
+                let blocks = data_block_load::load_segment_data_block_span(
+                    &store, None, None, descriptor, &index,
+                )
+                .await
+                .expect("blocks");
+                for block in blocks {
                     layouts.extend(block.rows.iter().cloned());
                 }
             }

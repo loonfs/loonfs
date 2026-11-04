@@ -287,7 +287,14 @@ pub(super) async fn family_rows<S: ObjectStore + ?Sized>(
         .expect("load the current manifest");
     super::super::metadata_basis_from_manifest(store, None, &current)
         .segments
-        .scan_range(family, "", None, usize::MAX, None, scan::Readahead::Enabled)
+        .scan_range(
+            family,
+            "",
+            None,
+            usize::MAX,
+            None,
+            scan::BlocksPerRefill::One,
+        )
         .await
         .expect("scan the family")
         .into_iter()
@@ -911,16 +918,11 @@ async fn compacted_rows<S: ObjectStore + ?Sized>(
             index_block_load::load_segment_index_for_compaction(store, None, None, descriptor)
                 .await
                 .expect("load the output index");
-        for entry in index.iter() {
-            let block = data_block_load::load_segment_data_block_with_readahead(
-                store,
-                None,
-                None,
-                descriptor,
-                std::slice::from_ref(entry),
-            )
-            .await
-            .expect("load an output block");
+        let blocks =
+            data_block_load::load_segment_data_block_span(store, None, None, descriptor, &index)
+                .await
+                .expect("load the output blocks");
+        for block in blocks {
             rows.extend(block.rows.iter().cloned());
         }
     }

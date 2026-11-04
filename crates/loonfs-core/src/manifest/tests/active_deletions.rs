@@ -794,7 +794,7 @@ async fn stored_active_deletions<S: ObjectStore + ?Sized>(
             None,
             usize::MAX,
             None,
-            scan::Readahead::Enabled,
+            scan::BlocksPerRefill::One,
         )
         .await
         .expect("scan the family")

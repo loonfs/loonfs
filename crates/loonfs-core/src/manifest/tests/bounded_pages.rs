@@ -9,7 +9,6 @@ use crate::segment::segment_block_cache::{
 };
 use loonfs_test_support::stores::{replace_object, ConcurrencyWatchStore};
 use loonfs_types::ROOT_INODE_ID;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 const FAMILY: ApiMetadataRowFamily = ApiMetadataRowFamily::DirentryBinds;
@@ -79,52 +78,17 @@ async fn segment(store: &impl ObjectStore, rows: &[MetadataRow]) -> MetadataSegm
     .expect("write fixture segment")
 }
 
-/// A view whose reads fetch `window_bytes` ahead of a data block they miss,
-/// so that a test's windows can be smaller than its segment.
-fn cache_with_window(max_decoded_bytes: usize, window_bytes: usize) -> MetadataSegmentCache {
-    MetadataSegmentCache::new(
-        Arc::new(SharedSegmentBlocks::new(
-            max_decoded_bytes,
-            max_decoded_bytes,
-        )),
-        ObjectStoreScope::new(0),
-        crate::segment::cache::unshared_read_working_memory(),
-        window_bytes,
-    )
-}
-
-/// The stored bytes of `blocks` data blocks of `descriptor` from `start`. A
-/// read-ahead window of that size from `start` covers exactly those blocks.
-async fn window_of_blocks(
-    store: &impl ObjectStore,
-    descriptor: &MetadataSegmentRef,
-    start: usize,
-    blocks: usize,
-) -> usize {
-    let index =
-        index_block_load::load_segment_index(store, None, &SessionBlockMemo::default(), descriptor)
-            .await
-            .expect("index");
-    let window_bytes = index[start + blocks].block.offset - index[start].block.offset;
-    usize::try_from(window_bytes).expect("a test window fits usize")
-}
-
 #[tokio::test]
-async fn bounded_pages_match_full_rows_across_windows_ranges_and_eviction() {
+async fn bounded_pages_match_full_rows_across_ranges_and_eviction() {
     let temp = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp.path()).expect("store");
     let expected = rows(0, 1024, 1);
     let descriptor = segment(&store, &expected).await;
-    // A window of 32 blocks from the first one, and of about 32 from the
-    // others (the fixture's blocks are about the same size), so the ranges
-    // and limits below start and end on both sides of a window's end. One
-    // window of the default size would cover the whole segment.
-    let window_bytes = window_of_blocks(&store, &descriptor, 0, 32).await;
     // A one-byte budget keeps no block, and a 64 KiB budget keeps a few data
     // blocks and evicts them during the wide ranges.
     const EVICTING_BUDGET: usize = 64 * 1024;
     for budget in [1, EVICTING_BUDGET, 8 * 1024 * 1024] {
-        let cache = cache_with_window(budget, window_bytes);
+        let cache = MetadataSegmentCache::unshared(budget);
         for (start, end, limit) in [
             (0, 1024, 0),
             (0, 1024, 1),
@@ -139,7 +103,7 @@ async fn bounded_pages_match_full_rows_across_windows_ranges_and_eviction() {
         ] {
             let lower = expected[start].row_key_for_family(FAMILY);
             let upper = expected.get(end).map(|row| row.row_key_for_family(FAMILY));
-            for readahead in [scan::Readahead::Enabled, scan::Readahead::Disabled] {
+            for blocks_per_refill in [scan::BlocksPerRefill::One, scan::BlocksPerRefill::KeyRange] {
                 let loaded = load_manifest_segment_rows_in_key_range_with_cache(
                     &store,
                     Some(&cache),
@@ -149,7 +113,7 @@ async fn bounded_pages_match_full_rows_across_windows_ranges_and_eviction() {
                     &lower,
                     upper.as_deref(),
                     limit,
-                    readahead,
+                    blocks_per_refill,
                 )
                 .await
                 .expect("bounded load");
@@ -214,7 +178,14 @@ async fn bounded_pages_merge_overlapping_runs_and_binding_versions() {
         while actual.len() < window.len() || window.end == expected.len() {
             let view = scan::VerifiedMetadataSegments::from_runs(&store, &cache, runs.clone());
             let page = view
-                .scan_range(FAMILY, &lower, None, limit, None, scan::Readahead::Enabled)
+                .scan_range(
+                    FAMILY,
+                    &lower,
+                    None,
+                    limit,
+                    None,
+                    scan::BlocksPerRefill::One,
+                )
                 .await
                 .expect("merged page");
             let peak = view.peak_page_rows();
@@ -257,14 +228,14 @@ async fn bounded_pages_open_and_refill_segments_in_a_concurrent_window() {
     let limit = 20 * 33;
     expected.sort_by_key(|row| row.row_key_for_family(FAMILY));
 
-    for warm_first_window in [false, true] {
-        let lower = if warm_first_window {
+    for warm_first_blocks in [false, true] {
+        let lower = if warm_first_blocks {
             rows(512, 1, 1)[0].row_key_for_family(FAMILY)
         } else {
             String::new()
         };
         let cache = MetadataSegmentCache::unshared(64 * 1024 * 1024);
-        if warm_first_window {
+        if warm_first_blocks {
             for run in &runs {
                 load_manifest_segment_rows_in_key_range_with_cache(
                     &store,
@@ -275,10 +246,10 @@ async fn bounded_pages_open_and_refill_segments_in_a_concurrent_window() {
                     &lower,
                     None,
                     1,
-                    scan::Readahead::Enabled,
+                    scan::BlocksPerRefill::One,
                 )
                 .await
-                .expect("warm the first read-ahead window");
+                .expect("warm the first block");
             }
         }
         let watched = ConcurrencyWatchStore::new(
@@ -297,7 +268,7 @@ async fn bounded_pages_open_and_refill_segments_in_a_concurrent_window() {
             None,
             limit,
             None,
-            scan::Readahead::Enabled
+            scan::BlocksPerRefill::One
         ));
         // Yield between polls so Tokio can replenish the cooperative budget
         // after cache hits, before the next store request starts.
@@ -310,7 +281,7 @@ async fn bounded_pages_open_and_refill_segments_in_a_concurrent_window() {
         }
         assert!(futures::poll!(page.as_mut()).is_pending());
         let waiting = watched.reads();
-        assert_eq!(waiting.total, 16, "warm first window: {warm_first_window}");
+        assert_eq!(waiting.total, 16, "warm first blocks: {warm_first_blocks}");
         assert_eq!(waiting.peak_in_flight, 16);
         watched.inner().release();
         let wanted: Vec<_> = expected
@@ -332,7 +303,7 @@ async fn bounded_pages_open_and_refill_segments_in_a_concurrent_window() {
 }
 
 #[tokio::test]
-async fn disabled_readahead_loads_a_cold_key_range_in_one_data_get() {
+async fn a_key_range_scan_loads_a_cold_key_range_in_one_data_get() {
     let temp = tempdir().expect("tempdir");
     let store = RecordingStore::metadata_segments(LocalFsStore::new(temp.path()).expect("store"));
     // One edge's rows sort newest first.
@@ -378,7 +349,7 @@ async fn disabled_readahead_loads_a_cold_key_range_in_one_data_get() {
             string_prefix_upper_bound(&prefix).as_deref(),
             usize::MAX,
             Some(&filter_probe),
-            scan::Readahead::Disabled,
+            scan::BlocksPerRefill::KeyRange,
         )
         .await
         .expect("prefix scan")
@@ -394,74 +365,15 @@ async fn disabled_readahead_loads_a_cold_key_range_in_one_data_get() {
     assert_eq!(data_gets, vec![(object_key, Some(data_range))]);
 }
 
-/// Checks that a page decodes only the block it reads, that a later page of
-/// the same read finds its block in the window that the read's memo keeps,
-/// and that a page of another read fetches a window of its own. A window's
-/// other blocks are kept as stored bytes in the memo of the read that fetched
-/// them, and not in the block cache.
-#[tokio::test]
-async fn bounded_pages_keep_their_window_in_the_memo_of_their_read() {
-    let temp = tempdir().expect("tempdir");
-    let store = RecordingStore::metadata_segments(LocalFsStore::new(temp.path()).expect("store"));
-    let expected = rows(0, 1024, 1);
-    let descriptor = segment(&store, &expected).await;
-    let cache = MetadataSegmentCache::unshared(usize::MAX);
-    let memo = SessionBlockMemo::default();
-    let page = |position: usize, memo| {
-        let lower = expected[position].row_key_for_family(FAMILY);
-        let (store, cache, descriptor) = (&store, &cache, &descriptor);
-        async move {
-            load_manifest_segment_rows_in_key_range_with_cache(
-                store,
-                Some(cache),
-                memo,
-                descriptor,
-                ChangeSeq(1),
-                &lower,
-                None,
-                1,
-                scan::Readahead::Enabled,
-            )
-            .await
-            .expect("page")
-            .rows()
-            .count()
-        }
-    };
-
-    assert_eq!(page(0, &memo).await, 1, "the page reads one block");
-    assert_eq!(
-        cache.stats().inserts,
-        3,
-        "the page decodes the index, the filter that the index's GET reads, and the one \
-         data block it reads"
-    );
-    store.reset();
-    page(1, &memo).await;
-    assert_eq!(
-        store.count(OperationSelector::Read),
-        0,
-        "the read's next page finds its block in the memo"
-    );
-    page(2, &SessionBlockMemo::default()).await;
-    assert_eq!(
-        store.count(OperationSelector::Read),
-        1,
-        "a page of another read fetches a window of its own"
-    );
-}
-
-/// A memory block cache that records each data block that a read asks it
-/// for, and counts each data block that LoonFS decodes into it: the block
-/// that a miss loads, and each block inserted without a read asking for it.
-struct DecodeCountingBlocks {
+/// A memory block cache that counts the inserts of each data block, which
+/// a read makes for each block that it fetches and decodes.
+struct InsertCountingBlocks {
     memory: MemorySegmentBlocks,
-    reads: Mutex<BTreeSet<u64>>,
-    decodes: AtomicUsize,
+    data_inserts: Mutex<BTreeMap<u64, usize>>,
 }
 
 #[async_trait]
-impl SegmentBlockCache for DecodeCountingBlocks {
+impl SegmentBlockCache for InsertCountingBlocks {
     async fn get_block(
         &self,
         key: &MetadataSegmentCacheKey,
@@ -477,7 +389,12 @@ impl SegmentBlockCache for DecodeCountingBlocks {
         stored: &[u8],
     ) {
         if key.block_kind == SegmentBlockKind::Data {
-            self.decodes.fetch_add(1, Ordering::SeqCst);
+            *self
+                .data_inserts
+                .lock()
+                .expect("inserts lock")
+                .entry(key.block_offset)
+                .or_default() += 1;
         }
         self.memory.insert_block(key, block, stored);
     }
@@ -485,40 +402,18 @@ impl SegmentBlockCache for DecodeCountingBlocks {
     async fn get_or_load_block(
         &self,
         key: &MetadataSegmentCacheKey,
-        _handle: &BlockHandle,
+        handle: &BlockHandle,
         load: SegmentBlockLoad<'_>,
     ) -> Result<DecodedMetadataSegmentBlock, ManifestLoadError> {
-        let data = key.block_kind == SegmentBlockKind::Data;
-        if data {
-            self.reads
-                .lock()
-                .expect("reads lock")
-                .insert(key.block_offset);
-        }
-        self.memory
-            .get_or_load_with_hit(
-                key,
-                |_| {},
-                move || async move {
-                    let loaded = load.await?;
-                    if data {
-                        self.decodes.fetch_add(1, Ordering::SeqCst);
-                    }
-                    Ok(loaded.block)
-                },
-            )
-            .await
+        self.memory.get_or_load_block(key, handle, load).await
     }
 }
 
-/// Checks that a lookup's scan over several read-ahead windows of data
-/// blocks decodes each block it reads once, with one ranged GET per window,
-/// when the block cache keeps fewer blocks than one window. The scan reads
-/// one block per refill, so a window that the scan decoded whole and the
-/// cache then evicted would be fetched and decoded again from each later
-/// block of the window.
+/// Checks that a scan of one key prefix over many data blocks fetches them in
+/// one GET and decodes each block once, when the block cache keeps fewer
+/// blocks than the scan reads.
 #[tokio::test]
-async fn a_lookup_scan_decodes_each_block_it_reads_once_through_a_small_block_cache() {
+async fn a_prefix_scan_through_a_small_block_cache_fetches_and_decodes_each_block_once() {
     let temp = tempdir().expect("tempdir");
     let store = RecordingStore::metadata_segments(LocalFsStore::new(temp.path()).expect("store"));
     // One edge's rows sort newest first.
@@ -538,11 +433,9 @@ async fn a_lookup_scan_decodes_each_block_it_reads_once_through_a_small_block_ca
     )
     .await
     .expect("index");
-    // A budget of four blocks, so the cache keeps fewer blocks than a window,
-    // and windows of 32 blocks, so the scan reads several of them. One
-    // window of the default size would cover the whole segment.
+    // A budget of four blocks, so the cache evicts the scan's blocks.
     let probe = MetadataSegmentCache::unshared(usize::MAX);
-    data_block_load::load_segment_data_block_with_readahead(
+    data_block_load::load_segment_data_block_span(
         &store,
         Some(&probe),
         None,
@@ -555,17 +448,15 @@ async fn a_lookup_scan_decodes_each_block_it_reads_once_through_a_small_block_ca
         4 * probe.stats().cached_decoded_bytes,
         usize::MAX,
     ));
-    let blocks = Arc::new(DecodeCountingBlocks {
+    let blocks = Arc::new(InsertCountingBlocks {
         memory: MemorySegmentBlocks::new(Arc::clone(&shared), ObjectStoreScope::new(0)),
-        reads: Mutex::default(),
-        decodes: AtomicUsize::new(0),
+        data_inserts: Mutex::default(),
     });
     let cache = MetadataSegmentCache::with_blocks(
         blocks.clone(),
         shared,
         ObjectStoreScope::new(0),
         crate::segment::cache::unshared_read_working_memory(),
-        window_of_blocks(&store, &descriptor, 1, 32).await,
     );
     let runs = vec![MetadataRunManifest {
         run_no: RunNo(1),
@@ -573,7 +464,7 @@ async fn a_lookup_scan_decodes_each_block_it_reads_once_through_a_small_block_ca
         tier: RunTier::Delta,
         segments: vec![MetadataFamilySegments {
             family: FAMILY,
-            segments: vec![descriptor],
+            segments: vec![descriptor.clone()],
         }],
     }];
     let view = scan::VerifiedMetadataSegments::from_runs(&store, &cache, runs);
@@ -587,7 +478,7 @@ async fn a_lookup_scan_decodes_each_block_it_reads_once_through_a_small_block_ca
             string_prefix_upper_bound(&format!("{filter_probe}-")).as_deref(),
             usize::MAX,
             Some(&filter_probe),
-            scan::Readahead::Enabled,
+            scan::BlocksPerRefill::KeyRange,
         )
         .await
         .expect("prefix scan")
@@ -595,20 +486,30 @@ async fn a_lookup_scan_decodes_each_block_it_reads_once_through_a_small_block_ca
         .map(|(_, row)| row)
         .collect::<Vec<_>>();
     assert_eq!(actual, expected);
-    let reads = blocks.reads.lock().expect("reads lock").len();
-    let gets = store.count(OperationSelector::Read);
-    assert!(
-        reads > 64,
-        "the scan reads the blocks of several windows, not {reads}"
-    );
+    let data_gets: Vec<_> = store
+        .take_gets()
+        .into_iter()
+        .filter_map(|(_, range)| range)
+        .filter(|(start, _)| *start < descriptor.filter_block.offset)
+        .collect();
+    // The key range ends in block 97, whose last row key is past the prefix
+    // and which can still hold a key below it.
+    let first = index[1].block;
+    let last = index[97].block;
     assert_eq!(
-        blocks.decodes.load(Ordering::SeqCst),
-        reads,
-        "decodes of the {reads} blocks that the scan read, with {gets} GETs"
+        data_gets,
+        vec![(first.offset, last.offset + u64::from(last.stored_bytes))],
+        "one GET reads the blocks of the prefix, which are under 1 MiB"
+    );
+    let inserts = blocks.data_inserts.lock().expect("inserts lock");
+    assert_eq!(
+        inserts.len(),
+        97,
+        "the scan fetches every block of its key range"
     );
     assert!(
-        gets <= 6,
-        "one GET for each window and the index, not {gets}"
+        inserts.values().all(|count| *count == 1),
+        "each block is decoded and inserted once: {inserts:?}"
     );
 }
 
@@ -637,8 +538,8 @@ async fn bounded_pages_reject_corruption_when_the_damaged_block_is_requested() {
     replace_object(&store, &key, Bytes::from(bytes))
         .await
         .expect("corrupt fixture");
-    // The first page's window covers the damaged block 64 as stored bytes, and
-    // the page doesn't reach that block, so the page doesn't decode it.
+    // The first page fetches block 0 alone, so the damaged block 64 doesn't
+    // fail it.
     load_manifest_segment_rows_in_key_range_with_cache(
         &store,
         None,
@@ -648,7 +549,7 @@ async fn bounded_pages_reject_corruption_when_the_damaged_block_is_requested() {
         "",
         None,
         1,
-        scan::Readahead::Enabled,
+        scan::BlocksPerRefill::One,
     )
     .await
     .expect("unaffected first page");
@@ -663,7 +564,7 @@ async fn bounded_pages_reject_corruption_when_the_damaged_block_is_requested() {
             &lower,
             None,
             1,
-            scan::Readahead::Enabled,
+            scan::BlocksPerRefill::One,
         )
         .await
         .is_err(),
@@ -671,8 +572,12 @@ async fn bounded_pages_reject_corruption_when_the_damaged_block_is_requested() {
     );
 }
 
+/// Checks that a damaged data block fails only the reads that decode it. A
+/// read of a segment small enough to fetch whole decodes every block of the
+/// segment, so each read of it fails, and a ranged read fetches and decodes
+/// only the block that it asks for.
 #[tokio::test]
-async fn lookup_readahead_retains_bytes_and_checks_rows_only_when_requested() {
+async fn a_damaged_block_fails_only_the_reads_that_decode_it() {
     for count in [16, 1024] {
         let temp = tempdir().expect("tempdir");
         let store =
@@ -691,7 +596,7 @@ async fn lookup_readahead_retains_bytes_and_checks_rows_only_when_requested() {
         let built = builder.build().expect("segment");
         let descriptor = crate::test_support::namespace_store(
             &store,
-            &NamespaceId::parse("lookup-readahead").expect("namespace"),
+            &NamespaceId::parse("damaged-block").expect("namespace"),
         )
         .write_manifest_segment(FAMILY, built)
         .await
@@ -732,10 +637,11 @@ async fn lookup_readahead_retains_bytes_and_checks_rows_only_when_requested() {
                 &lower,
                 string_prefix_upper_bound(&lower).as_deref(),
                 1,
-                scan::Readahead::Enabled,
+                scan::BlocksPerRefill::One,
             )
             .await;
-            if position == 2 {
+            let whole_object = count == 16;
+            if whole_object || position == 2 {
                 assert!(matches!(
                     loaded,
                     Err(ManifestLoadError::SegmentCodec { .. })
@@ -744,9 +650,16 @@ async fn lookup_readahead_retains_bytes_and_checks_rows_only_when_requested() {
                 let loaded = loaded.expect("intact requested block");
                 assert_eq!(loaded.rows().collect::<Vec<_>>(), vec![&expected[position]]);
             }
+            // A whole-object read publishes nothing when a block fails, so
+            // each read fetches the object again. A ranged read fetches the
+            // index once and then each block that it asks for.
             assert_eq!(
                 store.count(OperationSelector::Read),
-                if count == 16 { 1 } else { 2 }
+                if whole_object {
+                    position + 1
+                } else {
+                    position + 2
+                }
             );
         }
     }

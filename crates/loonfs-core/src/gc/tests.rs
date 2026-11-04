@@ -3424,7 +3424,6 @@ fn root_scan_cache(
         Arc::new(crate::cache::SharedSegmentBlocks::new(0, 0)),
         crate::cache::ObjectStoreScope::new(0),
         memory,
-        crate::limits::READAHEAD_WINDOW_BYTES,
     )
 }
 

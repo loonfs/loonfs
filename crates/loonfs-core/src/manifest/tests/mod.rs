@@ -4,6 +4,7 @@ mod access;
 mod active_deletions;
 mod attributes;
 mod basis_publications;
+mod block_fetches;
 mod bounded_pages;
 mod cache;
 mod cas_recovery;
@@ -19,7 +20,6 @@ mod manifest_gc_races;
 mod manifest_round_trips;
 mod merges;
 mod newest_first_lookups;
-mod read_ahead_windows;
 mod retention;
 mod streaming_compaction;
 mod views_below_the_head;
@@ -116,7 +116,14 @@ async fn load_manifest_projection_metadata_state<S: ObjectStore + ?Sized>(
     for family in ApiMetadataRowFamily::ALL {
         let mut rows = projection
             .manifest_segments
-            .scan_range(family, "", None, usize::MAX, None, scan::Readahead::Enabled)
+            .scan_range(
+                family,
+                "",
+                None,
+                usize::MAX,
+                None,
+                scan::BlocksPerRefill::One,
+            )
             .await?
             .into_iter()
             .map(|(_, row)| row)

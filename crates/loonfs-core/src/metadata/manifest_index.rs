@@ -13,7 +13,7 @@ use crate::metadata::{
     ContentLayoutRecord, DirentryBindingRecord, InodeRecord, RevisionRecord,
     SubtreeTombstoneRecord,
 };
-use crate::segment::{Readahead, VerifiedMetadataSegments};
+use crate::segment::{BlocksPerRefill, VerifiedMetadataSegments};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::lookup_keys;
 use loonfs_types::format::manifest::{MergeIndexRecord, MetadataRow, MetadataRowFamily};
@@ -61,7 +61,7 @@ pub(crate) async fn commits_after_page<S: ObjectStore + ?Sized>(
             string_prefix_upper_bound(lookup_keys::COMMIT_ROW_PREFIX).as_deref(),
             limit,
             None,
-            Readahead::Enabled,
+            BlocksPerRefill::KeyRange,
         )
         .await?
         .into_iter()
@@ -89,7 +89,7 @@ pub(crate) async fn direntry_binds_page<S: ObjectStore + ?Sized>(
             upper_bound.as_deref(),
             limit,
             Some(&lookup_keys::direntry_parent_probe(parent_inode_id)),
-            Readahead::Enabled,
+            BlocksPerRefill::KeyRange,
         )
         .await?
         .into_iter()
@@ -111,7 +111,7 @@ pub(super) async fn direntry_binds_for_parent_name<S: ObjectStore + ?Sized>(
         &lookup_keys::direntry_bind_prefix(parent_inode_id, name_key),
         &lookup_keys::direntry_bind_probe(parent_inode_id, name_key),
         slot_edge_end,
-        Readahead::Disabled,
+        BlocksPerRefill::KeyRange,
         visible_seq,
     )
     .await
@@ -130,7 +130,7 @@ pub(super) async fn direntry_binds_for_child<S: ObjectStore + ?Sized>(
         &lookup_keys::direntry_child_prefix(child_inode_id),
         &lookup_keys::direntry_child_probe(child_inode_id),
         child_edge_end,
-        Readahead::Enabled,
+        BlocksPerRefill::One,
         visible_seq,
     )
     .await
@@ -180,7 +180,7 @@ async fn newest_edge_rows<S: ObjectStore + ?Sized>(
     prefix: &str,
     filter_probe: &str,
     edge_end: fn(&DirentryBindingRecord) -> String,
-    readahead: Readahead,
+    blocks_per_refill: BlocksPerRefill,
     visible_seq: ChangeSeq,
 ) -> Result<Vec<DirentryBindingRecord>> {
     let newest_run_only = segments.every_row_is_visible_at(visible_seq);
@@ -196,7 +196,7 @@ async fn newest_edge_rows<S: ObjectStore + ?Sized>(
                     &lower_bound,
                     filter_probe,
                     EDGE_WALK_PAGE_ROWS,
-                    readahead,
+                    blocks_per_refill,
                 )
                 .await?
         } else {
@@ -207,7 +207,7 @@ async fn newest_edge_rows<S: ObjectStore + ?Sized>(
                     upper_bound.as_deref(),
                     EDGE_WALK_PAGE_ROWS,
                     Some(filter_probe),
-                    Readahead::Enabled,
+                    BlocksPerRefill::KeyRange,
                 )
                 .await?
         };
@@ -284,7 +284,7 @@ pub(super) async fn revision_by_inode_no<S: ObjectStore + ?Sized>(
             string_prefix_upper_bound(&exact_prefix).as_deref(),
             1,
             Some(&filter_probe),
-            Readahead::Enabled,
+            BlocksPerRefill::One,
         )
         .await?
         .into_iter()
@@ -312,7 +312,7 @@ pub(super) async fn revisions_page<S: ObjectStore + ?Sized>(
                     string_prefix_upper_bound(&lookup_keys::revision_prefix(inode_id)).as_deref(),
                     limit,
                     Some(&lookup_keys::revision_probe(inode_id)),
-                    Readahead::Enabled,
+                    BlocksPerRefill::KeyRange,
                 )
                 .await?
         }
@@ -324,7 +324,7 @@ pub(super) async fn revisions_page<S: ObjectStore + ?Sized>(
                     string_prefix_upper_bound(lookup_keys::REVISION_ROW_PREFIX).as_deref(),
                     limit,
                     None,
-                    Readahead::Enabled,
+                    BlocksPerRefill::KeyRange,
                 )
                 .await?
         }
@@ -351,7 +351,7 @@ pub(crate) async fn active_deletions_page<S: ObjectStore + ?Sized>(
             upper_bound,
             limit,
             None,
-            Readahead::Enabled,
+            BlocksPerRefill::KeyRange,
         )
         .await?
         .into_iter()
@@ -414,7 +414,7 @@ async fn first_content_layout<S: ObjectStore + ?Sized>(
             upper_bound.as_deref(),
             CONTENT_LAYOUT_PAGE_ROWS,
             Some(probe),
-            Readahead::Enabled,
+            BlocksPerRefill::One,
         )
         .await?;
     rows.into_iter()
@@ -438,7 +438,7 @@ pub(super) async fn commit_receipt<S: ObjectStore + ?Sized>(
             string_prefix_upper_bound(&prefix).as_deref(),
             usize::MAX,
             Some(&filter_probe),
-            Readahead::Disabled,
+            BlocksPerRefill::KeyRange,
         )
         .await?
         .into_iter()
@@ -538,7 +538,7 @@ where
                 &prefix,
                 &filter_probe,
                 1,
-                Readahead::Enabled,
+                BlocksPerRefill::One,
             )
             .await?
             .into_iter()
@@ -556,7 +556,7 @@ where
                 upper_bound.as_deref(),
                 WHOLE_STATE_RAW_SCAN_LIMIT,
                 Some(&filter_probe),
-                Readahead::Enabled,
+                BlocksPerRefill::KeyRange,
             )
             .await?;
         let page_len = page.len();

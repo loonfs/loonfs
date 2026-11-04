@@ -117,7 +117,7 @@ Every folded chain has its own record in the layouts group, and a read follows t
 
 A chain can have both records for a while (after an append, until compaction drops the bytes row), and the reader then uses the layout. Both records store the same bytes for the row's length, so either is correct, and preferring the layout means that every reader makes the same choice.
 
-A cold read of a folded small file reads one data block of the small-file bytes family, without a [read-ahead window](block-cache.md#reading-ahead). Today it reads a data block of the layouts family and then the content object. When the segments' filter and index blocks are already cached, that's one GET where today there are up to two. A warm read sends none in either design.
+A cold read of a folded small file reads one data block of the small-file bytes family, as [What a read fetches](block-cache.md#what-a-read-fetches) describes. Today it reads a data block of the layouts family and then the content object. When the segments' filter and index blocks are already cached, that's one GET where today there are up to two. A warm read sends none in either design.
 
 Why doesn't the reader choose by the file's size or by the threshold? A small file can be in a content object: an upload is never stored as a bytes row, a writer with a lower threshold or with bytes rows off writes small files to objects, an appended chain has a layout, and a fork inherits whatever its source stored. The threshold can also differ between processes and change over time, as [The row threshold](#the-row-threshold) describes. The chain's own record is the reliable signal, and finding it costs a filter probe in each of the two families, which usually needs no request.
 

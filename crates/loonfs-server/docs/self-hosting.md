@@ -417,7 +417,7 @@ Each cache, queue, and unit of work has its own memory budget. The values in the
 | Reads | `max_concurrent_reads` | 64 | Public reads running at once. Each page takes one slot | Concurrency |
 | Publications | `max_concurrent_publications` | 8 | Publications running at once | Concurrency |
 
-All memos share one read working memory pool. When the pool is full, a memo evicts its own entries or doesn't retain new blocks, and reads don't wait or fail because of memory. The pool counts decoded data, index and filter sections, stored read-ahead bytes, keys, reference counts, and memo containers. Setting it to zero disables retention. A block that a caller already has stays valid after it's evicted.
+All memos share one read working memory pool. When the pool is full, a memo evicts its own entries or doesn't retain new blocks, and reads don't wait or fail because of memory. The pool counts decoded data, index and filter sections, keys, reference counts, and memo containers. Setting it to zero disables retention. A block that a caller already has stays valid after it's evicted.
 
 A fold keeps its segment output in memory and takes its memo from the shared pool. A compaction keeps its compaction input and its segment output in memory, which comes to up to 96 MiB per concurrent compaction without sizing or overrides. A sweep visit that folds the WAL tail and then compacts takes a fold permit for the fold, and then a compaction permit for the compaction. So the fold and compaction limits bound that memory, not `max_concurrent_maintenance`.
 

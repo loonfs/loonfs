@@ -971,7 +971,7 @@ async fn write_long_named_entries(root: &Path) {
     use crate::{AbsolutePath, CommitId};
 
     let writer = LoonFs::builder_with_store(local_store(root))
-        .writer_id(writer_id("window-writer"))
+        .writer_id(writer_id("long-names-writer"))
         .build()
         .await
         .expect("build writer");
@@ -1013,50 +1013,9 @@ async fn write_long_named_entries(root: &Path) {
         .await
         .expect("create the entries");
     writer
-        .maintenance(writer_id("window-maintenance"))
+        .maintenance(writer_id("long-names-maintenance"))
         .fold_wal(&demo())
         .await
         .expect("fold the entries into segments");
     writer.shutdown().await.expect("shutdown");
-}
-
-/// Checks that reads use the read-ahead window that their runtime's cache
-/// was built with. A cold listing of a directory whose entries fill several
-/// data blocks fetches them in one GET with the default window, and in a GET
-/// for each block with no window.
-#[tokio::test]
-async fn reads_use_the_read_ahead_window_that_the_cache_was_built_with() {
-    let root = tempdir().expect("tempdir");
-    write_long_named_entries(root.path()).await;
-
-    let mut segment_reads = Vec::new();
-    for window_bytes in [crate::READAHEAD_WINDOW_BYTES, 0] {
-        let store = Arc::new(RecordingStore::metadata_segments(
-            LocalFsStore::new(root.path()).expect("store"),
-        ));
-        let reader = LoonFs::builder_with_store(store.clone())
-            .read_only()
-            .metadata_cache(
-                MetadataCache::builder()
-                    .read_ahead_window_bytes(window_bytes)
-                    .build(),
-            )
-            .build()
-            .await
-            .expect("build reader");
-        let page = reader
-            .namespace(&demo())
-            .list("/dirs")
-            .page()
-            .await
-            .expect("list the directory");
-        assert_eq!(page.entries.len(), 1_000);
-        segment_reads.push(store.count(OperationSelector::Read));
-    }
-    let (with_window, without_window) = (segment_reads[0], segment_reads[1]);
-    assert!(
-        without_window >= with_window + 4,
-        "no window reads each block alone: {without_window} GETs, and {with_window} with the \
-         default window"
-    );
 }

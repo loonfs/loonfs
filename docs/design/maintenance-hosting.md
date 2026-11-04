@@ -87,7 +87,6 @@ The pool's size is `max_read_working_bytes` in `ExecutionBudget`, which defaults
 Read, publication, fold, and pin-fold memos reserve memory from this pool. A reservation covers:
 
 - decoded data blocks,
-- stored read-ahead bytes,
 - decoded indexes and filters,
 - keys and reference counts, and
 - allocated memo container capacity.

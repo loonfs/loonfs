@@ -64,7 +64,7 @@ LoonFS caches decoded index, filter, and data blocks in memory, up to a byte bud
 
 The implementation also combines reads when transferring some extra bytes is cheaper than another object-store round trip:
 
-- A read that misses a data block also fetches the blocks after it in the same ranged GET, up to 1 MiB of stored bytes, so a scan or a run of nearby lookups doesn't send a GET for each block. The read keeps those blocks as stored bytes and decodes each one when it reaches it, as [Reading ahead](block-cache.md#reading-ahead) describes.
+- A scan fetches the next data blocks of its key range that no cache has in one ranged GET, up to 1 MiB of stored bytes, and inserts each block into the block cache, as [What a read fetches](block-cache.md#what-a-read-fetches) describes. A lookup of one key fetches one block.
 - On a cold read, the filter and the index next to it can be fetched together.
 - A small enough segment can be read once and decoded section by section.
 
@@ -82,12 +82,12 @@ The encoding and the writer's target sizes have different compatibility requirem
 
 Bloom hashing and the block grammar are rules of the durable format. The filter uses two 64-bit hashes with constant seeds, seven probes, and about ten bits per inserted key. Any change to how stored filters are interpreted requires a new format version.
 
-Block sizes, segment targets, the read-ahead window, and ordinary maintenance budgets are implementation settings:
+Block sizes, segment targets, the scan refill, and ordinary maintenance budgets are implementation settings:
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | Data-block target | 64 KiB decoded | A block is closed once it reaches its target. |
-| Read-ahead window | 1 MiB stored | A read that misses a data block fetches the blocks after it, up to this size, in the same GET. |
+| Scan refill | 1 MiB stored | A scan fetches the next blocks of its key range up to this size in one GET. |
 | Segment byte target | 8 MiB decoded | A segment can exceed the target by its final row. |
 | Segment row target | 65,536 rows | Segments are also split by row count. |
 | Merge input limit | 8 complete runs | A merge reads at most eight complete runs. |

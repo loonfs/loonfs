@@ -47,5 +47,5 @@ pub use self::segment_block_cache::{
     LoadedSegmentBlock, MemorySegmentBlocks, SegmentBlockCache, SegmentBlockLoad,
 };
 
-pub(crate) use self::scan::{Readahead, VerifiedMetadataSegments};
+pub(crate) use self::scan::{BlocksPerRefill, VerifiedMetadataSegments};
 pub(crate) use self::scan_load::{visit_segment_rows, ScanDescriptor};

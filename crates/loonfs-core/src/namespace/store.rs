@@ -17,7 +17,7 @@ pub struct NamespaceStore<S> {
     pub(crate) store: S,
     pub(crate) namespace_id: NamespaceId,
     /// The decoded segment blocks that reads, folds, and compactions go
-    /// through, with the read working memory and the read-ahead window.
+    /// through, with the read working memory.
     pub(crate) segment_cache: Arc<MetadataSegmentCache>,
     /// The projected WAL tails that reads take instead of replaying the WAL.
     pub(crate) head_and_wal_tail_cache: Arc<HeadAndWalTailCache>,

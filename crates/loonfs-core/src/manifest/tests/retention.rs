@@ -566,37 +566,52 @@ impl LongCommitHistory {
             .collect()
     }
 
-    /// Returns the ranges of the segment's index and of each data block from
-    /// the first block through the block that contains commit `seq`, which
-    /// are the GETs of a walk through [`cache_reading_one_block_at_a_time`]
-    /// that reads commit `seq` last.
-    fn ranges_through(&self, seq: ChangeSeq) -> Vec<(u64, u64)> {
-        let range =
-            |block: &BlockHandle| (block.offset, block.offset + u64::from(block.stored_bytes));
-        let key = lookup_keys::commit_row_key(seq);
-        let last = self.index.partition_point(|entry| entry.last_row_key < key);
-        std::iter::once(range(&self.segment.index_block))
-            .chain(self.index[..=last].iter().map(|entry| range(&entry.block)))
-            .collect()
+    /// Returns the ranges of the GETs of a walk through
+    /// [`cache_for_a_walk`] that reads commits `first` through `last`: the
+    /// segment's index, and then one GET for each refill, which reads the
+    /// next blocks of the commit range up to `MAX_SCAN_REFILL_BYTES` of
+    /// stored bytes, from the block of commit `first` through the refill
+    /// that reads the block of commit `last`.
+    fn ranges_from_through(&self, first: ChangeSeq, last: ChangeSeq) -> Vec<(u64, u64)> {
+        let block_of = |seq| {
+            let key = lookup_keys::commit_row_key(seq);
+            self.index.partition_point(|entry| entry.last_row_key < key)
+        };
+        let end_of = |block: &BlockHandle| block.offset + u64::from(block.stored_bytes);
+        let mut ranges = vec![(
+            self.segment.index_block.offset,
+            end_of(&self.segment.index_block),
+        )];
+        let (mut start, last) = (block_of(first), block_of(last));
+        while start <= last {
+            let mut end = start + 1;
+            while end < self.index.len()
+                && end_of(&self.index[end].block) - self.index[start].block.offset
+                    <= crate::limits::MAX_SCAN_REFILL_BYTES
+            {
+                end += 1;
+            }
+            ranges.push((
+                self.index[start].block.offset,
+                end_of(&self.index[end - 1].block),
+            ));
+            start = end;
+        }
+        ranges
     }
 }
 
-/// A cache whose reads fetch one data block at a time, so the GETs of a walk
-/// show each block that it reached.
-fn cache_reading_one_block_at_a_time() -> MetadataSegmentCache {
-    MetadataSegmentCache::new(
-        Arc::new(SharedSegmentBlocks::new(64 * 1024 * 1024, 64 * 1024 * 1024)),
-        ObjectStoreScope::new(0),
-        crate::segment::cache::unshared_read_working_memory(),
-        1,
-    )
+/// A cache with room for every block of a walk, so the GETs of a walk show
+/// each refill that it reached.
+fn cache_for_a_walk() -> MetadataSegmentCache {
+    MetadataSegmentCache::unshared(64 * 1024 * 1024)
 }
 
 /// Checks that an advance reads commits upward from the floor, and stops at
 /// its sequence or at the first commit younger than the grace window, with
-/// one ranged GET for each block of commit rows that it reaches.
+/// one ranged GET for each refill of commit blocks that it reaches.
 #[tokio::test]
-async fn an_advance_sends_one_get_for_each_commit_block_up_to_where_it_stops() {
+async fn an_advance_sends_one_get_for_each_refill_of_commit_blocks_up_to_where_it_stops() {
     let grace_ms = crate::limits::GC_DEFAULT_GRACE_WINDOW_MS;
     let now_ms = 10 * grace_ms;
     for (target, expected_floor, last_read) in [
@@ -604,7 +619,7 @@ async fn an_advance_sends_one_get_for_each_commit_block_up_to_where_it_stops() {
         // reads commits 1 to 65, and the floor moves to commit 64.
         (RetentionTarget::Head, ChangeSeq(64), ChangeSeq(65)),
         // The sequence ends the walk after commit 14, the last row of the
-        // first block, so the walk fetches no other block.
+        // first block, so the walk sends no GET after its first refill.
         (
             RetentionTarget::Seq(ChangeSeq(14)),
             ChangeSeq(14),
@@ -628,7 +643,7 @@ async fn an_advance_sends_one_get_for_each_commit_block_up_to_where_it_stops() {
                 &history.namespace_id,
                 &crate::test_support::writer_at("test-writer", now_ms),
             );
-            fixture.namespace.segment_cache = Arc::new(cache_reading_one_block_at_a_time());
+            fixture.namespace.segment_cache = Arc::new(cache_for_a_walk());
             fixture
         }
         .engine()
@@ -640,8 +655,8 @@ async fn an_advance_sends_one_get_for_each_commit_block_up_to_where_it_stops() {
         assert_eq!(floor, expected_floor, "{target:?}");
         assert_eq!(
             history.take_commit_ranges(),
-            history.ranges_through(last_read),
-            "{target:?}: one GET for the index, then one for each block through the block of commit {last_read}"
+            history.ranges_from_through(ChangeSeq(1), last_read),
+            "{target:?}: one GET for the index, then one for each refill through the block of commit {last_read}"
         );
     }
 }
@@ -656,7 +671,7 @@ async fn an_advance_reads_one_commit_row_when_the_first_commit_above_the_floor_i
     // With no old commits, the namespace is fresh, and the walk reads commit
     // 1. With 13 old commits, a first advance moves the floor to 13, and the
     // walk reads commit 14, the last row of the first block, so a walk that
-    // read another commit row would fetch the second block.
+    // read another commit row could need a second refill.
     for old_commits in [0, 13] {
         let history = LongCommitHistory::new(&[
             (old_commits, now_ms - 2 * grace_ms),
@@ -672,7 +687,7 @@ async fn an_advance_reads_one_commit_row_when_the_first_commit_above_the_floor_i
                     &history.namespace_id,
                     &crate::test_support::writer_at("test-writer", now_ms),
                 );
-                fixture.namespace.segment_cache = Arc::new(cache_reading_one_block_at_a_time());
+                fixture.namespace.segment_cache = Arc::new(cache_for_a_walk());
                 fixture
             }
             .engine()
@@ -691,8 +706,8 @@ async fn an_advance_reads_one_commit_row_when_the_first_commit_above_the_floor_i
         }
         assert_eq!(
             history.take_commit_ranges(),
-            history.ranges_through(ChangeSeq(floor.0 + 1)),
-            "{old_commits} old commits: one GET for the index and one for the first block"
+            history.ranges_from_through(ChangeSeq(floor.0 + 1), ChangeSeq(floor.0 + 1)),
+            "{old_commits} old commits: one GET for the index and one for the first refill"
         );
     }
 }
@@ -728,14 +743,12 @@ async fn a_cutoff_or_a_window_older_than_the_grace_window_reads_the_commits_once
         .response
         .retention_floor_seq;
         assert_eq!(floor, ChangeSeq(64), "{target:?}");
-        // Without a cache, the read-ahead window from the first block covers
-        // every block, and a second walk would fetch the index and the blocks
-        // again.
-        let ranges = history.ranges_through(ChangeSeq(128));
+        // Without a cache, a second walk would fetch the index and the
+        // blocks again.
         assert_eq!(
             history.take_commit_ranges(),
-            vec![ranges[0], (ranges[1].0, ranges[ranges.len() - 1].1)],
-            "{target:?}: one GET for the index and one for the blocks"
+            history.ranges_from_through(ChangeSeq(1), ChangeSeq(128)),
+            "{target:?}: one GET for the index and one for each refill"
         );
     }
 }
@@ -862,7 +875,6 @@ async fn a_cutoff_advance_reads_commits_through_the_given_cache() {
             64 * 1024 * 1024,
             Some(observer),
         )),
-        crate::limits::READAHEAD_WINDOW_BYTES,
     ));
     let floor = {
         let mut fixture = crate::test_support::NamespaceFixture::new(
