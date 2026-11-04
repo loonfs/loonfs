@@ -71,18 +71,32 @@ impl Sweep {
         )
         .await;
         let outcome = match &result {
-            Ok(response) => Ok(response.outcome),
+            Ok(report) => Ok(report.response.outcome),
             Err(failure) => Err(failure.code()),
         };
+        let next_due_at_ms = result
+            .as_ref()
+            .ok()
+            .and_then(|report| report.next_due_at_ms);
         // A caught-up session whose position shows nothing due costs nothing
         // to ask again. A step without a current position read the store, so
-        // it waits for the interval.
-        let work_wait_ms = if outcome == Ok(MetadataMaintenanceOutcome::CaughtUp)
-            && entry.is_some_and(|entry| lock(entry).handle.has_current_writer_position())
-        {
-            0
-        } else {
-            inner.config.maintenance_interval_ms
+        // it waits for the interval. A tail that waits for its idle fold age
+        // is asked again at that age if it comes first.
+        let positioned = entry.is_some_and(|entry| {
+            let mut held = lock(entry);
+            if outcome.is_ok() {
+                held.host_state.idle_fold_due_at_ms = next_due_at_ms;
+            }
+            held.handle.has_current_writer_position()
+        });
+        let interval_ms = inner.config.maintenance_interval_ms;
+        let work_wait_ms = match outcome {
+            Ok(MetadataMaintenanceOutcome::CaughtUp) if positioned => 0,
+            _ => next_due_at_ms.map_or(interval_ms, |due_at_ms| {
+                due_at_ms
+                    .saturating_sub(inner.timer.monotonic_now_ms())
+                    .min(interval_ms)
+            }),
         };
         self.record_call(
             namespace_id,

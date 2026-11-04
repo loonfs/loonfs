@@ -921,6 +921,7 @@ async fn a_unit_retries_over_a_fold_and_the_loop_stops_after_three_abandoned_uni
             .maintain_metadata_while_due(&namespace, &crate::MaintenanceCancellation::new())
             .await
             .expect("a lost race is an outcome, not an error")
+            .response
             .outcome,
         crate::MetadataMaintenanceOutcome::Due
     );
@@ -946,6 +947,7 @@ async fn a_unit_retries_over_a_fold_and_the_loop_stops_after_three_abandoned_uni
             .maintain_metadata_while_due(&namespace, &crate::MaintenanceCancellation::new())
             .await
             .expect("a fenced unit is an outcome, not an error")
+            .response
             .outcome,
         crate::MetadataMaintenanceOutcome::Due
     );
@@ -997,7 +999,7 @@ async fn a_metadata_loop_call_stops_after_its_unit_cap() {
             .expect("run the metadata loop");
         if published.is_empty() {
             assert_eq!(
-                response.outcome,
+                response.response.outcome,
                 crate::MetadataMaintenanceOutcome::Due,
                 "the unit cap cannot establish completion"
             );
@@ -1006,7 +1008,7 @@ async fn a_metadata_loop_call_stops_after_its_unit_cap() {
             .await
             .manifest_no;
         assert_eq!(
-            response.compaction_units,
+            response.response.compaction_units,
             after.0 - before.0,
             "the response counts every unit the call published"
         );
@@ -1118,6 +1120,7 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
             .maintain_metadata_while_due(&idle, &cancelled)
             .await
             .expect("cancellation is not completion")
+            .response
             .outcome,
         crate::MetadataMaintenanceOutcome::Due
     );
@@ -1156,6 +1159,7 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
                 metadata
                     .as_ref()
                     .expect("idle metadata is caught up")
+                    .response
                     .outcome,
                 crate::MetadataMaintenanceOutcome::CaughtUp
             );

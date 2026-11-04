@@ -46,9 +46,11 @@ pub(crate) enum FoldWhen {
 pub(crate) enum NamespaceFold {
     /// No fold was due.
     NotDue {
-        /// Whether the tail has a commit that reaches the idle fold age
-        /// later, so that a fold becomes due without another commit.
-        idle_fold_pending: bool,
+        /// When the tail's newest commit reaches the idle fold age, so that a
+        /// fold becomes due without another commit, on the runtime's
+        /// monotonic timer. `None` for an empty tail, or when the runtime
+        /// doesn't fold idle tails.
+        idle_fold_due_at_ms: Option<u64>,
         /// The current manifest, when the check loaded it from the store,
         /// for a compaction unit to plan from.
         observed: Option<PublicationBasis>,
@@ -240,8 +242,13 @@ impl PublisherRegistry {
         {
             return Ok(None);
         }
+        // The check without a position dates the tail on the wall clock, so
+        // the due time moves onto the monotonic timer by its distance from
+        // the check's own reading.
+        let monotonic_now_ms = core.timer().monotonic_now_ms();
         Ok(Some(NamespaceFold::NotDue {
-            idle_fold_pending: objects > 0 && trigger.folds_idle_tails(),
+            idle_fold_due_at_ms: idle_fold_due_at_ms
+                .map(|due_at_ms| monotonic_now_ms.saturating_add(due_at_ms.saturating_sub(now_ms))),
             observed,
         }))
     }

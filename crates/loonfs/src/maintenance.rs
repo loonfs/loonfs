@@ -37,7 +37,10 @@ mod tests;
 pub use floor_acknowledgment::{
     AcknowledgeRetentionFloorOutcome, AcknowledgeRetentionFloorReport, RetentionFloors,
 };
-pub use reports::{MetadataCompactionOutcome, MetadataCompactionReport, MetadataPassReport};
+pub use reports::{
+    MetadataCompactionOutcome, MetadataCompactionReport, MetadataMaintenanceReport,
+    MetadataPassReport,
+};
 
 /// Explicit maintenance: namespace diagnostics, operator checkpoints, WAL
 /// folds, metadata compaction, garbage collection, and retention.
@@ -262,7 +265,7 @@ impl Maintenance {
         &self,
         namespace_id: &NamespaceId,
         cancellation: &MaintenanceCancellation,
-    ) -> Result<MetadataMaintenanceResponse> {
+    ) -> Result<MetadataMaintenanceReport> {
         self.maintain_metadata_while_due_with_options(
             namespace_id,
             cancellation,
@@ -300,34 +303,39 @@ impl Maintenance {
     /// under `options`, based on the state this call read. It is
     /// [`MetadataMaintenanceOutcome::Due`] at a work limit, after lost races,
     /// on fencing or cancellation, when a compaction unit does not finish,
-    /// or while a tail waits for the idle fold age.
+    /// or while a tail waits for the idle fold age. When the wait for the
+    /// idle fold age is the only work left, the report says when the fold
+    /// comes due.
     pub async fn maintain_metadata_while_due_with_options(
         &self,
         namespace_id: &NamespaceId,
         cancellation: &MaintenanceCancellation,
         options: &MaintainMetadataOptions,
-    ) -> Result<MetadataMaintenanceResponse> {
+    ) -> Result<MetadataMaintenanceReport> {
         let cancellation = cancellation.metadata_compaction();
         let maintained = async {
             let fold = tokio::select! {
                 biased;
                 () = cancellation.cancelled() => {
-                    return Ok(MetadataMaintenanceResponse {
-                        namespace_id: namespace_id.clone(),
-                        outcome: MetadataMaintenanceOutcome::Due,
-                        compaction_units: 0,
+                    return Ok(MetadataMaintenanceReport {
+                        response: MetadataMaintenanceResponse {
+                            namespace_id: namespace_id.clone(),
+                            outcome: MetadataMaintenanceOutcome::Due,
+                            compaction_units: 0,
+                        },
+                        next_due_at_ms: None,
                     });
                 }
                 fold = self.fold_when_due(namespace_id, options) => fold?,
             };
-            let (tail_caught_up, observed) = match fold {
+            let (idle_fold_due_at_ms, observed) = match fold {
                 NamespaceFold::NotDue {
-                    idle_fold_pending,
+                    idle_fold_due_at_ms,
                     observed,
-                } => (!idle_fold_pending, observed),
-                NamespaceFold::Folded(_) => (true, None),
+                } => (idle_fold_due_at_ms, observed),
+                NamespaceFold::Folded(_) => (None, None),
             };
-            let mut maintained = self
+            let mut response = self
                 .compact_namespace(
                     namespace_id,
                     options.compaction_policy,
@@ -335,10 +343,15 @@ impl Maintenance {
                     cancellation,
                 )
                 .await?;
-            if !tail_caught_up {
-                maintained.outcome = MetadataMaintenanceOutcome::Due;
+            let next_due_at_ms = idle_fold_due_at_ms
+                .filter(|_| response.outcome == MetadataMaintenanceOutcome::CaughtUp);
+            if idle_fold_due_at_ms.is_some() {
+                response.outcome = MetadataMaintenanceOutcome::Due;
             }
-            Ok(maintained)
+            Ok(MetadataMaintenanceReport {
+                response,
+                next_due_at_ms,
+            })
         };
         // Boxing erases the loop's nested unit futures. Without it, a host
         // that awaits this call inside its own scheduling futures exceeds

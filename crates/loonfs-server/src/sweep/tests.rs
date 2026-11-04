@@ -756,6 +756,15 @@ impl SweepServer {
         .expect("a call that keeps retry state")
     }
 
+    /// When the held session's last metadata step said its tail's idle fold
+    /// comes due.
+    fn idle_fold_due_at_ms(&self, namespace_id: &NamespaceId) -> Option<u64> {
+        visit_held(&self.sweep.inner.namespaces, namespace_id, |held| {
+            held.host_state.idle_fold_due_at_ms
+        })
+        .expect("a held session")
+    }
+
     /// Whether the held session's last metadata step left work due, so the
     /// ticks wait for the metadata retry time before the next step.
     fn metadata_left_due(&self, namespace_id: &NamespaceId) -> bool {
@@ -770,6 +779,7 @@ impl SweepServer {
             .maintain_metadata_while_due(namespace_id, &loonfs::MaintenanceCancellation::new())
             .await
             .expect("the metadata call")
+            .response
             .outcome
             == loonfs::MetadataMaintenanceOutcome::CaughtUp
     }

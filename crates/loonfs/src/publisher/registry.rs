@@ -3,7 +3,7 @@
 
 use super::admission::{AdmissionPermit, PublicationAdmission};
 use super::hint_raises::HintRaises;
-use super::{lock_state, FoldTrigger, NamespacePublisher, NamespaceTurns, PublisherContext};
+use super::{lock_state, NamespacePublisher, NamespaceTurns, PublisherContext};
 use crate::publish::CommitCandidate;
 use crate::runtime_core::{HeadPositions, ReadPositionSlot, RuntimeCore};
 use crate::trace::phase_event;
@@ -182,12 +182,6 @@ impl NamespaceSession {
             .lock_state()
             .last_published
             .map(|last| last.seq)
-    }
-
-    pub(crate) fn idle_fold_due_at_ms(&self) -> Option<u64> {
-        let published_at_ms = self.publisher.last_published_at_ms()?;
-        FoldTrigger::new(self.publisher.context.runtime_core.config())
-            .idle_fold_due_at_ms(published_at_ms)
     }
 
     /// Whether the session has a writer position whose last check is within

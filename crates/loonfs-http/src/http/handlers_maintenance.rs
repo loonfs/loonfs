@@ -55,7 +55,7 @@ pub(super) async fn run_maintenance(
                     &options,
                 )
                 .await
-                .map(RunMaintenanceResponse::Metadata)
+                .map(|report| RunMaintenanceResponse::Metadata(report.response))
         }
         RunMaintenanceRequest::Gc(request) => maintenance
             .gc_with_options(&namespace_id, &GcOptions::from_request(request))

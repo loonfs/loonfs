@@ -67,31 +67,32 @@ impl Sweep {
     /// Runs the session's metadata step, and then the first due step of
     /// collection, index, and close.
     ///
-    /// The metadata step runs when the session has a current writer
-    /// position and the step's retry time has come, and once when the
-    /// session's tail reaches its idle fold age, whatever the position. A
-    /// session without a current position isn't writing, so otherwise the
-    /// daily pass maintains its namespace's metadata, as it does for a
-    /// namespace without a session. Collection comes before the index step
-    /// because it's due at most once per `gc_interval_ms`, and a session
-    /// with a commit on every tick has index work on every tick. A session
-    /// that was closed or fenced, or whose namespace is gone, closes as soon
-    /// as no caller has its handle.
+    /// The metadata step runs when its retry time has come and the session has
+    /// a current writer position, and once when the session's tail reaches the
+    /// idle fold age that its last step reported, whatever the position (see
+    /// [`metadata_due`]). A session without a current position isn't writing,
+    /// so otherwise the daily pass maintains its namespace's metadata, as it
+    /// does for a namespace without a session. Collection comes before the
+    /// index step because it's due at most once per `gc_interval_ms`, and a
+    /// session with a commit on every tick has index work on every tick. A
+    /// session that was closed or fenced, or whose namespace is gone, closes as
+    /// soon as no caller has its handle.
     async fn run_due_step(&self, namespace_id: &NamespaceId) {
         let inner = &self.inner;
         let Some(entry) = inner.namespaces.entry(namespace_id) else {
             return;
         };
-        let (seq, open, positioned, (retry_due, idle_fold_due)) = {
+        let (seq, open, positioned, metadata_due) = {
             let held = lock(&entry);
+            let positioned = held.handle.has_current_writer_position();
             (
                 held.handle.last_published_seq(),
                 held.handle.session_status() == NamespaceSessionStatus::Open,
-                held.handle.has_current_writer_position(),
-                self.metadata_due(&held, inner.timer.monotonic_now_ms()),
+                positioned,
+                metadata_due(&held, positioned, inner.timer.monotonic_now_ms()),
             )
         };
-        let metadata = if open && (idle_fold_due || positioned && retry_due) {
+        let metadata = if open && metadata_due {
             Some(self.maintain_metadata(namespace_id, Some(&entry)).await)
         } else {
             None
@@ -152,29 +153,6 @@ impl Sweep {
                 );
             }
         }
-    }
-
-    /// Returns whether the session's metadata step's retry time has come,
-    /// and whether the session's tail has reached its idle fold age with no
-    /// step since.
-    fn metadata_due(&self, held: &HeldNamespace<SweepState>, now_ms: u64) -> (bool, bool) {
-        let interval_ms = self.inner.config.maintenance_interval_ms;
-        let metadata_retry = held.host_state.metadata_retry;
-        // The idle fold allows one metadata step before the retry time, when
-        // no step has run since the tail reached the idle fold age. A step
-        // that ended without a current position sets its retry time an
-        // interval later, so the idle fold of a session without a position
-        // runs once. While the step keeps failing, its retry time also
-        // includes its backoff, which the idle fold doesn't cut short.
-        let idle_fold_due = metadata_retry.attempts == 0
-            && held
-                .handle
-                .idle_fold_due_at_ms()
-                .is_some_and(|fold_due_at_ms| {
-                    now_ms >= fold_due_at_ms
-                        && metadata_retry.retry_at_ms.saturating_sub(interval_ms) < fold_due_at_ms
-                });
-        (now_ms >= metadata_retry.retry_at_ms, idle_fold_due)
     }
 
     /// Closes the session if no caller has its handle and, for
@@ -289,4 +267,18 @@ impl Sweep {
             self.tick().await;
         }
     }
+}
+
+/// Returns whether a held session's metadata step is due at `now_ms`: its
+/// retry time has come, and the session has a current writer position, or
+/// its tail has reached the idle fold age that its last step reported. A
+/// step without a position reads the store, so it runs only for that idle
+/// fold, and its own report replaces the due time.
+fn metadata_due(held: &HeldNamespace<SweepState>, positioned: bool, now_ms: u64) -> bool {
+    let state = &held.host_state;
+    now_ms >= state.metadata_retry.retry_at_ms
+        && (positioned
+            || state
+                .idle_fold_due_at_ms
+                .is_some_and(|due_at_ms| now_ms >= due_at_ms))
 }

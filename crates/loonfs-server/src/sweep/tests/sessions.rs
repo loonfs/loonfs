@@ -300,11 +300,12 @@ async fn a_daily_pass_folds_every_idle_tail() {
 }
 
 /// Checks that a tick folds a tail at its idle fold age after the session's
-/// writer position has passed the revalidation bound. The idle fold age is
-/// longer than the bound, so until the age the ticks give the session no
-/// metadata step, and at the age one step reads the tail from the store and
-/// folds it. The fold leaves the session a current position again, so later
-/// ticks cost nothing.
+/// writer position has passed the revalidation bound. The tick right after
+/// the commit reads the idle fold's due time from the position. The idle
+/// fold age is longer than the bound, so until the age the ticks give the
+/// session no metadata step, and at the age one step reads the tail from the
+/// store and folds it. The fold leaves the session a current position again,
+/// so later ticks cost nothing.
 #[tokio::test]
 async fn a_tick_folds_an_idle_tail_after_the_position_passes_the_bound() {
     const IDLE_FOLD_AFTER_MS: u64 = 25 * 60 * 1000;
@@ -332,6 +333,7 @@ async fn a_tick_folds_an_idle_tail_after_the_position_passes_the_bound() {
     held.put_file("/note", b"data", &test_actor())
         .await
         .expect("publish");
+    server.sweep.tick().await;
     server
         .tick_after(loonfs_core::limits::READ_REVALIDATION_BOUND_MS + 1)
         .await;
@@ -974,13 +976,14 @@ async fn a_tick_sees_a_session_as_idle_exactly_when_the_runtime_timer_does() {
         .put_file("/note", b"data", &test_actor())
         .await
         .expect("publish");
-    assert_eq!(
-        handle.idle_fold_due_at_ms(),
-        Some(DAY_MS + idle_fold_after_ms(&config))
-    );
     drop(handle);
 
     server.tick_after(config.tick_interval_ms).await;
+    assert_eq!(
+        server.idle_fold_due_at_ms(&namespace_id),
+        Some(DAY_MS + idle_fold_after_ms(&config)),
+        "the step reports the idle fold on the runtime's timer"
+    );
     assert!(server.wal_tail_objects(&namespace_id).await > 0);
     store.reset();
     server

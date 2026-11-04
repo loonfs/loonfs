@@ -118,7 +118,7 @@ async fn a_close_returns_during_a_hosts_compaction_and_stops_it_after_its_unit()
     backlog.store.release();
     let maintained = call.await.expect("the call");
     assert_eq!(
-        maintained.compaction_units, 1,
+        maintained.response.compaction_units, 1,
         "the close stops the call after its unit in progress"
     );
     backlog.runtime.shutdown().await.expect("shutdown");
@@ -215,8 +215,8 @@ async fn two_metadata_calls_plan_their_units_from_each_others_manifests() {
         backlog.store.release();
     };
     let (first, second, ()) = tokio::join!(first, second, release);
-    let units = first.expect("the first call").compaction_units
-        + second.expect("the second call").compaction_units;
+    let units = first.expect("the first call").response.compaction_units
+        + second.expect("the second call").response.compaction_units;
     assert!(units > 0, "the calls compact the backlog");
     let manifest_puts = write_keys(
         &backlog.recording.take(),

@@ -37,12 +37,16 @@ const MAX_GREP_STEPS_PER_VISIT: usize = 16;
 const MAX_SWEEP_BACKOFF_MS: u64 = 60 * 60 * 1000;
 
 /// The sweep's current values for one held session: the seqs that it last
-/// indexed and collected, and the retry state of each call that ticks
-/// retry.
+/// indexed and collected, when its tail's idle fold comes due, and the retry
+/// state of each call that ticks retry.
 pub(crate) struct SweepState {
     indexed_seq: Option<ChangeSeq>,
     collected_seq: Option<ChangeSeq>,
     collected_at_ms: u64,
+    /// When the tail's idle fold comes due, on the sweep's monotonic timer,
+    /// as the last metadata step that succeeded reported it (see
+    /// [`MetadataMaintenanceReport::next_due_at_ms`](loonfs::MetadataMaintenanceReport::next_due_at_ms)).
+    idle_fold_due_at_ms: Option<u64>,
     metadata_retry: SweepRetry,
     index_retry: SweepRetry,
     gc_retry: SweepRetry,
@@ -56,6 +60,7 @@ impl HostState for SweepState {
             indexed_seq: None,
             collected_seq: None,
             collected_at_ms: opened_at_ms,
+            idle_fold_due_at_ms: None,
             metadata_retry: SweepRetry::default(),
             index_retry: SweepRetry::default(),
             gc_retry: SweepRetry::default(),
@@ -110,9 +115,10 @@ pub enum GarbageCollection {
 /// due step of collection, index, and close. A session without a current
 /// position gets no metadata step, because it isn't writing and the daily
 /// pass maintains its namespace's metadata, except one step from the store
-/// once its tail reaches the idle fold age. Metadata that remains unfinished
-/// waits `maintenance_interval_ms` before the next step, and the session's
-/// tail reaching its idle fold age allows one earlier step. Collection runs
+/// once its tail reaches the idle fold age that the session's last step
+/// reported. Metadata that remains unfinished waits `maintenance_interval_ms`
+/// before the next step, or less when the step reported an earlier idle
+/// fold. Collection runs
 /// once the session's published seq has moved and `gc_interval_ms` has
 /// elapsed, and it comes before the index step, so a session with index
 /// work on every tick still collects.
