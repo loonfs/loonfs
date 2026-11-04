@@ -200,6 +200,7 @@ mod tests {
     use super::GrepSegments;
     use crate::cache::GrepBlockCache;
     use crate::codec::{ContentValue, IndexRow};
+    use crate::index_read::{segment_object_bytes, MAX_WHOLE_SEGMENT_LOAD_BYTES};
     use loonfs::engine::DecodedBlockCacheConfig;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
@@ -209,7 +210,9 @@ mod tests {
 
     const SEGMENTS: u64 = 4;
     /// Enough `texts` rows that a segment's filter isn't inline.
-    const ROWS_PER_SEGMENT: u64 = 1_024;
+    const SMALL_SEGMENT_ROWS: u64 = 1_024;
+    /// Enough `texts` rows that a segment is too large to read whole.
+    const LARGE_SEGMENT_ROWS: u64 = 32_768;
     /// The values of each segment that the lookup asks for.
     const FOUND_PER_SEGMENT: u64 = 16;
 
@@ -222,6 +225,22 @@ mod tests {
     /// that a block cache turns those reads into one load of each segment.
     #[tokio::test]
     async fn a_texts_lookup_reads_each_segment_once_whatever_the_number_of_values() {
+        texts_lookup_reads(SMALL_SEGMENT_ROWS, false, [3, 1]).await;
+    }
+
+    /// Checks that through a block cache, a lookup in a segment too large to
+    /// read whole reads the segment's filter and index block in one GET, and
+    /// then the data block.
+    #[tokio::test]
+    async fn a_cached_lookup_in_a_large_segment_reads_its_filter_and_index_in_one_get() {
+        texts_lookup_reads(LARGE_SEGMENT_ROWS, true, [3, 2]).await;
+    }
+
+    /// Writes `SEGMENTS` segments of `rows_per_segment` rows each, larger
+    /// than the whole-segment load when `large`, looks up values in all of
+    /// them, and checks the GETs per segment of an uncached lookup and of a
+    /// lookup through a block cache, in that order.
+    async fn texts_lookup_reads(rows_per_segment: u64, large: bool, gets_per_segment: [usize; 2]) {
         let directory = tempfile::tempdir().expect("tempdir");
         let store = RecordingStore::new(
             LocalFsStore::new(directory.path()).expect("store"),
@@ -243,7 +262,7 @@ mod tests {
         let mut values = BTreeSet::new();
         for segment in 0..SEGMENTS {
             let mut rows = Vec::new();
-            for row in 0..ROWS_PER_SEGMENT {
+            for row in 0..rows_per_segment {
                 let n = row * SEGMENTS + segment;
                 let eligible = !n.is_multiple_of(3);
                 rows.push(IndexRow::text(&value(2 * n + 1), eligible));
@@ -257,12 +276,21 @@ mod tests {
                 .write_run(rows, NonZeroUsize::MAX)
                 .await
                 .expect("write a run");
-            assert!(run.iter().all(|segment| segment.filter_inline.is_none()));
+            assert_eq!(run.len(), 1);
+            assert!(run[0].filter_inline.is_none());
+            let object_bytes = segment_object_bytes("texts", &run[0]).expect("the segment's size");
+            assert_eq!(
+                object_bytes > MAX_WHOLE_SEGMENT_LOAD_BYTES,
+                large,
+                "a segment of {object_bytes} bytes"
+            );
             segments.extend(run);
         }
 
         let cache = GrepBlockCache::new(DecodedBlockCacheConfig::new(16 << 20));
-        for (block_cache, gets_per_segment) in [(None, 3), (Some(&cache), 1)] {
+        for (block_cache, gets_per_segment) in
+            [None, Some(&cache)].into_iter().zip(gets_per_segment)
+        {
             store.reset();
             let found = GrepSegments {
                 block_cache,
