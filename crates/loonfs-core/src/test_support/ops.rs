@@ -9,6 +9,7 @@ use crate::namespace::store::NamespaceStore;
 use crate::path::mutation_path::parse_mutation_path;
 use crate::path::write::{CommitIntent, FilesystemOperation};
 use crate::storage::content_admission::PreparedContent;
+use crate::wal::settle_publish_attempt;
 use loonfs_objectstore::{ObjectStore, PutMode};
 use loonfs_types::format::wal::{
     encode_wal_object_envelope_zstd, WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent,
@@ -45,15 +46,29 @@ impl<S: ObjectStore + Clone> NamespaceFixture<S> {
 
     /// Publishes `candidates` as one batch through a fresh commit engine, and
     /// publishes again each candidate whose attempt the store settled as
-    /// retryable.
+    /// retryable, until every candidate settles or the attempts run out. The
+    /// attempts share one clock.
     pub async fn publish_candidates(
         &self,
         candidates: Vec<CommitCandidate>,
     ) -> Vec<Result<Commit>> {
-        self.engine()
-            .commit_engine()
-            .publish_batch_until_settled(candidates, &self.namespace.start_clock())
-            .await
+        let mut engine = self.engine().commit_engine();
+        let clock = self.namespace.start_clock();
+        let mut results = vec![None; candidates.len()];
+        let mut pending: Vec<_> = candidates.into_iter().enumerate().collect();
+        for _ in 0..crate::limits::MAX_CONTENTION_ATTEMPTS {
+            let (indices, attempted): (Vec<_>, Vec<_>) = pending.into_iter().unzip();
+            let observed = engine.publish_batch(&attempted, &clock).await.results;
+            pending =
+                settle_publish_attempt(&mut results, indices.into_iter().zip(attempted), observed);
+            if pending.is_empty() {
+                break;
+            }
+        }
+        results
+            .into_iter()
+            .map(|result| result.expect("each candidate should receive a publication result"))
+            .collect()
     }
 
     /// Publishes one operation as a whole request with `prepared_content`:

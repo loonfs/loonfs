@@ -12,7 +12,6 @@ use crate::namespace::store::NamespaceStore;
 use crate::namespace::writer_epoch::AcquiredWriter;
 use crate::options::DeleteNamespaceOptions;
 use crate::time::{Observation, OperationClock};
-use crate::wal::settle_publish_attempt;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{Commit, CommitId, DeleteNamespaceResponse, ManifestNo, NamespaceId, WriterId};
 use std::sync::{Arc, Mutex};
@@ -302,32 +301,6 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
             Err(error) => failed_publication(candidates.len(), error),
         }
     }
-
-    /// Publishes `candidates` as one batch, and publishes again each
-    /// candidate whose attempt the store settled as retryable, until every
-    /// candidate settles or the attempts run out. The attempts share
-    /// `clock` and keep this engine's position.
-    pub async fn publish_batch_until_settled(
-        &mut self,
-        candidates: Vec<CommitCandidate>,
-        clock: &OperationClock,
-    ) -> Vec<Result<Commit>> {
-        let mut results = vec![None; candidates.len()];
-        let mut pending: Vec<_> = candidates.into_iter().enumerate().collect();
-        for _ in 0..crate::limits::MAX_CONTENTION_ATTEMPTS {
-            let (indices, attempted): (Vec<_>, Vec<_>) = pending.into_iter().unzip();
-            let observed = self.publish_batch(&attempted, clock).await.results;
-            pending =
-                settle_publish_attempt(&mut results, indices.into_iter().zip(attempted), observed);
-            if pending.is_empty() {
-                break;
-            }
-        }
-        results
-            .into_iter()
-            .map(|result| result.expect("each candidate should receive a publication result"))
-            .collect()
-    }
 }
 
 impl PositionState {
@@ -615,18 +588,6 @@ fn failed_publication(count: usize, error: CoreError) -> NamespaceCommitEnginePu
 }
 
 impl<S: ObjectStore + Clone> NamespaceEngine<S, Writable> {
-    /// Publishes already-classified mutation candidates as one batch: one WAL
-    /// object, one numbered WAL put, one result per candidate in order.
-    pub async fn publish_namespace_commits_batch(
-        &self,
-        candidates: Vec<CommitCandidate>,
-    ) -> Result<Vec<Result<Commit>>> {
-        Ok(self
-            .commit_engine()
-            .publish_batch_until_settled(candidates, &self.namespace.start_clock())
-            .await)
-    }
-
     /// Deletes the current namespace by publishing a tombstone manifest.
     /// Earlier committed changes remain durable. Later operations return `namespace_deleted`.
     pub async fn delete_namespace(

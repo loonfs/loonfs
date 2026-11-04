@@ -7,7 +7,7 @@ use crate::common::read_context;
 use loonfs_core::content::prepare_stored_content;
 use loonfs_core::publish::{CommitCandidate, CommitIntent, FilesystemOperation};
 use loonfs_core::test_support::kept_inodes::compact_groups_without_false_positives;
-use loonfs_core::test_support::namespace_store;
+use loonfs_core::test_support::{namespace_store, NamespaceFixture};
 use loonfs_core::{
     CompactionUnitOutcome, CoreError, CreateNamespaceOptions, CurrentFile, ErrorCode,
     NamespaceWriterEngine, RuntimeReadContext,
@@ -28,6 +28,7 @@ struct VisibilityHarness {
     _temp_dir: TempDir,
     store: Arc<LocalFsStore>,
     clock: Arc<ManualClock>,
+    fixture: NamespaceFixture<Arc<LocalFsStore>>,
     engine: NamespaceWriterEngine<Arc<LocalFsStore>>,
 }
 
@@ -37,8 +38,8 @@ impl VisibilityHarness {
         let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
         let namespace_id = NamespaceId::parse(namespace).expect("valid namespace id");
         let clock = Arc::new(ManualClock::new(1_000));
-        let engine = NamespaceWriterEngine::writer(
-            loonfs_core::NamespaceStore::new(
+        let fixture = NamespaceFixture {
+            namespace: loonfs_core::NamespaceStore::new(
                 Arc::clone(&store),
                 namespace_id.clone(),
                 std::sync::Arc::new(loonfs_core::cache::MetadataSegmentCache::unshared(0)),
@@ -49,8 +50,9 @@ impl VisibilityHarness {
                 std::sync::Arc::new(loonfs_core::test_support::content_writes()),
                 loonfs_core::MetadataRunPolicy::default(),
             ),
-            loonfs_types::WriterId::parse("visibility-equivalence").expect("writer id"),
-        );
+            writer_id: loonfs_types::WriterId::parse("visibility-equivalence").expect("writer id"),
+        };
+        let engine = fixture.engine();
         engine
             .bootstrap_namespace(
                 &loonfs_test_support::test_actor(),
@@ -58,8 +60,8 @@ impl VisibilityHarness {
             )
             .await
             .expect("bootstrap namespace");
-        let results = engine
-            .publish_namespace_commits_batch(vec![CommitCandidate::new(CommitIntent::single(
+        let results = fixture
+            .publish_candidates(vec![CommitCandidate::new(CommitIntent::single(
                 CommitId::parse("acquire-for-base").expect("commit id"),
                 loonfs_test_support::test_actor(),
                 None,
@@ -68,8 +70,7 @@ impl VisibilityHarness {
                     parents: false,
                 },
             ))])
-            .await
-            .expect("acquire writer");
+            .await;
         results[0]
             .as_ref()
             .expect_err("creating the root directory should fail");
@@ -81,6 +82,7 @@ impl VisibilityHarness {
             _temp_dir: temp_dir,
             store,
             clock,
+            fixture,
             engine,
         }
     }
@@ -90,10 +92,7 @@ impl VisibilityHarness {
     }
 
     async fn publish(&self, candidate: CommitCandidate) -> Result<Commit, CoreError> {
-        let mut results = self
-            .engine
-            .publish_namespace_commits_batch(vec![candidate])
-            .await?;
+        let mut results = self.fixture.publish_candidates(vec![candidate]).await;
         assert_eq!(results.len(), 1, "one candidate must produce one result");
         results.pop().expect("one publish result")
     }
