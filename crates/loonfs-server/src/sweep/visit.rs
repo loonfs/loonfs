@@ -27,9 +27,7 @@ use std::sync::Mutex;
 use tokio::sync::SemaphorePermit;
 
 impl Sweep {
-    /// Visits one namespace for a full pass. The visit leaves the metadata
-    /// step of a namespace whose held session has a current writer position
-    /// to the ticks, and makes it for every other namespace.
+    /// Visits one namespace for a full pass.
     pub(super) async fn visit(&self, namespace_id: NamespaceId, garbage: GarbageCollection) {
         let inner = &self.inner;
         let Some((visit, _permit)) = self
@@ -40,24 +38,15 @@ impl Sweep {
         };
         let entry = inner.namespaces.entry(&namespace_id);
         let entry = entry.as_deref();
-        let (seq, positioned) = entry.map_or((None, false), |entry| {
-            let held = lock(entry);
-            (
-                held.handle.last_published_seq(),
-                held.handle.has_current_writer_position(),
-            )
-        });
-        if !positioned {
-            // The call records its own failure, and the pass makes the
-            // visit's other calls whatever it returns.
-            let _ = self.maintain_metadata(&namespace_id, entry).await;
-        }
+        let seq = entry.and_then(|entry| lock(entry).handle.last_published_seq());
+        // The call records its own failure, and the pass makes the visit's
+        // other calls whatever it returns.
+        let _ = self.maintain_metadata(&namespace_id, entry).await;
         if let Some(grep) = &inner.grep {
             self.maintain_index(grep, &namespace_id, entry, seq).await;
         }
         // The advance reads only folded commits, so it runs after the
-        // metadata call, which can fold an idle tail. On a namespace that the
-        // ticks maintain, a tick's metadata step folds the idle tail.
+        // metadata call, which can fold an idle tail.
         self.advance_retention(&namespace_id, entry).await;
         if garbage == GarbageCollection::Collect {
             self.gc(&namespace_id, entry, seq).await;

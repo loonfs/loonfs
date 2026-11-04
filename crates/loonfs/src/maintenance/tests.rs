@@ -1024,7 +1024,7 @@ async fn a_metadata_loop_call_stops_after_its_unit_cap() {
     }
     assert_eq!(
         published[0],
-        u64::from(super::compactor::MAX_COMPACTION_UNITS_PER_CALL),
+        loonfs_types::u64_from_usize(super::compactor::MAX_COMPACTION_UNITS_PER_CALL),
         "one call publishes exactly the cap"
     );
     assert!(

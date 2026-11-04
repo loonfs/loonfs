@@ -241,14 +241,14 @@ async fn a_tick_waits_for_the_sessions_fold_instead_of_folding_the_tail_again() 
     server.runtime.shutdown().await.expect("shutdown");
 }
 
-/// Checks that a daily pass leaves the metadata of a held session with a
-/// current writer position to the ticks, and maintains the metadata of a
-/// held session without a position as it does for a namespace without a
-/// session. The session without a position never published, so the ticks
-/// give it no metadata step, and its tail, which an earlier writer left,
-/// waits for the pass.
+/// Checks that a daily pass folds every idle tail: the tail of a held
+/// session with a current writer position, the tail of a held session
+/// without a position, and the tail of a namespace without a session. The
+/// session without a position never published, so the ticks give it no
+/// metadata step, and its tail, which an earlier writer left, waits for the
+/// pass.
 #[tokio::test]
-async fn a_daily_pass_leaves_a_positioned_session_to_the_ticks_and_folds_the_rest() {
+async fn a_daily_pass_folds_every_idle_tail() {
     let directory = tempdir().expect("tempdir");
     let store = Arc::new(RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
@@ -282,25 +282,20 @@ async fn a_daily_pass_leaves_a_positioned_session_to_the_ticks_and_folds_the_res
         server.wal_tail_objects(&unpositioned).await > 0,
         "the ticks give a session without a position no metadata step"
     );
+    assert!(server.wal_tail_objects(&positioned).await > 0);
     server.clock.advance_ms(idle_fold_after_ms(&config));
     server
         .sweep
         .run_pass(GarbageCollection::Skip)
         .await
         .expect("daily pass");
-    for namespace_id in [&unpositioned, &unheld] {
-        assert_eq!(server.wal_tail_objects(namespace_id).await, 0);
+    for namespace_id in [&positioned, &unpositioned, &unheld] {
+        assert_eq!(
+            server.wal_tail_objects(namespace_id).await,
+            0,
+            "the pass folds the idle tail of {namespace_id}"
+        );
     }
-    assert!(
-        server.wal_tail_objects(&positioned).await > 0,
-        "the pass leaves the positioned session's idle tail to the ticks"
-    );
-    server.sweep.tick().await;
-    assert_eq!(
-        server.wal_tail_objects(&positioned).await,
-        0,
-        "the tick folds the tail from the session's position"
-    );
     server.runtime.shutdown().await.expect("shutdown");
 }
 

@@ -44,11 +44,18 @@ impl TransportRetryPolicy {
     /// Returns the capped exponential backoff before retry number `retry`,
     /// counting from one, in milliseconds.
     pub fn backoff_ms(&self, retry: u32) -> u64 {
-        let doublings = retry.saturating_sub(1).min(16);
-        self.initial_backoff_ms
-            .saturating_mul(1 << doublings)
-            .min(self.max_backoff_ms)
+        doubling_backoff_ms(self.initial_backoff_ms, retry, self.max_backoff_ms)
     }
+}
+
+/// Returns the backoff before attempt number `attempt`, counting from one:
+/// `first_backoff_ms`, doubled for each attempt after the first, at most
+/// `max_backoff_ms`.
+pub fn doubling_backoff_ms(first_backoff_ms: u64, attempt: u32, max_backoff_ms: u64) -> u64 {
+    1_u64
+        .checked_shl(attempt.saturating_sub(1))
+        .map_or(u64::MAX, |factor| first_backoff_ms.saturating_mul(factor))
+        .min(max_backoff_ms)
 }
 
 /// How one retry decision under a [`TransportRetryPolicy`] ended.

@@ -172,7 +172,9 @@ pub use path::{
     AbsolutePath, DisplayName, InodeKind, PathComponent, PathError, MAX_DISPLAY_NAME_BYTES,
     MAX_PATH_BYTES, MAX_PATH_DEPTH,
 };
-pub use retry::{OperationDeadline, TransportRetryOutcome, TransportRetryPolicy};
+pub use retry::{
+    doubling_backoff_ms, OperationDeadline, TransportRetryOutcome, TransportRetryPolicy,
+};
 pub use secret::{SecretString, REDACTED};
 pub use widths::{u64_from_usize, usize_from_u64};
 

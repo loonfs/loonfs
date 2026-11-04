@@ -21,12 +21,12 @@ use std::sync::Arc;
 /// [`Compactor::compact_namespace`] stops, so a loop whose units
 /// keep finding their inputs replaced, or keep losing every publication
 /// attempt, can't spin.
-const MAX_LOST_COMPACTION_RACES: u32 = 3;
+const MAX_LOST_COMPACTION_RACES: usize = 3;
 
 /// Compaction units that one call of [`Compactor::compact_namespace`]
 /// publishes before it returns,
 /// so a namespace with a backlog cannot keep its caller waiting for long.
-pub(super) const MAX_COMPACTION_UNITS_PER_CALL: u32 = 16;
+pub(super) const MAX_COMPACTION_UNITS_PER_CALL: usize = 16;
 
 /// Converts what one compaction unit did into its wire form.
 fn compaction_outcome(outcome: loonfs_core::CompactionUnitOutcome) -> MetadataCompactionOutcome {
@@ -150,7 +150,7 @@ impl Compactor {
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<Option<PublicationBasis>> {
-        let Some(position) = self.publisher.read_position_fold_input(namespace_id) else {
+        let Some(position) = self.publisher.current_position(namespace_id) else {
             return Ok(None);
         };
         let segment_cache = self.core.metadata_segment_cache();
@@ -171,8 +171,9 @@ impl Compactor {
     /// [`Self::run_compaction_unit`] does. The call stops when nothing is
     /// due, when another process has the compactor epoch, when
     /// `cancellation` is set, when the namespace's writer session in this
-    /// runtime is closed or its namespace deleted, after three abandoned
-    /// units in a row, or after it publishes 16 units. A close or a delete
+    /// runtime is closed or its namespace deleted, after
+    /// [`MAX_LOST_COMPACTION_RACES`] abandoned units in a row, or after it
+    /// publishes [`MAX_COMPACTION_UNITS_PER_CALL`] units. A close or a delete
     /// stops the loop before its next unit, and `cancellation` also stops a
     /// unit in progress at its next block. The response's outcome is
     /// [`MetadataMaintenanceOutcome::CaughtUp`] only when the call stopped
@@ -246,7 +247,7 @@ impl Compactor {
         Ok(MetadataMaintenanceResponse {
             namespace_id: namespace_id.clone(),
             outcome,
-            compaction_units: u64::from(published_units),
+            compaction_units: loonfs_types::u64_from_usize(published_units),
         })
     }
 

@@ -269,9 +269,5 @@ impl Sweep {
 /// `first_backoff_ms`, doubled for each failure after the first, at most
 /// [`MAX_SWEEP_BACKOFF_MS`].
 pub(super) fn backoff_ms(first_backoff_ms: u64, attempts: u32) -> u64 {
-    let doublings = attempts.saturating_sub(1);
-    1_u64
-        .checked_shl(doublings)
-        .map_or(u64::MAX, |factor| first_backoff_ms.saturating_mul(factor))
-        .min(MAX_SWEEP_BACKOFF_MS)
+    loonfs_types::doubling_backoff_ms(first_backoff_ms, attempts, MAX_SWEEP_BACKOFF_MS)
 }

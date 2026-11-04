@@ -186,8 +186,12 @@ impl PublisherRegistry {
     /// When `session` has a current position, the tail is the position's,
     /// and its newest commit is the session's last publish, on the runtime's
     /// monotonic clock. Otherwise the check loads the current manifest and
-    /// the tail from the store, and the tail's newest commit is dated on the
-    /// wall clock.
+    /// the tail from the store, the tail's newest commit is dated on the
+    /// wall clock, and the tail's inline bytes are those of the session's
+    /// position whatever the age of its last check, or zero without a
+    /// position. A position past the revalidation bound can only count more
+    /// inline bytes than the tail has, because another process may have
+    /// folded since.
     async fn fold_not_due(
         &self,
         namespace_id: &NamespaceId,
@@ -218,7 +222,9 @@ impl PublisherRegistry {
                 let status = NamespaceStorageDiagnostics::from(&anchor);
                 (
                     status.wal_tail_objects,
-                    0,
+                    session
+                        .and_then(|session| session.read_position.current())
+                        .map_or(0, |position| position.wal_tail_inline_bytes()),
                     status.wal_tail_newest_commit_at_ms,
                     core.now_ms(),
                     Some(anchor.publication_basis()),
