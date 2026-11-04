@@ -1508,9 +1508,9 @@ async fn creation_and_fork_install_hint_and_manifest_in_order() {
         .await
         .expect_err("target exists");
     assert_eq!(error.code(), ErrorCode::NamespaceExists);
-    // The fork writes its source pin, has the target's hint and manifest 1
-    // puts refused, and deletes the pin.
-    assert_eq!(store.counts().create_if_absent_puts, 3);
+    // The fork writes its source pin, has the target's hint put refused, and
+    // deletes the pin.
+    assert_eq!(store.counts().create_if_absent_puts, 2);
     assert_eq!(store.counts().compare_and_swaps, 0);
     assert_eq!(store.counts().deletes, 1);
 
@@ -1536,7 +1536,7 @@ async fn creation_and_fork_install_hint_and_manifest_in_order() {
                 ErrorCode::NamespaceExists
             );
         }
-        // Both puts are refused, and nothing is deleted.
+        // The hint put is refused, and nothing is deleted.
         let counts = store.counts();
         assert_eq!(
             (
@@ -1544,13 +1544,13 @@ async fn creation_and_fork_install_hint_and_manifest_in_order() {
                 counts.compare_and_swaps,
                 counts.deletes
             ),
-            (2, 0, 0)
+            (1, 0, 0)
         );
     }
 }
 
-/// A create whose manifest 1 put is refused reads the existing namespace
-/// through the hint, and a failed read is an error, not absence.
+/// A create whose hint put is refused reads the existing namespace through
+/// the hint, and a failed read is an error, not absence.
 #[tokio::test]
 async fn a_losing_create_reports_a_failed_hint_read() {
     for injected in [
@@ -1588,7 +1588,7 @@ async fn a_losing_create_reports_a_failed_hint_read() {
             .expect_err("hint read failed");
             assert_matches!(error, CoreError::ControlObjectLoad(_));
         }
-        // Each attempt's two puts are refused, and nothing is deleted.
+        // Each attempt's hint put is refused, and nothing is deleted.
         let counts = store.counts();
         assert_eq!(
             (
@@ -1596,13 +1596,13 @@ async fn a_losing_create_reports_a_failed_hint_read() {
                 counts.compare_and_swaps,
                 counts.deletes
             ),
-            (4, 0, 0)
+            (2, 0, 0)
         );
     }
 }
 
-/// A create whose manifest 1 put is refused reads the existing namespace
-/// through the hint, and a corrupt hint is corruption, not absence.
+/// A create whose hint put is refused reads the existing namespace through
+/// the hint, and a corrupt hint is corruption, not absence.
 #[tokio::test]
 async fn a_losing_create_reports_a_corrupt_hint() {
     let directory = tempdir().expect("tempdir");
@@ -1639,7 +1639,7 @@ async fn a_losing_create_reports_a_corrupt_hint() {
         .expect_err("corrupt hint");
         assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
     }
-    // Each attempt's two puts are refused, and nothing is deleted.
+    // Each attempt's hint put is refused, and nothing is deleted.
     let counts = store.counts();
     assert_eq!(
         (
@@ -1647,7 +1647,97 @@ async fn a_losing_create_reports_a_corrupt_hint() {
             counts.compare_and_swaps,
             counts.deletes
         ),
-        (4, 0, 0)
+        (2, 0, 0)
+    );
+}
+
+/// A create of an ID that already has a namespace reports `namespace_exists`
+/// after garbage collection has deleted that namespace's manifest 1, and
+/// writes nothing: the hint decides whether the ID is new, not manifest 1.
+#[tokio::test]
+async fn a_create_after_the_collection_of_manifest_one_reports_the_id_as_taken() {
+    let directory = tempdir().expect("tempdir");
+    let store = RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    );
+    let context = default_writer();
+    let namespace_id = namespace_id("demo");
+    let fixture = NamespaceFixture::new(&store, &namespace_id, &context);
+    fixture.create().await.expect("create");
+    fixture
+        .write_file_bytes("/keep.txt", b"keep me", Some(&commit_id("keep")))
+        .await
+        .expect("write");
+    // A fold publishes manifest 2, the runtime raises the hint to it, and a
+    // collection pass after the grace window deletes manifest 1.
+    loonfs_core::test_support::folded_manifest(&fixture.namespace)
+        .await
+        .expect("fold the WAL tail");
+    let namespace = namespace_store(&store, &namespace_id);
+    let current = namespace
+        .load_current_manifest()
+        .await
+        .expect("current manifest")
+        .manifest()
+        .manifest_no;
+    assert!(current > ManifestNo(1), "the fold published {current:?}");
+    namespace
+        .raise_hint(current, None)
+        .await
+        .expect("raise the hint");
+    let mut aged = context.clone();
+    aged.now_ms = u64::MAX / 2;
+    for _ in 0..2 {
+        namespace
+            .gc(None, &loonfs_core::GcOptions::default(), &aged.clock())
+            .await
+            .expect("collect manifest 1");
+    }
+    let manifest_one = metadata_manifest_object(&namespace_id, &ManifestNo(1));
+    assert!(store
+        .head(&manifest_one)
+        .await
+        .expect("probe manifest 1")
+        .is_none());
+
+    store.reset();
+    let error = NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
+        .await
+        .expect_err("the ID has a namespace");
+    assert_eq!(error.code(), ErrorCode::NamespaceExists);
+    // The hint put is refused, and the create reads the namespace through
+    // the hint instead of recreating manifest 1.
+    let counts = store.counts();
+    assert_eq!(
+        (
+            counts.create_if_absent_puts,
+            counts.compare_and_swaps,
+            counts.deletes
+        ),
+        (1, 0, 0)
+    );
+    assert!(store
+        .head(&manifest_one)
+        .await
+        .expect("probe manifest 1")
+        .is_none());
+    assert_eq!(
+        namespace
+            .load_current_manifest()
+            .await
+            .expect("current manifest")
+            .manifest()
+            .manifest_no,
+        current
+    );
+    assert_eq!(
+        read_file_bytes(&store, &namespace_id, "/keep.txt")
+            .await
+            .expect("still readable")
+            .bytes,
+        b"keep me"
     );
 }
 

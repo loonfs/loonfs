@@ -271,11 +271,14 @@ impl<S: ObjectStore> NamespaceStore<S> {
 
     /// Publishes manifest 1 of a new namespace, after the hint that points to it.
     ///
-    /// Both objects are created with put-if-absent, so an existing namespace
-    /// keeps its objects, and the put of manifest 1 decides whether the
-    /// namespace exists (format spec, "Creating a namespace"). If manifest 1
-    /// exists, the call returns `namespace_exists`, or `namespace_deleted`
-    /// when the current manifest is a tombstone.
+    /// The put of the hint decides whether the ID is new (format spec,
+    /// "Creating a namespace"). Manifest 1 can't, because garbage collection
+    /// deletes it once a successor is old enough. When the hint exists, the
+    /// call reads the current manifest through it, and returns
+    /// `namespace_exists`, or `namespace_deleted` when that manifest is a
+    /// tombstone. A hint without a manifest belongs to a creation that failed
+    /// before it wrote manifest 1, and the call then writes manifest 1 with
+    /// put-if-absent, which decides between two such creations.
     pub(crate) async fn create_manifest(
         &self,
         payload: NamespaceManifestPayload,
@@ -294,7 +297,16 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .put_if_absent(&object_key, Bytes::from(bytes))
             .await
         {
-            Ok(_) | Err(ObjectStoreError::PreconditionFailed { .. }) => {}
+            Ok(_) => {}
+            Err(ObjectStoreError::PreconditionFailed { .. }) => {
+                if let Some(current) = self
+                    .load_current_manifest_if_present()
+                    .await
+                    .map_err(CoreError::ControlObjectLoad)?
+                {
+                    return Err(existing_namespace(namespace_id, &current));
+                }
+            }
             Err(error) => return Err(CoreError::store(&object_key, &error)),
         }
         match self
@@ -304,11 +316,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             ManifestPublicationOutcome::Published(_) => Ok(()),
             ManifestPublicationOutcome::CoveredByCurrent(current)
             | ManifestPublicationOutcome::PredecessorChanged(current) => {
-                Err(if current.payload().status.is_deleted() {
-                    CoreError::NamespaceDeleted { namespace_id }
-                } else {
-                    CoreError::NamespaceExists { namespace_id }
-                })
+                Err(existing_namespace(namespace_id, &current))
             }
         }
     }
@@ -517,6 +525,15 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 confirm_authorship,
             )
         }))
+    }
+}
+
+/// The error for a create or fork of a namespace ID that `current` holds.
+fn existing_namespace(namespace_id: NamespaceId, current: &LoadedManifest) -> CoreError {
+    if current.payload().status.is_deleted() {
+        CoreError::NamespaceDeleted { namespace_id }
+    } else {
+        CoreError::NamespaceExists { namespace_id }
     }
 }
 

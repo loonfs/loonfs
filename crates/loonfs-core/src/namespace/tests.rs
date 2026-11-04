@@ -485,9 +485,9 @@ async fn fork_into_a_deleted_id_leaves_no_source_pin() {
         .await
         .expect_err("deleted target");
     assert_eq!(error.code(), ErrorCode::NamespaceDeleted);
-    // The fork writes its source pin, has the puts of the target's hint and
-    // manifest 1 refused, reads the tombstone, and deletes the pin.
-    assert_eq!(store.counts().create_if_absent_puts, 3);
+    // The fork writes its source pin, has the put of the target's hint
+    // refused, reads the tombstone, and deletes the pin.
+    assert_eq!(store.counts().create_if_absent_puts, 2);
     assert_eq!(store.counts().compare_and_swaps, 0);
     assert_eq!(store.counts().deletes, 1);
     assert!(store

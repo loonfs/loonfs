@@ -1265,16 +1265,16 @@ This section describes how namespaces are created, forked, deleted, and retired.
 To create a namespace, LoonFS:
 
 1. Builds the first manifest (see [Publishing a materialized file set](#72-publishing-a-materialized-file-set)).
-2. Writes the hint, pointing to manifest 1, and then manifest 1, both with put-if-absent. A hint collision is allowed.
-3. If manifest 1 already exists, reads the existing namespace state. An existing active namespace returns `namespace_exists` (or its current summary, with `allow_existing`), and a tombstone returns `namespace_deleted`. Corruption and read errors aren't absence.
+2. Writes the hint, pointing to manifest 1, with put-if-absent. A new hint means a new namespace ID, and LoonFS then writes manifest 1 with put-if-absent.
+3. If the hint already exists, reads the existing namespace state through it (see [Resolving the metadata basis](#41-resolving-the-metadata-basis)). An existing active namespace returns `namespace_exists` (or its current summary, with `allow_existing`), and a tombstone returns `namespace_deleted`. Corruption and read errors aren't absence. A hint whose manifest 1 is missing belongs to a creation that failed before it wrote manifest 1, and LoonFS then writes manifest 1 with put-if-absent. If that put is refused, it reads the state again.
 
-If two processes create the same namespace at the same time, the one whose manifest 1 put succeeds creates the namespace. A hint written before that put doesn't mean the namespace exists, because its writer might have failed before it wrote manifest 1.
+The hint decides whether the ID is new, because the hint lives as long as the namespace. Manifest 1 can't decide, because garbage collection deletes it once its successor is older than the grace window (see [Reference roots](#112-reference-roots)), so a missing manifest 1 doesn't mean a missing namespace. If two processes create the same ID at the same time, the one whose hint put succeeds writes manifest 1, the other reads a hint without a manifest and writes manifest 1 too, and the one whose manifest 1 put succeeds creates the namespace. A hint written before that put doesn't mean the namespace exists, because its writer might have failed before it wrote manifest 1.
 
 ### 9.2 Forking a namespace
 
 A fork starts its own history from the source's retained metadata. To create one, LoonFS:
 
-1. Creates a verified source pin whose owner is the target namespace, either from the source's head or from an unexpired user pin (see [Creating and verifying a pin](#82-creating-and-verifying-a-pin)). The fork reads nothing of the target first: the put of the target's manifest 1 in step 4 decides whether the target exists (see [Conflicting and unknown installations](#93-conflicting-and-unknown-installations)).
+1. Creates a verified source pin whose owner is the target namespace, either from the source's head or from an unexpired user pin (see [Creating and verifying a pin](#82-creating-and-verifying-a-pin)). The fork reads nothing of the target first: the put of the target's hint in step 4 decides whether the target exists (see [Conflicting and unknown installations](#93-conflicting-and-unknown-installations)).
 2. Loads and verifies the pinned manifest.
 3. Copies the pinned manifest's run references, head sequence, next run number, access configuration, family root, retention window, and [extension](#124-extensions) entries. The inherited runs determine the same base sequence. The fork's retention floor and acknowledged floor are both the pinned manifest's head sequence (see [Advancing the retention floor](#101-advancing-the-retention-floor)). Every segment keeps its owner. The fork basis is set to the pinned manifest reference and the source pin's ID. The fork basis of a fork that a [rebase](glossary.md#rebase) creates also records `rebased_from`, as described below.
 4. Builds the rest of the first manifest's fields (see [Publishing a materialized file set](#72-publishing-a-materialized-file-set)) and installs it (see [Creating a namespace](#91-creating-a-namespace)).
@@ -1287,7 +1287,7 @@ The source pin's creation grace protects the installation. Garbage collection ke
 
 ### 9.3 Conflicting and unknown installations
 
-A losing manifest 1 put reads the existing namespace state, as [Creating a namespace](#91-creating-a-namespace) describes. Deleted status follows the lifetime rule in [Namespaces and identity](#11-namespaces-and-identity). Invalid bytes, or a key that doesn't match its payload, are corruption. A loser never overwrites the winner.
+A losing hint put, or a losing manifest 1 put, reads the existing namespace state, as [Creating a namespace](#91-creating-a-namespace) describes. Deleted status follows the lifetime rule in [Namespaces and identity](#11-namespaces-and-identity). Invalid bytes, or a key that doesn't match its payload, are corruption. A loser never overwrites the winner.
 
 A confirmed precondition failure is a conflict. After a put with an unknown transport outcome, the publisher reads the manifest at that number:
 
