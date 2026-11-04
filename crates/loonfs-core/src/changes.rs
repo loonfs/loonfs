@@ -801,7 +801,7 @@ mod tests {
                 None,
                 2,
                 None,
-                crate::segment::Readahead::Enabled,
+                crate::segment::BlocksPerRefill::KeyRange,
             )
             .await
             .expect("commit row page");

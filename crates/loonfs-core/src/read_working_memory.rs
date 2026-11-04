@@ -1,5 +1,5 @@
-//! Shared reservations for bytes that reads keep: metadata block memos and
-//! the collector's table of content roots.
+//! Shared reservations for bytes that reads keep: metadata block memos, the
+//! blocks of a scan's refill, and the collector's table of content roots.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -67,6 +67,40 @@ impl ReadWorkingMemory {
         true
     }
 
+    /// Reserves `min_bytes` whatever the limit, plus as much of the rest of
+    /// `wanted_bytes` as fits under the limit, in one update, and returns the
+    /// reservation, which releases its bytes when it is dropped.
+    ///
+    /// The bytes in use can exceed the limit by `min_bytes`. A grant smaller
+    /// than `wanted_bytes` is reported as a failed reservation.
+    pub fn reserve(self: &Arc<Self>, wanted_bytes: usize, min_bytes: usize) -> ReadReservation {
+        assert!(
+            min_bytes <= wanted_bytes,
+            "a reservation should want at least its minimum"
+        );
+        let granted_bytes = |in_use: usize| {
+            let floor = in_use + min_bytes;
+            min_bytes + (wanted_bytes - min_bytes).min(self.limit.saturating_sub(floor))
+        };
+        let previous = self
+            .in_use
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |in_use| {
+                Some(in_use + granted_bytes(in_use))
+            })
+            .expect("an update that always returns a value should succeed");
+        let granted = granted_bytes(previous);
+        if granted < wanted_bytes {
+            if let Some(observer) = &self.observer {
+                observer.reservation_failed();
+            }
+        }
+        self.report();
+        ReadReservation {
+            pool: Arc::clone(self),
+            bytes: granted,
+        }
+    }
+
     pub fn release(&self, bytes: usize) {
         self.in_use.fetch_sub(bytes, Ordering::SeqCst);
         self.report();
@@ -87,6 +121,37 @@ impl ReadWorkingMemory {
                 break;
             }
         }
+    }
+}
+
+/// Bytes reserved from a read working memory, released when the reservation
+/// is dropped.
+#[derive(Debug)]
+pub struct ReadReservation {
+    pool: Arc<ReadWorkingMemory>,
+    bytes: usize,
+}
+
+impl ReadReservation {
+    /// Returns the number of bytes reserved.
+    pub fn bytes(&self) -> usize {
+        self.bytes
+    }
+
+    /// Releases the bytes of the reservation above `bytes`.
+    pub fn shrink_to(&mut self, bytes: usize) {
+        assert!(
+            bytes <= self.bytes,
+            "a reservation should shrink to at most its reserved bytes"
+        );
+        self.pool.release(self.bytes - bytes);
+        self.bytes = bytes;
+    }
+}
+
+impl Drop for ReadReservation {
+    fn drop(&mut self) {
+        self.pool.release(self.bytes);
     }
 }
 
@@ -135,6 +200,32 @@ mod tests {
         });
         let reported = observer.reported.lock().expect("reported values");
         assert_eq!(reported.as_slice(), &[300, 100, 300]);
+    }
+
+    #[test]
+    fn a_reservation_takes_its_minimum_and_what_is_free_and_releases_both() {
+        let pool = Arc::new(ReadWorkingMemory::new(4096, None));
+        assert!(pool.try_reserve(1024));
+        let mut reservation = pool.reserve(1000, 0);
+        assert_eq!(reservation.bytes(), 1000);
+        assert_eq!(pool.in_use(), 2024);
+        let rest = pool.reserve(4096, 100);
+        assert_eq!(rest.bytes(), 2072);
+        assert_eq!(pool.in_use(), 4096);
+        // A full pool still grants the minimum, above the limit.
+        let over = pool.reserve(500, 200);
+        assert_eq!(over.bytes(), 200);
+        assert_eq!(pool.in_use(), 4296);
+        assert_eq!(pool.available_bytes(), 0);
+        reservation.shrink_to(400);
+        assert_eq!(reservation.bytes(), 400);
+        assert_eq!(pool.in_use(), 3696);
+        drop(over);
+        drop(rest);
+        drop(reservation);
+        assert_eq!(pool.in_use(), 1024);
+        pool.release(1024);
+        assert_eq!(pool.in_use(), 0);
     }
 
     #[test]

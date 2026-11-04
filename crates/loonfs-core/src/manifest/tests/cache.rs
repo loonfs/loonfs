@@ -60,7 +60,7 @@ async fn a_byte_budgeted_cache_admits_wide_scans_and_holds_to_its_budget() {
             string_prefix_upper_bound("revision-").as_deref(),
             usize::MAX,
             None,
-            scan::Readahead::Enabled,
+            scan::BlocksPerRefill::One,
         )
         .await
         .expect("scan revisions");
@@ -89,7 +89,7 @@ async fn a_byte_budgeted_cache_admits_wide_scans_and_holds_to_its_budget() {
             string_prefix_upper_bound("revision-").as_deref(),
             usize::MAX,
             None,
-            scan::Readahead::Enabled,
+            scan::BlocksPerRefill::One,
         )
         .await
         .expect("repeated scan");
@@ -115,7 +115,7 @@ async fn a_byte_budgeted_cache_admits_wide_scans_and_holds_to_its_budget() {
             upper_bound.as_deref(),
             8,
             None,
-            scan::Readahead::Enabled,
+            scan::BlocksPerRefill::One,
         )
         .await
         .expect("scan range page");
@@ -141,7 +141,7 @@ async fn a_byte_budgeted_cache_admits_wide_scans_and_holds_to_its_budget() {
             upper_bound.as_deref(),
             8,
             None,
-            scan::Readahead::Enabled,
+            scan::BlocksPerRefill::One,
         )
         .await
         .expect("repeated scan range page");
@@ -223,7 +223,7 @@ async fn concurrent_scans_share_one_fetch_per_segment() {
             string_prefix_upper_bound("revision-").as_deref(),
             usize::MAX,
             None,
-            scan::Readahead::Enabled,
+            scan::BlocksPerRefill::One,
         )
         .await
         .expect("solo scan");
@@ -259,7 +259,7 @@ async fn concurrent_scans_share_one_fetch_per_segment() {
             upper_bound.as_deref(),
             usize::MAX,
             None,
-            scan::Readahead::Enabled
+            scan::BlocksPerRefill::One
         ),
         second_segments.scan_range(
             ApiMetadataRowFamily::Revisions,
@@ -267,7 +267,7 @@ async fn concurrent_scans_share_one_fetch_per_segment() {
             upper_bound.as_deref(),
             usize::MAX,
             None,
-            scan::Readahead::Enabled
+            scan::BlocksPerRefill::One
         ),
     );
     let paired_fetches = store.count(OperationSelector::Read);
@@ -359,7 +359,7 @@ async fn scan_between_manifest_loads(
             string_prefix_upper_bound("revision-").as_deref(),
             usize::MAX,
             None,
-            scan::Readahead::Enabled,
+            scan::BlocksPerRefill::One,
         )
         .await
         .expect("scan revisions");
@@ -402,7 +402,6 @@ async fn manifests_and_blocks_are_charged_to_budgets_of_their_own() {
             )),
             ObjectStoreScope::new(0),
             crate::segment::cache::unshared_read_working_memory(),
-            crate::limits::READAHEAD_WINDOW_BYTES,
         )
     };
     let unbounded = cache(usize::MAX, usize::MAX);
@@ -490,7 +489,7 @@ async fn segment_range_page_merges_base_and_delta_in_row_key_order() {
             upper_bound.as_deref(),
             4,
             None,
-            scan::Readahead::Enabled,
+            scan::BlocksPerRefill::One,
         )
         .await
         .expect("scan range page");
@@ -571,7 +570,7 @@ async fn lookup_skips_segments_whose_filter_rules_the_name_out() {
             .as_deref(),
             usize::MAX,
             None,
-            scan::Readahead::Enabled,
+            scan::BlocksPerRefill::One,
         )
         .await
         .expect("scan root binds");
@@ -598,7 +597,7 @@ async fn lookup_skips_segments_whose_filter_rules_the_name_out() {
             string_prefix_upper_bound(&prefix).as_deref(),
             usize::MAX,
             Some(&filter_probe),
-            super::scan::Readahead::Disabled,
+            super::scan::BlocksPerRefill::KeyRange,
         )
         .await
         .expect("filtered lookup");
@@ -804,7 +803,7 @@ async fn a_view_reuses_decoded_blocks_without_a_shared_cache() {
 }
 
 #[tokio::test]
-async fn a_zero_block_memo_refetches_data_blocks_for_reads_and_folds() {
+async fn a_zero_block_memo_and_block_cache_refetch_data_blocks_for_reads_and_folds() {
     let temp_dir = tempdir().expect("tempdir");
     let store =
         RecordingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
@@ -830,7 +829,6 @@ async fn a_zero_block_memo_refetches_data_blocks_for_reads_and_folds() {
         Arc::new(SharedSegmentBlocks::new(0, 0)),
         ObjectStoreScope::new(0),
         Arc::new(crate::cache::ReadWorkingMemory::new(0, None)),
-        crate::limits::READAHEAD_WINDOW_BYTES,
     ));
     let namespace = crate::NamespaceStore {
         segment_cache: Arc::clone(&cache),
@@ -865,7 +863,7 @@ async fn a_zero_block_memo_refetches_data_blocks_for_reads_and_folds() {
             .is_some());
         assert!(
             store.count(OperationSelector::Read) > first_lookup_reads,
-            "a zero memo should keep no data block for the repeated lookup"
+            "a zero memo and a zero block cache keep no data block for the repeated lookup"
         );
     }
 }
@@ -956,7 +954,7 @@ async fn point_lookups_skip_inline_filtered_runs_without_fetches() {
             string_prefix_upper_bound(&prefix).as_deref(),
             usize::MAX,
             Some(&probe),
-            super::scan::Readahead::Enabled,
+            super::scan::BlocksPerRefill::One,
         )
         .await
         .expect("point lookup");
@@ -1007,7 +1005,7 @@ async fn point_lookups_skip_inline_filtered_runs_without_fetches() {
             string_prefix_upper_bound(&prefix).as_deref(),
             usize::MAX,
             Some(&probe),
-            super::scan::Readahead::Enabled,
+            super::scan::BlocksPerRefill::One,
         )
         .await
         .expect("point lookup without inline filters");
@@ -1459,7 +1457,6 @@ async fn a_wide_read_passes_handles_and_stored_bytes_to_the_block_cache() {
         Arc::new(SharedSegmentBlocks::new(usize::MAX, usize::MAX)),
         ObjectStoreScope::new(0),
         crate::segment::cache::unshared_read_working_memory(),
-        crate::limits::READAHEAD_WINDOW_BYTES,
     );
 
     let (cold, cold_reads) = wide_read(&store, Some(&cache), &descriptor, &index).await;
@@ -1490,38 +1487,6 @@ async fn a_wide_read_passes_handles_and_stored_bytes_to_the_block_cache() {
             "the get of the block at {offset} passes its handle"
         );
     }
-}
-
-/// Checks that when the block cache keeps nothing (its budget is zero), a
-/// lookup's memo records the stored bytes of the read-ahead window's other
-/// blocks, so the reads of those blocks within the same read send no GET
-/// after the window's one.
-#[tokio::test]
-async fn a_read_ahead_window_stays_in_the_memo_when_the_block_cache_keeps_nothing() {
-    let (_temp_dir, store, descriptor, index) = multi_block_direntry_segment().await;
-    let (expected, _) = wide_read(&store, None, &descriptor, &index).await;
-    let cache = MetadataSegmentCache::unshared(0);
-    let memo = SessionBlockMemo::default();
-    store.reset();
-
-    for position in 0..index.len() {
-        let block = data_block_load::load_segment_data_block_with_readahead(
-            &store,
-            Some(&cache),
-            Some(&memo),
-            &descriptor,
-            &index[position..],
-        )
-        .await
-        .expect("a read of a block in the window");
-        assert_eq!(block, expected[position]);
-    }
-    assert_eq!(cache.stats().cached_decoded_bytes, 0);
-    assert_eq!(
-        store.count(OperationSelector::Read),
-        1,
-        "one ranged GET reads the window, and the memo has the rest of it"
-    );
 }
 
 #[tokio::test]
@@ -1578,7 +1543,6 @@ async fn two_loaded_views_share_one_read_working_pool_and_return_the_same_rows()
             Arc::new(SharedSegmentBlocks::new(0, 0)),
             ObjectStoreScope::new(0),
             pool,
-            crate::limits::READAHEAD_WINDOW_BYTES,
         )
     };
     let probe_pool = Arc::new(ReadWorkingMemory::new(64 * 1024 * 1024, None));
@@ -1598,7 +1562,7 @@ async fn two_loaded_views_share_one_read_working_pool_and_return_the_same_rows()
             None,
             usize::MAX,
             None,
-            scan::Readahead::Enabled,
+            scan::BlocksPerRefill::One,
         )
         .await
         .expect("probe rows");
@@ -1632,7 +1596,7 @@ async fn two_loaded_views_share_one_read_working_pool_and_return_the_same_rows()
                 None,
                 usize::MAX,
                 None,
-                scan::Readahead::Enabled
+                scan::BlocksPerRefill::One
             )
             .await
             .expect("rows"),
@@ -1649,7 +1613,7 @@ async fn two_loaded_views_share_one_read_working_pool_and_return_the_same_rows()
                 None,
                 usize::MAX,
                 None,
-                scan::Readahead::Enabled
+                scan::BlocksPerRefill::One
             )
             .await
             .expect("first reread"),
@@ -1665,7 +1629,7 @@ async fn two_loaded_views_share_one_read_working_pool_and_return_the_same_rows()
                 None,
                 usize::MAX,
                 None,
-                scan::Readahead::Enabled
+                scan::BlocksPerRefill::One
             )
             .await
             .expect("second reread"),
@@ -1681,7 +1645,7 @@ async fn two_loaded_views_share_one_read_working_pool_and_return_the_same_rows()
             None,
             usize::MAX,
             None,
-            scan::Readahead::Enabled,
+            scan::BlocksPerRefill::One,
         )
         .await
         .expect("read after release");
@@ -1694,7 +1658,7 @@ async fn two_loaded_views_share_one_read_working_pool_and_return_the_same_rows()
             None,
             usize::MAX,
             None,
-            scan::Readahead::Enabled,
+            scan::BlocksPerRefill::One,
         )
         .await
         .expect("retained reread");

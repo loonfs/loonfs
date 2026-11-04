@@ -229,6 +229,29 @@ pub fn namespace_store<S>(store: S, namespace_id: &NamespaceId) -> NamespaceStor
     )
 }
 
+/// The decoded-block budget of [`segment_cache`], large enough that no test
+/// fixture evicts a block.
+const TEST_SEGMENT_CACHE_BYTES: usize = 64 * 1024 * 1024;
+
+/// Returns an empty segment cache with a 64 MiB budget, for a test that
+/// counts the requests of reads that find earlier blocks in the block cache,
+/// as a runtime's reads do.
+pub fn segment_cache() -> MetadataSegmentCache {
+    MetadataSegmentCache::unshared(TEST_SEGMENT_CACHE_BYTES)
+}
+
+/// Returns the components of [`namespace_store`] with an empty
+/// [`segment_cache`] in place of the cache that keeps nothing.
+pub fn namespace_store_with_segment_cache<S>(
+    store: S,
+    namespace_id: &NamespaceId,
+) -> NamespaceStore<S> {
+    NamespaceStore {
+        segment_cache: Arc::new(segment_cache()),
+        ..namespace_store(store, namespace_id)
+    }
+}
+
 /// Folds the namespace's WAL tail and returns the manifest that covers it,
 /// the manifest that a snapshot or a fork of the current head pins.
 pub async fn folded_manifest<S: ObjectStore>(
@@ -305,6 +328,18 @@ impl<S: ObjectStore + Clone> NamespaceFixture<S> {
                 Arc::new(FixedWallClock(writer.now_ms)),
             ),
             writer_id: writer.writer_id.clone(),
+        }
+    }
+
+    /// Returns the fixture with an empty [`segment_cache`] in place of the
+    /// cache that keeps nothing.
+    pub fn with_segment_cache(self) -> Self {
+        Self {
+            namespace: NamespaceStore {
+                segment_cache: Arc::new(segment_cache()),
+                ..self.namespace
+            },
+            ..self
         }
     }
 

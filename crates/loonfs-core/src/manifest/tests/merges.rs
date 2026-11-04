@@ -140,7 +140,7 @@ async fn merges_are_indexed_in_the_tail_and_the_fold_newest_first_for_each_fork(
             string_prefix_upper_bound(&lookup_keys::merge_prefix(&fork("fork-a"))).as_deref(),
             usize::MAX,
             None,
-            scan::Readahead::Enabled,
+            scan::BlocksPerRefill::One,
         )
         .await
         .expect("scan the fork's merges")

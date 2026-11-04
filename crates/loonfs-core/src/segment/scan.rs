@@ -27,15 +27,23 @@ use std::sync::Arc;
 /// first blocks load in one refill.
 const SCAN_ITERATORS_OPEN: usize = 16;
 
-/// Whether a scan reads ahead when it misses a data block.
+/// How many data blocks of a segment one refill of a scan asks for.
+///
+/// A refill loads the blocks that it asks for and no others: it fetches the
+/// ones that no cache has, decodes each one, and inserts each one into the
+/// block cache.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Readahead {
-    /// The scan fetches a read-ahead window from each data block that it
-    /// misses, and the read's memo keeps the window's other blocks as stored
-    /// bytes until the scan reaches them.
-    Enabled,
-    /// The scan fetches the blocks that it asks for and no others.
-    Disabled,
+pub(crate) enum BlocksPerRefill {
+    /// The next block of each open segment, for a lookup of one exact key,
+    /// which fetches the block that has the key.
+    One,
+    /// The next blocks of the scan's remaining key range, up to
+    /// `MAX_SCAN_REFILL_BYTES` of stored bytes and the decoded bytes that the
+    /// refill reserves from the read working memory, for a scan of a key
+    /// range, so a cold page of up to 1 MiB of blocks loads in one GET. The
+    /// scan keeps the reservation until it has consumed the blocks, and the
+    /// memo doesn't record them.
+    KeyRange,
 }
 
 #[cfg(test)]
@@ -56,7 +64,8 @@ pub(crate) struct VerifiedMetadataSegments<'a, S: ObjectStore + ?Sized> {
     /// doesn't depend on this order, because row keys are unique across
     /// runs, but [`Self::scan_prefix_in_newest_run_for_lookup`] does.
     pub(crate) scan_runs: Arc<Vec<MetadataRunManifest>>,
-    /// Retains fetched blocks within the operation's data budget.
+    /// The decoded blocks that this view's reads have loaded, charged to the
+    /// read working memory until the view ends.
     pub(super) block_memo: SessionBlockMemo,
     #[cfg(test)]
     pub(super) peak_page_rows: std::sync::atomic::AtomicUsize,
@@ -180,7 +189,7 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
                 string_prefix_upper_bound(key).as_deref(),
                 usize::MAX,
                 Some(filter_probe),
-                Readahead::Enabled,
+                BlocksPerRefill::One,
             )
             .await?
             .into_iter()
@@ -238,7 +247,7 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
         lower_bound: &str,
         filter_probe: &str,
         limit: usize,
-        readahead: Readahead,
+        blocks_per_refill: BlocksPerRefill,
     ) -> Result<Vec<(String, MetadataRow)>, ManifestLoadError> {
         let upper_bound = string_prefix_upper_bound(prefix);
         let upper_bound = upper_bound.as_deref();
@@ -261,7 +270,14 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
                 continue;
             }
             let page = self
-                .merge_segment_rows(admitted, lower_bound, upper_bound, limit, readahead, true)
+                .merge_segment_rows(
+                    admitted,
+                    lower_bound,
+                    upper_bound,
+                    limit,
+                    blocks_per_refill,
+                    true,
+                )
                 .await?;
             if !page.is_empty() {
                 return Ok(page);
@@ -324,7 +340,7 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
         upper_bound: Option<&str>,
         limit: usize,
         filter_probe: Option<&str>,
-        readahead: Readahead,
+        blocks_per_refill: BlocksPerRefill,
     ) -> Result<Vec<(String, MetadataRow)>, ManifestLoadError> {
         if limit == 0 {
             return Ok(Vec::new());
@@ -341,7 +357,7 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
             lower_bound,
             upper_bound,
             limit,
-            readahead,
+            blocks_per_refill,
             filter_probe.is_some(),
         )
         .await
@@ -390,7 +406,7 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
         lower_bound: &str,
         upper_bound: Option<&str>,
         limit: usize,
-        readahead: Readahead,
+        blocks_per_refill: BlocksPerRefill,
         filter_admitted: bool,
     ) -> Result<Vec<(String, MetadataRow)>, ManifestLoadError> {
         descriptors.sort_by(|left, right| {
@@ -410,11 +426,9 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
             store: self.store,
             segment_cache: self.segment_cache,
             block_memo: &self.block_memo,
-            readahead,
+            pool: self.block_memo.pool(),
+            blocks_per_refill,
             upper_bound,
-            // A window reads on past the range, so that the read's later
-            // lookups and scans of nearby keys find their blocks in the memo.
-            windows_stop_at_upper_bound: false,
         };
         let mut iterators = Vec::new();
         let mut descriptors = descriptors.into_iter();
@@ -448,7 +462,7 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
             if iterators.is_empty() {
                 break;
             }
-            refill_iterators(&loader, &mut iterators, 1).await?;
+            refill_iterators(&loader, &mut iterators, loader.pool.available_bytes()).await?;
             if filter_admitted {
                 for iterator in &iterators[previously_open..] {
                     let matched = iterator

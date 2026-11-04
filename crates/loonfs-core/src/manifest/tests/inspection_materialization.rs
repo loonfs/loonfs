@@ -9,15 +9,14 @@ use super::super::validate::{
 };
 use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::metadata::{MetadataState, MetadataStateBuilder};
-use crate::segment::block_memo::{load_segment_blocks_with_readahead, SessionBlockMemo};
-use crate::segment::cache::read_ahead_window_bytes;
+use crate::segment::block_memo::SessionBlockMemo;
 use crate::segment::cache::MetadataSegmentCache;
-use crate::segment::data_block_load::read_ahead_window_len;
+use crate::segment::data_block_load::load_segment_data_block_span;
 use crate::segment::index_block_load::load_segment_index;
 use crate::segment::row::manifest_row_kind;
 use crate::segment::runs::{runs_in_materialization_order, MetadataFamilySegments};
 use crate::segment::scan::{
-    ordered_manifest_segments, ManifestMaterializationForInspection, Readahead,
+    ordered_manifest_segments, BlocksPerRefill, ManifestMaterializationForInspection,
 };
 use futures::future::try_join_all;
 use loonfs_objectstore::keys::{metadata_manifest_object, metadata_segment_object_key};
@@ -191,7 +190,7 @@ pub(super) async fn load_manifest_segment_rows_with_cache<S: ObjectStore + ?Size
         "",
         None,
         usize::MAX,
-        Readahead::Disabled,
+        BlocksPerRefill::KeyRange,
     )
     .await?;
     let row_count = row_set.rows().count();
@@ -343,7 +342,7 @@ pub(crate) async fn load_manifest_segment_rows_in_key_range_with_cache<S: Object
     lower_bound: &str,
     upper_bound: Option<&str>,
     row_limit: usize,
-    readahead: Readahead,
+    blocks_per_refill: BlocksPerRefill,
 ) -> Result<SegmentKeyRangeBlocks, ManifestLoadError> {
     let index = load_segment_index(store, segment_cache, memo, descriptor).await?;
     let needed = index_blocks_for_key_range(&index, lower_bound, upper_bound);
@@ -352,22 +351,16 @@ pub(crate) async fn load_manifest_segment_rows_in_key_range_with_cache<S: Object
     let mut remaining_rows = row_limit;
     let mut start = needed.start;
     while start < needed.end && remaining_rows > 0 {
-        let required_end = if readahead == Readahead::Enabled {
-            start + 1
-        } else if row_limit == usize::MAX {
-            needed.end
-        } else {
-            (start + read_ahead_window_len(&index[start..], read_ahead_window_bytes(segment_cache)))
-                .min(needed.end)
+        let required_end = match blocks_per_refill {
+            BlocksPerRefill::One => start + 1,
+            BlocksPerRefill::KeyRange => needed.end,
         };
-        let blocks = load_segment_blocks_with_readahead(
+        let blocks = load_segment_data_block_span(
             store,
             segment_cache,
-            memo,
+            Some(memo),
             descriptor,
-            &index,
-            start..required_end,
-            readahead,
+            &index[start..required_end],
         )
         .await?;
         let batch = SegmentKeyRangeBlocks { blocks };

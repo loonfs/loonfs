@@ -15,7 +15,6 @@ use crate::block_cache::{
     DecodedBlockKey,
 };
 use crate::heap_bytes::HeapBytes;
-use crate::limits::READAHEAD_WINDOW_BYTES;
 use crate::manifest::ManifestLoadError;
 use crate::read_working_memory::ReadWorkingMemory;
 use loonfs_types::format::manifest::{MetadataRow, NamespaceManifestEnvelope};
@@ -205,14 +204,6 @@ pub(crate) fn read_working_memory(
     })
 }
 
-/// Returns the stored bytes that a read through `segment_cache` fetches ahead
-/// when it misses a data block, or the default for a read without a cache.
-pub(crate) fn read_ahead_window_bytes(segment_cache: Option<&MetadataSegmentCache>) -> usize {
-    segment_cache.map_or(READAHEAD_WINDOW_BYTES, |cache| {
-        cache.read_ahead_window_bytes
-    })
-}
-
 /// A cache of decoded segment entries (blocks or manifests) under one byte
 /// budget.
 pub(super) type SegmentEntries =
@@ -296,9 +287,6 @@ pub struct MetadataSegmentCache {
     shared: Arc<SharedSegmentBlocks>,
     scope: ObjectStoreScope,
     read_working_memory: Arc<ReadWorkingMemory>,
-    /// The stored bytes that a read through this view fetches ahead when it
-    /// misses a data block (see [`READAHEAD_WINDOW_BYTES`]).
-    read_ahead_window_bytes: usize,
 }
 
 impl std::fmt::Debug for MetadataSegmentCache {
@@ -307,7 +295,6 @@ impl std::fmt::Debug for MetadataSegmentCache {
             .debug_struct("MetadataSegmentCache")
             .field("scope", &self.scope)
             .field("read_working_memory", &self.read_working_memory)
-            .field("read_ahead_window_bytes", &self.read_ahead_window_bytes)
             .finish_non_exhaustive()
     }
 }
@@ -319,14 +306,12 @@ impl MetadataSegmentCache {
         shared: Arc<SharedSegmentBlocks>,
         scope: ObjectStoreScope,
         read_working_memory: Arc<ReadWorkingMemory>,
-        read_ahead_window_bytes: usize,
     ) -> Self {
         Self {
             blocks: Arc::new(MemorySegmentBlocks::new(Arc::clone(&shared), scope)),
             shared,
             scope,
             read_working_memory,
-            read_ahead_window_bytes,
         }
     }
 
@@ -339,20 +324,18 @@ impl MetadataSegmentCache {
         shared: Arc<SharedSegmentBlocks>,
         scope: ObjectStoreScope,
         read_working_memory: Arc<ReadWorkingMemory>,
-        read_ahead_window_bytes: usize,
     ) -> Self {
         Self {
             blocks,
             shared,
             scope,
             read_working_memory,
-            read_ahead_window_bytes,
         }
     }
 
     /// Returns a view over blocks that no other view reads, with a budget of
     /// `max_decoded_bytes` for blocks, a second budget of the same size for
-    /// manifests, and the default block memo budget and read-ahead window.
+    /// manifests, and the default block memo budget.
     pub fn unshared(max_decoded_bytes: usize) -> Self {
         Self::new(
             Arc::new(SharedSegmentBlocks::new(
@@ -361,7 +344,6 @@ impl MetadataSegmentCache {
             )),
             ObjectStoreScope::new(0),
             unshared_read_working_memory(),
-            READAHEAD_WINDOW_BYTES,
         )
     }
 
@@ -477,7 +459,6 @@ mod tests {
                 Arc::clone(&shared),
                 ObjectStoreScope::new(scope),
                 super::unshared_read_working_memory(),
-                crate::limits::READAHEAD_WINDOW_BYTES,
             )
         };
         let (first, second, first_again) = (view(1), view(2), view(1));

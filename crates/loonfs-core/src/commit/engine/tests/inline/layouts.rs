@@ -947,7 +947,7 @@ async fn collection_keeps_shared_objects_named_only_by_an_unfolded_restore() {
             None,
             32,
             None,
-            crate::segment::Readahead::Enabled,
+            crate::segment::BlocksPerRefill::One,
         )
         .await
         .expect("manifest revisions");
@@ -1470,7 +1470,7 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
                 )),
                 32,
                 None,
-                crate::segment::Readahead::Enabled,
+                crate::segment::BlocksPerRefill::One,
             )
             .await
             .expect("layouts");

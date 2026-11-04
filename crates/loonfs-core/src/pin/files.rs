@@ -142,7 +142,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     upper_bound.as_deref(),
                     wave_rows,
                     None,
-                    crate::segment::Readahead::Enabled,
+                    crate::segment::BlocksPerRefill::KeyRange,
                 )
                 .await?;
             let family_exhausted = rows.len() < wave_rows;

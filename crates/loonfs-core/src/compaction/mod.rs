@@ -11,7 +11,7 @@ pub(crate) mod retention;
 pub(crate) mod step;
 
 pub use self::merge_iterator::{
-    refill_iterators, select_next_iterator, SegmentBlockLoader, SegmentRowIterator,
+    refill_iterators, select_next_iterator, LoadedBlocks, SegmentBlockLoader, SegmentRowIterator,
 };
 pub use self::step::{
     CompactionUnitOutcome, MetadataCompactionCancellation, MetadataCompactionPolicy,

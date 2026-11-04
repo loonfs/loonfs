@@ -257,7 +257,14 @@ async fn manifest_round_trip_supports_empty_namespace() {
     for family in ApiMetadataRowFamily::ALL {
         assert!(genesis
             .segments
-            .scan_range(family, "", None, usize::MAX, None, scan::Readahead::Enabled)
+            .scan_range(
+                family,
+                "",
+                None,
+                usize::MAX,
+                None,
+                scan::BlocksPerRefill::One
+            )
             .await
             .expect("empty scan")
             .is_empty());
