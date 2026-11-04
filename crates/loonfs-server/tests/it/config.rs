@@ -488,7 +488,7 @@ root = "/tmp/loonfs-server"
         .expect("valid config")
         .config()
         .clone();
-    assert_eq!(config.max_upload_bytes, 256 * 1024 * 1024);
+    assert_eq!(config.max_upload_bytes.get(), 256 * 1024 * 1024);
 
     let path = write_config(
         r#"
@@ -502,7 +502,7 @@ root = "/tmp/loonfs-server"
 "#,
     );
     let error = load_server_config(&path).expect_err("zero upload limit");
-    assert_invalid_field(error, "max_upload_bytes");
+    assert_zero_rejected_on_decode(error, "max_upload_bytes", "u64");
 }
 
 #[test]
@@ -521,8 +521,8 @@ root = "/tmp/loonfs-server"
         .expect("valid config")
         .config()
         .clone();
-    assert_eq!(config.request_deadline_ms, 60_000);
-    assert_eq!(config.shutdown_deadline_ms, 600_000);
+    assert_eq!(config.request_deadline_ms.get(), 60_000);
+    assert_eq!(config.shutdown_deadline_ms.get(), 600_000);
 
     for field in ["request_deadline_ms", "shutdown_deadline_ms"] {
         let path = write_config(&format!(
@@ -537,7 +537,7 @@ root = "/tmp/loonfs-server"
 "#
         ));
         let error = load_server_config(&path).expect_err("zero deadline must be rejected");
-        assert_invalid_field(error, field);
+        assert_zero_rejected_on_decode(error, field, "u64");
     }
 }
 
@@ -585,7 +585,6 @@ root = "/tmp/loonfs-server"
     assert_eq!(config.idle_session_close_after_ms, 1_800_000);
 
     for field in [
-        "max_download_bytes",
         "tick_interval_ms",
         "maintenance_interval_ms",
         "gc_interval_ms",
@@ -629,14 +628,22 @@ kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#
         ));
-        match load_server_config(&path).expect_err("a zero count must be rejected") {
-            ServerError::ConfigDecode(message) => assert!(
-                message.contains(field) && message.contains("expected a nonzero usize"),
-                "the decode error should identify `{field}` and say why: {message}"
-            ),
-            other => panic!("expected a decode error for `{field}`, got {other:?}"),
-        }
+        let error = load_server_config(&path).expect_err("a zero count must be rejected");
+        assert_zero_rejected_on_decode(error, field, "usize");
     }
+    let path = write_config(
+        r#"
+bind = "127.0.0.1:9400"
+writer_id = "loonfs-server"
+max_download_bytes = 0
+
+[store]
+kind = "local_fs"
+root = "/tmp/loonfs-server"
+"#,
+    );
+    let error = load_server_config(&path).expect_err("a zero download limit must be rejected");
+    assert_zero_rejected_on_decode(error, "max_download_bytes", "u64");
 
     let path = write_config(
         r#"
@@ -1389,6 +1396,17 @@ fn assert_invalid_field(error: ServerError, field: &'static str) {
             assert_eq!(actual, field)
         }
         other => panic!("expected invalid field error for {field}, got {other:?}"),
+    }
+}
+
+/// Asserts that decoding rejected a zero `field` of the nonzero `kind`.
+fn assert_zero_rejected_on_decode(error: ServerError, field: &str, kind: &str) {
+    match error {
+        ServerError::ConfigDecode(message) => assert!(
+            message.contains(field) && message.contains(&format!("expected a nonzero {kind}")),
+            "the decode error should identify `{field}` and say why: {message}"
+        ),
+        other => panic!("expected a decode error for `{field}`, got {other:?}"),
     }
 }
 

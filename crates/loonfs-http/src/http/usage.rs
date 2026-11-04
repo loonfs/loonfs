@@ -1,14 +1,14 @@
 //! The usage report that the binding records once for each request to a
 //! namespace route, and the recorder trait that embedders implement.
 
+use super::extractors::namespace_id_segment;
 use super::router::find_route;
 use crate::BindingState;
 use axum::body::{Body, Bytes};
-use axum::extract::{MatchedPath, RawPathParams, Request, State};
+use axum::extract::{MatchedPath, Request, State};
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::Response;
-use axum::RequestExt as _;
 use http_body::{Frame, SizeHint};
 use loonfs_types::NamespaceId;
 use std::pin::Pin;
@@ -104,11 +104,8 @@ async fn find_namespace_operation(request: &mut Request) -> Option<(&'static str
     // The handler parses the percent-decoded path parameter, so the report
     // parses the same value. The raw path segment of an encoded namespace ID
     // doesn't parse, and the request would go unreported.
-    let parameters = request.extract_parts::<RawPathParams>().await.ok()?;
-    let (_, segment) = parameters
-        .iter()
-        .find(|(name, _)| *name == "namespace_id")?;
-    Some((route.operation, NamespaceId::parse(segment).ok()?))
+    let segment = namespace_id_segment(request).await?;
+    Some((route.operation, NamespaceId::parse(&segment).ok()?))
 }
 
 /// A request body that adds the length of each data frame that the handler

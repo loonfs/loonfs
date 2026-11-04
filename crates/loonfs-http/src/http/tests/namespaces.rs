@@ -256,7 +256,7 @@ async fn a_close_during_an_open_existence_read_leaves_an_open_writer_handle_in_t
 #[tokio::test]
 async fn concurrent_fence_reports_drop_once_and_leave_other_sessions_and_replacements_held() {
     let (directory, router, state, namespaces) = host("fenced-host").await;
-    let (_, other) = test_app(
+    let (_, other, other_namespaces) = test_app_with_sessions(
         test_options(directory.path(), "winning-host"),
         TestAppOptions::default(),
     )
@@ -305,8 +305,13 @@ async fn concurrent_fence_reports_drop_once_and_leave_other_sessions_and_replace
     .await;
     assert_eq!(writer_epoch(&state, &fenced).await, winning_epoch);
     assert_eq!(namespaces.held_ids(), std::slice::from_ref(&kept));
-    assert!(!state.namespaces.forget_if_fenced(&kept, &errors[0]));
-    assert!(!state.namespaces.forget_if_fenced(&fenced, &errors[0]));
+    state.namespaces.forget_after(&kept, &errors[0]);
+    state.namespaces.forget_after(&fenced, &errors[0]);
+    assert_eq!(
+        namespaces.held_ids(),
+        std::slice::from_ref(&kept),
+        "a fenced error does not drop an open session"
+    );
 
     create_directory(&router, &fenced, "/replacement").await;
     let replacement = state.namespaces.open(&fenced).await.expect("replacement");
@@ -319,7 +324,6 @@ async fn concurrent_fence_reports_drop_once_and_leave_other_sessions_and_replace
     );
     assert_eq!(response.into_response().status(), StatusCode::CONFLICT);
     assert_eq!(namespaces.held_ids().len(), 2, "the replacement stays held");
-    assert!(!state.namespaces.forget_if_fenced(&fenced, &errors[0]));
     drop(old);
     create_directory(&router, &fenced, "/still-replacement").await;
     let held = state
@@ -347,8 +351,9 @@ async fn concurrent_fence_reports_drop_once_and_leave_other_sessions_and_replace
         .await
         .expect_err("same session stays fenced");
     assert_eq!(error.code(), ErrorCode::WriterFenced);
-    assert!(other.namespaces.forget_if_fenced(&fenced, &error));
-    assert!(!other.namespaces.forget_if_fenced(&fenced, &error));
+    assert!(other_namespaces.held_ids().contains(&fenced));
+    other.namespaces.forget_after(&fenced, &error);
+    assert!(!other_namespaces.held_ids().contains(&fenced));
 }
 
 #[tokio::test]

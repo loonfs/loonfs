@@ -5,8 +5,7 @@ use super::error::ApiResponseError;
 use super::extractors::SubjectHeaders;
 use super::handlers_filesystem::LivePageQuery;
 use super::query_params::{
-    checked_cursor, checked_list_cursor, effective_page_limit, invalid_path_id_error,
-    live_consistency, read_at,
+    checked_cursor, checked_list_cursor, effective_page_limit, live_consistency, read_at,
 };
 use super::{acquire_download_permit, AppPath, AppQuery, BindingState, NamespaceIdPath};
 use axum::extract::State;
@@ -24,17 +23,15 @@ use std::sync::Arc;
 
 #[derive(Debug, serde::Deserialize)]
 pub(super) struct InodePathParams {
-    pub(super) inode_id: String,
+    #[serde(with = "loonfs_types::inode_id::public")]
+    pub(super) inode_id: InodeId,
 }
 
 #[derive(Debug, serde::Deserialize)]
 pub(super) struct InodeRevisionPathParams {
-    pub(super) inode_id: String,
+    #[serde(with = "loonfs_types::inode_id::public")]
+    pub(super) inode_id: InodeId,
     pub(super) revision_no: RevisionNo,
-}
-
-pub(super) fn parse_inode_id(value: &str) -> Result<InodeId, ApiResponseError> {
-    InodeId::parse(value).map_err(|error| invalid_path_id_error("inode_id", value, error.reason()))
 }
 
 /// The query of a content read by inode.
@@ -132,7 +129,7 @@ pub(super) async fn get_inode(
     AppQuery(query): AppQuery<StatInodeQuery>,
 ) -> Result<Json<loonfs_types::PathEntry>, ApiResponseError> {
     let runtime = state.runtime_for(subject);
-    let inode_id = parse_inode_id(&path.inode_id)?;
+    let inode_id = path.inode_id;
     let mut options = StatOptions {
         at: read_at(query.snapshot_id, query.consistency, query.max_staleness_ms)?,
         ..StatOptions::default()
@@ -218,7 +215,7 @@ pub(super) async fn list_inode_children(
     AppQuery(query): AppQuery<ListInodeChildrenQuery>,
 ) -> Result<Response, ApiResponseError> {
     let runtime = state.runtime_for(subject);
-    let inode_id = parse_inode_id(&path.inode_id)?;
+    let inode_id = path.inode_id;
     let mut options = ListOptions::default();
     if let Some(include) = query.include_attributes {
         options.include_attributes = include.into();
@@ -275,7 +272,7 @@ pub(super) async fn list_file_revisions_by_inode(
 ) -> Result<Json<ListFileRevisionsResponse>, ApiResponseError> {
     let runtime = state.runtime_for(subject);
     let namespace = runtime.namespace(&namespace_id);
-    let inode_id = parse_inode_id(&path.inode_id)?;
+    let inode_id = path.inode_id;
     let options = ListFileRevisionsOptions {
         consistency: live_consistency(query.consistency, query.max_staleness_ms)?,
     };
@@ -328,7 +325,7 @@ pub(super) async fn get_file_content_by_inode(
     range: RangeHeader,
 ) -> Result<Response, ApiResponseError> {
     let runtime = state.runtime_for(subject);
-    let inode_id = parse_inode_id(&path.inode_id)?;
+    let inode_id = path.inode_id;
     let options = ReadFileStreamOptions {
         range: range.stream_range(),
         at: read_at(query.snapshot_id, query.consistency, query.max_staleness_ms)?,
@@ -384,7 +381,7 @@ pub(super) async fn get_file_revision_content_by_inode(
 ) -> Result<Response, ApiResponseError> {
     let runtime = state.runtime_for(subject);
     let namespace = runtime.namespace(&namespace_id);
-    let inode_id = parse_inode_id(&path.inode_id)?;
+    let inode_id = path.inode_id;
     let revision_no = path.revision_no;
     let options = ReadFileStreamOptions {
         range: range.stream_range(),

@@ -90,16 +90,6 @@ impl ServerConfig {
         let auth_policy = self.auth_policy(&bind)?;
         self.check_transport(&bind)?;
         for (field, value) in [
-            ("max_upload_bytes", self.max_upload_bytes),
-            ("request_deadline_ms", self.request_deadline_ms),
-            ("shutdown_deadline_ms", self.shutdown_deadline_ms),
-        ] {
-            validate_positive(field, value, None)?;
-        }
-        if let Some(max_download_bytes) = self.max_download_bytes {
-            validate_positive("max_download_bytes", max_download_bytes, None)?;
-        }
-        for (field, value) in [
             ("max_in_flight_requests", self.max_in_flight_requests),
             ("max_connections", self.max_connections),
         ] {

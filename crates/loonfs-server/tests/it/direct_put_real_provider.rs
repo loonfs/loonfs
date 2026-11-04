@@ -756,8 +756,9 @@ async fn gcp_gcs_signed_capabilities_are_scoped_bounded_and_single_use() {
         "gcs-signed-capabilities",
     );
     // Keep the test payload above both proxy limits without uploading a large file.
-    server_config.max_upload_bytes = PROXY_CAP_BYTES;
-    server_config.max_download_bytes = Some(PROXY_CAP_BYTES);
+    let proxy_cap = std::num::NonZeroU64::new(PROXY_CAP_BYTES).expect("nonzero proxy cap");
+    server_config.max_upload_bytes = proxy_cap;
+    server_config.max_download_bytes = Some(proxy_cap);
     let harness = start_server(server_config).await;
 
     let namespace = "gcs-capabilities";

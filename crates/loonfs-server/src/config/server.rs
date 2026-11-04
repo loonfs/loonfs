@@ -132,14 +132,14 @@ pub struct ServerConfig {
     /// Maximum time a metadata or query request may run, in milliseconds.
     /// Streamed content and long-running operator work are exempt.
     #[serde(default = "default_request_deadline_ms")]
-    pub request_deadline_ms: u64,
+    pub request_deadline_ms: NonZeroU64,
     /// Maximum time graceful shutdown waits for accepted requests to drain
     /// and then for the maintenance sweep to stop, in milliseconds, counted
     /// from the shutdown signal. Requests and sweep visits still running at
     /// the deadline are dropped. Writer and cache settlement continue
     /// afterward.
     #[serde(default = "default_shutdown_deadline_ms")]
-    pub shutdown_deadline_ms: u64,
+    pub shutdown_deadline_ms: NonZeroU64,
     /// Largest request body accepted for service-proxied upload content
     /// requests (`PUT .../uploads/{upload_id}/content`). Enforced
     /// incrementally while the body streams to the store, so it bounds the
@@ -148,7 +148,7 @@ pub struct ServerConfig {
     /// multipart for larger transfers when the capability is advertised.
     /// Advertised as the `upload.service_proxied.max_content_bytes` capability limit.
     #[serde(default = "default_max_upload_bytes")]
-    pub max_upload_bytes: u64,
+    pub max_upload_bytes: NonZeroU64,
     /// Largest file content a service-proxied read (`GET .../filesystem/
     /// content` and inode revision content) will stream and return. Checked
     /// against resolved metadata before fetching content bytes; over-limit reads
@@ -157,7 +157,7 @@ pub struct ServerConfig {
     /// Defaults to the runtime's
     /// [`DEFAULT_MAX_READ_CONTENT_BYTES`](loonfs::DEFAULT_MAX_READ_CONTENT_BYTES),
     /// 256 MiB.
-    pub max_download_bytes: Option<u64>,
+    pub max_download_bytes: Option<NonZeroU64>,
     /// How many proxied upload bodies the server will stream at once;
     /// requests past the cap return `server_busy` before any transfer.
     /// Worst-case upload memory is this times one streamed part, since
@@ -290,8 +290,8 @@ fn default_min_publish_interval_ms() -> u64 {
     200
 }
 
-fn default_request_deadline_ms() -> u64 {
-    loonfs_http::DEFAULT_REQUEST_DEADLINE_MS
+fn default_request_deadline_ms() -> NonZeroU64 {
+    const { NonZeroU64::new(loonfs_http::DEFAULT_REQUEST_DEADLINE_MS).unwrap() }
 }
 
 /// Default for `shutdown_deadline_ms`, so a graceful shutdown waits at most
@@ -306,15 +306,15 @@ const _: () = assert!(
         > loonfs_objectstore::PROVIDER_OPERATION_DEADLINE.as_millis()
 );
 
-fn default_shutdown_deadline_ms() -> u64 {
-    DEFAULT_SHUTDOWN_DEADLINE_MS
+fn default_shutdown_deadline_ms() -> NonZeroU64 {
+    const { NonZeroU64::new(DEFAULT_SHUTDOWN_DEADLINE_MS).unwrap() }
 }
 
-fn default_max_upload_bytes() -> u64 {
+fn default_max_upload_bytes() -> NonZeroU64 {
     // The download default, so anything the proxy accepted, the proxy will
     // serve back. Content ingested past this through `direct_put` needs a
     // raised limit to be read through the server.
-    loonfs::DEFAULT_MAX_READ_CONTENT_BYTES
+    const { NonZeroU64::new(loonfs::DEFAULT_MAX_READ_CONTENT_BYTES).unwrap() }
 }
 
 fn default_max_in_flight_requests() -> NonZeroUsize {
@@ -376,7 +376,7 @@ impl ServerConfig {
             // read cap covers every proxied content read.
             max_read_content_bytes: self
                 .max_download_bytes
-                .unwrap_or(defaults.max_read_content_bytes),
+                .map_or(defaults.max_read_content_bytes, NonZeroU64::get),
             manifest_revalidation_interval_ms: self
                 .manifest_revalidation_interval_ms
                 .unwrap_or(defaults.manifest_revalidation_interval_ms),
@@ -385,8 +385,8 @@ impl ServerConfig {
             trace_mode: loonfs::TraceMode::Remote,
             min_publish_interval_ms: self.min_publish_interval_ms,
             publication: loonfs::PublicationPolicy {
-                write_stop_wait_budget_ms: self.request_deadline_ms / 2,
-                merge_fold_budget_ms: self.request_deadline_ms / 2,
+                write_stop_wait_budget_ms: self.request_deadline_ms.get() / 2,
+                merge_fold_budget_ms: self.request_deadline_ms.get() / 2,
                 ..self.publication.clone()
             },
             inline_content: self.inline_content.clone(),

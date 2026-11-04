@@ -193,7 +193,7 @@ async fn capabilities_endpoint_advertises_capabilities() {
     for (limit, expected) in [
         (
             LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES,
-            config.max_upload_bytes,
+            config.max_upload_bytes.get(),
         ),
         (
             LIMIT_UPLOAD_COMPLETE_MAX_REQUEST_BODY_BYTES,
@@ -202,9 +202,10 @@ async fn capabilities_endpoint_advertises_capabilities() {
         (LIMIT_COMMIT_MAX_REQUEST_BODY_BYTES, 2 * 1024 * 1024),
         (
             LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES,
-            config
-                .max_download_bytes
-                .unwrap_or(loonfs::DEFAULT_MAX_READ_CONTENT_BYTES),
+            config.max_download_bytes.map_or(
+                loonfs::DEFAULT_MAX_READ_CONTENT_BYTES,
+                std::num::NonZeroU64::get,
+            ),
         ),
         (
             LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS,

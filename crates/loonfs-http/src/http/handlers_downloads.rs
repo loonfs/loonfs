@@ -3,7 +3,7 @@
 use super::error::ApiResponseError;
 use super::extractors::SubjectHeaders;
 use super::handlers_filesystem::reject_snapshot_with_revision;
-use super::handlers_inodes::{parse_inode_id, InodePathParams, InodeRevisionPathParams};
+use super::handlers_inodes::{InodePathParams, InodeRevisionPathParams};
 use super::handlers_uploads::{presign_issuer_error, presign_time};
 use super::query_params::{live_consistency, read_at};
 use super::usage::GrantedBytes;
@@ -142,7 +142,7 @@ pub(super) async fn create_download_by_inode(
 ) -> Result<(Extension<GrantedBytes>, Json<CreateDownloadByInodeResponse>), ApiResponseError> {
     let request = request.unwrap_or_default();
     let runtime = state.runtime_for(subject);
-    let inode_id = parse_inode_id(&path.inode_id)?;
+    let inode_id = path.inode_id;
     let at = read_at(
         request.snapshot_id,
         request.consistency,
@@ -202,7 +202,7 @@ pub(super) async fn create_revision_download_by_inode(
 ) -> Result<(Extension<GrantedBytes>, Json<CreateDownloadByInodeResponse>), ApiResponseError> {
     let request = request.unwrap_or_default();
     let runtime = state.runtime_for(subject);
-    let inode_id = parse_inode_id(&path.inode_id)?;
+    let inode_id = path.inode_id;
     let revision_no = path.revision_no;
     let consistency = live_consistency(request.consistency, request.max_staleness_ms)
         .map_err(with_consistency_field_params)?;

@@ -98,7 +98,7 @@ async fn a_pass_fences_a_held_session_that_committed_nothing_since_the_previous_
     assert_eq!(error.code(), ErrorCode::WriterFenced, "{error:?}");
     // The HTTP layer makes this call when a request fails with
     // `writer_fenced`.
-    assert!(namespaces.forget_if_fenced(&namespace_id, &error));
+    namespaces.forget_after(&namespace_id, &error);
     assert!(namespaces.entry(&namespace_id).is_none());
     drop(held);
     namespaces

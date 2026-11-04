@@ -1,7 +1,6 @@
 //! The `query/v0` API group: derived-index reads.
 
 use super::extractors::SubjectHeaders;
-use super::handlers_inodes::parse_inode_id;
 use super::query_params::{effective_page_limit, required_query_param};
 use super::{AppQuery, BindingState, NamespaceIdPath, NoBody, NoQuery};
 use crate::http::error::ApiResponseError;
@@ -15,8 +14,8 @@ use loonfs_grep::{
 use loonfs_types::ErrorResponse;
 use loonfs_types::GrepIndex;
 use loonfs_types::{
-    GrepRequest, GrepResponse, GrepScope, NamespaceId, PageRequest, FEATURE_MAINTENANCE_GREP_INDEX,
-    FEATURE_QUERY_GREP,
+    AbsolutePath, GrepRequest, GrepResponse, GrepScope, InodeId, NamespaceId, PageRequest,
+    FEATURE_MAINTENANCE_GREP_INDEX, FEATURE_QUERY_GREP,
 };
 use std::sync::Arc;
 
@@ -35,16 +34,19 @@ pub(super) struct GrepQuery {
     case_insensitive: Option<bool>,
     /// A complete absolute path that limits matches to its descendants. It can't be combined with
     /// `inode_id`.
-    path_prefix: Option<String>,
+    #[cfg_attr(feature = "openapi", param(value_type = Option<String>))]
+    path_prefix: Option<AbsolutePath>,
     /// An inode that limits matches to its descendants. It can't be combined with `path_prefix`.
     #[cfg_attr(
         feature = "openapi",
         param(
             pattern = r"^ino_[0-7][0-9a-hjkmnp-tv-z]{25}$",
-            example = "ino_000000r0000013kje0d47gc8kw"
+            example = "ino_000000r0000013kje0d47gc8kw",
+            value_type = Option<String>
         )
     )]
-    inode_id: Option<String>,
+    #[serde(default, with = "loonfs_types::inode_id::public::option")]
+    inode_id: Option<InodeId>,
     /// Whether a pattern with no required literal bytes can use a capped exhaustive scan. The
     /// default is `false`.
     #[cfg_attr(feature = "openapi", param(default = false))]
@@ -120,17 +122,7 @@ pub(super) async fn grep(
 
 fn grep_request(query: GrepQuery) -> Result<GrepRequest, ApiResponseError> {
     let pattern = required_query_param(query.pattern, "pattern")?;
-    let path_prefix = query
-        .path_prefix
-        .map(|value| {
-            loonfs_types::AbsolutePath::parse(&value).map_err(|error| {
-                ApiResponseError::new(loonfs_types::ErrorCode::InvalidRequest, &error.to_string())
-                    .with_param("path_prefix")
-            })
-        })
-        .transpose()?;
-    let inode_id = query.inode_id.as_deref().map(parse_inode_id).transpose()?;
-    let scope = match (path_prefix, inode_id) {
+    let scope = match (query.path_prefix, query.inode_id) {
         (None, None) => GrepScope::Namespace,
         (Some(path_prefix), None) => GrepScope::PathPrefix(path_prefix),
         (None, Some(inode_id)) => GrepScope::Inode(inode_id),
