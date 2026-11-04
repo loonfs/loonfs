@@ -144,9 +144,9 @@ pub struct AppConfig {
 /// Builds the router and returns its state.
 ///
 /// The state contains the maintenance sweep when the config maintains, and
-/// this does not start it. [`serve`] starts it. After an embedded listener
-/// drains, the host must shut down the binding's runtime, which [`serve`]
-/// does automatically.
+/// this does not start it. [`serve_with_shutdown`] starts it. After an
+/// embedded listener drains, the host must shut down the binding's runtime,
+/// which [`serve_with_shutdown`] does automatically.
 pub async fn app(config: ValidatedServerConfig, options: AppConfig) -> Result<(Router, AppState)> {
     let ValidatedServerConfig {
         config,
@@ -382,40 +382,49 @@ pub async fn probe_store(config: &ValidatedServerConfig) -> Result<StoreProbeRep
     Ok(run_store_contract_probe(store.as_ref(), &run_id).await)
 }
 
-/// Serves until ctrl-c or SIGTERM, then shuts down gracefully.
+/// Serves on the configured address until ctrl-c or SIGTERM, then shuts down
+/// gracefully.
 ///
 /// Admission closes while the listener remains available to reads and probes.
 /// After active requests drain, the listener closes and accepted work settles.
 pub async fn serve(config: ValidatedServerConfig) -> Result<()> {
     let shutdown = shutdown_signal().map_err(ServerError::Signal)?;
-    serve_with_shutdown(config, shutdown).await
-}
-
-/// [`serve`] with a caller-supplied shutdown trigger instead of process
-/// signals, for hosts that manage their own lifecycle.
-pub async fn serve_with_shutdown(
-    config: ValidatedServerConfig,
-    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
-) -> Result<()> {
     let bind = config.bind;
-    // The identity is loaded before the bind, so a deployment with an
-    // unreadable certificate fails without ever having bound the port.
-    let tls = tls_server_config(&config.config)?;
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .map_err(|source| ServerError::Bind { addr: bind, source })?;
+    serve_with_shutdown(config, AppConfig::default(), listener, shutdown).await
+}
+
+/// [`serve`] on a listener the caller bound, with the store and transfer
+/// overrides of `options` and a caller-supplied shutdown trigger instead of
+/// process signals, for hosts that manage their own lifecycle.
+///
+/// The server serves on the listener's address, whatever the config's `bind`
+/// address says.
+pub async fn serve_with_shutdown(
+    config: ValidatedServerConfig,
+    options: AppConfig,
+    listener: tokio::net::TcpListener,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<()> {
+    let tls = tls_server_config(&config.config)?;
+    let bind = listener.local_addr().map_err(|source| ServerError::Bind {
+        addr: config.bind,
+        source,
+    })?;
     // The first line a deployment sees. An idle server logs nothing until
     // a request arrives, so without this line a container that started
     // correctly and a container that is stuck look the same. This one says
-    // the config loaded and the process has bound the port.
+    // the config loaded and the process holds the port.
     tracing::info!(
         bind = %bind,
         store = config.config.store.kind().as_str(),
         "loonfs-server is listening"
     );
     match tls {
-        Some(tls) => serve_on(TlsListener::new(listener, tls), config, shutdown).await,
-        None => serve_on(listener.tap_io(set_nodelay), config, shutdown).await,
+        Some(tls) => serve_on(TlsListener::new(listener, tls), config, options, shutdown).await,
+        None => serve_on(listener.tap_io(set_nodelay), config, options, shutdown).await,
     }
 }
 
@@ -439,9 +448,10 @@ pub(super) fn set_nodelay(stream: &mut TcpStream) {
 /// Both start the maintenance sweep when the config maintains, close
 /// admission, drain requests, close the listener, stop the sweep, and settle
 /// the runtime in the same order.
-pub(super) async fn serve_on<L>(
+async fn serve_on<L>(
     listener: L,
     config: ValidatedServerConfig,
+    options: AppConfig,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<()>
 where
@@ -449,7 +459,7 @@ where
 {
     let deadline_ms = config.config.shutdown_deadline_ms;
     let max_connections = config.config.max_connections.get();
-    let (router, state) = app(config, AppConfig::default()).await?;
+    let (router, state) = app(config, options).await?;
     let listener = super::connection_limit::ConnectionLimit::new(
         listener,
         max_connections,

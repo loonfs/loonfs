@@ -13,16 +13,15 @@ use loonfs::SharedObjectStore;
 use loonfs_client::{Client, ClientConfig, ClientError, ListOptions, NamespacePath};
 use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
 use loonfs_server::{
-    app, serve_with_shutdown, AppConfig, AuthConfig, JobMode, ServerConfig, ServerError,
-    StoreConfig, TlsServerConfig, TransportConfig,
+    serve_with_shutdown, AppConfig, AuthConfig, JobMode, ServerConfig, ServerError, StoreConfig,
+    TlsServerConfig, TransportConfig,
 };
-use loonfs_test_support::http::{raw_agent, reserve_loopback_address};
+use loonfs_test_support::http::raw_agent;
 use loonfs_types::{ErrorCode, ListCheckpointsResponse, ListPathEntriesResponse, NamespaceId};
 use std::collections::BTreeMap;
 use std::io::Read as _;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::time::Duration;
 
 pub(crate) async fn collect_path_entries(
     client: &Client,
@@ -131,7 +130,14 @@ pub(crate) struct TestServer {
 // through the blocking `ureq` agent as well as the async client. A blocking
 // call holds its worker thread until the response arrives, so the tests run
 // with `flavor = "multi_thread"` to give the server a second worker.
-pub(crate) async fn start_server(config: ServerConfig) -> TestServer {
+//
+// The server never shuts down gracefully; a test stops it by aborting its
+// task. It runs no maintenance sweep: a config that serves and maintains
+// serves only, so sweep traffic never reaches a test's request counts.
+pub(crate) async fn start_server(mut config: ServerConfig) -> TestServer {
+    if config.maintenance == JobMode::ServeAndMaintain {
+        config.maintenance = JobMode::ServeOnly;
+    }
     let (store_root, store_key_prefix) = match &config.store {
         StoreConfig::LocalFs(LocalFsStoreConfig { root, key_prefix }) => {
             (Some(PathBuf::from(root)), key_prefix.clone())
@@ -139,24 +145,19 @@ pub(crate) async fn start_server(config: ServerConfig) -> TestServer {
         _ => (None, None),
     };
     let auth_token = bearer_token(&config);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind listener");
-    let addr = listener.local_addr().expect("listener addr");
+    let (listener, addr) = bind_loopback().await;
     let configured = config.object_store().expect("build the configured store");
     let direct_transfers = configured.direct_transfers();
     let store = configured.into_shared();
-    let (router, _) = app(
-        config.validate().expect("validate the test config"),
-        AppConfig {
-            store: Some(store.clone()),
-            direct_transfers,
-        },
-    )
-    .await
-    .expect("build app");
+    let config = config.validate().expect("validate the test config");
+    let options = AppConfig {
+        store: Some(store.clone()),
+        direct_transfers,
+    };
     let server = tokio::spawn(async move {
-        axum::serve(listener, router).await.expect("serve app");
+        serve_with_shutdown(config, options, listener, std::future::pending())
+            .await
+            .expect("serve app");
     });
     let server_url = format!("http://{addr}");
 
@@ -170,12 +171,20 @@ pub(crate) async fn start_server(config: ServerConfig) -> TestServer {
     }
 }
 
+/// Binds a listener on an unused loopback port.
+async fn bind_loopback() -> (tokio::net::TcpListener, SocketAddr) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let addr = listener.local_addr().expect("listener addr");
+    (listener, addr)
+}
+
 /// A server terminating TLS on loopback with a certificate generated for
 /// this test, plus the CA path a client needs to trust it.
 ///
-/// Unlike [`start_server`] this goes through [`serve_with_shutdown`], the
-/// same entry point the binary uses: the identity load, the bind, and the
-/// TLS listener are the deployed ones rather than a test-only assembly.
+/// The server loads the identity from the files on disk and serves through
+/// the deployed TLS listener.
 pub(crate) struct TlsTestServer {
     pub(crate) client: Client,
     pub(crate) server_url: String,
@@ -216,22 +225,22 @@ pub(crate) async fn start_tls_server_with_certificate(
     std::fs::write(&cert_path, certificate.pem()).expect("write certificate");
     std::fs::write(&key_path, signing_key.serialize_pem()).expect("write private key");
 
-    let addr = reserve_loopback_address();
-    config.bind = addr.to_string();
     config.transport = Some(TransportConfig::Tls(TlsServerConfig {
         cert_path: cert_path.display().to_string(),
         key_path: key_path.display().to_string(),
     }));
     let auth_token = bearer_token(&config);
 
+    let (listener, addr) = bind_loopback().await;
     let (shutdown, shutdown_signal) = tokio::sync::oneshot::channel();
-    let mut server = tokio::spawn(serve_with_shutdown(
+    let server = tokio::spawn(serve_with_shutdown(
         config.validate().expect("validate the test config"),
+        AppConfig::default(),
+        listener,
         async move {
             let _ = shutdown_signal.await;
         },
     ));
-    wait_until_listening(addr, &mut server).await;
 
     let server_url = format!("https://{addr}");
     let ca_cert_path = cert_path.display().to_string();
@@ -249,7 +258,7 @@ pub(crate) async fn start_tls_server_with_certificate(
 
 /// A plaintext server started and stopped through the deployed entry point.
 ///
-/// Unlike [`start_server`], which aborts its task, this shuts down the way a
+/// Unlike [`start_server`], whose task a test aborts, this shuts down the way a
 /// host does: the listener drains, the writer settles, and the SSD tier of
 /// the metadata segment cache, if the server has one, writes the blocks it
 /// queued. That is what lets a test stop one server and start another on
@@ -261,19 +270,18 @@ pub(crate) struct GracefulTestServer {
     server: tokio::task::JoinHandle<Result<(), ServerError>>,
 }
 
-pub(crate) async fn start_graceful_server(mut config: ServerConfig) -> GracefulTestServer {
-    let addr = reserve_loopback_address();
-    config.bind = addr.to_string();
+pub(crate) async fn start_graceful_server(config: ServerConfig) -> GracefulTestServer {
     let auth_token = bearer_token(&config);
-
+    let (listener, addr) = bind_loopback().await;
     let (shutdown, shutdown_signal) = tokio::sync::oneshot::channel();
-    let mut server = tokio::spawn(serve_with_shutdown(
+    let server = tokio::spawn(serve_with_shutdown(
         config.validate().expect("validate the test config"),
+        AppConfig::default(),
+        listener,
         async move {
             let _ = shutdown_signal.await;
         },
     ));
-    wait_until_listening(addr, &mut server).await;
 
     let server_url = format!("http://{addr}");
     GracefulTestServer {
@@ -313,27 +321,6 @@ fn client(server_url: &str, auth_token: Option<String>, ca_cert_path: Option<Str
         ca_cert_path,
     })
     .expect("valid client config")
-}
-
-#[allow(
-    clippy::disallowed_methods,
-    reason = "the harness polls for a port that the server binds on its own schedule"
-)]
-async fn wait_until_listening(
-    addr: SocketAddr,
-    server: &mut tokio::task::JoinHandle<Result<(), ServerError>>,
-) {
-    for _ in 0..500 {
-        if server.is_finished() {
-            let outcome = server.await;
-            panic!("server on {addr} stopped before it listened: {outcome:?}");
-        }
-        if tokio::net::TcpStream::connect(addr).await.is_ok() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("server never started listening on {addr}");
 }
 
 /// Returns the bearer token that a client of a server with `config` sends,
