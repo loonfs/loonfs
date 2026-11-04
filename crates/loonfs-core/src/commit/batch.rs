@@ -48,6 +48,8 @@ pub(crate) enum PublishViewEffect {
     Advanced {
         records: Vec<WalCommitPayload>,
         head: NamespaceReadState,
+        /// The published WAL object's size in the store.
+        wal_bytes: usize,
     },
 }
 
@@ -216,6 +218,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
         return abort_batch(slots, &error);
     }
 
+    let wal_bytes = wal.as_bytes().len();
     let wal_records = wal.into_envelope().into_payload().records;
     settle_published_slots(&mut slots, namespace_id, &wal_records);
     PublishBatchReport {
@@ -223,6 +226,7 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
         effect: PublishViewEffect::Advanced {
             records: wal_records,
             head: resulting_head,
+            wal_bytes,
         },
     }
 }

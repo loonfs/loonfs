@@ -17,6 +17,7 @@ use loonfs_test_support::stores::{
 use loonfs_test_support::test_actor;
 use loonfs_types::ChecksumAlgorithm;
 use std::collections::BTreeSet;
+use std::num::NonZeroU64;
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -107,11 +108,10 @@ async fn ticks_fold_idle_tails_from_the_position_and_then_cost_nothing() {
     server.runtime.shutdown().await.expect("shutdown");
 }
 
-/// Checks that a tick folds at the runtime's configured inline fold size, so
-/// a quiet session's 3 MiB tail under an 8 MiB trigger waits for the idle
-/// fold age.
+/// Checks that a tick leaves a quiet session's tail of 3 MiB of inline
+/// values, below the fold triggers, until the tail reaches the idle fold age.
 #[tokio::test]
-async fn a_tick_leaves_a_tail_below_the_configured_inline_fold_size_until_it_is_idle() {
+async fn a_tick_leaves_a_tail_below_the_fold_triggers_until_it_is_idle() {
     const MIB: usize = 1024 * 1024;
     const VALUE_BYTES: usize = 256 * 1024;
     let directory = tempdir().expect("tempdir");
@@ -121,7 +121,6 @@ async fn a_tick_leaves_a_tail_below_the_configured_inline_fold_size_until_it_is_
     ));
     let mut config = sweep_config(None);
     config.inline_content.inline_content_threshold_bytes = Some(VALUE_BYTES);
-    config.inline_content.inline_content_fold_at_bytes = 8 * MIB;
     let server = SweepServer::start(store.clone(), &config, 0).await;
     let namespace_id = namespace_id("large-fold-trigger");
     server
@@ -163,7 +162,7 @@ async fn a_tick_leaves_a_tail_below_the_configured_inline_fold_size_until_it_is_
     assert_eq!(
         server.wal_tail_objects(&namespace_id).await,
         tail_objects,
-        "a tail below the configured fold size stays unfolded"
+        "a tail below the fold triggers stays unfolded"
     );
     server.tick_after(idle_fold_after_ms(&config)).await;
     assert_eq!(server.wal_tail_objects(&namespace_id).await, 0);
@@ -177,8 +176,11 @@ async fn a_tick_leaves_a_tail_below_the_configured_inline_fold_size_until_it_is_
 /// and no manifest put has failed its precondition.
 #[tokio::test]
 async fn a_tick_waits_for_the_sessions_fold_instead_of_folding_the_tail_again() {
-    const FILES: usize = 8;
-    const FILE_BYTES: usize = 1024;
+    // Each file is the largest inline value, and its bytes don't compress,
+    // so the tail reaches the fold trigger of WAL bytes for the session and
+    // for the tick alike, with the last of these files.
+    const FILE_BYTES: usize = loonfs_types::format::wal::MAX_WAL_INLINE_CONTENT_BYTES;
+    const FILES: usize = loonfs_core::limits::FOLD_AT_WAL_BYTES.div_ceil(FILE_BYTES);
     // The memory store responds at once, so a second fold that ran
     // alongside the parked one would write its content before the release.
     let blocking = Arc::new(BlockingStore::new(
@@ -188,7 +190,7 @@ async fn a_tick_waits_for_the_sessions_fold_instead_of_folding_the_tail_again() 
     ));
     let store = Arc::new(RecordingStore::new(blocking.clone(), KeyPredicate::any()));
     let mut config = sweep_config(None);
-    config.inline_content.inline_content_fold_at_bytes = FILES * FILE_BYTES;
+    config.inline_content.inline_content_threshold_bytes = Some(FILE_BYTES);
     let server = SweepServer::start(store.clone(), &config, 0).await;
     let namespace_id = namespace_id("held-folding");
     server
@@ -206,15 +208,17 @@ async fn a_tick_waits_for_the_sessions_fold_instead_of_folding_the_tail_again() 
     store.reset();
     blocking.block_next();
     for index in 0..FILES {
-        let fill = b'a' + u8::try_from(index).expect("a small index");
+        let seed = u64::try_from(index).expect("a small index");
         held.put_file(
             &format!("/file-{index}"),
-            &[fill; FILE_BYTES],
+            &loonfs_test_support::bytes::incompressible_bytes(seed, FILE_BYTES),
             &test_actor(),
         )
         .await
         .expect("publish");
     }
+    // The last file brought the tail to the fold trigger and started the
+    // session's fold, which parks at its first content write.
     blocking.wait_until_blocked().await;
     let release = async {
         for _ in 0..100 {
@@ -974,13 +978,7 @@ async fn a_session_that_maintained_itself_leaves_the_ticks_nothing_to_do() {
         .writer_id(loonfs_test_support::ids::writer_id("self-maintenance"))
         .wall_clock(clock.clone())
         .monotonic_timer(clock.clone())
-        .config(loonfs::RuntimeConfig {
-            inline_content: loonfs::InlineContentPolicy {
-                inline_content_fold_at_bytes: 1,
-                ..loonfs::InlineContentPolicy::default()
-            },
-            ..loonfs::RuntimeConfig::default()
-        })
+        .session_fold_at_wal_objects(NonZeroU64::MIN)
         .build()
         .await
         .expect("runtime");

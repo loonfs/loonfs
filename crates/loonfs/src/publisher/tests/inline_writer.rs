@@ -3,11 +3,14 @@
 use super::super::admission::estimated_admission_bytes;
 use super::*;
 use crate::{InlineContentPolicy, MaintainMetadataOptions, PutFileOptions};
+use loonfs_core::limits::FOLD_AT_WAL_BYTES;
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
+use loonfs_test_support::bytes::incompressible_bytes;
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::RecordedOperation;
-use loonfs_types::format::wal::decode_wal_object_envelope_zstd;
+use loonfs_types::format::wal::{decode_wal_object_envelope_zstd, MAX_WAL_INLINE_CONTENT_BYTES};
 use std::assert_matches;
+use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 fn policy() -> InlineContentPolicy {
@@ -83,7 +86,6 @@ async fn check_terminal_reload_failure(include_replay: bool) {
         .config(crate::RuntimeConfig {
             inline_content: InlineContentPolicy {
                 inline_content_threshold_bytes: Some(4),
-                inline_content_fold_at_bytes: 4,
                 inline_content_tail_limit_bytes: 4,
                 ..Default::default()
             },
@@ -228,9 +230,9 @@ async fn check_terminal_reload_failure(include_replay: bool) {
     writer.shutdown().await.expect("shutdown");
 }
 
-/// Checks that a put whose outcome is unknown starts no fold, though its
-/// inline bytes reach the fold trigger, and that the batch's retry starts the
-/// fold once the tail it reads from the store includes those bytes.
+/// Checks that a put whose outcome is unknown starts no fold, though its WAL
+/// object reaches the fold trigger, and that the batch's retry starts the
+/// fold once the tail it reads from the store includes that object.
 #[tokio::test]
 async fn the_fold_trigger_waits_for_the_reloaded_tail_after_an_unknown_outcome() {
     let directory = tempdir().expect("directory");
@@ -243,13 +245,13 @@ async fn the_fold_trigger_waits_for_the_reloaded_tail_after_an_unknown_outcome()
         lost.load(Ordering::SeqCst) && !matches!(operation.kind(), OperationKind::Put { .. })
     }));
     store.block_next();
+    // The claim's fence and the warmup leave two WAL objects, so the put's
+    // object reaches the fold trigger.
     let writer = crate::LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("inline-writer"))
+        .session_fold_at_wal_objects(NonZeroU64::new(3).expect("three WAL objects"))
         .config(crate::RuntimeConfig {
-            inline_content: InlineContentPolicy {
-                inline_content_fold_at_bytes: 4,
-                ..policy()
-            },
+            inline_content: policy(),
             min_publish_interval_ms: 0,
             ..crate::RuntimeConfig::default()
         })
@@ -303,7 +305,6 @@ async fn a_new_session_keeps_one_wal_object_budget_inline_until_it_observes_the_
     let (_directory, store, writer, namespace, namespace_writer) =
         writer_with_policy(InlineContentPolicy {
             inline_content_wal_object_budget_bytes: 4,
-            inline_content_fold_at_bytes: 8,
             inline_content_tail_limit_bytes: 8,
             ..policy()
         })
@@ -387,6 +388,42 @@ async fn writer_with_policy_and_byte_limit(
     NamespaceId,
     crate::Namespace<crate::Writable>,
 ) {
+    writer_with(
+        policy,
+        max_estimated_bytes_per_namespace,
+        FOLD_AT_WAL_OBJECTS,
+    )
+    .await
+}
+
+/// Builds the writer of [`writer_with_policy`], whose session folds at
+/// `session_fold_at_wal_objects` WAL objects. The claim's fence and the
+/// warmup commit leave two.
+async fn writer_folding_at(
+    policy: InlineContentPolicy,
+    session_fold_at_wal_objects: u64,
+) -> (
+    tempfile::TempDir,
+    Arc<RecordingStore<LocalFsStore>>,
+    crate::LoonFs<crate::Writable>,
+    NamespaceId,
+    crate::Namespace<crate::Writable>,
+) {
+    let objects = NonZeroU64::new(session_fold_at_wal_objects).expect("a fold trigger");
+    writer_with(policy, 8192, objects).await
+}
+
+async fn writer_with(
+    policy: InlineContentPolicy,
+    max_estimated_bytes_per_namespace: usize,
+    session_fold_at_wal_objects: NonZeroU64,
+) -> (
+    tempfile::TempDir,
+    Arc<RecordingStore<LocalFsStore>>,
+    crate::LoonFs<crate::Writable>,
+    NamespaceId,
+    crate::Namespace<crate::Writable>,
+) {
     let directory = tempdir().expect("directory");
     let store = Arc::new(RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
@@ -394,6 +431,7 @@ async fn writer_with_policy_and_byte_limit(
     ));
     let writer = crate::LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("inline-writer"))
+        .session_fold_at_wal_objects(session_fold_at_wal_objects)
         .config(crate::RuntimeConfig {
             inline_content: policy,
             publication: crate::PublicationPolicy {
@@ -701,19 +739,6 @@ async fn stream_preparation_preserves_chunks_across_the_threshold() {
     writer.shutdown().await.expect("shutdown");
 }
 
-fn put_operation(path: &str, prepared: &crate::publish::PreparedContent) -> FilesystemOperation {
-    FilesystemOperation::PutFile {
-        path: AbsolutePath::parse(path).expect("path"),
-        content: loonfs_types::FileContent::Ref {
-            content_ref: prepared.content_ref().clone(),
-            source_namespace_id: None,
-        },
-        behavior: DestinationBehavior::NoReplace,
-        expected_inode_id: None,
-        expected_revision_no: None,
-    }
-}
-
 #[tokio::test]
 async fn appends_fill_the_wal_object_budget_before_inline_values() {
     let (_directory, store, writer, namespace, namespace_writer) =
@@ -778,13 +803,15 @@ async fn appends_fill_the_wal_object_budget_before_inline_values() {
 
 #[tokio::test]
 async fn tail_fallback_keeps_inline_identity_across_retries_and_a_fold() {
-    let (_directory, store, writer, namespace, namespace_writer) =
-        writer_with_policy(InlineContentPolicy {
-            inline_content_fold_at_bytes: 4,
+    // The first put's WAL object reaches the session's fold trigger.
+    let (_directory, store, writer, namespace, namespace_writer) = writer_folding_at(
+        InlineContentPolicy {
             inline_content_tail_limit_bytes: 4,
             ..policy()
-        })
-        .await;
+        },
+        3,
+    )
+    .await;
     let namespace_reader = writer.namespace(&namespace);
     let fold_permits = hold_every_fold_permit(&writer).await;
     namespace_writer
@@ -884,7 +911,6 @@ async fn retained_receipts_answer_retries_before_fallback_when_content_writes_fa
                 inline_content: InlineContentPolicy {
                     inline_content_threshold_bytes: Some(8),
                     inline_content_wal_object_budget_bytes: 4,
-                    inline_content_fold_at_bytes: 5,
                     inline_content_tail_limit_bytes: 5,
                 },
                 min_publish_interval_ms: 0,
@@ -1261,7 +1287,6 @@ async fn queued_writes_share_tail_reservations_and_split_at_the_wal_object_budge
             ..policy()
         };
         if limited_tail {
-            options.inline_content_fold_at_bytes = 5;
             options.inline_content_tail_limit_bytes = 5;
         }
         let (_directory, store, writer, _namespace, namespace) = writer_with_policy(options).await;
@@ -1337,7 +1362,6 @@ async fn queued_writes_share_tail_reservations_and_split_at_the_wal_object_budge
 async fn a_commit_after_a_dropped_position_is_admitted_against_the_wal_object_budget_alone() {
     let (_directory, store, writer, namespace, namespace_writer) =
         writer_with_policy(InlineContentPolicy {
-            inline_content_fold_at_bytes: 4,
             inline_content_tail_limit_bytes: 4,
             ..policy()
         })
@@ -1382,13 +1406,14 @@ async fn a_fold_that_leaves_the_tail_over_the_trigger_folds_again() {
         metadata_manifest_prefix(&namespace),
     ));
     let recorder = Arc::new(DefaultMetricsRecorder::new());
+    // Each commit's WAL object reaches the fold trigger.
     let writer = crate::LoonFs::builder_with_store(store.clone())
         .metrics_recorder(recorder.clone())
         .writer_id(loonfs_test_support::ids::writer_id("inline-writer"))
+        .session_fold_at_wal_objects(NonZeroU64::MIN)
         .config(crate::RuntimeConfig {
             inline_content: InlineContentPolicy {
                 inline_content_threshold_bytes: Some(4),
-                inline_content_fold_at_bytes: 4,
                 inline_content_tail_limit_bytes: 8,
                 ..Default::default()
             },
@@ -1408,6 +1433,8 @@ async fn a_fold_that_leaves_the_tail_over_the_trigger_folds_again() {
         .create_directory("/warmup", &loonfs_test_support::test_actor())
         .await
         .expect("acquire writer epoch");
+    writer.drain().await.expect("the warmup's fold settles");
+    let folds_before = counter(&recorder, "loonfs.publisher.wal_folds");
 
     store.block_next();
     namespace_writer
@@ -1431,7 +1458,10 @@ async fn a_fold_that_leaves_the_tail_over_the_trigger_folds_again() {
         .expect("publish over the trigger during the fold");
     store.release();
     namespace_writer.wait_for_fold().await.expect("fold twice");
-    assert_eq!(counter(&recorder, "loonfs.publisher.wal_folds"), 2);
+    assert_eq!(
+        counter(&recorder, "loonfs.publisher.wal_folds"),
+        folds_before + 2
+    );
     let usage = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace)
         .load_wal_tail_usage()
         .await
@@ -1508,62 +1538,88 @@ async fn commit_two_values(
         .expect("publish two values");
 }
 
-#[tokio::test]
-async fn inline_bytes_make_automatic_and_explicit_folds_due_before_wal_object_count() {
-    for mode in ["automatic", "explicit"] {
-        // Every fold takes a fold permit, so keeping them keeps the session's
-        // fold waiting until each case has checked the tail.
-        let (_directory, store, writer, namespace, namespace_writer) =
-            writer_with_policy(InlineContentPolicy {
-                inline_content_fold_at_bytes: 4,
-                ..policy()
-            })
-            .await;
-        let namespace_reader = writer.namespace(&namespace);
-        let permits = hold_every_fold_permit(&writer).await;
+/// The size of each file in the WAL-byte trigger tests: the largest inline
+/// value, so each put publishes a WAL object of about this size.
+const LARGE_FILE_BYTES: usize = MAX_WAL_INLINE_CONTENT_BYTES;
+
+/// An inline policy that keeps each file of [`LARGE_FILE_BYTES`] inline.
+fn large_file_policy() -> InlineContentPolicy {
+    InlineContentPolicy {
+        inline_content_threshold_bytes: Some(LARGE_FILE_BYTES),
+        ..InlineContentPolicy::default()
+    }
+}
+
+/// Puts incompressible files of [`LARGE_FILE_BYTES`] until the session's
+/// WAL tail reaches `FOLD_AT_WAL_BYTES`, checks after each put that the
+/// session starts its fold only once the tail's WAL bytes reach the trigger,
+/// and returns the number of files.
+async fn put_large_files_until_the_fold_trigger(
+    writer: &crate::LoonFs<crate::Writable>,
+    namespace: &NamespaceId,
+    namespace_writer: &crate::Namespace<crate::Writable>,
+) -> usize {
+    let publisher = namespace_writer.session().publisher.clone();
+    for index in 0..2 * FOLD_AT_WAL_BYTES / LARGE_FILE_BYTES {
+        let seed = u64::try_from(index).expect("a small index");
         namespace_writer
-            .put_file_with_options(
-                "/file",
-                b"four",
+            .put_file(
+                &format!("/large-{index}"),
+                &incompressible_bytes(seed, LARGE_FILE_BYTES),
                 &loonfs_test_support::test_actor(),
-                &put_options("fold"),
             )
             .await
-            .expect("put");
+            .expect("put a large file");
+        let wal_bytes = writer
+            .mode
+            .publisher
+            .wal_tail_bytes(namespace)
+            .await
+            .expect("the session's position");
+        let started = publisher_state(&publisher).fold.is_some();
+        assert_eq!(
+            started,
+            wal_bytes >= FOLD_AT_WAL_BYTES,
+            "after {} files the tail has {wal_bytes} WAL bytes",
+            index + 1
+        );
+        if started {
+            return index + 1;
+        }
+    }
+    panic!("the large files never reached the fold trigger");
+}
+
+/// Checks that a tail of few large commits makes the session's fold and an
+/// explicit maintenance fold due at `FOLD_AT_WAL_BYTES` of WAL bytes, long
+/// before the WAL object trigger, and that a tail with more than 2 MiB of
+/// inline content below that size starts no fold.
+#[tokio::test]
+async fn wal_bytes_make_automatic_and_explicit_folds_due_before_wal_object_count() {
+    for mode in ["automatic", "explicit"] {
+        let (_directory, store, writer, namespace, namespace_writer) =
+            writer_with_policy_and_byte_limit(large_file_policy(), 4 * LARGE_FILE_BYTES).await;
+        let namespace_reader = writer.namespace(&namespace);
+        // Every fold takes a fold permit, so keeping them keeps the session's
+        // fold waiting until each case has checked the tail.
+        let permits = hold_every_fold_permit(&writer).await;
+        let files =
+            put_large_files_until_the_fold_trigger(&writer, &namespace, &namespace_writer).await;
+        assert!(files * LARGE_FILE_BYTES > 2 * 1024 * 1024);
         let usage = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace)
             .load_wal_tail_usage()
             .await
             .expect("usage");
-        assert_eq!(usage.wal_tail_inline_bytes, 4);
         assert!(usage.wal_tail_objects < FOLD_AT_WAL_OBJECTS.get());
+        assert_eq!(
+            Some(usage.wal_tail_bytes),
+            writer.mode.publisher.wal_tail_bytes(&namespace).await,
+            "the store and the session's position count the same WAL bytes"
+        );
         let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("maintenance"));
         let options = MaintainMetadataOptions::default();
-        let independent = crate::LoonFs::builder_with_store(store.clone())
-            .writer_id(loonfs_test_support::ids::writer_id("independent"))
-            .config(crate::RuntimeConfig {
-                inline_content: InlineContentPolicy {
-                    inline_content_fold_at_bytes: 4,
-                    ..policy()
-                },
-                ..crate::RuntimeConfig::default()
-            })
-            .build()
-            .await
-            .expect("independent maintenance")
-            .maintenance(loonfs_test_support::ids::writer_id("independent"));
-        store.reset();
-        let step = independent
-            .maintain_metadata_with_options(&namespace, &options)
-            .await
-            .expect("maintenance without a writer");
-        assert_eq!(step.wal_fold, None);
-        assert_eq!(
-            family_requests(&store, DurableObjectFamily::WalObject),
-            7,
-            "one windowed WAL discovery without a byte-count replay"
-        );
         if mode == "explicit" {
-            // The session's position shows the tail's inline bytes, so the
+            // The session's position shows the tail's WAL bytes, so the
             // explicit step finds a fold due, and it waits for the
             // namespace's fold lock or for a permit, behind the session's
             // fold. A step that found nothing due would return at once.
@@ -1572,7 +1628,7 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_wal_object_co
             for _ in 0..100 {
                 assert!(
                     futures::poll!(step.as_mut()).is_pending(),
-                    "the runtime's inline fold size makes the explicit fold due"
+                    "the tail's WAL bytes make the explicit fold due"
                 );
                 tokio::task::yield_now().await;
             }
@@ -1597,28 +1653,27 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_wal_object_co
             .await
             .expect("usage after fold");
         assert_eq!(usage.wal_tail_objects, 0);
-        assert_eq!(usage.wal_tail_inline_bytes, 0);
+        assert_eq!(usage.wal_tail_bytes, 0);
         assert_eq!(
             namespace_reader
-                .read_file("/file")
+                .read_file("/large-0")
                 .await
                 .expect("read folded content")
                 .bytes,
-            b"four"
+            incompressible_bytes(0, LARGE_FILE_BYTES)
         );
         writer.shutdown().await.expect("shutdown");
     }
 }
 
-/// Checks that a maintenance pass folds a tail at the runtime's inline fold
-/// size after the session's position passes the revalidation bound. The
-/// session's own fold fails, the position stays with the tail's inline
-/// bytes, and the pass loads the tail from the store but counts the bytes
-/// from the session's position.
+/// Checks that a maintenance pass folds a tail at `FOLD_AT_WAL_BYTES` after
+/// the session's position passes the revalidation bound. The session's own
+/// fold fails, and the pass loads the tail from the store and counts the WAL
+/// bytes that it loaded.
 #[tokio::test]
-async fn a_pass_folds_inline_bytes_that_a_position_past_the_bound_records() {
+async fn a_pass_without_a_current_position_counts_the_wal_bytes_that_it_loads() {
     let directory = tempdir().expect("directory");
-    let namespace = NamespaceId::parse("stale-inline").expect("namespace");
+    let namespace = NamespaceId::parse("stale-position").expect("namespace");
     let store = Arc::new(FailStore::matching(
         LocalFsStore::new(directory.path()).expect("store"),
         is_fold,
@@ -1628,10 +1683,7 @@ async fn a_pass_folds_inline_bytes_that_a_position_past_the_bound_records() {
     let writer = crate::LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("inline-writer"))
         .config(crate::RuntimeConfig {
-            inline_content: InlineContentPolicy {
-                inline_content_fold_at_bytes: 4,
-                ..policy()
-            },
+            inline_content: large_file_policy(),
             min_publish_interval_ms: 0,
             ..crate::RuntimeConfig::default()
         })
@@ -1645,15 +1697,7 @@ async fn a_pass_folds_inline_bytes_that_a_position_past_the_bound_records() {
         .expect("namespace");
     let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
     store.fail_all();
-    namespace_writer
-        .put_file_with_options(
-            "/file",
-            b"four",
-            &loonfs_test_support::test_actor(),
-            &put_options("inline"),
-        )
-        .await
-        .expect("put");
+    put_large_files_until_the_fold_trigger(&writer, &namespace, &namespace_writer).await;
     let _ = namespace_writer.wait_for_fold().await;
     assert!(
         store.attempts() > 0,
@@ -1664,7 +1708,7 @@ async fn a_pass_folds_inline_bytes_that_a_position_past_the_bound_records() {
         .load_wal_tail_usage()
         .await
         .expect("usage");
-    assert_eq!(usage.wal_tail_inline_bytes, 4);
+    assert!(usage.wal_tail_bytes >= FOLD_AT_WAL_BYTES);
     assert!(usage.wal_tail_objects < FOLD_AT_WAL_OBJECTS.get());
     timer.advance_ms(loonfs_core::limits::READ_REVALIDATION_BOUND_MS);
     assert!(writer.mode.publisher.current_position(&namespace).is_none());
@@ -1708,15 +1752,7 @@ async fn invalid_inline_policy_is_rejected_before_store_access() {
             ..policy()
         },
         InlineContentPolicy {
-            inline_content_fold_at_bytes: 33 * 1024 * 1024,
-            ..policy()
-        },
-        InlineContentPolicy {
             inline_content_wal_object_budget_bytes: 0,
-            ..policy()
-        },
-        InlineContentPolicy {
-            inline_content_fold_at_bytes: 0,
             ..policy()
         },
         InlineContentPolicy {
@@ -1758,14 +1794,13 @@ async fn a_delayed_fold_callback_preserves_a_freshly_observed_tail() {
     let directory = tempdir().expect("directory");
     let namespace = NamespaceId::parse("fold-accounting").expect("namespace");
     let store = Arc::new(HeldFoldAnswer::new(directory.path(), &namespace));
-    // The session folds only a full tail, so nothing but the explicit fold
-    // runs until the last commit fills it.
+    // The commits stay far below the session's fold triggers, so nothing but
+    // the explicit fold runs.
     let writer = crate::LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("inline-writer"))
         .config(crate::RuntimeConfig {
             inline_content: InlineContentPolicy {
                 inline_content_threshold_bytes: Some(4),
-                inline_content_fold_at_bytes: 8,
                 inline_content_tail_limit_bytes: 8,
                 ..Default::default()
             },

@@ -4,8 +4,7 @@
 //! compaction units take turns.
 
 use loonfs::{
-    ActorId, InlineContentPolicy, LoonFs, Maintenance, MaintenanceCancellation, Namespace,
-    RuntimeConfig, Writable,
+    ActorId, LoonFs, Maintenance, MaintenanceCancellation, Namespace, RuntimeConfig, Writable,
 };
 use loonfs_test_support::clock::bounded;
 use loonfs_test_support::ids::{namespace_id, writer_id};
@@ -15,11 +14,13 @@ use loonfs_test_support::stores::{
 use loonfs_types::format::segment_blocks::DEFAULT_MAX_DELTA_RUNS;
 use loonfs_types::ChecksumAlgorithm;
 use std::collections::BTreeSet;
+use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Inline bytes that make the session's fold due.
-const FOLD_AT_BYTES: usize = 4096;
+/// WAL objects that make the session's fold due. The backlog folds after
+/// each commit, so its commits leave one object each.
+const FOLD_AT_WAL_OBJECTS: NonZeroU64 = NonZeroU64::new(2).unwrap();
 
 /// A runtime over a store that can park a metadata segment read, with a
 /// held session whose namespace has more delta runs than one compaction
@@ -41,11 +42,8 @@ async fn backlog(name: &str) -> Backlog {
     let recording = Arc::new(RecordingStore::new(store.clone(), KeyPredicate::any()));
     let runtime = LoonFs::builder_with_store(recording.clone())
         .writer_id(writer_id("compaction-calls"))
+        .session_fold_at_wal_objects(FOLD_AT_WAL_OBJECTS)
         .config(RuntimeConfig {
-            inline_content: InlineContentPolicy {
-                inline_content_fold_at_bytes: FOLD_AT_BYTES,
-                ..InlineContentPolicy::default()
-            },
             ..RuntimeConfig::default()
         })
         .build()
@@ -81,13 +79,15 @@ impl Backlog {
         self.runtime.maintenance(writer_id("compaction-calls"))
     }
 
-    /// Commits a file whose inline bytes reach the fold trigger, so the
-    /// session starts its fold, and waits for that fold.
+    /// Commits files until the tail reaches the fold trigger, so the session
+    /// starts its fold, and waits for that fold.
     async fn publish_over_the_fold_trigger(&self) {
-        self.held
-            .put_file("/large", &[b'x'; FOLD_AT_BYTES], &self.actor)
-            .await
-            .expect("publish over the fold trigger");
+        for index in 0..FOLD_AT_WAL_OBJECTS.get() {
+            self.held
+                .put_file(&format!("/trigger-{index}"), b"data", &self.actor)
+                .await
+                .expect("publish toward the fold trigger");
+        }
         self.held.wait_for_fold().await.expect("the session's fold");
     }
 }

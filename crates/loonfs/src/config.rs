@@ -101,14 +101,13 @@ pub struct InlineContentPolicy {
     pub inline_content_threshold_bytes: Option<usize>,
     /// Maximum inline bytes in one WAL object; defaults to 1 MiB.
     pub inline_content_wal_object_budget_bytes: usize,
-    /// Unfolded inline bytes that make a fold due; defaults to 2 MiB.
-    pub inline_content_fold_at_bytes: usize,
     /// Limit on unfolded and admitted inline bytes; defaults to 32 MiB.
     /// A session without a position (before its first publish, or after its
     /// position is dropped) admits at most the WAL object budget until its
     /// next publish reads the tail, so the tail can exceed the limit by the
     /// WAL object budget each time the position is dropped before a fold.
-    /// `MAX_UNFOLDED_WAL_OBJECTS` stops new commits regardless of this limit.
+    /// The write stop, in unfolded WAL bytes or WAL objects, stops new
+    /// commits regardless of this limit.
     pub inline_content_tail_limit_bytes: usize,
 }
 
@@ -117,7 +116,6 @@ impl Default for InlineContentPolicy {
         Self {
             inline_content_threshold_bytes: Some(64 * 1024),
             inline_content_wal_object_budget_bytes: 1024 * 1024,
-            inline_content_fold_at_bytes: 2 * 1024 * 1024,
             inline_content_tail_limit_bytes: 32 * 1024 * 1024,
         }
     }
@@ -178,15 +176,9 @@ impl InlineContentPolicy {
                 "`inline_content_wal_object_budget_bytes` must be between 1 and {MAX_WAL_OBJECT_INLINE_CONTENT_BYTES}"
             )));
         }
-        if self.inline_content_fold_at_bytes == 0 || self.inline_content_tail_limit_bytes == 0 {
+        if self.inline_content_tail_limit_bytes == 0 {
             return Err(Error::Config(
-                "`inline_content_fold_at_bytes` and `inline_content_tail_limit_bytes` must be greater than zero".to_owned()
-            ));
-        }
-        if self.inline_content_fold_at_bytes > self.inline_content_tail_limit_bytes {
-            return Err(Error::Config(
-                "`inline_content_fold_at_bytes` must not exceed `inline_content_tail_limit_bytes`"
-                    .to_owned(),
+                "`inline_content_tail_limit_bytes` must be greater than zero".to_owned(),
             ));
         }
         Ok(())

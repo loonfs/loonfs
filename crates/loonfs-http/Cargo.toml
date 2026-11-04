@@ -41,6 +41,8 @@ async-trait.workspace = true
 http-body-util.workspace = true
 hyper = { workspace = true, features = ["server", "http1"] }
 hyper-util = { workspace = true, features = ["tokio", "service"] }
+# The session tests lower the WAL objects that make a session's fold due.
+loonfs = { workspace = true, features = ["test-support"] }
 loonfs-client.workspace = true
 # The expiry tests commit a writer's expiry through the commit engine, which
 # the runtime doesn't expose.

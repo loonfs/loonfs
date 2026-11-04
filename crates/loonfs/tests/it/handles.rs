@@ -583,7 +583,11 @@ fn a_failed_fold_preserves_the_write_stop_until_the_store_recovers() {
         let namespace = writer
             .open_namespace(&namespace_id)
             .expect("open namespace");
-        let seed_wal_objects = wal_tail_object_threshold() - 1;
+        // The seed leaves room for a few commits below the write stop. The
+        // first of them starts the session's fold, which fails, and the rest
+        // check that commits continue after a failed fold.
+        let rounds = 4;
+        let seed_wal_objects = loonfs_core::limits::MAX_UNFOLDED_WAL_OBJECTS - rounds - 2;
         loonfs_core::test_support::NamespaceFixture::new(
             failing.as_ref(),
             &namespace_id,
@@ -594,10 +598,10 @@ fn a_failed_fold_preserves_the_write_stop_until_the_store_recovers() {
         )
         .append_wal_objects(seed_wal_objects)
         .await
-        .expect("seed WAL tail below fold threshold");
+        .expect("seed WAL tail over the fold trigger and below the write stop");
 
         failing.fail_all();
-        for round in 0..(loonfs_core::limits::MAX_UNFOLDED_WAL_OBJECTS - seed_wal_objects - 2) {
+        for round in 0..rounds {
             namespace
                 .put_file(
                     &format!("/failed-fold/file-{round}.txt"),

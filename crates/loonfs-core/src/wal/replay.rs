@@ -20,7 +20,8 @@ pub(crate) fn project_validated_wal_tail(
             object_key: object.object_key().to_owned(),
             error,
         };
-        tail.push_object(&payload.records).map_err(replay_error)?;
+        tail.push_object(&payload.records, object.stored_bytes())
+            .map_err(replay_error)?;
         head = head.after_wal_object(payload);
     }
     Ok(ReplayedWalTail {

@@ -1,7 +1,7 @@
 //! Publish-time metadata and the numbered WAL tip retained between batches.
 
 use crate::error::Result;
-use crate::limits::MAX_UNFOLDED_WAL_OBJECTS;
+use crate::limits::{MAX_UNFOLDED_WAL_BYTES, MAX_UNFOLDED_WAL_OBJECTS};
 use crate::manifest::move_read_basis;
 use crate::manifest::{
     load_basis_metadata_segments, metadata_basis_from_manifest, LoadedMetadataBasis,
@@ -33,11 +33,49 @@ pub(crate) struct PublishMetadataView<'a, S: ObjectStore + ?Sized> {
     pub(crate) tail_discovered: bool,
     manifest_segments: VerifiedMetadataSegments<'a, S>,
     pub(crate) position: WriterPosition,
-    /// The WAL tail length when it has reached the write-stop bound, so the
-    /// tail this publish would extend stays inside it. New commits are refused
-    /// with that count; a commit id the namespace already records is still
-    /// returned from its receipt.
-    write_stop: Option<u64>,
+    /// The write stop that the WAL tail has reached, if any. New commits are
+    /// refused with its reason; a commit id the namespace already records is
+    /// still returned from its receipt.
+    write_stop: Option<WriteStop>,
+}
+
+/// The write stop that a WAL tail has reached, with the tail's size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WriteStop {
+    /// The tail has at least `MAX_UNFOLDED_WAL_OBJECTS` WAL objects.
+    Objects(u64),
+    /// The tail has at least `MAX_UNFOLDED_WAL_BYTES` unfolded WAL bytes.
+    Bytes(usize),
+}
+
+impl WriteStop {
+    /// Returns the write stop that a tail of `objects` WAL objects and
+    /// `wal_bytes` unfolded WAL bytes has reached, or `None` when it has
+    /// reached neither.
+    fn reached(objects: u64, wal_bytes: usize) -> Option<Self> {
+        if objects >= MAX_UNFOLDED_WAL_OBJECTS {
+            Some(Self::Objects(objects))
+        } else if wal_bytes >= MAX_UNFOLDED_WAL_BYTES {
+            Some(Self::Bytes(wal_bytes))
+        } else {
+            None
+        }
+    }
+
+    /// Returns the `maintenance_required` reason of a commit refused at
+    /// this write stop.
+    pub(super) fn reason(self) -> String {
+        match self {
+            Self::Objects(objects) => format!(
+                "WAL tail has {objects} objects, at the write stop of {MAX_UNFOLDED_WAL_OBJECTS} objects; publishes resume once maintenance brings it back under {MAX_UNFOLDED_WAL_OBJECTS} objects"
+            ),
+            Self::Bytes(wal_bytes) => format!(
+                "WAL tail has {wal_bytes} bytes, at the write stop of {} MiB; publishes resume once maintenance brings it back under {} MiB",
+                MAX_UNFOLDED_WAL_BYTES / (1024 * 1024),
+                MAX_UNFOLDED_WAL_BYTES / (1024 * 1024),
+            ),
+        }
+    }
 }
 
 impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
@@ -72,7 +110,7 @@ impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
         self.position.retention_floor_seq
     }
 
-    pub(super) fn write_stop(&self) -> Option<u64> {
+    pub(super) fn write_stop(&self) -> Option<WriteStop> {
         self.write_stop
     }
 
@@ -114,6 +152,12 @@ impl WriterPosition {
     /// Returns the inline content bytes in the position's WAL tail.
     pub fn wal_tail_inline_bytes(&self) -> usize {
         self.tail.inline_bytes()
+    }
+
+    /// Returns the unfolded WAL bytes in the position's WAL tail: the stored
+    /// sizes of its WAL objects with commits.
+    pub fn wal_tail_bytes(&self) -> usize {
+        self.tail.wal_bytes()
     }
 
     /// Moves the position onto `manifest`, and returns `false` when the
@@ -185,8 +229,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         };
 
         let manifest_segments = loaded_basis.segments;
-        let wal_tail_objects = position.wal_tail_objects();
-        let write_stop = (wal_tail_objects >= MAX_UNFOLDED_WAL_OBJECTS).then_some(wal_tail_objects);
+        let write_stop = WriteStop::reached(position.wal_tail_objects(), position.wal_tail_bytes());
         Ok(PublishMetadataView {
             acquired_writer,
             content_write_permits: &self.content_writes,
@@ -219,4 +262,35 @@ fn load_writer_position<S: ObjectStore + ?Sized>(
         tail,
         basis_checked: anchor.checked.clone(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WriteStop;
+    use crate::limits::{MAX_UNFOLDED_WAL_BYTES, MAX_UNFOLDED_WAL_OBJECTS};
+
+    #[test]
+    fn the_write_stop_names_the_threshold_that_the_tail_reached() {
+        assert_eq!(
+            WriteStop::reached(MAX_UNFOLDED_WAL_OBJECTS - 1, MAX_UNFOLDED_WAL_BYTES - 1),
+            None
+        );
+        for (objects, wal_bytes, threshold) in [
+            (MAX_UNFOLDED_WAL_OBJECTS, 0, "1024 objects"),
+            (
+                MAX_UNFOLDED_WAL_OBJECTS + 1,
+                MAX_UNFOLDED_WAL_BYTES,
+                "1024 objects",
+            ),
+            (1, MAX_UNFOLDED_WAL_BYTES, "64 MiB"),
+        ] {
+            let reason = WriteStop::reached(objects, wal_bytes)
+                .expect("the tail is at a write stop")
+                .reason();
+            assert!(
+                reason.contains(&format!("at the write stop of {threshold}")),
+                "{reason}"
+            );
+        }
+    }
 }

@@ -36,8 +36,8 @@ pub(crate) enum FoldWhen {
     /// Any tail. A tail that's already folded is reported as
     /// [`FoldWalOutcome::AlreadyCurrent`].
     Always,
-    /// A tail of at least `max_wal_tail_objects` WAL objects, a tail with the
-    /// runtime's inline fold size of inline content, or a tail whose newest
+    /// A tail of at least `max_wal_tail_objects` WAL objects, a tail of at
+    /// least `FOLD_AT_WAL_BYTES` unfolded WAL bytes, or a tail whose newest
     /// commit has reached the runtime's idle fold age.
     Due { max_wal_tail_objects: u64 },
 }
@@ -184,12 +184,8 @@ impl PublisherRegistry {
     /// When `session` has a current position, the tail is the position's,
     /// and its newest commit is the session's last publish, on the runtime's
     /// monotonic clock. Otherwise the check loads the current manifest and
-    /// the tail from the store, the tail's newest commit is dated on the
-    /// wall clock, and the tail's inline bytes are those of the session's
-    /// position whatever the age of its last check, or zero without a
-    /// position. A position past the revalidation bound can only count more
-    /// inline bytes than the tail has, because another process may have
-    /// folded since.
+    /// the tail from the store, and the tail's newest commit is dated on the
+    /// wall clock.
     async fn fold_not_due(
         &self,
         namespace_id: &NamespaceId,
@@ -204,10 +200,10 @@ impl PublisherRegistry {
         };
         let core = &self.shared.context.runtime_core;
         let position = session.and_then(NamespacePublisher::current_position);
-        let (objects, inline_bytes, newest_commit_at_ms, now_ms, observed) = match position {
+        let (objects, wal_bytes, newest_commit_at_ms, now_ms, observed) = match position {
             Some(position) => (
                 position.wal_tail_objects(),
-                position.wal_tail_inline_bytes(),
+                position.wal_tail_bytes(),
                 session.and_then(NamespacePublisher::last_published_at_ms),
                 core.timer().monotonic_now_ms(),
                 None,
@@ -220,9 +216,7 @@ impl PublisherRegistry {
                 let status = NamespaceStorageDiagnostics::from(&anchor);
                 (
                     status.wal_tail_objects,
-                    session
-                        .and_then(|session| session.read_position.current())
-                        .map_or(0, |position| position.wal_tail_inline_bytes()),
+                    anchor.wal_tail_bytes(),
                     status.wal_tail_newest_commit_at_ms,
                     core.now_ms(),
                     Some(anchor.publication_basis()),
@@ -233,7 +227,7 @@ impl PublisherRegistry {
         let idle_fold_due_at_ms = newest_commit_at_ms
             .filter(|_| objects > 0)
             .and_then(|committed_at_ms| trigger.idle_fold_due_at_ms(committed_at_ms));
-        if trigger.fold_is_due(max_wal_tail_objects, objects, inline_bytes)
+        if trigger.fold_is_due(max_wal_tail_objects, objects, wal_bytes)
             || idle_fold_due_at_ms.is_some_and(|due_at_ms| now_ms >= due_at_ms)
         {
             return Ok(None);

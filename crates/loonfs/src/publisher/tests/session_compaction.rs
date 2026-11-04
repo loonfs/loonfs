@@ -3,18 +3,14 @@
 //! claim.
 
 use super::*;
-use crate::{InlineContentPolicy, MetadataCompactionOutcome};
+use crate::MetadataCompactionOutcome;
 use loonfs_core::control::LoadedManifest;
 use loonfs_types::format::manifest::RunTier;
 use loonfs_types::format::segment_blocks::{DEFAULT_MAX_DELTA_RUNS, DEFAULT_MIN_COMPACTION_RUNS};
+use std::num::NonZeroU64;
 
-/// Each write leaves one inline byte in the tail, so each write is folded.
-fn fold_every_write() -> InlineContentPolicy {
-    InlineContentPolicy {
-        inline_content_fold_at_bytes: 1,
-        ..InlineContentPolicy::default()
-    }
-}
+/// Each write publishes one WAL object, so each write is folded.
+const FOLD_EVERY_WRITE: NonZeroU64 = NonZeroU64::MIN;
 
 /// Writes one file and waits for its fold and the compaction that fold
 /// starts, so each call leaves one more delta run unless the session
@@ -132,10 +128,7 @@ async fn a_session_compacts_after_its_own_fold_without_any_hint() {
     let store: SharedStore = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
     let writer = crate::LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
-        .config(crate::RuntimeConfig {
-            inline_content: fold_every_write(),
-            ..crate::RuntimeConfig::default()
-        })
+        .session_fold_at_wal_objects(FOLD_EVERY_WRITE)
         .build()
         .await
         .expect("build writer");
@@ -186,10 +179,7 @@ async fn park_a_session_compaction() -> ParkedCompaction {
     let recorder = Arc::new(DefaultMetricsRecorder::new());
     let writer = crate::LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
-        .config(crate::RuntimeConfig {
-            inline_content: fold_every_write(),
-            ..crate::RuntimeConfig::default()
-        })
+        .session_fold_at_wal_objects(FOLD_EVERY_WRITE)
         .metrics_recorder(recorder.clone())
         .build()
         .await
@@ -292,10 +282,7 @@ async fn a_session_compaction_reads_no_wal_objects() {
     ));
     let writer = crate::LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
-        .config(crate::RuntimeConfig {
-            inline_content: fold_every_write(),
-            ..crate::RuntimeConfig::default()
-        })
+        .session_fold_at_wal_objects(FOLD_EVERY_WRITE)
         .build()
         .await
         .expect("build writer");
@@ -427,10 +414,7 @@ async fn maintenance_values_from_one_runtime_share_one_compactor_claim() {
     let store: SharedStore = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
     let writer = crate::LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
-        .config(crate::RuntimeConfig {
-            inline_content: fold_every_write(),
-            ..crate::RuntimeConfig::default()
-        })
+        .session_fold_at_wal_objects(FOLD_EVERY_WRITE)
         .build()
         .await
         .expect("build writer");
@@ -487,10 +471,7 @@ async fn a_runtime_runs_no_more_compactions_at_once_than_its_compaction_limit() 
     let store = Arc::new(segment_write_watch(temp_dir.path()));
     let writer = crate::LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
-        .config(crate::RuntimeConfig {
-            inline_content: fold_every_write(),
-            ..crate::RuntimeConfig::default()
-        })
+        .session_fold_at_wal_objects(FOLD_EVERY_WRITE)
         .execution_budget(one_compaction_at_a_time())
         .build()
         .await
@@ -551,10 +532,7 @@ async fn closing_a_session_does_not_wait_for_another_sessions_compaction() {
     ));
     let writer = crate::LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
-        .config(crate::RuntimeConfig {
-            inline_content: fold_every_write(),
-            ..crate::RuntimeConfig::default()
-        })
+        .session_fold_at_wal_objects(FOLD_EVERY_WRITE)
         .execution_budget(one_compaction_at_a_time())
         .build()
         .await

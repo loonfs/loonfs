@@ -1,7 +1,7 @@
 //! Discovers the WAL tip and advances cached namespace views.
 
 use super::frame::{ValidatedWalTail, WalTailLoadError};
-use super::reader::{load_wal_object, WalWalk};
+use super::reader::{load_wal_object, StoredWalEnvelope, WalWalk};
 use super::replay::project_validated_wal_tail;
 use crate::cache::{HeadAndWalTailCache, WalTailCacheKey};
 use crate::control_object::ControlObjectLoadError;
@@ -10,7 +10,6 @@ use crate::namespace::state::NamespaceReadState;
 use crate::RuntimeReadContext;
 use futures::{stream, StreamExt};
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::wal::WalObjectEnvelope;
 use loonfs_types::{NamespaceId, WalNo, MAX_PUBLIC_INTEGER};
 use std::ops::ControlFlow;
 use std::sync::Arc;
@@ -87,10 +86,7 @@ async fn load_wal_after<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     after: WalNo,
-    mut visit: impl FnMut(
-        String,
-        Arc<WalObjectEnvelope>,
-    ) -> Result<ControlFlow<()>, ControlObjectLoadError>,
+    mut visit: impl FnMut(String, StoredWalEnvelope) -> Result<ControlFlow<()>, ControlObjectLoadError>,
 ) -> Result<WalReadOutcome, ControlObjectLoadError> {
     let mut through = after.0;
     let mut window = 1;
@@ -201,9 +197,9 @@ pub async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
     );
     let mut other_epoch = false;
     let visit = |object_key: String,
-                 envelope: Arc<WalObjectEnvelope>|
+                 envelope: StoredWalEnvelope|
      -> Result<ControlFlow<()>, ControlObjectLoadError> {
-        if envelope.payload().writer_epoch != state.writer_epoch {
+        if envelope.envelope.payload().writer_epoch != state.writer_epoch {
             other_epoch = true;
             return Ok(ControlFlow::Break(()));
         }

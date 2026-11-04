@@ -2,8 +2,8 @@
 //! namespace while the former writer's folds and publishes are in flight.
 
 use loonfs::{
-    ErrorCode, FoldWalOutcome, InlineContentPolicy, LoonFs, Namespace, NamespaceSessionStatus,
-    ReadOnly, SharedObjectStore, Writable,
+    ErrorCode, FoldWalOutcome, LoonFs, Namespace, NamespaceSessionStatus, ReadOnly,
+    SharedObjectStore, Writable,
 };
 use loonfs_objectstore::keys::{metadata_manifest_prefix, wal_prefix};
 use loonfs_objectstore::PutMode;
@@ -16,6 +16,7 @@ use loonfs_test_support::stores::{
 use loonfs_types::format::manifest::decode_namespace_manifest_json;
 use loonfs_types::format::wal::decode_wal_object_envelope_zstd;
 use loonfs_types::{ChecksumAlgorithm, ManifestNo, NamespaceId};
+use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -74,11 +75,13 @@ struct Takeover {
 /// one commit, so A's session has a position.
 ///
 /// A's gate parks the next request that `parked` selects once a test calls
-/// `block_next`. `inline_content` sets A's fold limits.
+/// `block_next`. `session_fold_at_wal_objects` sets the WAL objects that
+/// make A's own fold due, and the setup waits for any fold that its commit
+/// starts.
 async fn takeover(
     name: &str,
     parked: fn(&NamespaceId) -> Selector,
-    inline_content: InlineContentPolicy,
+    session_fold_at_wal_objects: Option<NonZeroU64>,
 ) -> Takeover {
     let namespace_id = namespace_id(name);
     let store: SharedObjectStore = Arc::new(MemoryStore::new(ChecksumAlgorithm::Crc64nvme));
@@ -88,18 +91,19 @@ async fn takeover(
     ));
     let recording = Arc::new(RecordingStore::new(gate.clone(), KeyPredicate::any()));
     let recorded: SharedObjectStore = recording.clone();
-    let writer = LoonFs::builder_with_store(recorded)
+    let builder = LoonFs::builder_with_store(recorded)
         .writer_id(writer_id(name))
         .config(loonfs::RuntimeConfig {
             min_publish_interval_ms: 0,
             manifest_revalidation_interval_ms: 0,
             max_staleness_ms: 0,
-            inline_content,
             ..loonfs::RuntimeConfig::default()
-        })
-        .build()
-        .await
-        .expect("writer A");
+        });
+    let builder = match session_fold_at_wal_objects {
+        Some(objects) => builder.session_fold_at_wal_objects(objects),
+        None => builder,
+    };
+    let writer = builder.build().await.expect("writer A");
     let actor = loonfs_test_support::test_actor();
     writer
         .create_namespace(&namespace_id, &actor)
@@ -112,6 +116,7 @@ async fn takeover(
         .create_directory("/a", &actor)
         .await
         .expect("A's first commit");
+    writer.drain().await.expect("A's first commit settles");
     Takeover {
         reader: writer.read_only().namespace(&namespace_id),
         namespace_id,
@@ -176,15 +181,6 @@ fn parked_commits(namespace_id: &NamespaceId) -> Selector {
     Box::new(data_wal_put(namespace_id))
 }
 
-/// An inline policy under which every commit with inline bytes starts the
-/// session's own fold.
-fn fold_every_inline_commit() -> InlineContentPolicy {
-    InlineContentPolicy {
-        inline_content_fold_at_bytes: 1,
-        ..InlineContentPolicy::default()
-    }
-}
-
 /// Checks that when A's own fold loses its manifest number to B's claim,
 /// the fold folds B's log over the claim, that A's session finds that it's
 /// fenced at its next commit and not from the fold, and that a read in A's
@@ -196,7 +192,7 @@ fn fold_every_inline_commit() -> InlineContentPolicy {
 /// writer epoch, so A's position doesn't move onto it.
 #[tokio::test]
 async fn a_session_fold_that_loses_to_a_claim_folds_the_new_writers_log() {
-    let fixture = takeover("fold-over-claim", parked_folds, fold_every_inline_commit()).await;
+    let fixture = takeover("fold-over-claim", parked_folds, Some(NonZeroU64::MIN)).await;
     let peer_gate: Gate = Arc::new(BlockingStore::matching(
         fixture.store.clone(),
         data_wal_put(&fixture.namespace_id),
@@ -260,12 +256,7 @@ async fn a_session_fold_that_loses_to_a_claim_folds_the_new_writers_log() {
 /// move past B's claim.
 #[tokio::test]
 async fn a_maintenance_fold_over_a_claim_leaves_the_former_writer_reading_the_claim() {
-    let fixture = takeover(
-        "maintenance-fold-over-claim",
-        parked_folds,
-        InlineContentPolicy::default(),
-    )
-    .await;
+    let fixture = takeover("maintenance-fold-over-claim", parked_folds, None).await;
     let actor = loonfs_test_support::test_actor();
     fixture
         .namespace
@@ -377,12 +368,7 @@ impl Takeover {
 /// commit too.
 #[tokio::test]
 async fn a_check_goes_past_this_runtimes_own_manifest_to_a_claim() {
-    let fixture = takeover(
-        "past-own-manifest",
-        parked_commits,
-        InlineContentPolicy::default(),
-    )
-    .await;
+    let fixture = takeover("past-own-manifest", parked_commits, None).await;
     fixture
         .while_a_commit_waits(async {
             let before = fixture.current_manifest_no().await;
@@ -408,12 +394,7 @@ async fn a_check_goes_past_this_runtimes_own_manifest_to_a_claim() {
 /// position, and drops the position once A's commit releases the engine.
 #[tokio::test]
 async fn a_claim_below_this_runtimes_own_manifest_is_not_its_own() {
-    let fixture = takeover(
-        "claim-below-own",
-        parked_commits,
-        InlineContentPolicy::default(),
-    )
-    .await;
+    let fixture = takeover("claim-below-own", parked_commits, None).await;
     fixture
         .while_a_commit_waits(async {
             fixture.peer_commits().await;

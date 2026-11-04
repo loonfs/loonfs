@@ -577,7 +577,7 @@ async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
             .expect("WAL object");
         let wal_object = decode_wal_object_envelope_zstd(&bytes).expect("WAL decode");
         expected
-            .push_object(&wal_object.payload().records)
+            .push_object(&wal_object.payload().records, bytes.len())
             .expect("later rows");
     }
     let cached = engine
@@ -681,5 +681,54 @@ async fn a_published_fold_moves_the_position_with_its_tail() {
             &engine.writer_position().expect("a fold input").tail
         ),
         "reads and folds take the position's one tail"
+    );
+}
+
+/// Checks that a tail of few large commits stops new commits at
+/// `MAX_UNFOLDED_WAL_BYTES` of WAL bytes, long before the WAL object stop,
+/// and that the refusal names the byte stop.
+#[tokio::test]
+async fn new_commits_wait_at_the_byte_write_stop_and_the_refusal_names_it() {
+    use crate::limits::{MAX_UNFOLDED_WAL_BYTES, MAX_UNFOLDED_WAL_OBJECTS};
+    use loonfs_types::format::wal::{
+        MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_OBJECT_INLINE_CONTENT_BYTES,
+    };
+
+    let (_directory, _store, mut engine, context) = setup().await;
+    let values_per_commit = MAX_WAL_OBJECT_INLINE_CONTENT_BYTES / MAX_WAL_INLINE_CONTENT_BYTES;
+    let mut commits = 0;
+    while engine.wal_tail_bytes().unwrap_or(0) < MAX_UNFOLDED_WAL_BYTES {
+        let values = (0..values_per_commit)
+            .map(|value| {
+                let seed = u64::try_from(commits * values_per_commit + value).expect("a seed");
+                inline(Bytes::from(
+                    loonfs_test_support::bytes::incompressible_bytes(
+                        seed,
+                        MAX_WAL_INLINE_CONTENT_BYTES,
+                    ),
+                ))
+            })
+            .collect();
+        publish(
+            &mut engine,
+            &context,
+            candidate(&format!("large-{commits}"), values),
+        )
+        .await
+        .expect("a commit below the write stop");
+        commits += 1;
+    }
+    assert!(engine.wal_tail_objects() < Some(MAX_UNFOLDED_WAL_OBJECTS));
+    let refused = publish(
+        &mut engine,
+        &context,
+        candidate("refused", vec![inline(Bytes::from_static(b"small"))]),
+    )
+    .await
+    .expect_err("a new commit at the byte write stop");
+    assert_matches!(
+        &refused,
+        CoreError::MaintenanceRequired { reason, .. } if reason.contains("write stop of 64 MiB"),
+        "{refused}"
     );
 }

@@ -34,9 +34,9 @@ pub struct NamespaceCommitEnginePublishResult {
 pub struct WalTailReport {
     /// Unfolded WAL objects.
     pub objects: u64,
-    /// Inline content bytes in the unfolded WAL objects that the position
-    /// records, leaving out a put whose outcome is unknown.
-    pub inline_bytes: usize,
+    /// Stored bytes of the unfolded WAL objects with commits that the
+    /// position records, leaving out a put whose outcome is unknown.
+    pub wal_bytes: usize,
     /// Where the attempt found the tail.
     pub source: TailSource,
 }
@@ -160,6 +160,15 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
             .current
             .as_ref()
             .map(WriterPosition::wal_tail_inline_bytes)
+    }
+
+    /// Unfolded WAL bytes as of the last publication unit, or `None` when
+    /// the engine has no position.
+    pub fn wal_tail_bytes(&self) -> Option<usize> {
+        self.position
+            .current
+            .as_ref()
+            .map(WriterPosition::wal_tail_bytes)
     }
 
     /// Returns the engine's position, whether or not the session is fenced,
@@ -497,7 +506,7 @@ impl PositionState {
             results: published.results,
             wal_tail: Some(WalTailReport {
                 objects: update.wal_tail_objects,
-                inline_bytes: update.wal_tail_inline_bytes,
+                wal_bytes: update.wal_tail_bytes,
                 source: if wal_tail_discovered {
                     TailSource::Store
                 } else {
@@ -523,13 +532,19 @@ impl PositionState {
                 self.invalidate_projection();
                 return TailProjectionUpdate {
                     wal_tail_objects: position.wal_tail_objects(),
-                    wal_tail_inline_bytes: position.wal_tail_inline_bytes(),
+                    wal_tail_bytes: position.wal_tail_bytes(),
                     advanced: false,
                 };
             }
-            PublishViewEffect::Advanced { records, head } => {
+            PublishViewEffect::Advanced {
+                records,
+                head,
+                wal_bytes,
+            } => {
                 position.read_basis.head = head;
-                if let Err(error) = Arc::make_mut(&mut position.tail).push_object(&records) {
+                if let Err(error) =
+                    Arc::make_mut(&mut position.tail).push_object(&records, wal_bytes)
+                {
                     // The WAL is already durable. Discard the position;
                     // replay and folding will report the accounting error.
                     tracing::warn!(
@@ -540,7 +555,7 @@ impl PositionState {
                     self.invalidate_projection();
                     return TailProjectionUpdate {
                         wal_tail_objects: position.wal_tail_objects(),
-                        wal_tail_inline_bytes: position.wal_tail_inline_bytes(),
+                        wal_tail_bytes: position.wal_tail_bytes(),
                         advanced: false,
                     };
                 }
@@ -548,7 +563,7 @@ impl PositionState {
         }
         let update = TailProjectionUpdate {
             wal_tail_objects: position.wal_tail_objects(),
-            wal_tail_inline_bytes: position.wal_tail_inline_bytes(),
+            wal_tail_bytes: position.wal_tail_bytes(),
             advanced,
         };
         self.current = Some(position);
@@ -571,7 +586,7 @@ struct LoadedPublishView<'a, S: ObjectStore + ?Sized> {
 /// and moved the position.
 struct TailProjectionUpdate {
     wal_tail_objects: u64,
-    wal_tail_inline_bytes: usize,
+    wal_tail_bytes: usize,
     advanced: bool,
 }
 

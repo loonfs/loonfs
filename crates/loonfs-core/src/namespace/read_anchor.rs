@@ -41,6 +41,12 @@ impl NamespaceReadAnchor {
         &self.manifest
     }
 
+    /// Returns the unfolded WAL bytes above the anchor's manifest: the
+    /// stored sizes of the WAL objects with commits that the anchor read.
+    pub fn wal_tail_bytes(&self) -> usize {
+        self.tail.wal_bytes()
+    }
+
     /// Returns the anchor's manifest, with the time that the anchor's checks
     /// began, as a basis that a publication can build on.
     pub fn publication_basis(&self) -> PublicationBasis {

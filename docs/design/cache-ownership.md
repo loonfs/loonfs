@@ -34,7 +34,7 @@ The session's tail belongs to its position. The position (`WriterPosition`) keep
 
 Because the position keeps its tail, the session doesn't look its tail up in the shared cache, so a publish, a fold, a receipt check, or a read in the writer's process has no evicted tail to handle.
 
-The session bounds its tail itself. The write stop makes new commits wait for a fold at 128 unfolded WAL objects, and once about 32 MiB of inline bytes are unfolded, LoonFS stages new inline content as content objects instead (an append's bytes stay in the WAL past that limit). The fold that follows the fold trigger (32 WAL objects or 2 MiB of inline bytes) moves the tail into segments. The cost is memory. A session keeps its tail in memory until a fold moves the tail into segments, and during a large install the tail can be larger than 64 MiB, so a host pays that memory for each open session.
+The session bounds its tail itself. The write stop makes new commits wait for a fold at 64 MiB of unfolded WAL bytes or 1,024 unfolded WAL objects, and once about 32 MiB of inline bytes are unfolded, LoonFS stages new inline content as content objects instead (an append's bytes stay in the WAL past that limit). The fold that follows the fold trigger (8 MiB of WAL bytes or 256 WAL objects) moves the tail into segments. The cost is memory. A session keeps its tail in memory until a fold moves the tail into segments, and during a large install the tail can be larger than 64 MiB, so a host pays that memory for each open session.
 
 Why does the tail belong to the position and not to the cache? The session reads the tail on every publish, fold, and receipt check, so if the cache evicted the tail, the next publish would read the tail back through discovery, and each path that reads the tail would have to handle the miss. With the tail in the position, none of those paths needs a miss case, and the write stop and the fold trigger bound the memory.
 
@@ -64,7 +64,7 @@ Why a budget for each kind instead of one budget? With one budget, a scan that l
 | | Cost |
 | --- | --- |
 | Memory for heads | About 0.6 to 0.9 KB per head (about 116 KB with the largest access control list), in a 16 MiB budget of their own that fits about 18,000 heads at 0.9 KB. The lab's 100k sandbox workload uses 17 namespaces (about 15 KB). 10,000 namespaces need about 9 MB, or about 1.2 GB if each has the largest access control list, more than the budget fits |
-| Memory for a writer session's tail | Kept by the session up to the write stop (128 WAL objects, with about 32 MiB of inline bytes plus appends), for each open session, and larger than 64 MiB during a large install |
+| Memory for a writer session's tail | Kept by the session up to the write stop (64 MiB of WAL bytes or 1,024 WAL objects), for each open session, and larger than 64 MiB during a large install |
 | Requests after an eviction | None for a writer's tail, because the cache doesn't keep it. A reader whose tail is evicted replays the tail from the store |
 | Code for heads | No record outside the cache. Each in-flight entry is its key's join, and an invalidation or an eviction of the key during the entry's load or check makes that load or check install nothing |
 | Code for the writer's tail | No path for an evicted tail |

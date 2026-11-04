@@ -6,20 +6,22 @@
 use futures::stream::{self, StreamExt};
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
 use loonfs::{
-    DestinationBehavior, ErrorCode, InlineContentPolicy, LoonFs, Namespace, PutFileOptions,
-    SharedObjectStore, Writable,
+    DestinationBehavior, ErrorCode, LoonFs, Namespace, PutFileOptions, SharedObjectStore, Writable,
 };
+use loonfs_core::limits::FOLD_AT_WAL_BYTES;
+use loonfs_test_support::bytes::incompressible_bytes;
 use loonfs_test_support::stores::{
     Intercept, InterceptStore, Interceptor, MemoryStore, OperationContext, OperationKind,
 };
 use loonfs_types::{ActorId, ChecksumAlgorithm, MonotonicTimer};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 /// Inline bytes that each turn appends to the session's transcript.
-const APPEND_BYTES: usize = 4096;
+const APPEND_BYTES: usize = 16 * 1024;
 /// Inline bytes of the state file that each turn replaces.
-const STATE_BYTES: usize = 1024;
+const STATE_BYTES: usize = 4 * 1024;
 
 /// One run of the workload. Every session commits at the same time, and
 /// each of its turns appends to its transcript and then replaces its state
@@ -34,21 +36,22 @@ struct Shape {
     request_elapsed_ms: u64,
 }
 
-impl Shape {
-    /// How many times the run's inline bytes fill the fold threshold.
-    fn fold_thresholds(self) -> u64 {
-        let inline_bytes = self.sessions * self.turns * (APPEND_BYTES + STATE_BYTES);
-        let fold_at_bytes = InlineContentPolicy::default().inline_content_fold_at_bytes;
-        u64::try_from(inline_bytes / fold_at_bytes).expect("a test's threshold count fits in u64")
-    }
+/// What one run published.
+struct Folds {
+    /// The folds that the writer published.
+    folds: u64,
+    /// How many times the run's WAL puts fill `FOLD_AT_WAL_BYTES`.
+    thresholds: u64,
 }
 
 /// A store that takes a set time for each request on the paused test clock,
-/// so a slow request costs no wall time.
+/// so a slow request costs no wall time, and that counts the bytes of its
+/// WAL puts.
 #[derive(Debug)]
 struct StoreDelay {
     wal_put_elapsed_ms: u64,
     request_elapsed_ms: u64,
+    wal_bytes: AtomicUsize,
 }
 
 #[async_trait::async_trait]
@@ -60,8 +63,13 @@ impl Interceptor for StoreDelay {
         reason = "the delay stands in for provider latency on the paused test clock"
     )]
     async fn before(&self, context: &OperationContext<'_>) -> (Intercept, ()) {
-        let wal_put =
-            context.key().contains("/wal/") && matches!(context.kind(), OperationKind::Put { .. });
+        let wal_put = match context.kind() {
+            OperationKind::Put { bytes, .. } if context.key().contains("/wal/") => {
+                self.wal_bytes.fetch_add(bytes.len(), Ordering::Relaxed);
+                true
+            }
+            _ => false,
+        };
         let elapsed_ms = if wal_put {
             self.wal_put_elapsed_ms
         } else {
@@ -135,12 +143,12 @@ async fn session_turns(
         .await
         .expect("create the transcript");
     for turn in 0..turns {
-        let fill = b'a' + u8::try_from(turn % 26).expect("a letter");
-        let line = vec![fill; APPEND_BYTES];
+        let seed = u64::try_from(session * 1_000_000 + turn).expect("a small seed");
+        let line = incompressible_bytes(seed, APPEND_BYTES);
         retry_refusals(|| namespace.append_file(&transcript, &line, actor))
             .await
             .expect("append to the transcript");
-        let body = vec![fill; STATE_BYTES];
+        let body = incompressible_bytes(!seed, STATE_BYTES);
         retry_refusals(|| namespace.put_file_with_options(&state, &body, actor, &replace))
             .await
             .expect("replace the state file");
@@ -148,15 +156,18 @@ async fn session_turns(
 }
 
 /// Runs every session's turns at once against one writer, and returns how
-/// many folds the writer published.
-async fn folds_for(shape: Shape) -> u64 {
-    let store: SharedObjectStore = Arc::new(InterceptStore::with_interceptor(
+/// many folds the writer published, and how many fold thresholds its WAL
+/// puts filled.
+async fn folds_for(shape: Shape) -> Folds {
+    let intercepted = Arc::new(InterceptStore::with_interceptor(
         MemoryStore::new(ChecksumAlgorithm::Crc64nvme),
         StoreDelay {
             wal_put_elapsed_ms: shape.wal_put_elapsed_ms,
             request_elapsed_ms: shape.request_elapsed_ms,
+            wal_bytes: AtomicUsize::new(0),
         },
     ));
+    let store: SharedObjectStore = intercepted.clone();
     let recorder = Arc::new(DefaultMetricsRecorder::new());
     let writer: LoonFs<Writable> = LoonFs::builder_with_store(store)
         .writer_id(loonfs_test_support::ids::writer_id("concurrent-folds"))
@@ -183,22 +194,28 @@ async fn folds_for(shape: Shape) -> u64 {
         .wait_for_fold()
         .await
         .expect("wait for the last fold");
-    recorder
+    let folds = recorder
         .snapshot()
         .by_name("loonfs.publisher.wal_folds")
         .map(|entry| match entry.value {
             MetricValue::Counter(count) => count,
             ref other => panic!("expected a counter, found {other:?}"),
         })
-        .sum()
+        .sum();
+    let wal_bytes = intercepted.interceptor().wal_bytes.load(Ordering::Relaxed);
+    Folds {
+        folds,
+        thresholds: u64::try_from(wal_bytes / FOLD_AT_WAL_BYTES)
+            .expect("a test's threshold count fits in u64"),
+    }
 }
 
 /// Checks that a writer with many concurrent committers starts a fold only
-/// once its WAL tail reaches the inline fold threshold, so it folds at most
-/// once for each threshold of inline bytes, and that it folds once for each
-/// threshold when its folds run faster than its commits. (Each WAL object
-/// here batches enough commits that the inline threshold, not the WAL
-/// object count, starts each fold.)
+/// once its WAL tail reaches the fold threshold of WAL bytes, so it folds at
+/// most once for each threshold of WAL bytes, and that it folds once for
+/// each threshold when its folds run faster than its commits. (The files
+/// don't compress, and each WAL object here batches enough commits that the
+/// WAL bytes, not the WAL object count, start each fold.)
 ///
 /// When every other request takes twice as long as a WAL put, each fold runs
 /// slower than the commits, and the tail grows past the threshold while the
@@ -206,7 +223,7 @@ async fn folds_for(shape: Shape) -> u64 {
 /// commits take fewer folds. That's why the fold counts of two runs with
 /// different store latency can't be compared.
 #[tokio::test(start_paused = true)]
-async fn concurrent_committers_fold_once_per_threshold_of_inline_bytes() {
+async fn concurrent_committers_fold_once_per_threshold_of_wal_bytes() {
     let slow_commits = |sessions, turns| Shape {
         sessions,
         turns,
@@ -214,8 +231,7 @@ async fn concurrent_committers_fold_once_per_threshold_of_inline_bytes() {
         request_elapsed_ms: 5,
     };
     for shape in [slow_commits(32, 80), slow_commits(250, 10)] {
-        let thresholds = shape.fold_thresholds();
-        let folds = folds_for(shape).await;
+        let Folds { folds, thresholds } = folds_for(shape).await;
         assert!(
             (thresholds - 1..=thresholds).contains(&folds),
             "{shape:?} published {folds} folds for {thresholds} fold thresholds"
@@ -227,8 +243,7 @@ async fn concurrent_committers_fold_once_per_threshold_of_inline_bytes() {
         request_elapsed_ms: 40,
         ..slow_commits(32, 80)
     };
-    let thresholds = slow_folds.fold_thresholds();
-    let folds = folds_for(slow_folds).await;
+    let Folds { folds, thresholds } = folds_for(slow_folds).await;
     assert!(
         (1..thresholds - 1).contains(&folds),
         "{slow_folds:?} published {folds} folds for {thresholds} fold thresholds, \

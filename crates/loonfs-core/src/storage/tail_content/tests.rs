@@ -128,7 +128,7 @@ async fn fixture<S: ObjectStore>(
             .expect("tail checksum"),
     };
     let mut tail = ProjectedWalTail::default();
-    tail.push_object(&[piece_commit(&reference, offset, bytes, 2)])
+    tail.push_object(&[piece_commit(&reference, offset, bytes, 2)], 0)
         .expect("tail");
     (layout, tail, reference)
 }
@@ -286,7 +286,7 @@ async fn local_large_tail_assembles_without_sources() {
         records.push(piece_commit(&reference, offset, piece.clone(), index + 2));
     }
     let mut tail = ProjectedWalTail::default();
-    tail.push_object(&records).expect("tail");
+    tail.push_object(&records, 0).expect("tail");
     let content = tail.content(&reference).expect("content");
     let pieces = assemble_tail_content(&HEAD.family_root_id, &content).expect("pieces");
     assert_eq!(pieces.len(), 13);

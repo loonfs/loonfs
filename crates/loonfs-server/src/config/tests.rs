@@ -11,7 +11,6 @@ use loonfs_types::SecretString;
 fn inline_content_defaults_and_overrides_preserve_explicit_disablement() {
     let defaults = loonfs::InlineContentPolicy::default();
     assert_eq!(defaults.inline_content_threshold_bytes, Some(64 * 1024));
-    assert_eq!(defaults.inline_content_fold_at_bytes, 2 * 1024 * 1024);
     assert_eq!(defaults.inline_content_wal_object_budget_bytes, 1024 * 1024);
     assert_eq!(defaults.inline_content_tail_limit_bytes, 32 * 1024 * 1024);
     for (source, threshold) in [
@@ -29,6 +28,8 @@ fn inline_content_defaults_and_overrides_preserve_explicit_disablement() {
     }
     toml::from_str::<loonfs::InlineContentPolicy>("inline_content_threshold_bytes = true")
         .expect_err("a boolean threshold should be rejected");
+    toml::from_str::<loonfs::InlineContentPolicy>("inline_content_fold_at_bytes = 1")
+        .expect_err("the fold trigger isn't a setting");
 }
 
 #[test]

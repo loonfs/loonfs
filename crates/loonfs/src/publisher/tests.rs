@@ -242,6 +242,7 @@ impl TestCore {
         RuntimeCore::open(
             store,
             self.config,
+            FOLD_AT_WAL_OBJECTS,
             self.execution_budget,
             self.run_policy,
             Some(ConfiguredObjectStoreKind::LocalFs),
@@ -381,6 +382,20 @@ async fn create_namespace(runtime: &TestRuntime, namespace_id: &NamespaceId) {
 /// Pacing for standalone test publishers, long enough that
 /// `wait_past_publish_pacing` outlasting it is meaningful.
 const TEST_STANDALONE_PACING_MS: u64 = 1_000;
+
+/// Returns an operation that puts the prepared content at `path`.
+fn put_operation(path: &str, prepared: &crate::publish::PreparedContent) -> FilesystemOperation {
+    FilesystemOperation::PutFile {
+        path: AbsolutePath::parse(path).expect("path"),
+        content: loonfs_types::FileContent::Ref {
+            content_ref: prepared.content_ref().clone(),
+            source_namespace_id: None,
+        },
+        behavior: DestinationBehavior::NoReplace,
+        expected_inode_id: None,
+        expected_revision_no: None,
+    }
+}
 
 fn publisher_state(
     publisher: &NamespacePublisher,

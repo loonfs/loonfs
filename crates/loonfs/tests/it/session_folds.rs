@@ -6,8 +6,8 @@
 //! operation folds the tail itself, once.
 
 use loonfs::{
-    ActorId, InlineContentPolicy, LoonFs, MaintainMetadataOptions, Maintenance,
-    MaintenanceCancellation, Namespace, NamespaceId, RuntimeConfig, Writable,
+    ActorId, LoonFs, MaintainMetadataOptions, Maintenance, MaintenanceCancellation, Namespace,
+    NamespaceId, RuntimeConfig, Writable,
 };
 use loonfs_test_support::ids::{namespace_id, writer_id};
 use loonfs_test_support::stores::{
@@ -21,9 +21,12 @@ use std::sync::Arc;
 /// The number of files that the fork writes, each stored inline in the
 /// fork's WAL tail.
 const FILES: usize = 8;
-/// The size of each file, in bytes. The last of the fork's [`FILES`] files
-/// brings the tail's inline bytes to the fold trigger.
+/// The size of each file, in bytes.
 const FILE_BYTES: usize = 1024;
+/// The WAL objects that make a session's fold due: the session's claim
+/// writes a fence, so the last of the fork's [`FILES`] files brings the tail
+/// to the fold trigger.
+const FOLD_AT_WAL_OBJECTS: NonZeroU64 = NonZeroU64::new(FILES as u64 + 1).unwrap();
 
 type Store = RecordingStore<Arc<BlockingStore<MemoryStore>>>;
 
@@ -68,11 +71,8 @@ async fn family() -> Family {
     let store = Arc::new(RecordingStore::new(blocking.clone(), KeyPredicate::any()));
     let runtime = LoonFs::builder_with_store(store.clone())
         .writer_id(writer_id("session-folds"))
+        .session_fold_at_wal_objects(FOLD_AT_WAL_OBJECTS)
         .config(RuntimeConfig {
-            inline_content: InlineContentPolicy {
-                inline_content_fold_at_bytes: FILES * FILE_BYTES,
-                ..InlineContentPolicy::default()
-            },
             ..RuntimeConfig::default()
         })
         .build()
@@ -366,11 +366,8 @@ async fn pin_after_a_replaced_fold(head_pin: HeadPin) {
     let store = Arc::new(RecordingStore::new(blocking.clone(), KeyPredicate::any()));
     let runtime = LoonFs::builder_with_store(store.clone())
         .writer_id(writer_id("pin-retry"))
+        .session_fold_at_wal_objects(FOLD_AT_WAL_OBJECTS)
         .config(RuntimeConfig {
-            inline_content: InlineContentPolicy {
-                inline_content_fold_at_bytes: FILES * FILE_BYTES,
-                ..InlineContentPolicy::default()
-            },
             ..RuntimeConfig::default()
         })
         .build()
@@ -419,7 +416,9 @@ async fn pin_after_a_replaced_fold(head_pin: HeadPin) {
         _ = &mut pinned => panic!("{head_pin:?}: the pin finished without writing its record"),
         () = blocking.wait_until_blocked() => {}
     }
-    write(FILES - 1, FILES).await;
+    // The pin's fold folded the fence, so one more file than before brings
+    // the tail to the fold trigger.
+    write(FILES - 1, FILES + 1).await;
     namespace.wait_for_fold().await.expect("the session's fold");
     let folded = runtime
         .maintenance(writer_id("pin-retry"))
@@ -442,11 +441,7 @@ async fn pin_after_a_replaced_fold(head_pin: HeadPin) {
     let operations = [operations, retry].concat();
     let content_puts = write_keys(&operations, &KeyPredicate::content_blob());
     let distinct: BTreeSet<_> = content_puts.iter().collect();
-    assert_eq!(
-        distinct.len(),
-        2 * FILES - 1,
-        "{head_pin:?}: {content_puts:#?}"
-    );
+    assert_eq!(distinct.len(), 2 * FILES, "{head_pin:?}: {content_puts:#?}");
     assert_eq!(
         content_puts.len(),
         distinct.len(),

@@ -8,7 +8,6 @@ use crate::trace::phase_event;
 use crate::Maintenance;
 use crate::{Error, FoldWalOutcome, Result};
 use futures::FutureExt;
-use loonfs_core::limits::FOLD_AT_WAL_OBJECTS;
 use loonfs_core::Phase;
 use std::panic::AssertUnwindSafe;
 use tokio::sync::{oneshot, watch};
@@ -172,7 +171,11 @@ impl NamespacePublisher {
         };
         let registry = PublisherRegistry { shared };
         let when = FoldWhen::Due {
-            max_wal_tail_objects: FOLD_AT_WAL_OBJECTS.get(),
+            max_wal_tail_objects: self
+                .context
+                .runtime_core
+                .session_fold_at_wal_objects()
+                .get(),
         };
         match registry.fold_namespace(&self.namespace_id, when).await {
             Ok(NamespaceFold::Folded(folded)) => {
