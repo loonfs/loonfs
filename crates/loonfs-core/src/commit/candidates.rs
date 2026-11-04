@@ -7,7 +7,7 @@ use super::engine::{CommitCandidate, ContentPreparation, ContentPreparationError
 use super::publish_view::PublishMetadataView;
 use super::{CommitFingerprint, CommitPlan};
 use crate::authorize::Authorizer;
-use crate::error::{CoreError, MetadataViewError, Result};
+use crate::error::{CoreError, Result};
 use crate::limits::MAX_UNFOLDED_WAL_OBJECTS;
 use crate::metadata::{CommitReceiptRecord, MetadataView};
 use crate::path::write::{CommitIntent, FilesystemOperation, PublishPlanningSession};
@@ -116,13 +116,12 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
         Err(error) => return CandidateAdmission::independent(Err(error)),
     }
     if let Some(wal_tail_objects) = view.write_stop() {
-        return CandidateAdmission::independent(Err(MetadataViewError::MaintenanceRequired {
+        return CandidateAdmission::independent(Err(CoreError::MaintenanceRequired {
             namespace_id: namespace_id.clone(),
             reason: format!(
                 "WAL tail has {wal_tail_objects} objects; publishes resume once maintenance brings it back under {MAX_UNFOLDED_WAL_OBJECTS}"
             ),
-        }
-        .into()));
+        }));
     }
     if let Err(error) = candidate.validate_request_limits() {
         return CandidateAdmission::independent(Err(error));
