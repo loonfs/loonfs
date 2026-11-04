@@ -756,7 +756,7 @@ async fn a_source_that_isnt_a_live_fork_is_an_invalid_request() {
         assert_eq!(error.code(), ErrorCode::InvalidRequest, "{source}");
         assert_eq!(
             error.invalid_request_param().as_deref(),
-            Some("/source_namespace_id"),
+            Some("source_namespace_id"),
             "{source}"
         );
     }

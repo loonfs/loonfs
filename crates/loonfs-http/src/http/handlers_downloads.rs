@@ -23,6 +23,10 @@ use loonfs_types::{
 use std::sync::Arc;
 use std::time::Duration;
 
+/// The JSON Pointers of the download request fields that a rejection can
+/// name.
+const DOWNLOAD_BODY_FIELDS: &[&str] = &["/consistency", "/max_staleness_ms", "/start_offset"];
+
 /// Issues a short-lived download URL for a file.
 ///
 /// This endpoint reads metadata but does not proxy the file bytes, so service-proxied
@@ -71,7 +75,7 @@ pub(super) async fn create_download(
         request.consistency,
         request.max_staleness_ms,
     )
-    .map_err(with_consistency_field_params)?;
+    .map_err(|error| error.with_body_field_params(DOWNLOAD_BODY_FIELDS))?;
     let issuer = direct_get_issuer(&state)?;
 
     let options = DownloadOptions {
@@ -88,7 +92,9 @@ pub(super) async fn create_download(
         }
         None => namespace.create_download_with_options(path, &options).await,
     }
-    .map_err(|error| ApiResponseError::runtime(error).with_body_field_param("start_offset"))?;
+    .map_err(|error| {
+        ApiResponseError::runtime(error).with_body_field_params(DOWNLOAD_BODY_FIELDS)
+    })?;
     let ranges = presigned_ranges(issuer, &download.ranges, download.start_offset).await?;
 
     Ok((
@@ -148,7 +154,7 @@ pub(super) async fn create_download_by_inode(
         request.consistency,
         request.max_staleness_ms,
     )
-    .map_err(with_consistency_field_params)?;
+    .map_err(|error| error.with_body_field_params(DOWNLOAD_BODY_FIELDS))?;
     let issuer = direct_get_issuer(&state)?;
     let options = DownloadOptions {
         at,
@@ -158,7 +164,9 @@ pub(super) async fn create_download_by_inode(
         .namespace(&namespace_id)
         .create_download_by_inode_with_options(inode_id, &options)
         .await
-        .map_err(|error| ApiResponseError::runtime(error).with_body_field_param("start_offset"))?;
+        .map_err(|error| {
+            ApiResponseError::runtime(error).with_body_field_params(DOWNLOAD_BODY_FIELDS)
+        })?;
     inode_download_response(issuer, namespace_id, download).await
 }
 
@@ -205,7 +213,7 @@ pub(super) async fn create_revision_download_by_inode(
     let inode_id = path.inode_id;
     let revision_no = path.revision_no;
     let consistency = live_consistency(request.consistency, request.max_staleness_ms)
-        .map_err(with_consistency_field_params)?;
+        .map_err(|error| error.with_body_field_params(DOWNLOAD_BODY_FIELDS))?;
     let issuer = direct_get_issuer(&state)?;
     let options = DownloadOptions {
         at: ReadAt::Live(consistency),
@@ -215,16 +223,10 @@ pub(super) async fn create_revision_download_by_inode(
         .namespace(&namespace_id)
         .create_revision_download_by_inode_with_options(inode_id, revision_no, &options)
         .await
-        .map_err(|error| ApiResponseError::runtime(error).with_body_field_param("start_offset"))?;
+        .map_err(|error| {
+            ApiResponseError::runtime(error).with_body_field_params(DOWNLOAD_BODY_FIELDS)
+        })?;
     inode_download_response(issuer, namespace_id, target).await
-}
-
-/// Reports a rejected `consistency` or `max_staleness_ms` as the JSON
-/// Pointer of the body field.
-fn with_consistency_field_params(error: ApiResponseError) -> ApiResponseError {
-    error
-        .with_body_field_param("consistency")
-        .with_body_field_param("max_staleness_ms")
 }
 
 async fn inode_download_response(

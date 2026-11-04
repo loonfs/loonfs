@@ -276,7 +276,7 @@ pub enum Error {
     InvalidRequest {
         /// Public reason the field was rejected.
         message: String,
-        /// Header, query parameter, or JSON Pointer identifying the field.
+        /// Name of the rejected header, query parameter, or request field.
         param: &'static str,
     },
     /// The runtime doesn't serve a feature, such as merges when its merge
@@ -340,7 +340,10 @@ impl Error {
         }
     }
 
-    /// Identifies the rejected header, query parameter, or body field.
+    /// Identifies the rejected header, query parameter, or request field by
+    /// name. A rejected field of a commit operation or precondition is the
+    /// field's name, and the details carry `operation_index` or
+    /// `precondition_index`.
     pub fn invalid_request_param(&self) -> Option<String> {
         match self {
             Self::InvalidRequest { param, .. } => Some((*param).to_owned()),
@@ -350,29 +353,16 @@ impl Error {
             ) => Some((*param).to_owned()),
             Self::Core(CoreError::InvalidEventIndex(_)) => Some("event_index".to_owned()),
             Self::Core(CoreError::ResumeOffsetOutOfRange { .. }) => Some("start_offset".to_owned()),
-            Self::Core(CoreError::InvalidSnapshotRequest(_)) => Some("/name".to_owned()),
-            Self::Core(CoreError::RootGrantsWithoutAdministrator) => {
-                Some("/access/root_grants".to_owned())
-            }
+            Self::Core(CoreError::InvalidSnapshotRequest(_)) => Some("name".to_owned()),
+            Self::Core(CoreError::RootGrantsWithoutAdministrator) => Some("root_grants".to_owned()),
             Self::Core(CoreError::SubjectRequired { .. }) => {
                 Some(loonfs_types::headers::PRINCIPALS.to_owned())
             }
-            Self::Core(CoreError::FailedOperation {
-                operation_index,
-                error,
-            }) => match error.as_ref() {
-                CoreError::InvalidCommitField { field, .. } => {
-                    Some(format!("/operations/{operation_index}/{field}"))
-                }
-                _ => None,
-            },
-            Self::Core(CoreError::FailedPrecondition {
-                precondition_index,
-                error,
-            }) => match error.as_ref() {
-                CoreError::InvalidCommitField { field, .. } => {
-                    Some(format!("/preconditions/{precondition_index}/{field}"))
-                }
+            Self::Core(
+                CoreError::FailedOperation { error, .. }
+                | CoreError::FailedPrecondition { error, .. },
+            ) => match error.as_ref() {
+                CoreError::InvalidCommitField { field, .. } => Some((*field).to_owned()),
                 _ => None,
             },
             _ => None,

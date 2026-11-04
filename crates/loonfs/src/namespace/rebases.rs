@@ -102,7 +102,7 @@ fn ensure_rebase(
         return Ok(existing);
     }
     Err(CoreError::InvalidMerge {
-        param: "/new_namespace_id",
+        param: "new_namespace_id",
         message: format!(
             "namespace `{new_namespace_id}` isn't a rebase of fork `{source_namespace_id}` of \
              `{namespace_id}`"

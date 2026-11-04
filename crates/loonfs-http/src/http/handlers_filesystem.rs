@@ -649,6 +649,7 @@ pub(super) async fn create_commit(
             &namespace_id,
             error,
         )
+        .with_commit_field_param()
         .with_commit_id(&commit_id_for_errors)
     })?;
     Ok(Json(response))

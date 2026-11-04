@@ -55,12 +55,32 @@ impl ApiResponseError {
         }
     }
 
-    /// Reports a runtime `param` that is a field of the request body as that
-    /// field's JSON Pointer.
-    pub(super) fn with_body_field_param(mut self, field: &str) -> Self {
-        if self.body.param.as_deref() == Some(field) {
-            self.body.param = Some(format!("/{field}"));
+    /// Reports a runtime `param` that names a field of the request body as
+    /// that field's JSON Pointer. Each of `pointers` is a body field's JSON
+    /// Pointer, whose last segment is the field name that the runtime reports.
+    pub(super) fn with_body_field_params(mut self, pointers: &[&str]) -> Self {
+        let pointer = pointers
+            .iter()
+            .find(|pointer| pointer.rsplit('/').next() == self.body.param.as_deref());
+        if let Some(pointer) = pointer {
+            self.body.param = Some((*pointer).to_owned());
         }
+        self
+    }
+
+    /// Reports a runtime `param` that names a field of one commit operation
+    /// or precondition as the field's JSON Pointer in the commit body, from
+    /// the index in the error's details.
+    pub(super) fn with_commit_field_param(mut self) -> Self {
+        let (Some(field), Some(details)) = (&self.body.param, &self.body.details) else {
+            return self;
+        };
+        let pointer = match (details.operation_index, details.precondition_index) {
+            (Some(index), _) => format!("/operations/{index}/{field}"),
+            (None, Some(index)) => format!("/preconditions/{index}/{field}"),
+            (None, None) => return self,
+        };
+        self.body.param = Some(pointer);
         self
     }
 

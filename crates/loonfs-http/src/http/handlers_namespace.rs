@@ -25,6 +25,12 @@ use loonfs_types::{
 };
 use std::sync::Arc;
 
+/// The JSON Pointers of the merge request fields that a rejection can name.
+const MERGE_BODY_FIELDS: &[&str] = &["/source_namespace_id", "/through_seq"];
+
+/// The JSON Pointers of the rebase request fields that a rejection can name.
+const REBASE_BODY_FIELDS: &[&str] = &["/source_namespace_id", "/new_namespace_id", "/through_seq"];
+
 /// Advertises a feature, or removes the key: an absent key and an
 /// advertised-false key both mean unsupported, and the document stays small.
 fn set_feature(capabilities: &mut CapabilityDocument, feature: &str, supported: bool) {
@@ -217,7 +223,9 @@ pub(super) async fn create_namespace(
             },
         )
         .await
-        .map_err(ApiResponseError::runtime)?;
+        .map_err(|error| {
+            ApiResponseError::runtime(error).with_body_field_params(&["/access/root_grants"])
+        })?;
     Ok(Json(namespace))
 }
 
@@ -445,6 +453,7 @@ pub(super) async fn merge_fork(
                 &namespace_id,
                 error,
             )
+            .with_body_field_params(MERGE_BODY_FIELDS)
             .with_commit_id(&commit_id)
         })?;
     Ok(Json(response))
@@ -493,10 +502,10 @@ pub(super) async fn get_next_merge_range(
         .next_merge_range(&source_namespace_id)
         .await
         .map_err(|error| {
-            // The runtime reports the source as the merge request's body
-            // field, which this route reads from the `source` parameter.
+            // The runtime names the source `source_namespace_id`, which this
+            // route reads from the `source` parameter.
             let source_refused =
-                error.invalid_request_param().as_deref() == Some("/source_namespace_id");
+                error.invalid_request_param().as_deref() == Some("source_namespace_id");
             let response = ApiResponseError::runtime(error);
             if source_refused {
                 response.with_param("source")
@@ -565,7 +574,11 @@ pub(super) async fn rebase_fork(
             &actor_id,
         )
         .await
-        .map_err(|error| ApiResponseError::runtime(error).with_commit_id(&commit_id))?;
+        .map_err(|error| {
+            ApiResponseError::runtime(error)
+                .with_body_field_params(REBASE_BODY_FIELDS)
+                .with_commit_id(&commit_id)
+        })?;
     let new_fork = state
         .open_writer(&new_namespace_id, subject)
         .await
@@ -584,6 +597,7 @@ pub(super) async fn rebase_fork(
                 &new_namespace_id,
                 error,
             )
+            .with_body_field_params(REBASE_BODY_FIELDS)
             .with_commit_id(&commit_id)
         })?;
     Ok(Json(response))

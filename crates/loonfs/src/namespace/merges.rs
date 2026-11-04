@@ -398,7 +398,7 @@ pub(super) fn missing_fork(source_namespace_id: &NamespaceId, error: Error) -> E
         _ => return error,
     };
     CoreError::InvalidMerge {
-        param: "/source_namespace_id",
+        param: "source_namespace_id",
         message,
     }
     .into()

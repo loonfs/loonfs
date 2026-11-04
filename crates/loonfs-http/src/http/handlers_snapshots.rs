@@ -57,10 +57,14 @@ pub(super) async fn create_snapshot(
             },
         )
         .await
-        .map_err(ApiResponseError::for_namespace_writer(
-            state.namespaces.as_ref(),
-            &namespace_id,
-        ))?;
+        .map_err(|error| {
+            ApiResponseError::runtime_for_namespace_writer(
+                state.namespaces.as_ref(),
+                &namespace_id,
+                error,
+            )
+            .with_body_field_params(&["/name"])
+        })?;
     Ok(Json(snapshot))
 }
 

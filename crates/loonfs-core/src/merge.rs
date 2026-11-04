@@ -453,7 +453,7 @@ fn fork_point(fork_head: &NamespaceReadState, namespace_id: &NamespaceId) -> Res
             Ok(basis.manifest.head_seq)
         }
         _ => Err(CoreError::InvalidMerge {
-            param: "/source_namespace_id",
+            param: "source_namespace_id",
             message: format!(
                 "namespace `{}` isn't a fork of `{namespace_id}`",
                 fork_head.namespace_id
@@ -473,7 +473,7 @@ fn through_seq(
 ) -> Result<ChangeSeq> {
     let through_seq = requested.unwrap_or(folded_seq);
     let refused = |message: String| CoreError::InvalidMerge {
-        param: "/through_seq",
+        param: "through_seq",
         message,
     };
     if through_seq > folded_seq {
