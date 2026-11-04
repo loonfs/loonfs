@@ -661,9 +661,9 @@ An idle namespace costs no requests between full passes. A full pass costs one l
 | Pass | Grep not maintained | Grep maintained, index not enabled | Grep index enabled |
 | --- | --- | --- | --- |
 | Does not collect | 14 GET or HEAD | 18 GET or HEAD | 19 GET or HEAD |
-| Collects | 20 GET or HEAD and 11 LIST | 24 GET or HEAD and 11 LIST | 26 GET or HEAD and 11 LIST |
+| Collects | 20 GET or HEAD and 10 LIST | 24 GET or HEAD and 10 LIST | 26 GET or HEAD and 10 LIST |
 
-On a collection pass, each object that's still inside its collection grace adds a request, and a namespace with work due adds the requests for that work. Deleted namespaces stay listed, so each one keeps this cost on every full pass. Core metadata still costs 6 requests per visit, the acknowledgment of the retention floor adds 4, the retention advance adds 4, and garbage collection adds 17, for a total of 31. For example, a server with 1,000 caught-up idle namespaces and no grep sends no requests for them between full passes, and about 31,000 on each daily full pass, plus the namespace listing.
+On a collection pass, each object that's still inside its collection grace adds a request, and a namespace with work due adds the requests for that work. Deleted namespaces stay listed, so each one keeps this cost on every full pass. Core metadata still costs 6 requests per visit, the acknowledgment of the retention floor adds 4, the retention advance adds 4, and garbage collection adds 16, for a total of 30. For example, a server with 1,000 caught-up idle namespaces and no grep sends no requests for them between full passes, and about 30,000 on each daily full pass, plus the namespace listing.
 
 Every visit of a full pass makes the retention advance, whether or not `retention_window_ms` is set, because the advance reads the namespace's own window from the current manifest. For an idle namespace whose floor has already reached its cutoff, or that has no window, the advance costs the 4 GET requests that load the current manifest once, and it publishes nothing. For a namespace with a window and commits above its floor, the advance also reads those commits in order, up to the first one that's newer than the cutoff. When the floor moves, the advance also sends one HEAD request for each segment that the manifest lists, and it puts one manifest.
 

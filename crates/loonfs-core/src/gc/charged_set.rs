@@ -176,6 +176,10 @@ impl<T: HeapBytes> ChargedQueue<T> {
             .grow_to(self.values.capacity() * std::mem::size_of::<T>() + self.heap_bytes)
     }
 
+    pub(super) fn iter(&self) -> impl Iterator<Item = &T> {
+        self.values.iter()
+    }
+
     pub(super) fn pop_front(&mut self) -> Option<T> {
         let value = self.values.pop_front()?;
         self.heap_bytes -= value.heap_bytes();

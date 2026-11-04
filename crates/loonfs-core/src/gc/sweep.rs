@@ -98,14 +98,14 @@ impl<S: ObjectStore> Sweep<'_, S> {
     }
 
     /// Determines what to do with one upload session's records.
-    pub(super) async fn upload(&self, listed: ListedUpload) -> Result<Decision> {
+    pub(super) async fn upload(&self, listed: &ListedUpload) -> Result<Decision> {
         self.add_listed_bytes(listed.size_bytes);
-        match listed.kind {
+        match &listed.kind {
             ListedUploadKind::Session {
                 upload_id,
                 outcome_listing,
             } => {
-                self.process_upload_session(upload_id, outcome_listing)
+                self.process_upload_session(upload_id.clone(), *outcome_listing)
                     .await
             }
             // An outcome record without its session record is deleted only
@@ -117,11 +117,11 @@ impl<S: ObjectStore> Sweep<'_, S> {
             // the session read as open, and a later pass would abort it and
             // delete content that a commit might reference. That outcome was
             // created after the pass started, so it's younger than the window.
-            ListedUploadKind::OrphanOutcome { entry } => {
-                Ok(self.sweep_aged(entry, self.grace_window_ms, |report| {
-                    &mut report.deleted.upload_sessions
-                }))
-            }
+            ListedUploadKind::OrphanOutcome { entry } => Ok(self.sweep_aged(
+                entry.clone(),
+                self.grace_window_ms,
+                |report| &mut report.deleted.upload_sessions,
+            )),
             ListedUploadKind::Unrecognized => {
                 Ok(self.retain(RetainedReason::UnrecognizedKey, None))
             }

@@ -11,7 +11,7 @@ use crate::error::{CoreError, Result};
 use crate::limits::MAX_BLOOM_FILTER_BYTES;
 use crate::namespace::store::NamespaceStore;
 use crate::time::OperationClock;
-use futures::{future, StreamExt, TryStreamExt};
+use futures::{future, stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::keys::content_prefix;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::GcResponse;
@@ -77,10 +77,10 @@ impl<S: ObjectStore> NamespaceStore<S> {
             self.apply_decisions(decisions, &mut report).await?;
         }
         if live.collects_family_content() {
-            // Upload sessions are swept as pairs of records, from their own listing.
-            let decisions = self
-                .list_uploads()
-                .and_then(|listed| sweep.upload(listed))
+            // Upload sessions are swept as pairs of records, from the listing
+            // that rooted their content.
+            let decisions = stream::iter(live.uploads.iter())
+                .then(|listed| sweep.upload(listed))
                 .boxed();
             self.apply_decisions(decisions, &mut report).await?;
         }

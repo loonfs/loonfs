@@ -3,13 +3,14 @@
 use super::live_set::{LiveSet, RetirementStatus};
 use super::session_cache::{CompletedUploadSession, CompletedUploadSessionCache};
 use crate::error::{CoreError, Result};
+use crate::heap_bytes::HeapBytes;
 use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::limits::CONTENT_RECLAMATION_GRACE_WINDOW_MS;
 use crate::namespace::store::NamespaceStore;
 use crate::time::OperationClock;
 use crate::upload::abort::AbandonedUpload;
 use crate::upload::records::{OutcomeCreation, UploadSessionState};
-use futures::{future, Stream, StreamExt, TryStreamExt};
+use futures::{Stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::keys::upload_session_prefix;
 use loonfs_objectstore::layout::{upload_id_of, upload_outcome_id_of};
 use loonfs_objectstore::{ListedObject, ObjectStore};
@@ -41,6 +42,16 @@ pub(super) enum ListedUploadKind {
     OrphanOutcome { entry: ListedObject },
     /// A key under the uploads prefix that isn't an upload record.
     Unrecognized,
+}
+
+impl HeapBytes for ListedUpload {
+    fn heap_bytes(&self) -> usize {
+        match &self.kind {
+            ListedUploadKind::Session { upload_id, .. } => upload_id.heap_bytes(),
+            ListedUploadKind::OrphanOutcome { entry } => entry.key.heap_bytes(),
+            ListedUploadKind::Unrecognized => 0,
+        }
+    }
 }
 
 /// Whether a listing of the uploads prefix returned a session's outcome key
@@ -100,56 +111,62 @@ impl<S: ObjectStore> NamespaceStore<S> {
         })
     }
 
-    /// Lists every upload session in the namespace and calls `visit` with each
-    /// one, so the caller can charge each session to its budget as it arrives.
+    /// Lists the uploads prefix and calls `visit` with each listed entry, and
+    /// with what the pass read of each listed session, so the caller can keep
+    /// the entry and charge both to its budget as they arrive.
     ///
     /// A completed session that `session_cache` has costs no store request. The
     /// pass reads one record of every other session, and both records of an
-    /// aborted one, with at most `STORE_READS_IN_FLIGHT` reads in flight. An
+    /// aborted one, with at most `STORE_READS_IN_FLIGHT` reads in flight. A
+    /// session that another pass deleted after the listing isn't visited. An
     /// outcome record without its session record isn't a root, because nothing
     /// can issue admission evidence from it.
     pub(super) async fn load_upload_sessions(
         &self,
         session_cache: Option<&CompletedUploadSessionCache>,
-        mut visit: impl FnMut(ListedUploadSession) -> Result<()>,
+        mut visit: impl FnMut(ListedUpload, Option<ListedUploadSession>) -> Result<()>,
     ) -> Result<()> {
-        let mut sessions = pin!(self
+        let mut uploads = pin!(self
             .list_uploads()
-            .try_filter_map(|listed| future::ok(match listed.kind {
-                ListedUploadKind::Session {
+            .map_ok(|listed| async move {
+                let ListedUploadKind::Session {
                     upload_id,
                     outcome_listing,
-                } => Some((upload_id, outcome_listing)),
-                ListedUploadKind::OrphanOutcome { .. } | ListedUploadKind::Unrecognized => None,
-            }))
-            .map_ok(|(upload_id, outcome_listing)| async move {
-                if let Some(session) = session_cache.and_then(|cache| cache.get(&upload_id)) {
-                    return Ok(SessionLookup::Cached(ListedUploadSession::Completed {
-                        upload_id,
+                } = &listed.kind
+                else {
+                    return Ok((listed, None));
+                };
+                let lookup = match session_cache.and_then(|cache| cache.get(upload_id)) {
+                    Some(session) => SessionLookup::Cached(ListedUploadSession::Completed {
+                        upload_id: upload_id.clone(),
                         session,
-                    }));
-                }
-                self.load_listed_session(upload_id, outcome_listing)
-                    .await
-                    .map(SessionLookup::Read)
+                    }),
+                    None => SessionLookup::Read(
+                        self.load_listed_session(upload_id.clone(), *outcome_listing)
+                            .await?,
+                    ),
+                };
+                Ok((listed, Some(lookup)))
             })
             .try_buffer_unordered(STORE_READS_IN_FLIGHT));
         let mut hits = 0_u64;
         let mut misses = 0_u64;
-        while let Some(lookup) = sessions.try_next().await? {
+        while let Some((listed, lookup)) = uploads.try_next().await? {
             let session = match lookup {
-                SessionLookup::Cached(session) => {
+                None => None,
+                Some(SessionLookup::Cached(session)) => {
                     hits += 1;
                     Some(session)
                 }
-                SessionLookup::Read(session) => {
+                Some(SessionLookup::Read(session)) => {
                     misses += 1;
-                    session
+                    let Some(session) = session else {
+                        continue;
+                    };
+                    Some(session)
                 }
             };
-            if let Some(session) = session {
-                visit(session)?;
-            }
+            visit(listed, session)?;
         }
         tracing::debug!(
             namespace_id = %self.namespace_id,
@@ -264,12 +281,12 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 // Abort cleanup runs even when no content object was written.
                 Ok(UploadSessionSweep::Delete)
             }
-            // The pass didn't list this session as completed before the walk,
-            // so the session was completed after the pass started, in a
-            // namespace that was live then. That namespace can't be eligible
-            // for retirement by the pass's clock, unless the walk didn't find
-            // it because it's a fork installed after the walk. Its session
-            // keeps the completed-content grace of an active namespace.
+            // The pass read this session as open or aborted when it listed
+            // the sessions, and the sweep reads an outcome only when the
+            // listing returned one. An outcome record never changes, so a
+            // completed outcome here contradicts the earlier read, and the
+            // session keeps the completed-content grace of an active
+            // namespace.
             Some(UploadOutcome::Completed {
                 completed_at_ms, ..
             }) => Ok(sweep_completed_session(
