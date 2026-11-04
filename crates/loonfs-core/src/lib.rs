@@ -209,7 +209,7 @@ pub use engine::{
 };
 pub use error::{
     classify_store_failure, CoreError, ErrorCode, ErrorKind, HistoryPosition, MergeBound,
-    MetadataProjectionLoadError, MetadataViewError, Result, WriterFence,
+    MetadataProjectionLoadError, Result, WriterFence,
 };
 pub use gc::GcOptions;
 pub use manifest::{

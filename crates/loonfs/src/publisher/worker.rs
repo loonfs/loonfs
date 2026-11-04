@@ -260,7 +260,7 @@ impl NamespacePublisher {
             for (permit, result) in permits.iter().zip(&publish.results) {
                 // A commit refused at the write stop publishes later, so its
                 // inline bytes stay reserved against the tail limit.
-                if !is_maintenance_required(result) {
+                if !result.as_ref().err().is_some_and(is_maintenance_required) {
                     permit.release_inline();
                 }
             }
@@ -291,7 +291,10 @@ impl NamespacePublisher {
                 .publisher
                 .tail_replay();
         }
-        let write_stopped = publish.results.iter().any(is_maintenance_required);
+        let write_stopped = publish
+            .results
+            .iter()
+            .any(|result| result.as_ref().err().is_some_and(is_maintenance_required));
         let fold_start = if publish.wal_tail.is_some_and(|tail| {
             FoldTrigger::new(self.context.runtime_core.config()).fold_is_due(
                 FOLD_AT_WAL_OBJECTS.get(),
@@ -465,7 +468,7 @@ impl NamespacePublisher {
                     .collect(),
             };
             for ((index, candidate), result) in indices.iter().zip(&candidates).zip(&observed) {
-                if is_maintenance_required(result) {
+                if result.as_ref().err().is_some_and(is_maintenance_required) {
                     stopped[*index] = Some(candidate.clone());
                 }
             }
@@ -505,10 +508,7 @@ fn split_write_stop_waiters(
     let mut waiting = Vec::new();
     let (mut delivered_ids, mut delivered) = (Vec::new(), Vec::new());
     for (index, (commit_id, result)) in commit_ids.into_iter().zip(results).enumerate() {
-        let refused = matches!(
-            &result,
-            Err(error) if error.code() == loonfs_core::ErrorCode::MaintenanceRequired
-        );
+        let refused = matches!(&result, Err(Error::Core(error)) if is_maintenance_required(error));
         match stopped[index].take() {
             Some(candidate) if refused => {
                 let (enqueued_at, write_stop_wait_recorded) = queued[index];
@@ -530,11 +530,9 @@ fn split_write_stop_waiters(
     (waiting, delivered_ids, delivered)
 }
 
-pub(super) fn is_maintenance_required(result: &std::result::Result<Commit, CoreError>) -> bool {
-    matches!(
-        result,
-        Err(error) if error.code() == loonfs_core::ErrorCode::MaintenanceRequired
-    )
+/// Returns whether `error` is core's refusal of a commit at the write stop.
+fn is_maintenance_required(error: &CoreError) -> bool {
+    matches!(error, CoreError::MaintenanceRequired { .. })
 }
 
 pub(super) fn result_label<T, E>(result: &std::result::Result<T, E>) -> PublishOutcome {

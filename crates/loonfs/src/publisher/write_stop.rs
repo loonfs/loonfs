@@ -4,7 +4,7 @@ use super::queue::{OpenBatch, WorkItem};
 use super::session_tasks::wait_for_exit;
 use super::worker::{elapsed_ms_from, sleep_ms};
 use super::NamespacePublisher;
-use crate::Error;
+use crate::{CoreError, Error};
 use loonfs_core::limits::MAX_UNFOLDED_WAL_OBJECTS;
 use loonfs_types::u64_from_usize;
 use tokio::sync::watch;
@@ -91,15 +91,12 @@ impl NamespacePublisher {
         instruments
             .publisher
             .write_stop_refusal(u64_from_usize(refused.len()));
-        let error = Error::Core(
-            crate::MetadataViewError::MaintenanceRequired {
-                namespace_id: self.namespace_id.clone(),
-                reason: format!(
-                    "WAL tail stayed at {MAX_UNFOLDED_WAL_OBJECTS} objects through the write-stop wait of {budget_ms} ms, and publishes resume once a fold brings it back under {MAX_UNFOLDED_WAL_OBJECTS}"
-                ),
-            }
-            .into(),
-        );
+        let error = Error::Core(CoreError::MaintenanceRequired {
+            namespace_id: self.namespace_id.clone(),
+            reason: format!(
+                "WAL tail stayed at {MAX_UNFOLDED_WAL_OBJECTS} objects through the write-stop wait of {budget_ms} ms, and publishes resume once a fold brings it back under {MAX_UNFOLDED_WAL_OBJECTS}"
+            ),
+        });
         let results = refused.iter().map(|_| Err(error.clone())).collect();
         self.deliver_batch_results(refused, results, now_ms);
     }

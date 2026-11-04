@@ -95,9 +95,8 @@ pub use loonfs_core::{
     CheckpointPageCursor, CoreError, CreateNamespaceOptions, CurrentFile, CurrentFileState,
     DeleteNamespaceOptions, ErrorCode, ErrorKind, FileBytes, FileContentStream, FoldWalOutcome,
     FoldWalResponse, GcOptions, ListCheckpointFilesOptions, MetadataCompactionPolicy,
-    MetadataViewError, RetainedRevisionsPage, RetainedRevisionsPageCursor, RetentionTarget,
-    SnapshotPageCursor, StreamRange, WriterFence, CONTENT_READ_CHUNK_BYTES,
-    MAX_CURRENT_FILES_PER_STAT,
+    RetainedRevisionsPage, RetainedRevisionsPageCursor, RetentionTarget, SnapshotPageCursor,
+    StreamRange, WriterFence, CONTENT_READ_CHUNK_BYTES, MAX_CURRENT_FILES_PER_STAT,
 };
 pub use loonfs_types::{
     AbsolutePath, ActorId, AdvanceRetentionResponse, AttributeKey, AttributeValue, Attributes,

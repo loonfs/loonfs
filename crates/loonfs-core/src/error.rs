@@ -40,8 +40,14 @@ pub enum CoreError {
     MetadataProjection(#[from] MetadataProjectionLoadError),
     #[error(transparent)]
     ControlObjectLoad(#[from] ControlObjectLoadError),
-    #[error(transparent)]
-    MetadataView(#[from] MetadataViewError),
+    /// The namespace's WAL tail is at the write stop, so the namespace
+    /// refuses publishes until maintenance folds the tail. `reason` says how
+    /// long the tail is and when publishes resume.
+    #[error("metadata view for namespace `{namespace_id}` requires maintenance: {reason}")]
+    MaintenanceRequired {
+        namespace_id: NamespaceId,
+        reason: String,
+    },
     #[error(transparent)]
     VisiblePath(VisiblePathError),
     #[error(transparent)]
@@ -337,29 +343,6 @@ pub enum CoreError {
     },
 }
 
-/// Failures specific to manifest-plus-tail metadata views.
-///
-/// These are not generic store failures: each variant names the recovery or
-/// caller action we expect. Normal reads and publishes must return these
-/// errors instead of falling back to a whole-namespace rebuild.
-#[derive(Debug, Clone, Error)]
-#[non_exhaustive]
-pub enum MetadataViewError {
-    #[error("metadata view for namespace `{namespace_id}` requires maintenance: {reason}")]
-    MaintenanceRequired {
-        namespace_id: NamespaceId,
-        reason: String,
-    },
-}
-
-impl MetadataViewError {
-    pub fn code(&self) -> ErrorCode {
-        match self {
-            Self::MaintenanceRequired { .. } => ErrorCode::MaintenanceRequired,
-        }
-    }
-}
-
 /// Failures while loading a bounded manifest-plus-tail metadata projection.
 ///
 /// These variants name durable/control failure cases without implying that a
@@ -468,7 +451,7 @@ impl CoreError {
         match self {
             CoreError::MetadataProjection(error) => error.code(),
             CoreError::ControlObjectLoad(error) => error.code(),
-            CoreError::MetadataView(error) => error.code(),
+            CoreError::MaintenanceRequired { .. } => ErrorCode::MaintenanceRequired,
             CoreError::VisiblePath(error) => error.code(),
             CoreError::DurableContent(error) => error.code(),
             CoreError::CommitValidation(error) => error.code(),
@@ -593,7 +576,7 @@ impl CoreError {
             | CoreError::WalPublish(
                 WalPublishError::NumberTaken | WalPublishError::PublishBudgetExceeded { .. },
             )
-            | CoreError::MetadataView(_)
+            | CoreError::MaintenanceRequired { .. }
             | CoreError::VisiblePath(_)
             | CoreError::CommitValidation(_)
             | CoreError::InvalidPath(_)
@@ -911,8 +894,8 @@ impl std::fmt::Display for WriterFence {
 mod tests {
     use super::{
         ActiveWriter, CommitValidationError, CommittedReceipt, CoreError, ErrorCode, ErrorKind,
-        ManifestLoadError, MetadataProjectionLoadError, MetadataViewError, ObjectStoreErrorKind,
-        WriterBlock, WriterFence,
+        ManifestLoadError, MetadataProjectionLoadError, ObjectStoreErrorKind, WriterBlock,
+        WriterFence,
     };
     use crate::commit::engine::ContentPreparationError;
     use crate::control_object::ControlObjectLoadError;
@@ -983,11 +966,11 @@ mod tests {
     }
 
     #[test]
-    fn metadata_view_errors_map_to_actionable_public_codes() {
-        let error = CoreError::from(MetadataViewError::MaintenanceRequired {
+    fn the_write_stop_refusal_maps_to_maintenance_required() {
+        let error = CoreError::MaintenanceRequired {
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
             reason: "retention progress is missing".to_owned(),
-        });
+        };
         assert_eq!(error.code(), ErrorCode::MaintenanceRequired);
     }
 
