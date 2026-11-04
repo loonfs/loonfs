@@ -949,7 +949,7 @@ secret_access_key = "secret"
         let temp_files: Vec<_> = std::fs::read_dir(dir.path())
             .expect("read config directory")
             .map(|entry| entry.expect("read directory entry").path())
-            .filter(|path| path.extension().is_some_and(|extension| extension == "tmp"))
+            .filter(|entry| *entry != path && *entry != path.with_extension("lock"))
             .collect();
         assert!(
             temp_files.is_empty(),
@@ -1064,7 +1064,7 @@ root = "/tmp/store"
         )
         .expect("write config");
 
-        let crate::config_file::ConfigLoad::Degraded { mut table, error } =
+        let crate::config_file::ConfigLoad::Degraded { table, error } =
             crate::config_file::load_config_for_repair(&path).expect("stage one holds")
         else {
             panic!("unknown_knob must fail the strict decode");
@@ -1084,17 +1084,19 @@ root = "/tmp/store"
 
         // Deleting the broken profile through the table heals the file: the
         // strict decoder accepts what remains.
-        let removed =
-            crate::profiles::delete_profile_in_table(&mut table, "broken").expect("delete broken");
+        let removed = crate::config_file::mutate_config_table(&path, |table| {
+            let removed = crate::profiles::delete_profile_in_table(table, "broken")?;
+            crate::profiles::set_default_profile_in_table(table, "ok")?;
+            assert_eq!(
+                crate::profiles::set_default_profile_in_table(table, "gone")
+                    .expect_err("unknown profile must not become the default")
+                    .code,
+                crate::error::CliErrorCode::ProfileNotFound.as_str()
+            );
+            Ok(removed)
+        })
+        .expect("repair the table");
         assert_eq!(removed.mode, "embedded");
-        crate::profiles::set_default_profile_in_table(&mut table, "ok").expect("switch default");
-        assert_eq!(
-            crate::profiles::set_default_profile_in_table(&mut table, "gone")
-                .expect_err("unknown profile must not become the default")
-                .code,
-            crate::error::CliErrorCode::ProfileNotFound.as_str()
-        );
-        crate::config_file::save_config_table(&path, &table).expect("save repaired table");
 
         match crate::config_file::load_config_for_repair(&path).expect("reload") {
             crate::config_file::ConfigLoad::Valid(config) => {
@@ -1105,5 +1107,41 @@ root = "/tmp/store"
                 panic!("repaired config must strict-decode: {}", error.message)
             }
         }
+    }
+
+    #[test]
+    fn a_valid_config_takes_the_repair_edits_through_its_table() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        for name in ["first", "second"] {
+            crate::config_file::mutate_config(&path, |config| {
+                crate::profiles::add_profile(
+                    config,
+                    name,
+                    ProfileConfig {
+                        identity: ProfileIdentity::default(),
+                        default_namespace: None,
+                        connection: ProfileConnection::Remote {
+                            server_url: format!("https://{name}.example.com"),
+                            auth_token: None,
+                            ca_cert_path: None,
+                        },
+                    },
+                )
+            })
+            .expect("add profile");
+        }
+
+        let removed = crate::config_file::mutate_config_table(&path, |table| {
+            crate::profiles::set_default_profile_in_table(table, "second")?;
+            crate::profiles::delete_profile_in_table(table, "first")
+        })
+        .expect("edit the table");
+        assert_eq!(removed.mode, "remote");
+        assert_eq!(removed.store_kind, None);
+
+        let config = crate::config_file::load_config(&path).expect("strict decode");
+        assert_eq!(config.default_profile.as_deref(), Some("second"));
+        assert_eq!(config.profiles.keys().collect::<Vec<_>>(), vec!["second"]);
     }
 }

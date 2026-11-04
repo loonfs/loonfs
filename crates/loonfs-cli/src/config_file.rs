@@ -2,10 +2,10 @@
 
 use crate::config::{absolute_env_path, non_empty_env, CliConfig, CONFIG_PATH_ENV, CONFIG_VERSION};
 use crate::error::{CliError, Result};
+use crate::state_file::{lock_sidecar, replace_durably, LockContention};
 use loonfs_types::config::validate_non_empty;
 use serde::Serialize;
-use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 
 const CONFIG_FILE_NAME: &str = "config.toml";
@@ -101,8 +101,8 @@ pub(crate) fn load_config(path: &Path) -> Result<CliConfig> {
 
 /// Config result used by repair commands.
 ///
-/// When strict decoding fails, repair commands receive the raw TOML table so
-/// they can edit the invalid file.
+/// When strict decoding fails, the caller receives the raw TOML table, so
+/// `config show` can still render the invalid file.
 pub(crate) enum ConfigLoad {
     Valid(CliConfig),
     Degraded {
@@ -231,19 +231,7 @@ pub(crate) fn load_or_default_config(path: &Path) -> Result<CliConfig> {
 fn write_config_locked(path: &Path, config: &CliConfig) -> Result<()> {
     // The caller already has the config lock, which is not reentrant.
     config.validate()?;
-    let contents = toml::to_string_pretty(config)
-        .map_err(|err| CliError::invalid_config(format!("failed to encode config: {err}")))?;
-    persist_config_contents(path, &contents)
-}
-
-/// Persists a loose config table as-is (atomic, owner-only), for the repair
-/// commands when the file no longer strict-decodes: round-tripping through
-/// [`CliConfig`] would drop the content the user still needs to fix.
-pub(crate) fn save_config_table(path: &Path, table: &toml::Table) -> Result<()> {
-    let _lock = lock_config(path)?;
-    let contents = toml::to_string_pretty(table)
-        .map_err(|err| CliError::invalid_config(format!("failed to encode config: {err}")))?;
-    persist_config_contents(path, &contents)
+    persist_config(path, config)
 }
 
 /// Applies one edit to the latest config under the exclusive lock, so
@@ -260,6 +248,20 @@ pub(crate) fn mutate_config<T>(
     Ok(value)
 }
 
+/// Applies one edit to the config file's loose table under the exclusive
+/// lock, for the repair commands: the table survives a file the strict
+/// decode rejects, and the edit keeps whatever the user still has to fix.
+pub(crate) fn mutate_config_table<T>(
+    path: &Path,
+    mutate: impl FnOnce(&mut toml::Table) -> Result<T>,
+) -> Result<T> {
+    let _lock = lock_config(path)?;
+    let mut table = load_config_source(path)?.table;
+    let value = mutate(&mut table)?;
+    persist_config(path, &table)?;
+    Ok(value)
+}
+
 fn lock_config(path: &Path) -> Result<File> {
     let parent = path.parent().ok_or_else(|| {
         CliError::invalid_config(format!(
@@ -270,61 +272,18 @@ fn lock_config(path: &Path) -> Result<File> {
     fs::create_dir_all(parent).map_err(|err| {
         CliError::invalid_config(format!("failed to create config directory: {err}"))
     })?;
-    let lock_path = path.with_extension("lock");
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&lock_path)
-        .map_err(|err| {
-            CliError::invalid_config(format!(
-                "failed to open the lock file `{}`: {err}",
-                lock_path.display()
-            ))
-        })?;
-    fs4::fs_std::FileExt::lock_exclusive(&file).map_err(|err| {
-        CliError::invalid_config(format!("failed to lock `{}`: {err}", lock_path.display()))
-    })?;
-    Ok(file)
+    lock_sidecar(path, LockContention::Wait).map_err(|err| {
+        CliError::invalid_config(format!("failed to lock config {}: {err}", path.display()))
+    })
 }
 
-fn persist_config_contents(path: &Path, contents: &str) -> Result<()> {
-    // The caller's config lock already proved that this parent directory exists.
-    let parent = path
-        .parent()
-        .expect("a locked config path should have a parent directory");
-    let mut temp_file = tempfile::Builder::new()
-        .prefix(".loonfs-config-")
-        .suffix(".tmp")
-        .tempfile_in(parent)
-        .map_err(|err| {
-            CliError::invalid_config(format!(
-                "failed to create temporary config file in {}: {err}",
-                parent.display()
-            ))
-        })?;
-    temp_file
-        .write_all(contents.as_bytes())
-        .map_err(|err| CliError::invalid_config(format!("failed to write config: {err}")))?;
-    temp_file
-        .flush()
-        .map_err(|err| CliError::invalid_config(format!("failed to flush config: {err}")))?;
-    temp_file
-        .as_file()
-        .sync_all()
-        .map_err(|err| CliError::invalid_config(format!("failed to sync config: {err}")))?;
-    temp_file.persist(path).map_err(|err| {
+fn persist_config(path: &Path, config: &impl Serialize) -> Result<()> {
+    let contents = toml::to_string_pretty(config)
+        .map_err(|err| CliError::invalid_config(format!("failed to encode config: {err}")))?;
+    replace_durably(path, contents.as_bytes()).map_err(|err| {
         CliError::invalid_config(format!(
-            "failed to persist config {}: {}",
-            path.display(),
-            err.error
+            "failed to persist config {}: {err}",
+            path.display()
         ))
-    })?;
-    // Rename durability is best-effort because some filesystems cannot sync
-    // directories, and the rename itself has already succeeded.
-    if let Ok(directory) = File::open(parent) {
-        let _ = directory.sync_all();
-    }
-    Ok(())
+    })
 }

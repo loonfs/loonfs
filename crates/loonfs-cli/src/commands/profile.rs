@@ -8,14 +8,11 @@ use super::profile_update::{
 };
 use crate::args::{ProfileCommand, ProfileProviderCommand};
 use crate::config::{ProfileConfig, ProfileMode};
-use crate::config_file::{
-    load_config, load_config_for_repair, load_config_if_exists, mutate_config, save_config_table,
-    ConfigLoad,
-};
+use crate::config_file::{load_config, load_config_if_exists, mutate_config, mutate_config_table};
 use crate::error::{CliError, Result};
 use crate::profiles::{
-    add_profile, delete_profile, delete_profile_in_table, list_profiles, set_default_profile,
-    set_default_profile_in_table, show_profile, update_profile, NamedProfile,
+    add_profile, delete_profile_in_table, list_profiles, set_default_profile_in_table,
+    show_profile, update_profile, NamedProfile,
 };
 use crate::prompt;
 
@@ -121,40 +118,22 @@ fn run_profile_delete(
     invocation: &Invocation,
     name: &str,
 ) -> Result<CommandOutput, CommandFailure> {
-    let fail = |mode: Option<ProfileMode>, error: CliError| {
-        super::context::fail(invocation.kind, Some(name.to_owned()), mode, error)
-    };
+    let fail = |error| invocation.fail_for_profile(Some(name), error);
     if invocation.behavior.interactive {
-        let confirmed = prompt::prompt_confirm(&format!("delete profile `{name}`?"))
-            .map_err(|error| fail(None, error))?;
+        let confirmed =
+            prompt::prompt_confirm(&format!("delete profile `{name}`?")).map_err(fail)?;
         if !confirmed {
-            return Err(fail(None, CliError::cancelled()));
+            return Err(fail(CliError::cancelled()));
         }
     }
 
-    // Delete is a repair command: it operates on the loose table when the
-    // strict decode fails, so the profile that broke the config can still be
-    // removed with the tool that manages it.
-    let config_path = invocation.config.path.as_path();
-    let loaded = load_config_for_repair(config_path).map_err(|error| fail(None, error))?;
-    let removed = match loaded {
-        ConfigLoad::Valid(_) => {
-            let mut removed_mode = None;
-            mutate_config(config_path, |config| {
-                let removed = delete_profile(config, name)?;
-                removed_mode = ProfileMode::parse(&removed.mode);
-                Ok(removed)
-            })
-            .map_err(|error| fail(removed_mode, error))?
-        }
-        ConfigLoad::Degraded { mut table, .. } => {
-            let removed =
-                delete_profile_in_table(&mut table, name).map_err(|error| fail(None, error))?;
-            save_config_table(config_path, &table)
-                .map_err(|error| fail(ProfileMode::parse(&removed.mode), error))?;
-            removed
-        }
-    };
+    // Delete is a repair command: it edits the loose table, which survives a
+    // strict decode failure, so the profile that broke the config can still
+    // be removed with the tool that manages it.
+    let removed = mutate_config_table(&invocation.config.path, |table| {
+        delete_profile_in_table(table, name)
+    })
+    .map_err(fail)?;
     Ok(CommandOutput {
         kind: invocation.kind,
         profile: Some(name.to_owned()),
@@ -166,18 +145,10 @@ fn run_profile_delete(
 fn run_profile_use(invocation: &Invocation, name: &str) -> Result<CommandOutput, CommandFailure> {
     // Use is a repair command like delete: switching the default away from a
     // profile that broke the config must not require hand-editing the file.
-    let config_path = invocation.config.path.as_path();
-    let fail = |error| invocation.fail_for_profile(Some(name), error);
-    let loaded = load_config_for_repair(config_path).map_err(fail)?;
-    match loaded {
-        ConfigLoad::Valid(_) => {
-            mutate_config(config_path, |config| set_default_profile(config, name)).map_err(fail)?
-        }
-        ConfigLoad::Degraded { mut table, .. } => {
-            set_default_profile_in_table(&mut table, name).map_err(fail)?;
-            save_config_table(config_path, &table).map_err(fail)?;
-        }
-    }
+    mutate_config_table(&invocation.config.path, |table| {
+        set_default_profile_in_table(table, name)
+    })
+    .map_err(|error| invocation.fail_for_profile(Some(name), error))?;
     Ok(CommandOutput {
         kind: invocation.kind,
         profile: Some(name.to_owned()),

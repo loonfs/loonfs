@@ -1,5 +1,5 @@
-//! Files under the CLI's state directory that one command owns at a time and
-//! replaces atomically: the upload journals and the merge records.
+//! Files the CLI locks for one command at a time and replaces durably: the
+//! upload journals, the merge records, and the config file.
 
 use crate::config::absolute_env_path;
 use serde::de::DeserializeOwned;
@@ -22,12 +22,55 @@ pub(crate) fn state_directory(kind: &str) -> Option<PathBuf> {
     Some(home.join(".local/state").join(XDG_STATE_SUBDIR).join(kind))
 }
 
+/// Whether [`lock_sidecar`] waits for a lock another command holds or fails
+/// at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LockContention {
+    Wait,
+    /// Fails with [`io::ErrorKind::WouldBlock`].
+    Fail,
+}
+
+/// Locks the sidecar `<path>.lock` for this command and returns the open
+/// sidecar, which keeps the lock until it is dropped.
+///
+/// The sidecar's inode stays the same when the file at `path` is replaced or
+/// removed, so neither can bypass the lock.
+pub(crate) fn lock_sidecar(path: &Path, contention: LockContention) -> io::Result<File> {
+    let sidecar = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path.with_extension("lock"))?;
+    match contention {
+        LockContention::Wait => fs4::fs_std::FileExt::lock_exclusive(&sidecar)?,
+        LockContention::Fail => {
+            if !fs4::fs_std::FileExt::try_lock_exclusive(&sidecar)? {
+                return Err(io::ErrorKind::WouldBlock.into());
+            }
+        }
+    }
+    Ok(sidecar)
+}
+
+/// Replaces the file at `path` with `bytes` durably: it writes an owner-only
+/// temporary file in the same directory, syncs it, renames it over the file,
+/// and syncs the directory.
+pub(crate) fn replace_durably(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let directory = parent(path);
+    let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
+    temporary.write_all(bytes)?;
+    temporary.as_file().sync_all()?;
+    temporary.persist(path).map_err(|error| error.error)?;
+    sync_directory(directory)
+}
+
 /// A JSON state file that one command owns until this value is dropped.
 #[derive(Debug)]
 pub(crate) struct OwnedStateFile {
     path: PathBuf,
-    /// A lock on a sidecar file, whose inode stays the same when the state
-    /// file is replaced or removed, so neither can bypass the lock.
+    /// The lock from [`lock_sidecar`].
     _ownership: File,
 }
 
@@ -36,17 +79,13 @@ impl OwnedStateFile {
     /// fails when another command owns `what` the file records.
     pub(crate) fn open(path: PathBuf, what: &str) -> io::Result<Self> {
         std::fs::create_dir_all(parent(&path))?;
-        let ownership = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(path.with_extension("lock"))?;
-        if !fs4::fs_std::FileExt::try_lock_exclusive(&ownership)? {
-            return Err(io::Error::other(format!(
-                "another command owns this {what}"
-            )));
-        }
+        let ownership =
+            lock_sidecar(&path, LockContention::Fail).map_err(|error| match error.kind() {
+                io::ErrorKind::WouldBlock => {
+                    io::Error::other(format!("another command owns this {what}"))
+                }
+                _ => error,
+            })?;
         Ok(Self {
             path,
             _ownership: ownership,
@@ -66,36 +105,36 @@ impl OwnedStateFile {
         }
     }
 
-    /// Replaces the file with `value` durably: it writes a temporary file in
-    /// the same directory, syncs it, renames it over the file, and syncs the
-    /// directory.
+    /// Replaces the file with `value` through [`replace_durably`].
     pub(crate) fn write<T: Serialize>(&self, value: &T) -> io::Result<()> {
-        let mut temporary = tempfile::NamedTempFile::new_in(parent(&self.path))?;
-        serde_json::to_writer(&mut temporary, value)?;
-        temporary.flush()?;
-        temporary.as_file().sync_all()?;
-        temporary.persist(&self.path).map_err(|error| error.error)?;
-        self.sync_directory()
+        replace_durably(&self.path, &serde_json::to_vec(value)?)
     }
 
     /// Removes the file durably. A file that doesn't exist is already
     /// removed.
     pub(crate) fn remove(&self) -> io::Result<()> {
         match std::fs::remove_file(&self.path) {
-            Ok(()) => self.sync_directory(),
+            Ok(()) => sync_directory(parent(&self.path)),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(error),
         }
     }
-
-    fn sync_directory(&self) -> io::Result<()> {
-        #[cfg(unix)]
-        File::open(parent(&self.path))?.sync_all()?;
-        Ok(())
-    }
 }
 
+fn sync_directory(directory: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    File::open(directory)?.sync_all()?;
+    Ok(())
+}
+
+/// Returns the directory that holds `path`, which is the working directory
+/// for a bare file name.
 fn parent(path: &Path) -> &Path {
-    path.parent()
+    match path
+        .parent()
         .expect("a state file path should have a parent directory")
+    {
+        directory if directory.as_os_str().is_empty() => Path::new("."),
+        directory => directory,
+    }
 }

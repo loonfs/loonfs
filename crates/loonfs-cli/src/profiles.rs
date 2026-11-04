@@ -1,4 +1,4 @@
-//! Profile listing, inspection, and mutation over the loaded CLI config.
+//! Profile listing, inspection, and mutation over the CLI config.
 
 use crate::config::{CliConfig, ProfileConfig};
 use crate::config_file::validate_profile_name;
@@ -83,23 +83,8 @@ pub(crate) fn update_profile(
     })
 }
 
-pub(crate) fn delete_profile(config: &mut CliConfig, name: &str) -> Result<ProfileSummary> {
-    let removed = config
-        .profiles
-        .remove(name)
-        .ok_or_else(|| CliError::profile_not_found(name))?;
-    if config.default_profile.as_deref() == Some(name) {
-        config.default_profile = None;
-    }
-    Ok(ProfileSummary {
-        name: name.to_owned(),
-        mode: removed.mode().as_str().to_owned(),
-        store_kind: removed.store_kind_str().map(ToOwned::to_owned),
-    })
-}
-
-/// [`delete_profile`] over the loose table of a degraded config, so a
-/// profile the strict decoder rejects can still be deleted.
+/// Removes a profile from the config file's loose table, so a profile the
+/// strict decoder rejects can still be deleted.
 pub(crate) fn delete_profile_in_table(
     table: &mut toml::Table,
     name: &str,
@@ -127,15 +112,7 @@ pub(crate) fn delete_profile_in_table(
     })
 }
 
-pub(crate) fn set_default_profile(config: &mut CliConfig, name: &str) -> Result<()> {
-    if !config.profiles.contains_key(name) {
-        return Err(CliError::profile_not_found(name));
-    }
-    config.default_profile = Some(name.to_owned());
-    Ok(())
-}
-
-/// [`set_default_profile`] over the loose table of a degraded config.
+/// Points the default at a profile in the config file's loose table.
 pub(crate) fn set_default_profile_in_table(table: &mut toml::Table, name: &str) -> Result<()> {
     let exists = table
         .get("profiles")
