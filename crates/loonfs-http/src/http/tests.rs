@@ -432,6 +432,7 @@ fn error_detail_fields_match_the_api_spec_table() {
         source_namespace_id: Some(NamespaceId::parse("fork").expect("namespace id")),
         expected_after_seq: Some(ChangeSeq::from(9)),
         actual_after_seq: Some(ChangeSeq::from(10)),
+        source_after_seq: Some(ChangeSeq::from(10)),
         conflict_count: Some(1),
         merge_bound: Some(loonfs_types::MergeBound::WalObject),
         split_at_seq: Some(ChangeSeq::from(11)),

@@ -1947,7 +1947,8 @@ async fn a_merge_below_either_floor_needs_a_rebootstrap() {
     assert_eq!(error.code(), ErrorCode::RebootstrapRequired);
     let details = error.details().expect("details");
     assert_eq!(details.source_namespace_id, Some(family.fork.clone()));
-    assert_eq!(details.actual_after_seq, Some(fork_point));
+    assert_eq!(details.source_after_seq, Some(fork_point));
+    assert_eq!(details.actual_after_seq, None);
     assert_eq!(details.retention_floor_seq, Some(floor));
     assert_eq!(details.fork_point_seq, None);
     assert_eq!(

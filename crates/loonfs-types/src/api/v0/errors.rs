@@ -171,7 +171,8 @@ pub struct ErrorDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub actual_deletion_seq: Option<ChangeSeq>,
-    /// The fork whose merge didn't continue the previous merge from that fork.
+    /// The fork of a refused merge: the fork whose range conflicts, or whose range starts below
+    /// its own retention floor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub source_namespace_id: Option<NamespaceId>,
@@ -184,6 +185,11 @@ pub struct ErrorDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub actual_after_seq: Option<ChangeSeq>,
+    /// The fork sequence that a merge's range starts after, when that start is below the fork's
+    /// own retention floor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub source_after_seq: Option<ChangeSeq>,
     /// The number of inodes whose change a refused merge can't apply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]

@@ -105,7 +105,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             &fork_view.head().namespace_id,
             fork_point_seq,
         )
-        .await?;
+        .await??;
         ensure_range_start_retained(&fork_view, start.after_seq)?;
         Ok(fork_point_seq)
     }

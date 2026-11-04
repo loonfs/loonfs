@@ -312,6 +312,22 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     }
 }
 
+/// A retention floor that refuses a merge: the position of the merge's
+/// history that is below the floor, and the floor.
+pub(crate) struct FloorRefusal {
+    below: HistoryPosition,
+    retention_floor_seq: ChangeSeq,
+}
+
+impl From<FloorRefusal> for CoreError {
+    fn from(refusal: FloorRefusal) -> Self {
+        CoreError::RebootstrapRequired {
+            below: refusal.below,
+            retention_floor_seq: refusal.retention_floor_seq,
+        }
+    }
+}
+
 /// Where the next merge from a fork into a namespace starts, under the range
 /// rule.
 pub(crate) struct MergeStart {
@@ -329,7 +345,8 @@ pub(crate) struct MergeStart {
 ///
 /// The merge starts after the fork's newest merge in the merge index, or
 /// after the fork point when the fork has none, and the fork point has to be
-/// at or above the namespace's retention floor. When the namespace's fork
+/// at or above the namespace's retention floor, or the floor refuses the
+/// merge. When the namespace's fork
 /// basis records a `rebased_from` that identifies the fork, the namespace is
 /// a rebase's new fork, and the rules read its own fork point in place of the
 /// fork's: only the merge index rows above it count, the first replay commit
@@ -340,18 +357,18 @@ pub(crate) async fn merge_start<S: ObjectStore + ?Sized>(
     head: &NamespaceReadState,
     source_namespace_id: &NamespaceId,
     fork_point_seq: ChangeSeq,
-) -> Result<MergeStart> {
+) -> Result<std::result::Result<MergeStart, FloorRefusal>> {
     let rebase = rebase_basis(head, source_namespace_id);
     let checked_fork_point_seq =
         rebase.map_or(fork_point_seq, |(basis, _)| basis.manifest.head_seq);
     let retention_floor_seq = view.retention_floor_seq();
     if checked_fork_point_seq < retention_floor_seq {
-        return Err(CoreError::RebootstrapRequired {
+        return Ok(Err(FloorRefusal {
             below: HistoryPosition::ForkPoint {
                 fork_point_seq: checked_fork_point_seq,
             },
             retention_floor_seq,
-        });
+        }));
     }
     let newest = view.newest_merge(source_namespace_id).await?;
     let (previous, first_after_seq) = match rebase {
@@ -363,12 +380,12 @@ pub(crate) async fn merge_start<S: ObjectStore + ?Sized>(
         ),
         None => (newest, fork_point_seq),
     };
-    Ok(MergeStart {
+    Ok(Ok(MergeStart {
         after_seq: previous
             .as_ref()
             .map_or(first_after_seq, |previous| previous.source_through_seq),
         previous,
-    })
+    }))
 }
 
 /// Returns the fork basis of the namespace whose head is `head`, with the
@@ -407,7 +424,7 @@ async fn range_start<S: ObjectStore + ?Sized>(
         source_namespace_id,
         fork_point_seq,
     )
-    .await?
+    .await??
     .after_seq;
     if let Some(planned_after_seq) = request.after_seq {
         if planned_after_seq != source_after_seq {
@@ -423,16 +440,16 @@ async fn range_start<S: ObjectStore + ?Sized>(
 }
 
 /// Refuses a range that starts after `source_after_seq` below the fork's own
-/// retention floor, in the fork that `fork_view` reads, with
-/// `rebootstrap_required`, because the fork's net change over the range
-/// can't be computed from history that the fork no longer keeps.
+/// retention floor, in the fork that `fork_view` reads, because the fork's
+/// net change over the range can't be computed from history that the fork
+/// no longer keeps.
 fn ensure_range_start_retained<S: ObjectStore + ?Sized>(
     fork_view: &LoadedMetadataView<'_, S>,
     source_after_seq: ChangeSeq,
-) -> Result<()> {
+) -> std::result::Result<(), FloorRefusal> {
     let fork_floor_seq = fork_view.retention_floor_seq();
     if source_after_seq < fork_floor_seq {
-        return Err(CoreError::RebootstrapRequired {
+        return Err(FloorRefusal {
             below: HistoryPosition::RangeStart {
                 source_namespace_id: fork_view.head().namespace_id.clone(),
                 source_after_seq,
