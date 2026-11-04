@@ -55,15 +55,17 @@ pub(crate) async fn commits_after_page<S: ObjectStore + ?Sized>(
     limit: usize,
 ) -> Result<Vec<WalCommitPayload>> {
     segments
-        .scan_range_page(
+        .scan_range(
             MetadataRowFamily::Commits,
             &lookup_keys::after_row_key(&lookup_keys::commit_row_key(after_seq)),
             string_prefix_upper_bound(lookup_keys::COMMIT_ROW_PREFIX).as_deref(),
             limit,
+            None,
+            Readahead::Enabled,
         )
         .await?
         .into_iter()
-        .map(commit_from_manifest_row)
+        .map(|(_, row)| commit_from_manifest_row(row))
         .collect()
 }
 
@@ -81,12 +83,13 @@ pub(crate) async fn direntry_binds_page<S: ObjectStore + ?Sized>(
     let upper_bound =
         string_prefix_upper_bound(&lookup_keys::direntry_parent_prefix(parent_inode_id));
     segments
-        .scan_range_page_with_keys_for_lookup(
+        .scan_range(
             MetadataRowFamily::DirentryBinds,
             lower_bound,
             upper_bound.as_deref(),
             limit,
-            &lookup_keys::direntry_parent_probe(parent_inode_id),
+            Some(&lookup_keys::direntry_parent_probe(parent_inode_id)),
+            Readahead::Enabled,
         )
         .await?
         .into_iter()
@@ -198,12 +201,13 @@ async fn newest_edge_rows<S: ObjectStore + ?Sized>(
                 .await?
         } else {
             segments
-                .scan_range_page_with_keys_for_lookup(
+                .scan_range(
                     family,
                     &lower_bound,
                     upper_bound.as_deref(),
                     EDGE_WALK_PAGE_ROWS,
-                    filter_probe,
+                    Some(filter_probe),
+                    Readahead::Enabled,
                 )
                 .await?
         };
@@ -274,17 +278,18 @@ pub(super) async fn revision_by_inode_no<S: ObjectStore + ?Sized>(
     let exact_prefix = lookup_keys::revision_no_prefix(inode_id, revision_no);
     let filter_probe = lookup_keys::revision_probe(inode_id);
     Ok(segments
-        .scan_range_page_for_lookup(
+        .scan_range(
             MetadataRowFamily::Revisions,
             &exact_prefix,
             string_prefix_upper_bound(&exact_prefix).as_deref(),
             1,
-            &filter_probe,
+            Some(&filter_probe),
+            Readahead::Enabled,
         )
         .await?
         .into_iter()
         .next()
-        .map(revision_from_manifest_row)
+        .map(|(_, row)| revision_from_manifest_row(row))
         .transpose()?
         .filter(|revision| revision.committed_seq <= visible_seq))
 }
@@ -301,22 +306,25 @@ pub(super) async fn revisions_page<S: ObjectStore + ?Sized>(
     let rows = match inode_id {
         Some(inode_id) => {
             segments
-                .scan_range_page_with_keys_for_lookup(
+                .scan_range(
                     MetadataRowFamily::Revisions,
                     lower_bound,
                     string_prefix_upper_bound(&lookup_keys::revision_prefix(inode_id)).as_deref(),
                     limit,
-                    &lookup_keys::revision_probe(inode_id),
+                    Some(&lookup_keys::revision_probe(inode_id)),
+                    Readahead::Enabled,
                 )
                 .await?
         }
         None => {
             segments
-                .scan_range_page_with_keys(
+                .scan_range(
                     MetadataRowFamily::Revisions,
                     lower_bound,
                     string_prefix_upper_bound(lookup_keys::REVISION_ROW_PREFIX).as_deref(),
                     limit,
+                    None,
+                    Readahead::Enabled,
                 )
                 .await?
         }
@@ -337,11 +345,13 @@ pub(super) async fn active_deletions_page<S: ObjectStore + ?Sized>(
     limit: usize,
 ) -> Result<Vec<(String, ActiveDeletionRecord)>> {
     segments
-        .scan_range_page_with_keys(
+        .scan_range(
             MetadataRowFamily::ActiveDeletions,
             lower_bound,
             upper_bound,
             limit,
+            None,
+            Readahead::Enabled,
         )
         .await?
         .into_iter()
@@ -398,12 +408,13 @@ async fn first_content_layout<S: ObjectStore + ?Sized>(
 ) -> Result<Option<ContentLayoutRecord>> {
     let upper_bound = string_prefix_upper_bound(prefix);
     let rows = segments
-        .scan_range_page_with_keys_for_lookup(
+        .scan_range(
             MetadataRowFamily::ContentLayouts,
             prefix,
             upper_bound.as_deref(),
             CONTENT_LAYOUT_PAGE_ROWS,
-            probe,
+            Some(probe),
+            Readahead::Enabled,
         )
         .await?;
     rows.into_iter()
@@ -421,15 +432,17 @@ pub(super) async fn commit_receipt<S: ObjectStore + ?Sized>(
     let filter_probe = lookup_keys::commit_receipt_probe(commit_id);
     let prefix = lookup_keys::commit_receipt_prefix(commit_id);
     let receipts: Vec<CommitReceiptRecord> = segments
-        .scan_prefix_for_lookup(
+        .scan_range(
             MetadataRowFamily::CommitReceipts,
             &prefix,
-            &filter_probe,
+            string_prefix_upper_bound(&prefix).as_deref(),
+            usize::MAX,
+            Some(&filter_probe),
             Readahead::Disabled,
         )
         .await?
         .into_iter()
-        .map(commit_receipt_from_manifest_row)
+        .map(|(_, row)| commit_receipt_from_manifest_row(row))
         .collect::<Result<_>>()?;
     Ok(receipts
         .into_iter()
@@ -537,17 +550,18 @@ where
     let mut lower_bound = prefix;
     loop {
         let page = segments
-            .scan_range_page_for_lookup(
+            .scan_range(
                 family,
                 &lower_bound,
                 upper_bound.as_deref(),
                 WHOLE_STATE_RAW_SCAN_LIMIT,
-                &filter_probe,
+                Some(&filter_probe),
+                Readahead::Enabled,
             )
             .await?;
         let page_len = page.len();
-        let last_row_key = page.last().map(|row| row.row_key_for_family(family));
-        for row in page {
+        let last_row_key = page.last().map(|(row_key, _)| row_key.clone());
+        for (_, row) in page {
             let record = decode(row)?;
             if committed_seq(&record) <= visible_seq {
                 return Ok(Some(record));

@@ -497,9 +497,19 @@ async fn group_rows_from_manifest<S: ObjectStore + ?Sized>(
     let mut rows_by_family = BTreeMap::new();
     for family in group.families() {
         let mut rows = segments
-            .scan_prefix(*family, "")
+            .scan_range(
+                *family,
+                "",
+                None,
+                usize::MAX,
+                None,
+                scan::Readahead::Enabled,
+            )
             .await
-            .expect("scan the group");
+            .expect("scan the group")
+            .into_iter()
+            .map(|(_, row)| row)
+            .collect::<Vec<_>>();
         rows.sort_by_key(|row| row.row_key_for_family(*family));
         rows_by_family.insert(*family, rows);
     }

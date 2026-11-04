@@ -136,11 +136,13 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let mut files = Vec::with_capacity(wanted);
         while files.len() < wanted {
             let rows = segments
-                .scan_range_page_with_keys(
+                .scan_range(
                     MetadataRowFamily::Inodes,
                     &lower_bound,
                     upper_bound.as_deref(),
                     wave_rows,
+                    None,
+                    crate::segment::Readahead::Enabled,
                 )
                 .await?;
             let family_exhausted = rows.len() < wave_rows;
