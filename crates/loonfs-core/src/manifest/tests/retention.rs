@@ -736,6 +736,7 @@ async fn a_cutoff_or_a_window_older_than_the_grace_window_reads_the_commits_once
             &history.namespace_id,
             &crate::test_support::writer_at("test-writer", now_ms),
         )
+        .with_segment_cache()
         .engine()
         .advance_retention_floor(target)
         .await
@@ -743,8 +744,8 @@ async fn a_cutoff_or_a_window_older_than_the_grace_window_reads_the_commits_once
         .response
         .retention_floor_seq;
         assert_eq!(floor, ChangeSeq(64), "{target:?}");
-        // Without a cache, a second walk would fetch the index and the
-        // blocks again.
+        // The walk's later refills find the index and the blocks that an
+        // earlier one fetched in the block cache.
         assert_eq!(
             history.take_commit_ranges(),
             history.ranges_from_through(ChangeSeq(1), ChangeSeq(128)),

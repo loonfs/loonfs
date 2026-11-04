@@ -9,6 +9,7 @@ use crate::common::{
 use loonfs_core::publish::{CommitIntent, FilesystemOperation};
 use loonfs_core::test_support::{namespace_store, NamespaceFixture};
 use loonfs_core::CoreError;
+use loonfs_core::NamespaceWriterEngine;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::{namespace_id, page_limit};
@@ -360,18 +361,23 @@ async fn a_recursive_page_costs_the_store_requests_of_one_directory_page() {
     for (path, recursive) in [("/tree", true), ("/wide", false)] {
         let context = read_context(&store, &namespace_id).await;
         store.reset();
-        let listed = namespace_engine(&store, &namespace_id, &default_writer())
-            .list_path_page(
-                path,
-                PageRequest {
-                    limit: page_limit(1_000),
-                    cursor: None,
-                },
-                listing(recursive),
-                &context,
-            )
-            .await
-            .expect("list page");
+        // Each page reads through its own empty block cache, as a cold page
+        // of a runtime does.
+        let listed = NamespaceWriterEngine::writer(
+            loonfs_core::test_support::namespace_store_with_segment_cache(&store, &namespace_id),
+            default_writer().writer_id,
+        )
+        .list_path_page(
+            path,
+            PageRequest {
+                limit: page_limit(1_000),
+                cursor: None,
+            },
+            listing(recursive),
+            &context,
+        )
+        .await
+        .expect("list page");
         assert_eq!(listed.items.len(), 80, "{path}");
         assert!(listed.next_cursor.is_none());
         requests.push(store.counts());

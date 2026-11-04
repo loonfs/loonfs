@@ -19,15 +19,15 @@ use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
 use futures::{stream, FutureExt, StreamExt, TryStreamExt};
 use keys::KeyLookup;
-use loonfs::engine::SegmentBlockLoader;
+use loonfs::engine::{LoadedBlocks, SegmentBlockLoader};
 use loonfs::MAX_PENDING_SEGMENT_BYTES;
 use loonfs_objectstore::keys::extension_segment_object_key;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::hex::hex_decode_bytes;
 use loonfs_types::format::manifest::ExtensionSegmentRef;
 use loonfs_types::format::segment_blocks::{
-    decode_filter_block, index_blocks_for_key_range, key_range_may_intersect, DecodedDataBlock,
-    SegmentBlocksBuilder, SegmentFilter, SegmentIndexEntry, DEFAULT_TARGET_SEGMENT_BYTES,
+    decode_filter_block, index_blocks_for_key_range, key_range_may_intersect, SegmentBlocksBuilder,
+    SegmentFilter, SegmentIndexEntry, DEFAULT_TARGET_SEGMENT_BYTES,
 };
 use loonfs_types::{IndexSegmentId, NamespaceId};
 use std::collections::{BTreeMap, BTreeSet};
@@ -257,16 +257,21 @@ impl<S: ObjectStore + ?Sized> SegmentBlockLoader<IndexRow, ExtensionSegmentRef>
         &self,
         segment: ExtensionSegmentRef,
         entries: Vec<SegmentIndexEntry>,
-    ) -> Result<Vec<Arc<DecodedDataBlock<IndexRow>>>> {
+    ) -> Result<LoadedBlocks<IndexRow>> {
         let object_key = self.object_key(&segment);
-        load_data_block_span(
+        let blocks = load_data_block_span(
             self.store,
             self.block_cache,
             &object_key,
             &segment.segment_id,
             &entries,
         )
-        .await
+        .await?;
+        // A grep step bounds the blocks it keeps by its own input budget.
+        Ok(LoadedBlocks {
+            blocks,
+            reservation: None,
+        })
     }
 }
 

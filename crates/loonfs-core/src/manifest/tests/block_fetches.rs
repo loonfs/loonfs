@@ -230,9 +230,11 @@ async fn a_bounded_scan_fetches_the_blocks_of_its_key_range_and_nothing_past_the
     }
 }
 
-/// Checks that a cold scan under a small read working memory fetches its key
-/// range in refills that each decode to no more than the memory left, rather
-/// than in one GET of blocks that its memo can't keep.
+/// Checks that a scan reserves each refill's decoded bytes from the read
+/// working memory: with all but four blocks' worth reserved by another read,
+/// every refill's GET covers at most four blocks, with no room left every
+/// refill takes one block, and the scan releases its reservations when it
+/// ends.
 #[tokio::test]
 async fn a_scan_refill_loads_no_more_than_the_read_working_memory_has_left() {
     let temp = tempdir().expect("tempdir");
@@ -248,50 +250,58 @@ async fn a_scan_refill_loads_no_more_than_the_read_working_memory_has_left() {
             .map(|entry| entry.block.decoded_bytes as usize)
             .sum()
     };
-    // Room for four of the range's blocks, which all decode to about the
-    // same size.
-    let limit = decoded_bytes(first..first + 4);
-    let cache = MetadataSegmentCache::new(
-        Arc::new(crate::segment::cache::SharedSegmentBlocks::new(
-            usize::MAX,
-            usize::MAX,
-        )),
-        crate::block_cache::ObjectStoreScope::new(0),
-        Arc::new(crate::read_working_memory::ReadWorkingMemory::new(
-            limit, None,
-        )),
-    );
-    let wanted: Vec<_> = expected
-        .iter()
-        .filter(|row| {
-            let key = row.row_key_for_family(FAMILY);
-            key >= lower && key < upper
-        })
-        .cloned()
-        .collect();
-    let view = scan::VerifiedMetadataSegments::from_runs(
-        &store,
-        &cache,
-        one_segment_runs(descriptor.clone()),
-    );
-    store.reset();
-    let page: Vec<_> = view
-        .scan_range(
+    let pool = Arc::new(crate::read_working_memory::ReadWorkingMemory::new(
+        64 * 1024 * 1024,
+        None,
+    ));
+    let cache = || {
+        MetadataSegmentCache::new(
+            Arc::new(SharedSegmentBlocks::new(usize::MAX, usize::MAX)),
+            ObjectStoreScope::new(0),
+            Arc::clone(&pool),
+        )
+    };
+    let (store, descriptor, lower, upper) = (&store, &descriptor, &lower, &upper);
+    let scan = |cache: MetadataSegmentCache| async move {
+        let view = scan::VerifiedMetadataSegments::from_runs(
+            store,
+            &cache,
+            one_segment_runs(descriptor.clone()),
+        );
+        view.scan_range(
             FAMILY,
-            &lower,
-            Some(&upper),
+            lower,
+            Some(upper),
             usize::MAX,
             None,
             scan::BlocksPerRefill::KeyRange,
         )
+        .await
+    };
+    // The test's reservation stands in for another scan that keeps its
+    // blocks; four of the range's blocks, which all decode to about the same
+    // size, fit in the rest.
+    let room = decoded_bytes(first..first + 4);
+    let held = pool.reserve(pool.limit() - room, 0);
+    let wanted: Vec<_> = expected
+        .iter()
+        .filter(|row| {
+            let key = row.row_key_for_family(FAMILY);
+            key >= *lower && key < *upper
+        })
+        .cloned()
+        .collect();
+    store.reset();
+    let page: Vec<_> = scan(cache())
         .await
         .expect("scan the key range")
         .into_iter()
         .map(|(_, row)| row)
         .collect();
     assert_eq!(page, wanted);
+    assert_eq!(pool.in_use(), held.bytes(), "the scan released its blocks");
 
-    let mut gets = data_gets(&store, &descriptor);
+    let mut gets = data_gets(store, descriptor);
     gets.sort_unstable();
     let (range_start, range_end) = stored_range(&index, first..last + 1);
     assert_eq!(gets.first().map(|get| get.0), Some(range_start));
@@ -300,23 +310,43 @@ async fn a_scan_refill_loads_no_more_than_the_read_working_memory_has_left() {
         gets.windows(2).all(|pair| pair[0].1 == pair[1].0),
         "the GETs cover blocks {first}..={last} once: {gets:?}"
     );
-    assert!(
-        gets.len() > 1,
-        "the range loads in several refills: {gets:?}"
-    );
     for (start, end) in &gets {
         let blocks = index
             .iter()
-            .enumerate()
-            .filter(|(_, entry)| entry.block.offset >= *start && entry.block.offset < *end)
-            .map(|(position, _)| position);
-        let (lowest, highest) = blocks.fold((usize::MAX, 0), |(lowest, highest), position| {
-            (lowest.min(position), highest.max(position + 1))
-        });
+            .filter(|entry| entry.block.offset >= *start && entry.block.offset < *end)
+            .count();
         assert!(
-            decoded_bytes(lowest..highest) <= limit,
-            "the refill of blocks {lowest}..{highest} decodes to more than {limit} bytes: {gets:?}"
+            (1..=4).contains(&blocks),
+            "a refill covers {blocks} blocks, more than the four that fit: {gets:?}"
         );
+    }
+
+    // With less than one block free, each refill still takes its first
+    // block, above the limit, and the scan reads the range one block at a
+    // time.
+    drop(held);
+    let held = pool.reserve(pool.limit(), pool.limit());
+    store.reset();
+    let page: Vec<_> = scan(cache())
+        .await
+        .expect("scan the key range over the limit")
+        .into_iter()
+        .map(|(_, row)| row)
+        .collect();
+    assert_eq!(page, wanted);
+    assert_eq!(pool.in_use(), held.bytes(), "the scan released its blocks");
+    let gets = data_gets(store, descriptor);
+    assert_eq!(
+        gets.len(),
+        last + 1 - first,
+        "one GET for each block: {gets:?}"
+    );
+    for (start, end) in gets {
+        let blocks = index
+            .iter()
+            .filter(|entry| entry.block.offset >= start && entry.block.offset < end)
+            .count();
+        assert_eq!(blocks, 1, "a refill over the limit takes one block");
     }
 }
 

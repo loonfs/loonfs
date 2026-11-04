@@ -6,16 +6,19 @@ use super::cache::{read_working_memory, MetadataSegmentCache};
 use super::data_block_load::load_segment_data_block_span;
 use super::index_block_load::load_segment_index;
 use super::scan::BlocksPerRefill;
-use crate::compaction::merge_iterator::{refill_iterators, SegmentBlockLoader, SegmentRowIterator};
+use crate::compaction::merge_iterator::{
+    refill_iterators, LoadedBlocks, SegmentBlockLoader, SegmentRowIterator,
+};
 use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::limits::MAX_SCAN_REFILL_BYTES;
 use crate::manifest::error::ManifestLoadError;
 use crate::manifest::validate::validate_manifest_row_seq_range;
+use crate::read_working_memory::{ReadReservation, ReadWorkingMemory};
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{MetadataRow, MetadataSegmentRef};
 use loonfs_types::format::segment_blocks::{
-    index_blocks_for_key_range, key_range_may_intersect, DecodedDataBlock, SegmentIndexEntry,
+    index_blocks_for_key_range, key_range_may_intersect, SegmentIndexEntry,
 };
 use loonfs_types::ChangeSeq;
 use std::ops::ControlFlow;
@@ -33,6 +36,9 @@ pub(super) struct ScanLoader<'a, S: ObjectStore + ?Sized> {
     pub(super) store: &'a S,
     pub(super) segment_cache: Option<&'a MetadataSegmentCache>,
     pub(super) block_memo: &'a SessionBlockMemo,
+    /// The read working memory that a key-range refill reserves its blocks'
+    /// decoded bytes from.
+    pub(super) pool: &'a Arc<ReadWorkingMemory>,
     pub(super) blocks_per_refill: BlocksPerRefill,
     pub(super) upper_bound: Option<&'a str>,
 }
@@ -44,11 +50,11 @@ pub(super) struct ScanLoader<'a, S: ObjectStore + ?Sized> {
 /// list arrives once from each. Up to `STORE_READS_IN_FLIGHT` segments are
 /// open and loading through `segment_cache` at once. Each refill loads the
 /// next blocks of each open segment's key range, up to
-/// `MAX_SCAN_REFILL_BYTES` of stored bytes and the decoded bytes that the
-/// cache's read working memory has left, and inserts each block that it
-/// fetches into the block cache. The blocks of a refill are charged to the
-/// read working memory while they load, and the charge is released before
-/// `visit` sees their rows.
+/// `MAX_SCAN_REFILL_BYTES` of stored bytes and the decoded bytes that it
+/// reserves from the cache's read working memory, and inserts each block that
+/// it fetches into the block cache. The memo's index and filter blocks are
+/// released before `visit` sees the rows, and a refill's reservation stays
+/// until `visit` has seen every row of the refill's blocks.
 pub(crate) async fn visit_segment_rows<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,
@@ -72,6 +78,7 @@ pub(crate) async fn visit_segment_rows<S: ObjectStore + ?Sized>(
         store,
         segment_cache,
         block_memo: &block_memo,
+        pool: block_memo.pool(),
         blocks_per_refill: BlocksPerRefill::KeyRange,
         upper_bound,
     };
@@ -87,9 +94,9 @@ pub(crate) async fn visit_segment_rows<S: ObjectStore + ?Sized>(
         if iterators.is_empty() {
             return Ok(ControlFlow::Continue(()));
         }
-        refill_iterators(&loader, &mut iterators, block_memo.refill_budget()).await?;
+        refill_iterators(&loader, &mut iterators, loader.pool.available_bytes()).await?;
         // The memo releases its charge before `visit` runs, so the caller's
-        // sets can take the read working memory.
+        // sets can take the rest of the read working memory.
         block_memo.clear();
         for iterator in &mut iterators {
             while let Some((key, _)) = iterator.head() {
@@ -162,20 +169,75 @@ impl<S: ObjectStore + ?Sized> SegmentBlockLoader<MetadataRow, ScanDescriptor<'_>
         &self,
         segment: ScanDescriptor<'_>,
         entries: Vec<SegmentIndexEntry>,
-    ) -> Result<Vec<Arc<DecodedDataBlock>>, Self::Error> {
-        let blocks = load_segment_data_block_span(
-            self.store,
-            self.segment_cache,
-            Some(self.block_memo),
-            segment.descriptor,
-            &entries,
-        )
-        .await?;
+    ) -> Result<LoadedBlocks<MetadataRow>, Self::Error> {
+        let (blocks, reservation) = match self.blocks_per_refill {
+            BlocksPerRefill::One => {
+                let blocks = load_segment_data_block_span(
+                    self.store,
+                    self.segment_cache,
+                    Some(self.block_memo),
+                    segment.descriptor,
+                    &entries,
+                )
+                .await?;
+                (blocks, None)
+            }
+            BlocksPerRefill::KeyRange => {
+                let (entries, reservation) = self.reserve_refill(&entries);
+                let blocks = load_segment_data_block_span(
+                    self.store,
+                    self.segment_cache,
+                    None,
+                    segment.descriptor,
+                    entries,
+                )
+                .await?;
+                (blocks, Some(reservation))
+            }
+        };
         validate_manifest_row_seq_range(
             &metadata_segment_object_key(segment.descriptor),
             blocks.iter().flat_map(|block| block.rows.iter()),
             segment.max_seq,
         )?;
-        Ok(blocks)
+        Ok(LoadedBlocks {
+            blocks,
+            reservation,
+        })
+    }
+}
+
+impl<S: ObjectStore + ?Sized> ScanLoader<'_, S> {
+    /// Reserves the decoded bytes of the longest prefix of `entries` that the
+    /// read working memory has room for, and always of the first entry, and
+    /// returns that prefix with its reservation.
+    ///
+    /// The scan keeps the reservation until it has consumed the prefix's
+    /// blocks. The first block is reserved even above the limit, so the
+    /// scans that share the read working memory exceed its limit by at most
+    /// one block for each segment that they have open.
+    fn reserve_refill<'e>(
+        &self,
+        entries: &'e [SegmentIndexEntry],
+    ) -> (&'e [SegmentIndexEntry], ReadReservation) {
+        let decoded_bytes = |entry: &SegmentIndexEntry| entry.block.decoded_bytes as usize;
+        let mut reservation = self.pool.reserve(
+            entries.iter().map(decoded_bytes).sum(),
+            decoded_bytes(&entries[0]),
+        );
+        let mut kept_bytes = decoded_bytes(&entries[0]);
+        let kept = 1 + entries[1..]
+            .iter()
+            .take_while(|entry| {
+                let next_bytes = kept_bytes + decoded_bytes(entry);
+                if next_bytes > reservation.bytes() {
+                    return false;
+                }
+                kept_bytes = next_bytes;
+                true
+            })
+            .count();
+        reservation.shrink_to(kept_bytes);
+        (&entries[..kept], reservation)
     }
 }

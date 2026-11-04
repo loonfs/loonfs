@@ -7,9 +7,9 @@ use crate::read_working_memory::ReadWorkingMemory;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
-/// The decoded blocks that one read has loaded, charged to the read working
-/// memory and evicted oldest first when the pool is full, until the read
-/// ends.
+/// The decoded index, filter, and lookup blocks that one read has loaded,
+/// charged to the read working memory and evicted oldest first when the pool
+/// is full, until the read ends.
 #[derive(Debug)]
 pub(crate) struct SessionBlockMemo {
     pool: Arc<ReadWorkingMemory>,
@@ -73,16 +73,9 @@ impl SessionBlockMemo {
         *inner = SessionBlockMemoInner::default();
     }
 
-    /// Returns the decoded bytes that one refill of the memo's read may load:
-    /// what the read working memory has left, plus the memo's own reservation,
-    /// which the memo recycles oldest block first to hold the refill.
-    pub(super) fn refill_budget(&self) -> usize {
-        let reserved_bytes = self
-            .inner
-            .lock()
-            .expect("session block memo lock should not be poisoned")
-            .reserved_bytes;
-        self.pool.available_bytes().saturating_add(reserved_bytes)
+    /// Returns the read working memory that the memo is charged to.
+    pub(super) fn pool(&self) -> &Arc<ReadWorkingMemory> {
+        &self.pool
     }
 
     pub(super) fn record(

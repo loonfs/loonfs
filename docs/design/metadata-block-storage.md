@@ -64,7 +64,7 @@ LoonFS caches decoded index, filter, and data blocks in memory, up to a byte bud
 
 The implementation also combines reads when transferring some extra bytes is cheaper than another object-store round trip:
 
-- A scan fetches the next data blocks of its key range that no cache has in one ranged GET, up to 1 MiB of stored bytes and no more decoded bytes than its memo can keep, and inserts each block into the block cache, as [What a read fetches](block-cache.md#what-a-read-fetches) describes. A lookup of one key fetches one block.
+- A scan fetches the next data blocks of its key range that no cache has in one ranged GET, up to 1 MiB of stored bytes and the decoded bytes that it can reserve from the read working memory (always at least one block), and inserts each block into the block cache, as [What a read fetches](block-cache.md#what-a-read-fetches) describes. A lookup of one key fetches one block.
 - On a cold read, the filter and the index next to it can be fetched together.
 - A small enough segment can be read once and decoded section by section.
 
@@ -87,7 +87,7 @@ Block sizes, segment targets, the scan refill, and ordinary maintenance budgets 
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | Data-block target | 64 KiB decoded | A block is closed once it reaches its target. |
-| Scan refill | 1 MiB stored | A scan fetches the next blocks of its key range up to this size, and no more decoded bytes than its memo can keep, in one GET. |
+| Scan refill | 1 MiB stored | A scan fetches the next blocks of its key range up to this size in one GET, reserves their decoded bytes from the read working memory until it has consumed them, and always takes the first block, even above the limit. |
 | Segment byte target | 8 MiB decoded | A segment can exceed the target by its final row. |
 | Segment row target | 65,536 rows | Segments are also split by row count. |
 | Merge input limit | 8 complete runs | A merge reads at most eight complete runs. |

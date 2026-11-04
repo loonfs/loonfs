@@ -1016,9 +1016,16 @@ async fn a_kept_inode_filter_over_its_byte_limit_still_removes_hidden_rows() {
             }
         }
         assert!(seeded, "{inode_rows:?}: a seed with no false positive");
+        // The compaction walks through an empty block cache of its own, as a
+        // runtime's compaction does.
+        let cache = crate::test_support::segment_cache();
+        let mut walked_basis =
+            super::super::metadata_basis_from_manifest(&store, Some(&cache), &current).segments;
+        walked_basis.scan_runs = Arc::clone(&basis.scan_runs);
+        walked_basis.manifest = Arc::clone(&basis.manifest);
         store.reset();
         let compacted = run_metadata_compaction(
-            &basis,
+            &walked_basis,
             &crate::cache::MetadataSegmentCache::unshared(0),
             &namespace_id,
             &spec,

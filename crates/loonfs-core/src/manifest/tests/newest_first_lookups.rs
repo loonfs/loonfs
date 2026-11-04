@@ -538,7 +538,8 @@ async fn cold_lookup_gets(
 ) -> [usize; 2] {
     let mut gets = [0; 2];
     for (lookup, gets) in gets.iter_mut().enumerate() {
-        let (verified, _) = fixture.load(None).await;
+        let cache = crate::test_support::segment_cache();
+        let (verified, _) = fixture.load(Some(&cache)).await;
         let view = MetadataView::over_manifest_segments(&verified, fixture.head());
         let sent = fixture.store.reads().total;
         if lookup == 0 {
@@ -707,10 +708,15 @@ async fn a_lookup_of_a_key_in_many_runs_reads_only_the_newest_run() {
         HotLookup::Binding,
         HotLookup::Attributes,
     ] {
-        let verified =
-            load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest_no)
-                .await
-                .expect("load segments");
+        let cold_cache = crate::test_support::segment_cache();
+        let verified = load_manifest_segments_for_inspection(
+            &store,
+            Some(&cold_cache),
+            &namespace_id,
+            &manifest_no,
+        )
+        .await
+        .expect("load segments");
         let sent = store.reads().total;
         look_up_hot_key(
             &MetadataView::over_manifest_segments(&verified, head),
