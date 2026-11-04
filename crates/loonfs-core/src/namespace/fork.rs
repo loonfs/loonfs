@@ -108,7 +108,6 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     ) -> Result<NamespaceMetadata> {
         let clock = self.namespace.start_clock();
         let target = self.namespace.with_namespace(new_namespace_id.clone());
-        target.ensure_absent().await?;
         let owner = PinOwner::Fork {
             target_namespace_id: new_namespace_id.clone(),
         };

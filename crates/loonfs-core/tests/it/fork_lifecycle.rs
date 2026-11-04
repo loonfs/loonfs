@@ -1508,9 +1508,11 @@ async fn creation_and_fork_install_hint_and_manifest_in_order() {
         .await
         .expect_err("target exists");
     assert_eq!(error.code(), ErrorCode::NamespaceExists);
-    assert_eq!(store.counts().puts, 0);
+    // The fork writes its source pin, has the target's hint and manifest 1
+    // puts refused, and deletes the pin.
+    assert_eq!(store.counts().create_if_absent_puts, 3);
     assert_eq!(store.counts().compare_and_swaps, 0);
-    assert_eq!(store.counts().deletes, 0);
+    assert_eq!(store.counts().deletes, 1);
 
     for allow_existing in [false, true] {
         store.reset();
@@ -1534,16 +1536,23 @@ async fn creation_and_fork_install_hint_and_manifest_in_order() {
                 ErrorCode::NamespaceExists
             );
         }
+        // Both puts are refused, and nothing is deleted.
         let counts = store.counts();
         assert_eq!(
-            (counts.puts, counts.compare_and_swaps, counts.deletes),
-            (0, 0, 0)
+            (
+                counts.create_if_absent_puts,
+                counts.compare_and_swaps,
+                counts.deletes
+            ),
+            (2, 0, 0)
         );
     }
 }
 
+/// A create whose manifest 1 put is refused reads the existing namespace
+/// through the hint, and a failed read is an error, not absence.
 #[tokio::test]
-async fn bootstrap_hint_read_failures_write_nothing() {
+async fn a_losing_create_reports_a_failed_hint_read() {
     for injected in [
         InjectedError::Transport("hint read failed".to_owned()),
         InjectedError::PermissionDenied("hint read denied".to_owned()),
@@ -1556,8 +1565,13 @@ async fn bootstrap_hint_read_failures_write_nothing() {
             OperationSelector::Read,
             injected,
         );
-        failing.fail_all();
         let store = RecordingStore::new(failing, KeyPredicate::any());
+        NamespaceFixture::new(&store, &namespace_id, &default_writer())
+            .create()
+            .await
+            .expect("create");
+        store.inner().fail_all();
+        store.reset();
         for allow_existing in [false, true] {
             let error = (if allow_existing {
                 NamespaceFixture::new(&store, &namespace_id, &default_writer())
@@ -1574,26 +1588,40 @@ async fn bootstrap_hint_read_failures_write_nothing() {
             .expect_err("hint read failed");
             assert_matches!(error, CoreError::ControlObjectLoad(_));
         }
+        // Each attempt's two puts are refused, and nothing is deleted.
         let counts = store.counts();
         assert_eq!(
-            (counts.puts, counts.compare_and_swaps, counts.deletes),
-            (0, 0, 0)
+            (
+                counts.create_if_absent_puts,
+                counts.compare_and_swaps,
+                counts.deletes
+            ),
+            (4, 0, 0)
         );
     }
 }
 
+/// A create whose manifest 1 put is refused reads the existing namespace
+/// through the hint, and a corrupt hint is corruption, not absence.
 #[tokio::test]
-async fn bootstrap_of_a_corrupt_hint_writes_nothing() {
+async fn a_losing_create_reports_a_corrupt_hint() {
     let directory = tempdir().expect("tempdir");
     let store = RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
     );
     let namespace_id = namespace_id("demo");
-    store
-        .put_if_absent(&hint(&namespace_id), Bytes::from_static(b"invalid hint"))
+    NamespaceFixture::new(&store, &namespace_id, &default_writer())
+        .create()
         .await
-        .expect("corrupt hint");
+        .expect("create");
+    replace_object(
+        &store,
+        &hint(&namespace_id),
+        Bytes::from_static(b"invalid hint"),
+    )
+    .await
+    .expect("corrupt hint");
     store.reset();
     for allow_existing in [false, true] {
         let error = (if allow_existing {
@@ -1611,10 +1639,15 @@ async fn bootstrap_of_a_corrupt_hint_writes_nothing() {
         .expect_err("corrupt hint");
         assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
     }
+    // Each attempt's two puts are refused, and nothing is deleted.
     let counts = store.counts();
     assert_eq!(
-        (counts.puts, counts.compare_and_swaps, counts.deletes),
-        (0, 0, 0)
+        (
+            counts.create_if_absent_puts,
+            counts.compare_and_swaps,
+            counts.deletes
+        ),
+        (4, 0, 0)
     );
 }
 

@@ -272,10 +272,10 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// Publishes manifest 1 of a new namespace, after the hint that points to it.
     ///
     /// Both objects are created with put-if-absent, so an existing namespace
-    /// keeps its objects. The caller checks that the namespace is absent first
-    /// (format spec, "Creating a namespace"). If manifest 1 exists, the call
-    /// returns `namespace_exists`, or `namespace_deleted` when the current
-    /// manifest is a tombstone.
+    /// keeps its objects, and the put of manifest 1 decides whether the
+    /// namespace exists (format spec, "Creating a namespace"). If manifest 1
+    /// exists, the call returns `namespace_exists`, or `namespace_deleted`
+    /// when the current manifest is a tombstone.
     pub(crate) async fn create_manifest(
         &self,
         payload: NamespaceManifestPayload,

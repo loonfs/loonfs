@@ -1264,9 +1264,9 @@ This section describes how namespaces are created, forked, deleted, and retired.
 
 To create a namespace, LoonFS:
 
-1. Reads the existing namespace state before it writes any objects. An existing active namespace returns `namespace_exists` (or its current summary, with `allow_existing`). Corruption and read errors aren't absence. These checks write nothing.
-2. Builds the first manifest for an absent namespace (see [Publishing a materialized file set](#72-publishing-a-materialized-file-set)).
-3. Writes the hint, pointing to manifest 1, and then manifest 1, both with put-if-absent. A hint collision is allowed.
+1. Builds the first manifest (see [Publishing a materialized file set](#72-publishing-a-materialized-file-set)).
+2. Writes the hint, pointing to manifest 1, and then manifest 1, both with put-if-absent. A hint collision is allowed.
+3. If manifest 1 already exists, reads the existing namespace state. An existing active namespace returns `namespace_exists` (or its current summary, with `allow_existing`), and a tombstone returns `namespace_deleted`. Corruption and read errors aren't absence.
 
 If two processes create the same namespace at the same time, the one whose manifest 1 put succeeds creates the namespace. A hint written before that put doesn't mean the namespace exists, because its writer might have failed before it wrote manifest 1.
 
@@ -1274,7 +1274,7 @@ If two processes create the same namespace at the same time, the one whose manif
 
 A fork starts its own history from the source's retained metadata. To create one, LoonFS:
 
-1. Loads the target's current manifest before it writes a source pin, and continues only if the target doesn't exist. It then creates a verified source pin whose owner is the target namespace, either from the source's head or from an unexpired user pin (see [Creating and verifying a pin](#82-creating-and-verifying-a-pin)).
+1. Creates a verified source pin whose owner is the target namespace, either from the source's head or from an unexpired user pin (see [Creating and verifying a pin](#82-creating-and-verifying-a-pin)). The fork reads nothing of the target first: the put of the target's manifest 1 in step 4 decides whether the target exists (see [Conflicting and unknown installations](#93-conflicting-and-unknown-installations)).
 2. Loads and verifies the pinned manifest.
 3. Copies the pinned manifest's run references, head sequence, next run number, access configuration, family root, retention window, and [extension](#124-extensions) entries. The inherited runs determine the same base sequence. The fork's retention floor and acknowledged floor are both the pinned manifest's head sequence (see [Advancing the retention floor](#101-advancing-the-retention-floor)). Every segment keeps its owner. The fork basis is set to the pinned manifest reference and the source pin's ID. The fork basis of a fork that a [rebase](glossary.md#rebase) creates also records `rebased_from`, as described below.
 4. Builds the rest of the first manifest's fields (see [Publishing a materialized file set](#72-publishing-a-materialized-file-set)) and installs it (see [Creating a namespace](#91-creating-a-namespace)).
@@ -1283,11 +1283,11 @@ The fork copies no file bytes or metadata segments. Its first commit is one sequ
 
 A rebase creates its new fork from the source's head, and the new fork's fork basis records `rebased_from`: the fork whose commits the rebase replays into the new fork (`source_namespace_id`), and the fork sequence that the replayed fork's next merge into the source would start after (`resume_after_seq`). LoonFS reads `resume_after_seq` from the pinned manifest, under the range rule in [Merges](#merges), so it describes exactly the history that the new fork inherits. If the replayed fork's fork point is below the pinned manifest's retention floor, LoonFS deletes the source pin and fails with `rebootstrap_required`, before it installs the new fork. `rebased_from` is part of the fork basis, so it can't change after creation.
 
-The source pin's creation grace protects the installation. Garbage collection keeps a fork pin for at least the ordinary grace `T` of the pass (see [Candidate and age rules](#113-candidate-and-age-rules)) after its `created_at_ms`, which the fork call takes from its request clock (see [Pin cleanup](#117-pin-cleanup)). The metadata publication budget (see [Publishing a materialized file set](#72-publishing-a-materialized-file-set)) starts at the beginning of the fork call, before target discovery and source pin creation, and the rest of the grace covers provider operations and the clock allowance.
+The source pin's creation grace protects the installation. Garbage collection keeps a fork pin for at least the ordinary grace `T` of the pass (see [Candidate and age rules](#113-candidate-and-age-rules)) after its `created_at_ms`, which the fork call takes from its request clock (see [Pin cleanup](#117-pin-cleanup)). The metadata publication budget (see [Publishing a materialized file set](#72-publishing-a-materialized-file-set)) starts at the beginning of the fork call, before source pin creation, and the rest of the grace covers provider operations and the clock allowance.
 
 ### 9.3 Conflicting and unknown installations
 
-A losing manifest 1 put goes back to the existing-state checks in [Creating a namespace](#91-creating-a-namespace). Deleted status follows the lifetime rule in [Namespaces and identity](#11-namespaces-and-identity). Invalid bytes, or a key that doesn't match its payload, are corruption. A loser never overwrites the winner.
+A losing manifest 1 put reads the existing namespace state, as [Creating a namespace](#91-creating-a-namespace) describes. Deleted status follows the lifetime rule in [Namespaces and identity](#11-namespaces-and-identity). Invalid bytes, or a key that doesn't match its payload, are corruption. A loser never overwrites the winner.
 
 A confirmed precondition failure is a conflict. After a put with an unknown transport outcome, the publisher reads the manifest at that number:
 

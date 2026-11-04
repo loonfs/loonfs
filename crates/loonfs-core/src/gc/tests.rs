@@ -3402,7 +3402,9 @@ async fn create_on_a_deleted_id_fails_before_and_after_content_reclamation() {
                     .await
                     .expect_err("deleted id");
             assert_eq!(error.code(), loonfs_types::ErrorCode::NamespaceDeleted);
-            assert_eq!(store.counts().puts, 0);
+            // The creation's hint and manifest 1 puts are refused, and
+            // nothing is deleted.
+            assert_eq!(store.counts().create_if_absent_puts, 2);
             assert_eq!(store.counts().compare_and_swaps, 0);
             assert_eq!(store.counts().deletes, 0);
         }
