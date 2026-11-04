@@ -1439,7 +1439,7 @@ As an example of step 5, suppose a group has eight delta runs but no tier of fou
 
 An explicit compaction request compacts a group's runs whatever their sizes. If the group has more than eight runs, the request compacts its oldest eight, unless the oldest run is more than four times the size of the smallest of the next seven. In that case, it compacts the eight runs above the oldest one first, so the oldest run is rewritten once, by the compaction that finishes the group.
 
-(The tier size of four runs, the size ratio of four, and the limit of eight delta runs are implementation defaults, not format requirements. A compaction can rewrite any window that follows the earlier rules in this section.)
+(The tier size of four runs, the size ratio of four, the limit of eight delta runs, and the limit of eight input runs to one compaction are implementation defaults, not format requirements. A compaction can rewrite any window that follows the earlier rules in this section.)
 
 Why can't a compaction above the oldest run drop rows? An excluded older run might contain rows that a row in the window supersedes, such as an older binding version below an unbound one, or a listed deletion whose removal row is in the window. Dropping rows in the window could make those older rows visible again.
 
@@ -2541,7 +2541,6 @@ These are defaults for the reference producer and runtime. A target size can be 
 | Inline filter threshold | 1,024 stored bytes |
 | Target segment rows | 65,536 |
 | Target decoded segment size | 8 MiB |
-| Maximum compaction input runs | 8 |
 | Maximum compaction input rows in one metadata maintenance pass | 131,072 |
 | Maximum decoded input one compaction keeps in memory | 64 MiB |
 | Automatic WAL-fold threshold | 32 WAL objects |

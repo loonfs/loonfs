@@ -54,7 +54,7 @@ async fn a_daily_pass_and_a_tick_never_visit_the_same_namespace_together() {
         )
         .await
         .expect("publish");
-        server.clock.advance_ms(config.tick_interval_ms);
+        server.clock.advance_ms(config.tick_interval_ms.get());
         store.block_next();
         let visit = tokio::spawn({
             let sweep = server.sweep.clone();
@@ -129,7 +129,7 @@ async fn a_publish_during_a_metadata_step_is_folded_by_the_next_tick() {
     held.put_file("/first", b"first", &test_actor())
         .await
         .expect("publish");
-    server.clock.advance_ms(config.tick_interval_ms);
+    server.clock.advance_ms(config.tick_interval_ms.get());
     store.block_next();
     let visit = tokio::spawn({
         let sweep = server.sweep.clone();
@@ -142,7 +142,7 @@ async fn a_publish_during_a_metadata_step_is_folded_by_the_next_tick() {
     store.release();
     visit.await.expect("finish visit");
     store.inner().reset();
-    server.tick_after(config.tick_interval_ms).await;
+    server.tick_after(config.tick_interval_ms.get()).await;
     assert!(
         !store.inner().take().is_empty(),
         "the next tick folds the tail that the concurrent publish left"
@@ -203,7 +203,7 @@ async fn ticks_share_slots_with_a_parked_daily_pass_and_continue_when_a_slot_is_
         held.put_file("/note", b"data", &test_actor())
             .await
             .expect("publish");
-        server.clock.advance_ms(config.tick_interval_ms);
+        server.clock.advance_ms(config.tick_interval_ms.get());
         store.inner().reset();
         let mut tick = Box::pin(server.sweep.tick());
         if slots == 1 {
@@ -317,8 +317,8 @@ async fn a_collection_finishing_after_close_does_not_update_the_replacement_entr
         .expect("publish");
     let seq = held.last_published_seq();
     drop(held);
-    server.tick_after(config.tick_interval_ms).await;
-    server.clock.advance_ms(config.gc_interval_ms);
+    server.tick_after(config.tick_interval_ms.get()).await;
+    server.clock.advance_ms(config.gc_interval_ms.get());
     store.block_next();
     let visit = tokio::spawn({
         let sweep = server.sweep.clone();
@@ -344,7 +344,7 @@ async fn a_collection_finishing_after_close_does_not_update_the_replacement_entr
         Some(None)
     );
     store.inner().reset();
-    server.tick_after(config.gc_interval_ms).await;
+    server.tick_after(config.gc_interval_ms.get()).await;
     assert!(
         store.inner().take().is_empty(),
         "the replacement never published and owes no collection"

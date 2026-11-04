@@ -78,7 +78,7 @@ async fn a_pass_fences_a_held_session_that_committed_nothing_since_the_previous_
     assert_eq!(server.floors(&namespace_id).await, (floor, ChangeSeq(0)));
     let (epoch, _) = server.writer_block(&namespace_id).await;
 
-    server.pass_after(config.full_sweep_interval_ms).await;
+    server.pass_after(config.full_sweep_interval_ms.get()).await;
     assert_eq!(server.floors(&namespace_id).await, (floor, floor));
     assert_eq!(
         server.writer_block(&namespace_id).await,
@@ -152,7 +152,7 @@ async fn the_next_pass_fences_only_the_namespace_that_nobody_wrote_to() {
     server.commit(&written, "/new.txt").await;
     let written_epoch = server.writer_block(&written).await.0;
 
-    server.pass_after(config.full_sweep_interval_ms).await;
+    server.pass_after(config.full_sweep_interval_ms.get()).await;
     assert_eq!(server.floors(&idle).await, (floors[0], floors[0]));
     assert_eq!(
         server.writer_block(&idle).await.0,
@@ -197,7 +197,7 @@ async fn a_refused_fence_fails_once_per_full_pass_until_one_is_written() {
     store.fail_all();
 
     for passes in 1..=3 {
-        server.pass_after(config.full_sweep_interval_ms).await;
+        server.pass_after(config.full_sweep_interval_ms.get()).await;
         assert_eq!(
             server.acknowledgment_failures(),
             passes,
@@ -212,7 +212,7 @@ async fn a_refused_fence_fails_once_per_full_pass_until_one_is_written() {
     );
 
     store.clear();
-    server.pass_after(config.full_sweep_interval_ms).await;
+    server.pass_after(config.full_sweep_interval_ms.get()).await;
     assert_eq!(server.floors(&namespace_id).await, (floor, floor));
     assert_eq!(server.acknowledgment_failures(), 3);
 }

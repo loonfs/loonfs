@@ -177,17 +177,17 @@ pub struct ServerConfig {
     pub max_concurrent_maintenance: NonZeroUsize,
     /// Milliseconds between ticks of held sessions. Defaults to 5000.
     #[serde(default = "default_tick_interval_ms")]
-    pub tick_interval_ms: u64,
+    pub tick_interval_ms: NonZeroU64,
     /// Milliseconds before retrying unfinished metadata. Defaults to 300000.
     #[serde(default = "default_maintenance_interval_ms")]
-    pub maintenance_interval_ms: u64,
+    pub maintenance_interval_ms: NonZeroU64,
     /// Least milliseconds between collections for sessions whose seq moved. Defaults to 3600000 (1 hour).
     #[serde(default = "default_gc_interval_ms")]
-    pub gc_interval_ms: u64,
+    pub gc_interval_ms: NonZeroU64,
     /// Milliseconds between full passes over every namespace, with collection.
     /// The first runs at start. Defaults to 86400000 (24 hours).
     #[serde(default = "default_full_sweep_interval_ms")]
-    pub full_sweep_interval_ms: u64,
+    pub full_sweep_interval_ms: NonZeroU64,
     /// How long the server keeps a namespace's history before it advances
     /// the namespace's retention floor past that history, in milliseconds,
     /// for each namespace without a retention window of its own. Each full
@@ -200,13 +200,9 @@ pub struct ServerConfig {
     /// Idle milliseconds before a caught-up session with no request handle
     /// closes. A later write opens a new session. Defaults to 30 minutes.
     #[serde(default = "default_idle_session_close_after_ms")]
-    pub idle_session_close_after_ms: u64,
+    pub idle_session_close_after_ms: NonZeroU64,
     /// Decoded metadata bytes one compaction keeps in memory at once,
     /// whatever the size of its window. Derived when sized.
-    ///
-    /// `max_merge_input_bytes`, this setting's name through 0.5, is accepted
-    /// as an alias in 0.6 and removed in 0.7.
-    #[serde(alias = "max_merge_input_bytes")]
     pub max_compaction_input_bytes: Option<usize>,
     /// Minimum interval between checks for a successor to a cached manifest,
     /// in milliseconds. Zero checks on every read. Unset keeps the runtime
@@ -337,24 +333,24 @@ fn default_max_concurrent_maintenance() -> NonZeroUsize {
     const { NonZeroUsize::new(8).unwrap() }
 }
 
-fn default_tick_interval_ms() -> u64 {
-    5_000
+fn default_tick_interval_ms() -> NonZeroU64 {
+    const { NonZeroU64::new(5_000).unwrap() }
 }
 
-fn default_maintenance_interval_ms() -> u64 {
-    300_000
+fn default_maintenance_interval_ms() -> NonZeroU64 {
+    const { NonZeroU64::new(300_000).unwrap() }
 }
 
-fn default_gc_interval_ms() -> u64 {
-    3_600_000
+fn default_gc_interval_ms() -> NonZeroU64 {
+    const { NonZeroU64::new(3_600_000).unwrap() }
 }
 
-fn default_full_sweep_interval_ms() -> u64 {
-    86_400_000
+fn default_full_sweep_interval_ms() -> NonZeroU64 {
+    const { NonZeroU64::new(86_400_000).unwrap() }
 }
 
-fn default_idle_session_close_after_ms() -> u64 {
-    1_800_000
+fn default_idle_session_close_after_ms() -> NonZeroU64 {
+    const { NonZeroU64::new(1_800_000).unwrap() }
 }
 
 impl ServerConfig {
@@ -401,12 +397,12 @@ impl ServerConfig {
     pub(crate) fn sweep_config(&self) -> crate::sweep::SweepConfig {
         crate::sweep::SweepConfig {
             max_concurrent_maintenance: self.max_concurrent_maintenance,
-            tick_interval_ms: self.tick_interval_ms,
-            maintenance_interval_ms: self.maintenance_interval_ms,
-            gc_interval_ms: self.gc_interval_ms,
-            full_sweep_interval_ms: self.full_sweep_interval_ms,
+            tick_interval_ms: self.tick_interval_ms.get(),
+            maintenance_interval_ms: self.maintenance_interval_ms.get(),
+            gc_interval_ms: self.gc_interval_ms.get(),
+            full_sweep_interval_ms: self.full_sweep_interval_ms.get(),
             retention_window_ms: self.retention_window_ms,
-            idle_session_close_after_ms: self.idle_session_close_after_ms,
+            idle_session_close_after_ms: self.idle_session_close_after_ms.get(),
         }
     }
 

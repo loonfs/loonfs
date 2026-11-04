@@ -578,19 +578,31 @@ root = "/tmp/loonfs-server"
     assert_eq!(config.max_concurrent_uploads.get(), 8);
     assert_eq!(config.max_concurrent_downloads.get(), 16);
     assert_eq!(config.max_concurrent_maintenance.get(), 8);
-    assert_eq!(config.tick_interval_ms, 5_000);
-    assert_eq!(config.maintenance_interval_ms, 300_000);
-    assert_eq!(config.gc_interval_ms, 3_600_000);
-    assert_eq!(config.full_sweep_interval_ms, 86_400_000);
-    assert_eq!(config.idle_session_close_after_ms, 1_800_000);
+    assert_eq!(config.tick_interval_ms.get(), 5_000);
+    assert_eq!(config.maintenance_interval_ms.get(), 300_000);
+    assert_eq!(config.gc_interval_ms.get(), 3_600_000);
+    assert_eq!(config.full_sweep_interval_ms.get(), 86_400_000);
+    assert_eq!(config.idle_session_close_after_ms.get(), 1_800_000);
 
+    let path = write_config(
+        r#"
+bind = "127.0.0.1:9400"
+writer_id = "loonfs-server"
+max_compaction_input_bytes = 0
+
+[store]
+kind = "local_fs"
+root = "/tmp/loonfs-server"
+"#,
+    );
+    let error = load_server_config(&path).expect_err("zero bound must be rejected");
+    assert_invalid_field(error, "max_compaction_input_bytes");
     for field in [
         "tick_interval_ms",
         "maintenance_interval_ms",
         "gc_interval_ms",
         "full_sweep_interval_ms",
         "idle_session_close_after_ms",
-        "max_compaction_input_bytes",
     ] {
         let path = write_config(&format!(
             r#"
@@ -603,8 +615,8 @@ kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#
         ));
-        let error = load_server_config(&path).expect_err("zero bound must be rejected");
-        assert_invalid_field(error, field);
+        let error = load_server_config(&path).expect_err("a zero interval must be rejected");
+        assert_zero_rejected_on_decode(error, field, "u64");
     }
     for field in [
         "max_concurrent_reads",
@@ -661,26 +673,6 @@ root = "/tmp/loonfs-server"
     );
     let error = load_server_config(&path).expect_err("zero grep bound must be rejected");
     assert_invalid_field(error, "grep");
-}
-
-#[test]
-fn the_old_compaction_input_key_still_sets_the_compaction_input_limit() {
-    let path = write_config(
-        r#"
-bind = "127.0.0.1:9400"
-writer_id = "loonfs-server"
-max_merge_input_bytes = 33554432
-
-[store]
-kind = "local_fs"
-root = "/tmp/loonfs-server"
-"#,
-    );
-    let loaded = load_server_config(&path).expect("the old key is an alias");
-    assert_eq!(
-        loaded.config().max_compaction_input_bytes,
-        Some(32 * 1024 * 1024)
-    );
 }
 
 #[test]

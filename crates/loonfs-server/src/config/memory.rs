@@ -320,7 +320,6 @@ impl ServerConfig {
         validate_positive(
             "max_compaction_input_bytes",
             memory.compaction_input.bytes as u64,
-            None,
         )?;
         Ok(memory)
     }

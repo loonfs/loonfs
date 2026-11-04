@@ -687,7 +687,7 @@ async fn a_panicking_visit_is_backed_off_and_the_next_namespace_is_still_visited
         server.retry(&names[1], SweepCall::Metadata),
         SweepRetry {
             retry_at_ms: server.sweep.inner.timer.monotonic_now_ms()
-                + config.maintenance_interval_ms,
+                + config.maintenance_interval_ms.get(),
             attempts: 1,
         },
         "the panic counts as a failure, and ticks wait for its retry time"
@@ -830,24 +830,29 @@ async fn a_failing_metadata_step_waits_its_interval_until_the_position_passes_th
     let directory = tempdir().expect("tempdir");
     let mut config = sweep_config(None);
     assert_eq!(
-        (config.tick_interval_ms, config.maintenance_interval_ms),
+        (
+            config.tick_interval_ms.get(),
+            config.maintenance_interval_ms.get()
+        ),
         (5_000, 5 * MINUTE_MS)
     );
     // Keeps collection from coming due while the clock runs.
-    config.gc_interval_ms = 30 * DAY_MS;
+    config.gc_interval_ms = const { std::num::NonZeroU64::new(30 * DAY_MS).unwrap() };
     // The tail is due from the first tick, so each metadata step folds it
     // and reaches the failing store.
     config.idle_fold_after_ms = Some(1);
     let (store, server, namespace_id, held) =
         held_failing_server(directory.path(), &config, OperationSelector::Any).await;
     store.fail_all();
-    server.tick_after(config.tick_interval_ms).await;
+    server.tick_after(config.tick_interval_ms.get()).await;
     server
         .tick_through_retries(&namespace_id, SweepCall::Metadata, &WAIT_SECONDS)
         .await;
     // The next retry time comes after the position's revalidation bound.
     let failures = server.visit_failures(SweepCall::Metadata);
-    server.tick_after(config.maintenance_interval_ms).await;
+    server
+        .tick_after(config.maintenance_interval_ms.get())
+        .await;
     assert_eq!(
         server.visit_failures(SweepCall::Metadata),
         failures,
@@ -870,7 +875,7 @@ async fn a_failing_metadata_step_waits_its_interval_until_the_position_passes_th
         .await
         .expect("write another tail");
     store.fail_all();
-    server.tick_after(config.tick_interval_ms).await;
+    server.tick_after(config.tick_interval_ms.get()).await;
     assert_eq!(
         server.retry(&namespace_id, SweepCall::Metadata).attempts,
         1,
@@ -888,10 +893,10 @@ async fn a_failing_collection_backs_off_from_one_tick_to_an_hour() {
     config.idle_fold_after_ms = Some(0);
     let (store, server, namespace_id, _held) =
         held_failing_server(directory.path(), &config, OperationSelector::List).await;
-    server.tick_after(config.tick_interval_ms).await;
+    server.tick_after(config.tick_interval_ms.get()).await;
     assert!(server.metadata_caught_up(&namespace_id).await);
     store.fail_all();
-    server.tick_after(config.gc_interval_ms).await;
+    server.tick_after(config.gc_interval_ms.get()).await;
     assert_eq!(server.visit_failures(SweepCall::Gc), 1);
     server
         .tick_through_retries(&namespace_id, SweepCall::Gc, &WAIT_SECONDS)
@@ -912,11 +917,11 @@ async fn an_idle_session_with_a_failing_call_closes_once_its_backoff_reaches_the
         held_failing_server(directory.path(), &config, OperationSelector::List).await;
     let namespaces = &server.sweep.inner.namespaces;
     drop(held);
-    server.tick_after(config.tick_interval_ms).await;
+    server.tick_after(config.tick_interval_ms.get()).await;
     assert_eq!(server.wal_tail_objects(&namespace_id).await, 0);
     store.fail_all();
 
-    server.tick_after(config.gc_interval_ms).await;
+    server.tick_after(config.gc_interval_ms.get()).await;
     assert_eq!(server.visit_failures(SweepCall::Gc), 1);
     assert_eq!(
         held_ids(namespaces),
@@ -925,7 +930,7 @@ async fn an_idle_session_with_a_failing_call_closes_once_its_backoff_reaches_the
     );
 
     let attempts = || server.retry(&namespace_id, SweepCall::Gc).attempts;
-    while super::retries::backoff_ms(config.tick_interval_ms, attempts())
+    while super::retries::backoff_ms(config.tick_interval_ms.get(), attempts())
         < super::MAX_SWEEP_BACKOFF_MS
     {
         let failures = server.visit_failures(SweepCall::Gc);
@@ -937,7 +942,7 @@ async fn an_idle_session_with_a_failing_call_closes_once_its_backoff_reaches_the
         );
         assert!(!held_ids(namespaces).is_empty());
     }
-    server.tick_after(config.tick_interval_ms).await;
+    server.tick_after(config.tick_interval_ms.get()).await;
     assert!(
         held_ids(namespaces).is_empty(),
         "a call whose backoff reached the cap doesn't keep an idle session open"

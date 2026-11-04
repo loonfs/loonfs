@@ -458,8 +458,9 @@ Maintenance
     Enable the gram content index and wait for its backfill to reach the
     sequence the namespace was at when this command started. --no-wait
     returns as soon as the index is enabled. --max-steps and --deadline-ms
-    limit the wait. When either limit stops the command, it exits nonzero
-    and reports how far the index got.
+    limit the wait, so neither can be combined with --no-wait. When either
+    limit stops the command, it exits nonzero and reports how far the index
+    got.
 
   loonfs maintenance index status
     Show whether the gram content index is disabled, backfilling, or active.

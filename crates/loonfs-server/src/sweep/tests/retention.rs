@@ -333,7 +333,7 @@ async fn ticks_never_advance_the_floor_and_the_next_full_pass_does() {
     );
     server.tick_after(2 * WINDOW_MS).await;
     for _ in 0..3 {
-        server.tick_after(config.tick_interval_ms).await;
+        server.tick_after(config.tick_interval_ms.get()).await;
     }
     let entry = server
         .sweep
@@ -472,7 +472,7 @@ async fn a_failing_advance_fails_once_per_full_pass_until_it_succeeds() {
     store.fail_all();
 
     for passes in 1..=3 {
-        server.pass_after(config.full_sweep_interval_ms).await;
+        server.pass_after(config.full_sweep_interval_ms.get()).await;
         assert_eq!(
             server.retention_failures(),
             passes,
@@ -490,7 +490,7 @@ async fn a_failing_advance_fails_once_per_full_pass_until_it_succeeds() {
     );
 
     store.clear();
-    server.pass_after(config.full_sweep_interval_ms).await;
+    server.pass_after(config.full_sweep_interval_ms.get()).await;
     assert_eq!(
         server.diagnostics(&namespace_id).await.retention_floor_seq,
         seq,

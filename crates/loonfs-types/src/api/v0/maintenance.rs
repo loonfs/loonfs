@@ -158,7 +158,7 @@ pub enum RunMaintenanceResponse {
 ///
 /// The job folds the WAL tail and compacts metadata until nothing is due, or until it reaches a
 /// work limit such as 16 compaction units. `Maintenance::maintain_metadata_while_due` in the
-/// embedded runtime returns the same result.
+/// embedded runtime returns this result in the `response` field of a `MetadataMaintenanceReport`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct MetadataMaintenanceResponse {

@@ -116,22 +116,6 @@ impl ServerConfig {
                 }));
             }
         }
-        for (field, value) in [
-            ("tick_interval_ms", self.tick_interval_ms),
-            ("maintenance_interval_ms", self.maintenance_interval_ms),
-            ("gc_interval_ms", self.gc_interval_ms),
-            ("full_sweep_interval_ms", self.full_sweep_interval_ms),
-            (
-                "idle_session_close_after_ms",
-                self.idle_session_close_after_ms,
-            ),
-        ] {
-            validate_positive(
-                field,
-                value,
-                Some("set `maintenance = \"serve_only\"` to turn the maintenance sweep off"),
-            )?;
-        }
         let invalid_grep = |reason: String| {
             ServerError::Config(ConfigFieldError::Invalid {
                 field: "grep",
@@ -254,18 +238,13 @@ pub fn parse_server_config(source: &str) -> Result<ValidatedServerConfig> {
     config.validate()
 }
 
-pub(super) fn validate_positive(field: &'static str, value: u64, hint: Option<&str>) -> Result<()> {
+pub(super) fn validate_positive(field: &'static str, value: u64) -> Result<()> {
     if value > 0 {
         return Ok(());
     }
-    let mut reason = "must be greater than zero".to_owned();
-    if let Some(hint) = hint {
-        reason.push_str("; ");
-        reason.push_str(hint);
-    }
     Err(ServerError::Config(ConfigFieldError::Invalid {
         field,
-        reason,
+        reason: "must be greater than zero".to_owned(),
     }))
 }
 

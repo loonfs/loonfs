@@ -49,7 +49,7 @@ async fn ticks_fold_idle_tails_from_the_position_and_then_cost_nothing() {
         .expect("open");
     store.reset();
     for _ in 0..100 {
-        server.tick_after(config.tick_interval_ms).await;
+        server.tick_after(config.tick_interval_ms.get()).await;
     }
     assert!(
         store.take().is_empty(),
@@ -72,7 +72,9 @@ async fn ticks_fold_idle_tails_from_the_position_and_then_cost_nothing() {
         assert!(server.metadata_left_due(&namespace_id));
         let retry_at_ms = || server.retry(&namespace_id, SweepCall::Metadata).retry_at_ms;
         let first_retry_at_ms = retry_at_ms();
-        server.tick_after(config.maintenance_interval_ms - 1).await;
+        server
+            .tick_after(config.maintenance_interval_ms.get() - 1)
+            .await;
         assert_eq!(
             retry_at_ms(),
             first_retry_at_ms,
@@ -89,13 +91,13 @@ async fn ticks_fold_idle_tails_from_the_position_and_then_cost_nothing() {
         );
         assert!(server.wal_tail_objects(&namespace_id).await > 0);
         server
-            .tick_after(idle_fold_after_ms(&config) - config.maintenance_interval_ms)
+            .tick_after(idle_fold_after_ms(&config) - config.maintenance_interval_ms.get())
             .await;
         assert_eq!(server.wal_tail_objects(&namespace_id).await, 0);
         server.sweep.tick().await;
         store.reset();
         for _ in 0..20 {
-            server.tick_after(config.tick_interval_ms).await;
+            server.tick_after(config.tick_interval_ms.get()).await;
         }
         assert!(
             store.take().is_empty(),
@@ -153,7 +155,7 @@ async fn a_tick_leaves_a_tail_below_the_configured_inline_fold_size_until_it_is_
         "every value is written inline, so the tail has 3 MiB of inline bytes"
     );
     let tail_objects = server.wal_tail_objects(&namespace_id).await;
-    server.tick_after(config.tick_interval_ms).await;
+    server.tick_after(config.tick_interval_ms.get()).await;
     assert!(
         server.metadata_left_due(&namespace_id),
         "the tail waits for its idle fold age"
@@ -220,7 +222,7 @@ async fn a_tick_waits_for_the_sessions_fold_instead_of_folding_the_tail_again() 
         }
         blocking.release();
     };
-    tokio::join!(server.tick_after(config.tick_interval_ms), release);
+    tokio::join!(server.tick_after(config.tick_interval_ms.get()), release);
 
     let operations = store.take();
     let content_puts = write_keys(&operations, &KeyPredicate::content_blob());
@@ -276,7 +278,7 @@ async fn a_daily_pass_folds_every_idle_tail() {
         .expect("publish");
     drop(namespaces.open(&unpositioned).await.expect("open"));
     for _ in 0..3 {
-        server.tick_after(config.tick_interval_ms).await;
+        server.tick_after(config.tick_interval_ms.get()).await;
     }
     assert!(
         server.wal_tail_objects(&unpositioned).await > 0,
@@ -352,7 +354,7 @@ async fn a_tick_folds_an_idle_tail_after_the_position_passes_the_bound() {
     server.sweep.tick().await;
     store.reset();
     for _ in 0..20 {
-        server.tick_after(config.tick_interval_ms).await;
+        server.tick_after(config.tick_interval_ms.get()).await;
     }
     assert!(store.take().is_empty(), "the idle fold runs once");
     server.runtime.shutdown().await.expect("shutdown");
@@ -487,7 +489,7 @@ async fn ticks_finish_more_than_sixteen_metadata_units_without_another_publish()
         .expect("diagnostics")
         .current_manifest_no
         .expect("manifest");
-    server.tick_after(config.tick_interval_ms).await;
+    server.tick_after(config.tick_interval_ms.get()).await;
     let after = server
         .maintenance
         .diagnostics(&namespace_id)
@@ -502,13 +504,17 @@ async fn ticks_finish_more_than_sixteen_metadata_units_without_another_publish()
     );
     assert!(server.metadata_left_due(&namespace_id));
     store.reset();
-    server.tick_after(config.maintenance_interval_ms).await;
+    server
+        .tick_after(config.maintenance_interval_ms.get())
+        .await;
     assert!(
         !store.take().is_empty(),
         "the unit cap leaves this session due"
     );
     for _ in 0..8 {
-        server.tick_after(config.maintenance_interval_ms).await;
+        server
+            .tick_after(config.maintenance_interval_ms.get())
+            .await;
     }
     assert!(server.metadata_caught_up(&namespace_id).await);
     store.reset();
@@ -578,7 +584,7 @@ async fn a_fenced_compactor_stops_before_a_unit_and_waits_for_the_retry_interval
         .raise_hint_to_current_manifest()
         .await;
     store.reset();
-    server.tick_after(config.tick_interval_ms).await;
+    server.tick_after(config.tick_interval_ms.get()).await;
     let operations = store.take();
     assert_eq!(
         write_keys(&operations, &KeyPredicate::any()),
@@ -588,13 +594,13 @@ async fn a_fenced_compactor_stops_before_a_unit_and_waits_for_the_retry_interval
     assert_eq!(operations.len(), 6, "{operations:#?}");
     assert!(server.metadata_left_due(&namespace_id));
     for _ in 0..59 {
-        server.tick_after(config.tick_interval_ms).await;
+        server.tick_after(config.tick_interval_ms.get()).await;
     }
     assert!(
         store.take().is_empty(),
         "a fenced compactor is not retried on every tick"
     );
-    server.tick_after(config.tick_interval_ms).await;
+    server.tick_after(config.tick_interval_ms.get()).await;
     assert!(
         !store.take().is_empty(),
         "the next metadata attempt waits for its retry time"
@@ -639,11 +645,11 @@ async fn collection_runs_hourly_only_when_the_session_moved() {
     held.put_file("/note", b"data", &test_actor())
         .await
         .expect("publish");
-    server.tick_after(config.tick_interval_ms).await;
+    server.tick_after(config.tick_interval_ms.get()).await;
     server.sweep.tick().await;
     store.reset();
     server
-        .tick_after(config.gc_interval_ms - config.tick_interval_ms - 1)
+        .tick_after(config.gc_interval_ms.get() - config.tick_interval_ms.get() - 1)
         .await;
     assert!(store.take().is_empty());
     server.tick_after(1).await;
@@ -656,7 +662,7 @@ async fn collection_runs_hourly_only_when_the_session_moved() {
     assert!(operations.iter().all(|op| op
         .key()
         .starts_with(&loonfs_objectstore::keys::namespace_prefix(&moved))));
-    server.tick_after(config.gc_interval_ms).await;
+    server.tick_after(config.gc_interval_ms.get()).await;
     assert!(
         store.take().is_empty(),
         "an unchanged session is never collected by ticks"
@@ -665,7 +671,7 @@ async fn collection_runs_hourly_only_when_the_session_moved() {
         .await
         .expect("publish");
     store.reset();
-    server.tick_after(config.tick_interval_ms).await;
+    server.tick_after(config.tick_interval_ms.get()).await;
     assert_eq!(
         list_count(&store.take()),
         11,
@@ -697,7 +703,7 @@ async fn idle_sessions_close_only_after_the_idle_threshold_and_all_callers_relea
         .await
         .expect("publish");
     server.enable_index(&namespace_id).await;
-    server.tick_after(config.tick_interval_ms).await;
+    server.tick_after(config.tick_interval_ms.get()).await;
     server.sweep.tick().await;
     drop(held);
     let first_epoch = loonfs_core::test_support::namespace_store(&*store, &namespace_id)
@@ -710,7 +716,7 @@ async fn idle_sessions_close_only_after_the_idle_threshold_and_all_callers_relea
         .writer_epoch;
     store.reset();
     server
-        .tick_after(config.idle_session_close_after_ms - config.tick_interval_ms)
+        .tick_after(config.idle_session_close_after_ms.get() - config.tick_interval_ms.get())
         .await;
     assert_eq!(
         held_ids(namespaces).len(),
@@ -731,7 +737,7 @@ async fn idle_sessions_close_only_after_the_idle_threshold_and_all_callers_relea
     assert_eq!(held_ids(namespaces).len(), 1);
     assert!(store.take().is_empty());
     server
-        .tick_after(config.idle_session_close_after_ms + 1)
+        .tick_after(config.idle_session_close_after_ms.get() + 1)
         .await;
     server.sweep.tick().await;
     store.reset();
@@ -814,7 +820,7 @@ async fn ticks_close_a_fenced_session_and_the_session_of_a_deleted_namespace() {
         .expect_err("the session is fenced");
     assert_eq!(error.code(), loonfs::ErrorCode::WriterFenced, "{error:?}");
     store.reset();
-    server.tick_after(config.tick_interval_ms).await;
+    server.tick_after(config.tick_interval_ms.get()).await;
     assert_eq!(
         held_ids(namespaces),
         std::slice::from_ref(&fenced),
@@ -825,13 +831,13 @@ async fn ticks_close_a_fenced_session_and_the_session_of_a_deleted_namespace() {
         "the tick gives a fenced session no metadata step"
     );
     drop(held);
-    server.tick_after(config.tick_interval_ms).await;
+    server.tick_after(config.tick_interval_ms.get()).await;
     assert!(held_ids(namespaces).is_empty(), "the fenced session closes");
 
     let held = namespaces.open(&deleted).await.expect("open");
     held.delete().await.expect("delete the namespace");
     drop(held);
-    server.tick_after(config.tick_interval_ms).await;
+    server.tick_after(config.tick_interval_ms.get()).await;
     assert!(
         held_ids(namespaces).is_empty(),
         "the session of a deleted namespace closes"
@@ -875,7 +881,7 @@ async fn a_session_closes_when_its_index_step_finds_the_namespace_deleted() {
         .delete()
         .await
         .expect("delete the namespace");
-    server.tick_after(config.tick_interval_ms).await;
+    server.tick_after(config.tick_interval_ms.get()).await;
     assert!(
         held_ids(namespaces).is_empty(),
         "the session of a deleted namespace closes"
@@ -893,7 +899,7 @@ async fn aborted_uploads_close_without_a_publish_but_an_unfolded_tail_prevents_c
         KeyPredicate::any(),
     ));
     let mut config = sweep_config(None);
-    config.idle_session_close_after_ms = 1;
+    config.idle_session_close_after_ms = std::num::NonZeroU64::MIN;
     config.idle_fold_after_ms = Some(60_000);
     let server = SweepServer::start(store.clone(), &config, 0).await;
     let namespaces = &server.sweep.inner.namespaces;
@@ -927,7 +933,7 @@ async fn aborted_uploads_close_without_a_publish_but_an_unfolded_tail_prevents_c
         .await
         .expect("publish");
     drop(handle);
-    server.tick_after(config.tick_interval_ms).await;
+    server.tick_after(config.tick_interval_ms.get()).await;
     assert_eq!(
         held_ids(namespaces).len(),
         1,
@@ -937,7 +943,7 @@ async fn aborted_uploads_close_without_a_publish_but_an_unfolded_tail_prevents_c
     assert!(server.wal_tail_objects(&unfolded).await > 0);
     store.reset();
     server
-        .tick_after(idle_fold_after_ms(&config) - config.tick_interval_ms - 1)
+        .tick_after(idle_fold_after_ms(&config) - config.tick_interval_ms.get() - 1)
         .await;
     assert!(
         store.take().is_empty(),
@@ -1038,7 +1044,7 @@ async fn a_tick_sees_a_session_as_idle_exactly_when_the_runtime_timer_does() {
         .expect("publish");
     drop(handle);
 
-    server.tick_after(config.tick_interval_ms).await;
+    server.tick_after(config.tick_interval_ms.get()).await;
     assert_eq!(
         server.idle_fold_due_at_ms(&namespace_id),
         Some(DAY_MS + idle_fold_after_ms(&config)),
@@ -1047,7 +1053,7 @@ async fn a_tick_sees_a_session_as_idle_exactly_when_the_runtime_timer_does() {
     assert!(server.wal_tail_objects(&namespace_id).await > 0);
     store.reset();
     server
-        .tick_after(idle_fold_after_ms(&config) - config.tick_interval_ms - 1)
+        .tick_after(idle_fold_after_ms(&config) - config.tick_interval_ms.get() - 1)
         .await;
     assert!(
         store.take().is_empty(),
@@ -1061,7 +1067,7 @@ async fn a_tick_sees_a_session_as_idle_exactly_when_the_runtime_timer_does() {
     );
 
     server
-        .tick_after(config.idle_session_close_after_ms - idle_fold_after_ms(&config))
+        .tick_after(config.idle_session_close_after_ms.get() - idle_fold_after_ms(&config))
         .await;
     assert_eq!(
         held_ids(namespaces).len(),
