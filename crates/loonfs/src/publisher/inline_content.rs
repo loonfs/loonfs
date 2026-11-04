@@ -42,7 +42,7 @@ impl NamespacePublisher {
             candidate,
             &values[..wal_object_inline_values],
             &values[wal_object_inline_values..],
-        )?;
+        );
         Ok(InlineCandidatePlan {
             candidate,
             ordered_inline_content: values,
@@ -91,15 +91,21 @@ impl NamespacePublisher {
         self.stage_inline_values(
             &mut plan.candidate.candidate,
             &plan.ordered_inline_content[kept..],
+            permit,
         )
         .await?;
-        PreparedCandidate::new(plan.candidate.candidate).map_err(Into::into)
+        Ok(PreparedCandidate::new(plan.candidate.candidate))
     }
 
+    /// Stages `values` for `candidate` and moves `permit`'s charge to the
+    /// staged candidate's weight. A candidate whose commit already has a
+    /// receipt is answered from the receipt, so its values stay inline and
+    /// its charge stays the estimate.
     async fn stage_inline_values(
         &self,
         candidate: &mut CommitCandidate,
         values: &[InlineContent],
+        permit: &AdmissionPermit,
     ) -> Result<()> {
         if values.is_empty() {
             return Ok(());
@@ -154,6 +160,7 @@ impl NamespacePublisher {
                 .await?;
             candidate.stage_inline_content(&value.content_ref().content_id, proof);
         }
+        permit.reweigh(candidate.estimated_retained_bytes())?;
         Ok(())
     }
 }

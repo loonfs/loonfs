@@ -593,7 +593,7 @@ fn try_admit_candidate(
     namespace_id: &NamespaceId,
     candidate: CommitCandidate,
 ) -> Result<oneshot::Receiver<crate::Result<Commit>>, CoreError> {
-    try_admit_prepared_candidate(publisher, namespace_id, PreparedCandidate::new(candidate)?)
+    try_admit_prepared_candidate(publisher, namespace_id, PreparedCandidate::new(candidate))
 }
 
 fn try_admit_prepared_candidate(
@@ -661,8 +661,7 @@ async fn publisher_splits_batches_at_the_wal_bound_in_admission_order() {
             ("second", available_bytes - first_bound + extra_bytes),
         ] {
             let mut candidate =
-                PreparedCandidate::new(CommitCandidate::new(create_directory_request(name, name)))
-                    .expect("prepare");
+                PreparedCandidate::new(CommitCandidate::new(create_directory_request(name, name)));
             candidate.wal_record_bytes_upper_bound = bound;
             responses.push(
                 try_admit_prepared_candidate(&publisher, &namespace_id, candidate).expect("admit"),

@@ -8,6 +8,9 @@
 
 use crate::gc::{CompletedUploadSession, MemberState};
 use crate::namespace::state::NamespaceReadState;
+use crate::path::write::{CommitIntent, FilesystemOperation};
+use crate::storage::content_admission::ContentTokenError;
+use crate::storage::inline_content::InlineContent;
 use loonfs_types::format::control::{
     ForkBasis, ManifestRef, PinOwner, PinPayload, RebasedFrom, WriterBlock,
 };
@@ -25,9 +28,10 @@ use loonfs_types::format::wal::{
 };
 use loonfs_types::{
     AbsolutePath, AccessGrants, ActorId, AttributeKey, AttributeValue, Attributes, BindingVersion,
-    ChangeSeq, Checksum, ChecksumHex, CommitFingerprint, CommitId, ContentId, ContentRef,
-    DisplayName, ExtensionName, IndexSegmentId, InodeId, MetadataSegmentId, NameKey, NamespaceId,
-    PathComponent, PayloadChecksum, PinId, PrincipalId, PrincipalScope, UploadId, WriterId,
+    ChangeSeq, Checksum, ChecksumHex, CommitFingerprint, CommitId, CommitPrecondition, ContentId,
+    ContentRef, DisplayName, ExtensionName, FileContent, IndexSegmentId, InodeId,
+    MetadataSegmentId, NameKey, NamespaceId, PathComponent, PayloadChecksum, PinId, PrincipalId,
+    PrincipalScope, Subject, SubjectId, UploadId, WriterId,
 };
 use loonfs_types::{DiffEntry, FilesystemChange};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -88,7 +92,7 @@ fn hash_table_bytes<Entry>(capacity: usize) -> usize {
 /// and moves one entry up to its parent. So each node after the first on a
 /// level takes seven entries: six it keeps and one its parent keeps. The
 /// parents form the next level and fill the same way, up to a single root.
-fn btree_map_node_bytes<K, V>(map: &BTreeMap<K, V>) -> usize {
+pub(crate) fn btree_map_node_bytes<K, V>(map: &BTreeMap<K, V>) -> usize {
     btree_node_bytes::<K, V>(map.len())
 }
 
@@ -172,6 +176,7 @@ text_heap_bytes!(
     PinId,
     PrincipalId,
     PrincipalScope,
+    SubjectId,
     UploadId,
     WriterId,
 );
@@ -210,6 +215,151 @@ impl HeapBytes for ContentRef {
     fn heap_bytes(&self) -> usize {
         self.content_id.heap_bytes() + self.checksum.heap_bytes()
     }
+}
+
+impl HeapBytes for InlineContent {
+    fn heap_bytes(&self) -> usize {
+        self.content_ref().heap_bytes() + self.bytes().len()
+    }
+}
+
+impl HeapBytes for ContentTokenError {
+    fn heap_bytes(&self) -> usize {
+        match self {
+            Self::Codec(message) => message.heap_bytes(),
+            Self::Malformed
+            | Self::BadSignature
+            | Self::NamespaceMismatch
+            | Self::ContentRefMismatch
+            | Self::Expired
+            | Self::TimeOverflow => 0,
+        }
+    }
+}
+
+impl HeapBytes for CommitIntent {
+    fn heap_bytes(&self) -> usize {
+        self.commit_id.heap_bytes()
+            + self.actor_id.heap_bytes()
+            + self.subject.heap_bytes()
+            + self.message.heap_bytes()
+            + self.operations.heap_bytes()
+            + self.preconditions.heap_bytes()
+    }
+}
+
+// A principal set is a B-tree set, whose nodes have no value slots.
+impl HeapBytes for Subject {
+    fn heap_bytes(&self) -> usize {
+        self.principals.iter().map(HeapBytes::heap_bytes).fold(
+            self.principal_scope.heap_bytes()
+                + self.subject_id.heap_bytes()
+                + btree_node_bytes::<PrincipalId, ()>(self.principals.len()),
+            usize::saturating_add,
+        )
+    }
+}
+
+impl HeapBytes for CommitPrecondition {
+    fn heap_bytes(&self) -> usize {
+        match self {
+            Self::PathBinding {
+                path,
+                expected_binding_version,
+                ..
+            } => path.heap_bytes() + expected_binding_version.heap_bytes(),
+            Self::InodeBinding {
+                expected_binding_version,
+                ..
+            } => expected_binding_version.heap_bytes(),
+            Self::PathAbsence { path } => path.heap_bytes(),
+            Self::NameAbsence { display_name, .. } => display_name.heap_bytes(),
+            Self::NamespaceHead { .. }
+            | Self::FileRevision { .. }
+            | Self::AttributesRevision { .. }
+            | Self::AccessRevision { .. } => 0,
+        }
+    }
+}
+
+impl HeapBytes for FileContent {
+    fn heap_bytes(&self) -> usize {
+        match self {
+            Self::Ref {
+                content_ref,
+                source_namespace_id,
+            } => content_ref.heap_bytes() + source_namespace_id.heap_bytes(),
+            Self::Inline(bytes) => bytes.capacity(),
+        }
+    }
+}
+
+impl HeapBytes for FilesystemOperation {
+    fn heap_bytes(&self) -> usize {
+        match self {
+            Self::CreateDirectory { path, .. }
+            | Self::DeletePath { path, .. }
+            | Self::RestoreRevision { path, .. } => path.heap_bytes(),
+            Self::CreateDirectoryByInode { display_name, .. } => display_name.heap_bytes(),
+            Self::PutFile { path, content, .. } => path.heap_bytes() + content.heap_bytes(),
+            Self::CreateFileByInode {
+                display_name,
+                content,
+                ..
+            } => display_name.heap_bytes() + content.heap_bytes(),
+            Self::PutFileRevisionByInode { content, .. } => content.heap_bytes(),
+            Self::AppendFile {
+                path,
+                inline_content,
+                ..
+            } => path.heap_bytes() + inline_content.capacity(),
+            Self::AppendFileByInode { inline_content, .. } => inline_content.capacity(),
+            Self::DeleteByInode {
+                expected_binding_version,
+                ..
+            } => expected_binding_version.heap_bytes(),
+            Self::MovePath {
+                source_path,
+                destination_path,
+                ..
+            }
+            | Self::CopyPath {
+                source_path,
+                destination_path,
+                ..
+            } => source_path.heap_bytes() + destination_path.heap_bytes(),
+            Self::MoveByInode {
+                expected_binding_version,
+                destination_display_name,
+                ..
+            } => expected_binding_version.heap_bytes() + destination_display_name.heap_bytes(),
+            Self::CopyByInode {
+                destination_display_name,
+                ..
+            } => destination_display_name.heap_bytes(),
+            Self::Undelete {
+                destination_path,
+                destination_display_name,
+                ..
+            } => destination_path.heap_bytes() + destination_display_name.heap_bytes(),
+            Self::RestoreRevisionByInode { .. } => 0,
+            Self::UpdateAttributes {
+                path, set, remove, ..
+            } => path.heap_bytes() + attribute_set_heap_bytes(set) + remove.heap_bytes(),
+            Self::UpdateAttributesByInode { set, remove, .. } => {
+                attribute_set_heap_bytes(set) + remove.heap_bytes()
+            }
+            Self::UpdateAccess { path, grants, .. } => path.heap_bytes() + grants.heap_bytes(),
+            Self::UpdateAccessByInode { grants, .. } => grants.heap_bytes(),
+        }
+    }
+}
+
+/// The attributes that an update writes.
+fn attribute_set_heap_bytes(set: &BTreeMap<AttributeKey, AttributeValue>) -> usize {
+    set.iter()
+        .map(|(key, value)| key.heap_bytes() + value.heap_bytes())
+        .fold(btree_map_node_bytes(set), usize::saturating_add)
 }
 
 impl HeapBytes for FilesystemChange {

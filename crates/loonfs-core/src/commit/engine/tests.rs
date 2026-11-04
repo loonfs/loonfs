@@ -58,21 +58,12 @@ fn create_dir_request(commit_id: &str, name: &str) -> CommitIntent {
 #[test]
 fn admission_weight_includes_annotation_proofs_and_preparation_errors() {
     let request = create_dir_request("weight", "docs");
-    let baseline = CommitCandidate::new(request.clone())
-        .estimated_retained_bytes()
-        .expect("weight");
+    let baseline = CommitCandidate::new(request.clone()).estimated_retained_bytes();
     let mut annotated = request.clone();
     annotated.message = Some(String::new());
-    let empty_annotation = CommitCandidate::new(annotated.clone())
-        .estimated_retained_bytes()
-        .expect("weight");
+    let empty_annotation = CommitCandidate::new(annotated.clone()).estimated_retained_bytes();
     annotated.message = Some("x".repeat(4096));
-    assert!(
-        CommitCandidate::new(annotated)
-            .estimated_retained_bytes()
-            .expect("weight")
-            >= empty_annotation + 4096
-    );
+    assert!(CommitCandidate::new(annotated).estimated_retained_bytes() >= empty_annotation + 4096);
     let proof = PreparedContent::for_durable_content_write(
         NamespaceId::parse("demo").expect("namespace"),
         ContentRef::blob_v1(
@@ -83,7 +74,7 @@ fn admission_weight_includes_annotation_proofs_and_preparation_errors() {
     );
     let prepared = CommitCandidate::prepared(request.clone(), vec![proof; 100]);
     assert!(
-        prepared.estimated_retained_bytes().expect("weight")
+        prepared.estimated_retained_bytes()
             > baseline + 100 * std::mem::size_of::<PreparedContent>()
     );
     let rejected = CommitCandidate::rejected(
@@ -96,13 +87,13 @@ fn admission_weight_includes_annotation_proofs_and_preparation_errors() {
             10
         ]),
     );
-    assert!(rejected.estimated_retained_bytes().expect("weight") > baseline + 40960);
+    assert!(rejected.estimated_retained_bytes() > baseline + 40960);
 }
 
 #[test]
 fn principals_add_to_candidate_admission_weight() {
     let candidate = CommitCandidate::new(create_dir_request("subject-weight", "docs"));
-    let before = candidate.estimated_retained_bytes().expect("weight");
+    let before = candidate.estimated_retained_bytes();
     let principals = (0..64)
         .map(|index| {
             PrincipalId::parse(format!("{index:03}{}", "x".repeat(253))).expect("principal")
@@ -113,7 +104,7 @@ fn principals_add_to_candidate_admission_weight() {
         subject_id: SubjectId::parse("subject").expect("subject"),
         principals: PrincipalSet::new(principals).expect("principals"),
     });
-    let after = candidate.estimated_retained_bytes().expect("weight");
+    let after = candidate.estimated_retained_bytes();
     assert!(after >= before + 64 * 256);
 }
 
