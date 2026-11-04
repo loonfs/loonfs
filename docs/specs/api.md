@@ -1256,7 +1256,7 @@ The response contains the new namespace's initial state. A new namespace starts 
 
 A fork request identifies the target namespace with `new_namespace_id`. Route placeholders such as `{ns}`, `{source_ns}`, and an implementation-internal `:namespace` are path parameter names, and each one takes the same namespace ID value. v0 doesn't accept or return a namespace `name` alias.
 
-Create and fork install the hint and then manifest 1. The conditional put of manifest 1 determines whether the namespace exists (see [Namespace lifecycle and forks](format.md#9-namespace-lifecycle-and-forks)). A create or fork that loses that write to another active namespace returns `namespace_exists` (409). A create or fork into a deleted ID returns `namespace_deleted` (410) before it writes anything. A namespace is never left partially created.
+Create and fork install the hint and then manifest 1. The conditional put of the hint determines whether the namespace ID is new (see [Namespace lifecycle and forks](format.md#9-namespace-lifecycle-and-forks)). A create or fork that loses that write to another active namespace returns `namespace_exists` (409). A create or fork into a deleted ID returns `namespace_deleted` (410). A namespace is never left partially created.
 
 [Namespaces and identity](format.md#11-namespaces-and-identity) defines a namespace's lifetime. An application that reuses a human-readable name MUST keep its own map from names to namespace IDs, and generate a new namespace ID for each lifetime.
 

@@ -339,9 +339,11 @@ async fn snapshot_fork_refuses_a_snapshot_that_expired_after_the_fork_call_began
         )
         .await
         .expect("snapshot");
+    // The fork's first read of the snapshot blocks, and the snapshot expires
+    // while it does.
     let store = BlockingStore::new(
         RecordingStore::new(inner, KeyPredicate::prefix(pin_prefix(&source))),
-        KeyPredicate::exact(hint(&target)),
+        KeyPredicate::exact(pin(&source, &snapshot.pin_id)),
         OperationSelector::Read,
     );
     let clock = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
@@ -365,6 +367,6 @@ async fn snapshot_fork_refuses_a_snapshot_that_expired_after_the_fork_call_began
     assert_eq!(
         store.inner().counts().create_if_absent_puts,
         0,
-        "the first expiry check refuses before a fork pin is written"
+        "the expiry check refuses before a fork pin is written"
     );
 }

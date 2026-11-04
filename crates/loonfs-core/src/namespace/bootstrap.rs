@@ -38,11 +38,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 options.access.clone(),
             )
         };
-        let created = async {
-            self.namespace.ensure_absent().await?;
-            self.namespace.create_manifest(start.clone(), &clock).await
-        };
-        match created.await {
+        match self.namespace.create_manifest(start.clone(), &clock).await {
             Ok(()) => Ok(super::status::created_namespace(&start)),
             Err(CoreError::NamespaceExists { .. }) if options.allow_existing => {
                 self.namespace.load_metadata().await

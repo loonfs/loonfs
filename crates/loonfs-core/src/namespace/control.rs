@@ -85,23 +85,6 @@ pub(crate) fn ensure_namespace_live(
 }
 
 impl<S: ObjectStore> NamespaceStore<S> {
-    /// Returns `namespace_exists`, or `namespace_deleted` for a tombstone, when
-    /// the namespace has a current manifest.
-    pub(crate) async fn ensure_absent(&self) -> crate::error::Result<()> {
-        let Some(current) = self.load_current_manifest_if_present().await? else {
-            return Ok(());
-        };
-        Err(if current.payload().status.is_deleted() {
-            CoreError::NamespaceDeleted {
-                namespace_id: self.namespace_id.clone(),
-            }
-        } else {
-            CoreError::NamespaceExists {
-                namespace_id: self.namespace_id.clone(),
-            }
-        })
-    }
-
     pub(crate) async fn load_hint(&self) -> Result<LoadedHint, ControlObjectLoadError> {
         load_control_object(
             &self.store,

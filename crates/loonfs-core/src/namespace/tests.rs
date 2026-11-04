@@ -98,8 +98,8 @@ async fn two_creations_race_at_manifest_one() {
 }
 
 /// Checks that a create and a fork each return the state that their manifest
-/// 1 records, and that neither reads the new namespace after its absence
-/// check.
+/// 1 records, and that neither reads the new namespace: the put of manifest 1
+/// decides whether it exists.
 #[tokio::test]
 async fn a_new_namespace_returns_the_state_its_first_manifest_records() {
     let directory = tempdir().expect("directory");
@@ -116,7 +116,6 @@ async fn a_new_namespace_returns_the_state_its_first_manifest_records() {
     assert_eq!(
         control_requests(&source, &store.take()),
         vec![
-            ("get", hint(&source)),
             ("put", hint(&source)),
             ("put", metadata_manifest_object(&source, &ManifestNo(1))),
         ]
@@ -153,7 +152,6 @@ async fn a_new_namespace_returns_the_state_its_first_manifest_records() {
     assert_eq!(
         control_requests(&target, &store.take()),
         vec![
-            ("get", hint(&target)),
             ("put", hint(&target)),
             ("put", metadata_manifest_object(&target, &ManifestNo(1))),
         ]
@@ -182,13 +180,14 @@ async fn an_ambiguous_first_manifest_confirms_only_a_forks_creation() {
         InjectedError::Transport("response lost".to_owned()),
     )
     .apply_then_fail();
-    store.fail_next(2);
+    store.fail_next(1);
     let actor_id = loonfs_test_support::test_actor();
     let error = crate::test_support::NamespaceFixture::new(&store, &source, &context())
         .create()
         .await
         .expect_err("plain create cannot prove authorship from matching bytes");
     assert_eq!(error.code(), ErrorCode::NamespaceExists);
+    assert_eq!(store.attempts(), 1);
     let existing = crate::test_support::namespace_store(&store, &source)
         .load_metadata()
         .await
@@ -205,6 +204,7 @@ async fn an_ambiguous_first_manifest_confirms_only_a_forks_creation() {
         .await
         .expect("allow existing returns the created namespace");
     assert_eq!(adopted, existing);
+    store.fail_next(1);
     let fixture = crate::test_support::NamespaceFixture::new(&store, &source, &context());
     let created = fixture
         .engine()
@@ -218,7 +218,7 @@ async fn an_ambiguous_first_manifest_confirms_only_a_forks_creation() {
         .await
         .expect("fork source pin proves authorship from matching bytes");
     assert!(created.fork_basis.is_some());
-    assert_eq!(store.attempts(), 2);
+    assert_eq!(store.attempts(), 1);
     assert_eq!(store.remaining(), 0);
 }
 
@@ -449,7 +449,7 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
 }
 
 #[tokio::test]
-async fn fork_into_a_deleted_id_writes_no_source_pin() {
+async fn fork_into_a_deleted_id_leaves_no_source_pin() {
     let directory = tempdir().expect("directory");
     let store = RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
@@ -485,9 +485,11 @@ async fn fork_into_a_deleted_id_writes_no_source_pin() {
         .await
         .expect_err("deleted target");
     assert_eq!(error.code(), ErrorCode::NamespaceDeleted);
-    assert_eq!(store.counts().puts, 0);
+    // The fork writes its source pin, has the put of the target's hint
+    // refused, reads the tombstone, and deletes the pin.
+    assert_eq!(store.counts().create_if_absent_puts, 2);
     assert_eq!(store.counts().compare_and_swaps, 0);
-    assert_eq!(store.counts().deletes, 0);
+    assert_eq!(store.counts().deletes, 1);
     assert!(store
         .list_prefix(&loonfs_objectstore::keys::pin_prefix(&source))
         .await
