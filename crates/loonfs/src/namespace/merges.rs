@@ -344,23 +344,16 @@ impl Namespace<Writable> {
     /// writer session in this runtime is already folding, the fold waits for
     /// that fold instead of folding the same tail.
     ///
-    /// A strong read confirms a namespace's head, but the manifest that the
-    /// read starts from is the cached head's, which a runtime checks for a
-    /// successor only once per
-    /// [`manifest_revalidation_interval_ms`](crate::RuntimeConfig::manifest_revalidation_interval_ms)
-    /// when it has no writer session for the namespace, such as a fork
-    /// whose handle the caller dropped, or one that another process writes.
-    /// A read right after the fold could then start from the manifest before
-    /// the fold, or from one older than a fold that another process
-    /// published, and a merge, whose range ends at the fork's folded head,
-    /// would quietly merge a shorter range. So the fold drops the
-    /// namespace's cached head before the read, whether or not it published.
+    /// The fold moves the namespace's cached head onto the manifest that
+    /// covers the tail, whether it published that manifest or found it
+    /// current, or drops the cached head when it can't move there. So the
+    /// read starts from that manifest or a newer one, and a merge, whose
+    /// range ends at the fork's folded head, merges the whole range.
     pub(crate) async fn fold_and_read(&self, namespace_id: &NamespaceId) -> Result<PinnedRead> {
         self.mode
             .publisher
             .fold_namespace(namespace_id, FoldWhen::Always)
             .await?;
-        self.core.invalidate_namespace_read_cache(namespace_id);
         self.core
             .pinned_read(namespace_id, Consistency::Strong)
             .await

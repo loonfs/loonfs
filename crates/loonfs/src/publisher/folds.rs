@@ -1,7 +1,7 @@
 //! The one fold path of each namespace in a writable runtime, and the locks
 //! that keep a namespace's folds apart and its compaction units apart.
 
-use super::registry::{NamespaceChange, PositionChange};
+use super::registry::NamespaceChange;
 use super::worker::elapsed_ms_from;
 use super::{FoldTrigger, NamespacePublisher, PublisherRegistry};
 use crate::trace::phase_span;
@@ -84,8 +84,9 @@ impl PublisherRegistry {
     /// the tail from the store, under the lock.
     ///
     /// The fold waits for a fold permit, and it moves the session's position
-    /// onto the manifest that covers the tail, whether it published that
-    /// manifest or found it current. A fold that publishes then wakes the
+    /// and the cached head onto the manifest that covers the tail, whether
+    /// it published that manifest or found it current (see
+    /// [`Self::move_views`]). A fold that publishes then wakes the
     /// commits that wait at the write stop, and raises the namespace's hint.
     pub(crate) async fn fold_namespace(
         &self,
@@ -133,16 +134,11 @@ impl PublisherRegistry {
         let folded = self
             .finish_namespace_mutation(namespace_id, result, |_| NamespaceChange::Unchanged)
             .await?;
-        let published = folded.response.outcome == FoldWalOutcome::Published;
-        if let Some(publisher) = self.live_publisher(namespace_id) {
-            publisher
-                .change_position(PositionChange::Move(folded.manifest.clone()))
-                .await;
-            if published {
+        self.move_views(namespace_id, folded.manifest.clone()).await;
+        if folded.response.outcome == FoldWalOutcome::Published {
+            if let Some(publisher) = self.live_publisher(namespace_id) {
                 publisher.fold_published.send_replace(());
             }
-        }
-        if published {
             self.raise_hint(namespace_id, folded.response.manifest_no)
                 .await;
         }

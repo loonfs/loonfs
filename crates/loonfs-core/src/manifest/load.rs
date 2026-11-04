@@ -17,7 +17,7 @@ use crate::namespace::state::NamespaceReadState;
 use crate::segment::cache::{
     DecodedMetadataSegmentBlock, MetadataSegmentCache, MetadataSegmentCacheKey,
 };
-use crate::segment::runs::{manifest_cache_heap_bytes, runs_newest_first};
+use crate::segment::runs::{manifest_cache_heap_bytes, runs_newest_first, MetadataRunManifest};
 use crate::segment::scan::VerifiedMetadataSegments;
 use crate::wal::{replay_discovered_tail, ProjectedWalTail};
 use loonfs_objectstore::keys::metadata_manifest_object;
@@ -155,17 +155,7 @@ pub(crate) fn metadata_basis_from_manifest<'a, S: ObjectStore + ?Sized>(
 ) -> LoadedMetadataBasis<'a, S> {
     let scan_runs = Arc::new(runs_newest_first(manifest.payload()));
     if let Some(cache) = segment_cache {
-        cache.insert(
-            MetadataSegmentCacheKey::manifest(&manifest.object_key),
-            DecodedMetadataSegmentBlock::Manifest {
-                decoded_bytes: manifest_cache_heap_bytes(&manifest.envelope, &scan_runs),
-                manifest: (
-                    Arc::clone(&manifest.envelope),
-                    Arc::clone(&scan_runs),
-                    manifest.manifest_bytes,
-                ),
-            },
-        );
+        cache_manifest(cache, manifest, &scan_runs);
     }
     metadata_basis_from_segments(VerifiedMetadataSegments::new(
         store,
@@ -175,6 +165,27 @@ pub(crate) fn metadata_basis_from_manifest<'a, S: ObjectStore + ?Sized>(
         manifest.manifest_bytes,
         scan_runs,
     ))
+}
+
+/// Caches `manifest` in `segment_cache` under its object key, with
+/// `scan_runs`, its runs newest first, so that a read of the manifest sends
+/// no request.
+pub(crate) fn cache_manifest(
+    segment_cache: &MetadataSegmentCache,
+    manifest: &LoadedManifest,
+    scan_runs: &Arc<Vec<MetadataRunManifest>>,
+) {
+    segment_cache.insert(
+        MetadataSegmentCacheKey::manifest(&manifest.object_key),
+        DecodedMetadataSegmentBlock::Manifest {
+            decoded_bytes: manifest_cache_heap_bytes(&manifest.envelope, scan_runs),
+            manifest: (
+                Arc::clone(&manifest.envelope),
+                Arc::clone(scan_runs),
+                manifest.manifest_bytes,
+            ),
+        },
+    );
 }
 
 fn metadata_basis_from_segments<S: ObjectStore + ?Sized>(

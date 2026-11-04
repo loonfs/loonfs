@@ -527,8 +527,10 @@ async fn ticks_finish_more_than_sixteen_metadata_units_without_another_publish()
 /// the claim before it plans a compaction unit. Its position doesn't show
 /// the claim, so one HEAD finds the manifests after the position's manifest,
 /// the position moves onto them, and the unit stops as fenced without
-/// writing a segment or a manifest. The session waits for the metadata
-/// retry interval before it tries again.
+/// writing a segment or a manifest. The session's own claim manifest is in
+/// the segment cache from its publication, so the tick doesn't read it
+/// again. The session waits for the metadata retry interval before it tries
+/// again.
 #[tokio::test]
 async fn a_fenced_compactor_stops_before_a_unit_and_waits_for_the_retry_interval() {
     let directory = tempdir().expect("tempdir");
@@ -591,7 +593,7 @@ async fn a_fenced_compactor_stops_before_a_unit_and_waits_for_the_retry_interval
         Vec::<String>::new(),
         "the session writes no segment and no manifest"
     );
-    assert_eq!(operations.len(), 6, "{operations:#?}");
+    assert_eq!(operations.len(), 5, "{operations:#?}");
     assert!(server.metadata_left_due(&namespace_id));
     for _ in 0..59 {
         server.tick_after(config.tick_interval_ms.get()).await;

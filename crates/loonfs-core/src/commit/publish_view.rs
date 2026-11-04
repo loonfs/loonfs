@@ -2,7 +2,7 @@
 
 use crate::error::Result;
 use crate::limits::MAX_UNFOLDED_WAL_OBJECTS;
-use crate::manifest::same_head;
+use crate::manifest::move_read_basis;
 use crate::manifest::{
     load_basis_metadata_segments, metadata_basis_from_manifest, LoadedMetadataBasis,
     PublishedManifest,
@@ -121,55 +121,18 @@ impl WriterPosition {
     /// 4.2).
     ///
     /// A manifest at or below the basis's number leaves the position where
-    /// it is. A later manifest at the basis's head (see [`same_head`])
-    /// keeps the tail. A later fold moves the position when it's active, has
-    /// the position's writer epoch, folds a WAL number above the position's
-    /// folded number and at most its head's, and its `head_seq` is the last
-    /// commit of a chunk of the tail. The tail above the fold's manifest is
-    /// then the chunks after its `head_seq`, because a fold folds whole WAL
-    /// objects, oldest first. For example, if a fold read the WAL through
-    /// the commit at sequence 10, and this session then wrote the commits at
-    /// 11 and 12, the tail above the fold's manifest is those two commits. A
-    /// fold's manifest lists runs, so the cut also drops the root directory
-    /// that replay adds above a manifest without runs. A manifest at the
-    /// basis's head keeps that directory, which is why it keeps the tail
-    /// instead of cutting it.
-    ///
-    /// A position that moves takes the manifest's retention floor, so the
-    /// session validates its next commits against a floor that a retention
-    /// advance raised, and its next WAL object records that floor.
-    ///
-    /// The rule doesn't depend on whether this runtime or another process
-    /// published the manifest, or on the order in which manifests arrive.
-    /// Writer epochs never decrease along manifests, so every manifest
-    /// between the basis and a later manifest with the position's writer
-    /// epoch has that epoch too, and none of them is another writer's claim.
-    /// Each of them folds the same WAL that the position's tail contains above
-    /// the basis's folded number, so the later manifest's folded WAL number
-    /// and `head_seq` are enough to find the tail above it, and the position
-    /// can move onto it without the manifests between. A manifest between
-    /// the two that arrives later is below the new basis, so it leaves the
-    /// position where it is.
+    /// it is. A later manifest moves the position by the rule of
+    /// [`move_read_basis`]. A position that moves takes the manifest's
+    /// retention floor, so the session validates its next commits against a
+    /// floor that a retention advance raised, and its next WAL object
+    /// records that floor.
     pub(crate) fn move_to(&mut self, manifest: &PublishedManifest) -> bool {
-        let ReadBasis { head, basis } = &mut self.read_basis;
-        if manifest.manifest.manifest_no <= basis.manifest_no() {
+        if manifest.manifest.manifest_no <= self.read_basis.basis.manifest_no() {
             return true;
         }
-        if !same_head(basis, head, manifest) {
-            if manifest.status.is_deleted()
-                || manifest.writer_epoch != head.writer_epoch
-                || manifest.folded_wal_no <= head.folded_wal_no
-                || manifest.folded_wal_no > head.wal_no
-            {
-                return false;
-            }
-            let Some(after) = self.tail.after_seq(manifest.manifest.head_seq, head.seq) else {
-                return false;
-            };
-            head.folded_wal_no = manifest.folded_wal_no;
-            self.tail = Arc::new(after);
+        if !move_read_basis(&mut self.read_basis, &mut self.tail, manifest) {
+            return false;
         }
-        *basis = MetadataBasis::new(manifest.manifest.clone());
         self.retention_floor_seq = manifest.retention_floor_seq;
         true
     }

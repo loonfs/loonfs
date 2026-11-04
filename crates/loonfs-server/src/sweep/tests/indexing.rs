@@ -66,12 +66,13 @@ async fn ticks_index_publishes_and_lifecycle_changes_then_cost_nothing() {
             commit.committed_seq
         );
         // The first build publishes a manifest, and the session's position
-        // moves onto it, so the next tick's metadata step reads that
-        // manifest once. Enabling the active index again publishes nothing.
+        // moves onto it and the manifest is cached, so the next tick's
+        // metadata step sends no request. Enabling the active index again
+        // publishes nothing.
         store.reset();
         server.sweep.tick().await;
         let after = store.take();
-        assert_eq!(after.len(), usize::from(index == 0), "{after:#?}");
+        assert!(after.is_empty(), "{after:#?}");
         server.sweep.tick().await;
         assert!(store.take().is_empty(), "the lifecycle change is finished");
     }

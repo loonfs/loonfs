@@ -1619,3 +1619,102 @@ async fn a_restarted_runtime_reads_a_folded_file_from_the_ssd_tier() {
     assert_eq!(segment_gets, 0, "{:?}", cache.stats());
     assert!(cache.stats().segment_ssd.expect("the SSD tier").hits > 0);
 }
+
+/// Checks that an extension's publication in a runtime without the
+/// namespace's writer session moves that runtime's cached head onto the
+/// published manifest, and caches that manifest, so the next read sees the
+/// published entry and the WAL tail from the cache, with no request.
+#[tokio::test]
+async fn a_read_after_an_extension_publication_sends_no_request() {
+    use crate::{Consistency, ReadAt, StatOptions};
+    use loonfs_test_support::stores::{KeyPredicate, RecordingStore, StoreCounts};
+    use loonfs_types::format::manifest::ExtensionEntry;
+    use loonfs_types::ExtensionName;
+
+    let directory = tempdir().expect("tempdir");
+    let store = Arc::new(RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    ));
+    let actor = loonfs_test_support::test_actor();
+    let namespace = namespace_id("extension");
+    let writer = LoonFs::builder_with_store(store.clone())
+        .writer_id(loonfs_test_support::ids::writer_id("writer"))
+        .build()
+        .await
+        .expect("writer");
+    writer
+        .create_namespace(&namespace, &actor)
+        .await
+        .expect("create the namespace");
+    writer
+        .open_namespace(&namespace)
+        .expect("open the namespace")
+        .put_file("/file", b"body", &actor)
+        .await
+        .expect("put a file");
+    // The writer's shutdown ends its hint raises before the test counts
+    // requests.
+    writer.shutdown().await.expect("shut down the writer");
+    // The runtime's timer doesn't move, so its cached head stays within an
+    // eventual read's maximum staleness.
+    let runtime = LoonFs::builder_with_store(store.clone())
+        .writer_id(loonfs_test_support::ids::writer_id("maintenance"))
+        .monotonic_timer(Arc::new(ManualClock::new(0)))
+        .build()
+        .await
+        .expect("maintenance runtime");
+    let maintenance = runtime.maintenance(loonfs_test_support::ids::writer_id("maintenance"));
+    let eventual = Consistency::Eventual {
+        max_staleness_ms: Some(1_000),
+    };
+    let stat = StatOptions {
+        at: ReadAt::Live(Some(eventual)),
+        ..StatOptions::default()
+    };
+    let namespace_handle = runtime
+        .open_namespace(&namespace)
+        .expect("open the namespace");
+    namespace_handle
+        .stat_with_options("/file", &stat)
+        .await
+        .expect("stat the file");
+
+    let name = ExtensionName::parse("grep").expect("extension name");
+    let entry = ExtensionEntry::new(1, Vec::new(), serde_json::Map::new());
+    let basis = maintenance
+        .load_extension_basis(&namespace)
+        .await
+        .expect("load the basis");
+    let published = maintenance
+        .publish_extension(&basis, &name, |base| (entry.clone(), base))
+        .await
+        .expect("publish the entry");
+    let loonfs_core::ExtensionPublication::Published(published) = published else {
+        panic!("no other publication races the test's own");
+    };
+    assert!(published.manifest().manifest_no > basis.manifest().manifest_no);
+
+    store.reset();
+    let pinned = maintenance
+        .core
+        .pinned_read(&namespace, eventual)
+        .await
+        .expect("read the namespace");
+    let found = pinned
+        .engine
+        .find_extension_entry(&pinned.context, &name)
+        .await
+        .expect("find the entry");
+    assert_eq!(found, Some(entry));
+    namespace_handle
+        .stat_with_options("/file", &stat)
+        .await
+        .expect("stat the file");
+    assert_eq!(
+        store.counts(),
+        StoreCounts::default(),
+        "{:?}",
+        store.snapshot()
+    );
+}
