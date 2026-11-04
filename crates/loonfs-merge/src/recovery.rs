@@ -16,9 +16,10 @@ struct RebasedFork {
 }
 
 impl<M: Mechanics, R: Resolver> MergeSession<M, R> {
-    /// Recovers the session that merges `original_fork_id` into
-    /// `namespace_id` as `actor_id`, for a caller that lost the session's
-    /// state, from what the store records.
+    /// Starts the session that merges `original_fork_id` into
+    /// `namespace_id` as `actor_id`, and recovers what an earlier run of the
+    /// session did from what the store records, for a caller that has no
+    /// saved state.
     ///
     /// The session's new forks are the forks of `namespace_id` whose fork
     /// basis records a rebase of the original fork or of another new fork,
@@ -33,10 +34,12 @@ impl<M: Mechanics, R: Resolver> MergeSession<M, R> {
     /// it's `merged` or `abandoned`.
     ///
     /// The session merges the original fork through `options.through_seq`,
-    /// or through its head, and a new fork through its head. It starts
-    /// `failed` when the next-range query of the fork to merge says that the
-    /// fork can't merge, as in [`start`](Self::start), or when the query of a
-    /// new fork returns an outcome that this crate doesn't know.
+    /// or through its head, and a new fork through its head. When the next
+    /// merge of the fork to merge would start at or after that sequence, the
+    /// session starts `merged`. When a retention floor refuses that merge, or
+    /// the next-range query of the fork or of a new fork returns an outcome
+    /// that this crate doesn't know, the session starts `failed`. With no
+    /// new forks, the session merges the original fork.
     pub async fn recover(
         mechanics: M,
         resolver: R,
@@ -140,59 +143,60 @@ impl<M: Mechanics, R: Resolver> MergeSession<M, R> {
 /// Returns the forks of `namespace_id` that rebases of `original_fork_id`,
 /// or of another fork that the result lists, created.
 ///
-/// Each pass reads the namespace's checkpoint inventory and the namespace
-/// of every fork pin's target. A fork's pin can come before the pin of the
-/// fork that it was rebased from, so a pass that finds a new fork makes
-/// another pass.
+/// The search reads the namespace's checkpoint inventory once, and the
+/// namespace of each fork pin's target once. A fork's pin can come before
+/// the pin of the fork that it was rebased from, so the search follows the
+/// rebases from the original fork only after it read every pin.
 async fn find_rebased_forks(
     mechanics: &impl Mechanics,
     namespace_id: &NamespaceId,
     original_fork_id: &NamespaceId,
 ) -> Result<Vec<RebasedFork>> {
-    let mut found: Vec<RebasedFork> = Vec::new();
-    let is_found =
-        |found: &[RebasedFork], id: &NamespaceId| found.iter().any(|fork| fork.namespace_id == *id);
-    // A pass that finds no new fork ends the search. Every other pass finds
-    // one or more, and `found` stops at `MAX_NEW_FORKS`, so the search makes
-    // at most `MAX_NEW_FORKS` + 1 passes.
-    loop {
-        let found_before = found.len();
-        let mut pages = mechanics.list_checkpoints(namespace_id);
-        while let Some(page) = pages.next().await {
-            for checkpoint in page?.checkpoints {
-                let CheckpointOwner::Fork {
-                    target_namespace_id,
-                } = checkpoint.owner
-                else {
-                    continue;
-                };
-                if target_namespace_id == *original_fork_id
-                    || is_found(&found, &target_namespace_id)
-                {
-                    continue;
-                }
-                let Some(rebased_from) = rebased_from(mechanics, &target_namespace_id).await?
-                else {
-                    continue;
-                };
-                if rebased_from != *original_fork_id && !is_found(&found, &rebased_from) {
-                    continue;
-                }
-                if found.len() == MAX_NEW_FORKS {
-                    return Err(MergeError::TooManyNewForks {
-                        original_fork_id: original_fork_id.clone(),
-                    });
-                }
-                found.push(RebasedFork {
+    let mut rebased: Vec<RebasedFork> = Vec::new();
+    let mut pages = mechanics.list_checkpoints(namespace_id);
+    while let Some(page) = pages.next().await {
+        for checkpoint in page?.checkpoints {
+            let CheckpointOwner::Fork {
+                target_namespace_id,
+            } = checkpoint.owner
+            else {
+                continue;
+            };
+            if target_namespace_id == *original_fork_id
+                || rebased
+                    .iter()
+                    .any(|fork| fork.namespace_id == target_namespace_id)
+            {
+                continue;
+            }
+            if let Some(rebased_from) = rebased_from(mechanics, &target_namespace_id).await? {
+                rebased.push(RebasedFork {
                     namespace_id: target_namespace_id,
                     rebased_from,
                 });
             }
         }
-        if found.len() == found_before {
-            return Ok(found);
-        }
     }
+    let mut found: Vec<RebasedFork> = Vec::new();
+    let mut parent_id = original_fork_id.clone();
+    // The forks form a tree under the original fork. Each turn moves the
+    // forks rebased from `parent_id` into `found`, and then takes the next
+    // fork that `found` lists as `parent_id`.
+    for next in 0.. {
+        for fork in rebased.extract_if(.., |fork| fork.rebased_from == parent_id) {
+            if found.len() == MAX_NEW_FORKS {
+                return Err(MergeError::TooManyNewForks {
+                    original_fork_id: original_fork_id.clone(),
+                });
+            }
+            found.push(fork);
+        }
+        let Some(fork) = found.get(next) else {
+            break;
+        };
+        parent_id = fork.namespace_id.clone();
+    }
+    Ok(found)
 }
 
 /// Returns the fork whose commits a rebase replayed into `namespace_id`, or

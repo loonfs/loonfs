@@ -2,7 +2,7 @@
 //! loop, and the requests that each transition sends.
 
 use crate::scripted_mechanics::{
-    conflict, deletes, merges, run_to_end, sandbox, start, Answer, RecordingResolver,
+    conflict, deletes, merges, recover, run_to_end, sandbox, Answer, RecordingResolver,
     ScriptedMechanics, Sent,
 };
 use loonfs_merge::{
@@ -14,8 +14,12 @@ use std::collections::BTreeSet;
 
 #[tokio::test]
 async fn a_fork_without_conflicts_merges_in_one_commit() {
-    let mechanics = ScriptedMechanics::new([Answer::range(10, 20), Answer::Committed(31)]);
-    let session = start(&mechanics, DefaultResolver).await;
+    let mechanics = ScriptedMechanics::new([
+        Answer::ForkPins(Vec::new()),
+        Answer::range(10, 20),
+        Answer::Committed(31),
+    ]);
+    let session = recover(&mechanics, DefaultResolver).await;
 
     let (outcomes, state) = run_to_end(&mechanics, &DefaultResolver, session).await;
 
@@ -38,12 +42,13 @@ async fn a_fork_without_conflicts_merges_in_one_commit() {
 #[tokio::test]
 async fn a_merge_too_large_merges_through_the_split_hint_and_then_the_rest() {
     let mechanics = ScriptedMechanics::new([
+        Answer::ForkPins(Vec::new()),
         Answer::range(10, 20),
         Answer::too_large(15),
         Answer::Committed(31),
         Answer::Committed(32),
     ]);
-    let session = start(&mechanics, DefaultResolver).await;
+    let session = recover(&mechanics, DefaultResolver).await;
 
     let (outcomes, state) = run_to_end(&mechanics, &DefaultResolver, session).await;
 
@@ -88,6 +93,7 @@ async fn a_merge_too_large_merges_through_the_split_hint_and_then_the_rest() {
 #[tokio::test]
 async fn a_conflict_rebases_in_pieces_and_the_resolved_new_fork_merges() {
     let mechanics = ScriptedMechanics::new([
+        Answer::ForkPins(Vec::new()),
         Answer::range(10, 20),
         Answer::refused(ErrorCode::MergeConflict),
         Answer::too_large(15),
@@ -98,7 +104,7 @@ async fn a_conflict_rebases_in_pieces_and_the_resolved_new_fork_merges() {
         Answer::Deleted,
     ]);
     let resolver = RecordingResolver::default();
-    let session = start(&mechanics, resolver.clone()).await;
+    let session = recover(&mechanics, resolver.clone()).await;
 
     let (_, state) = run_to_end(&mechanics, &resolver, session).await;
 
@@ -169,6 +175,7 @@ async fn a_conflict_rebases_in_pieces_and_the_resolved_new_fork_merges() {
 #[tokio::test]
 async fn a_lost_report_rebases_again_and_the_default_resolver_fails_with_the_reports() {
     let mechanics = ScriptedMechanics::new([
+        Answer::ForkPins(Vec::new()),
         Answer::range(10, 20),
         Answer::refused(ErrorCode::MergeConflict),
         Answer::Replayed(None),
@@ -177,7 +184,7 @@ async fn a_lost_report_rebases_again_and_the_default_resolver_fails_with_the_rep
         Answer::Deleted,
         Answer::Deleted,
     ]);
-    let mut session = start(&mechanics, DefaultResolver).await;
+    let mut session = recover(&mechanics, DefaultResolver).await;
     for _ in 0..4 {
         session.step().await.expect("step");
     }
@@ -206,8 +213,8 @@ async fn a_lost_report_rebases_again_and_the_default_resolver_fails_with_the_rep
         "the failure identifies the new fork to inspect"
     );
     let sent = mechanics.sent();
-    let Sent::Rebase { new_fork_id, .. } = &sent[3] else {
-        panic!("the session rebases again: {:?}", sent[3]);
+    let Sent::Rebase { new_fork_id, .. } = &sent[4] else {
+        panic!("the session rebases again: {:?}", sent[4]);
     };
     assert_eq!(*new_fork_id, replacement_id);
     assert!(
@@ -231,6 +238,7 @@ async fn a_lost_report_rebases_again_and_the_default_resolver_fails_with_the_rep
 #[tokio::test]
 async fn a_run_that_stops_after_a_lost_report_resumes_from_its_saved_state() {
     let mechanics = ScriptedMechanics::new([
+        Answer::ForkPins(Vec::new()),
         Answer::range(10, 20),
         Answer::refused(ErrorCode::MergeConflict),
         // The run stops after this answer, before it saves the step's state.
@@ -244,7 +252,7 @@ async fn a_run_that_stops_after_a_lost_report_resumes_from_its_saved_state() {
         Answer::Deleted,
     ]);
     let resolver = RecordingResolver::default();
-    let mut session = start(&mechanics, resolver.clone()).await;
+    let mut session = recover(&mechanics, resolver.clone()).await;
     session.step().await.expect("merge");
     let saved = session.state().clone();
     let lost = session.step().await.expect("rebase");
@@ -288,6 +296,7 @@ async fn a_run_that_stops_after_a_lost_report_resumes_from_its_saved_state() {
 #[tokio::test]
 async fn the_default_resolver_merges_a_new_fork_whose_rebase_left_out_nothing() {
     let mechanics = ScriptedMechanics::new([
+        Answer::ForkPins(Vec::new()),
         Answer::range(10, 20),
         Answer::refused(ErrorCode::MergeConflict),
         Answer::too_large(15),
@@ -297,7 +306,7 @@ async fn the_default_resolver_merges_a_new_fork_whose_rebase_left_out_nothing() 
         Answer::Committed(50),
         Answer::Deleted,
     ]);
-    let session = start(&mechanics, DefaultResolver).await;
+    let session = recover(&mechanics, DefaultResolver).await;
 
     let (outcomes, state) = run_to_end(&mechanics, &DefaultResolver, session).await;
 
@@ -315,6 +324,7 @@ async fn the_default_resolver_merges_a_new_fork_whose_rebase_left_out_nothing() 
 #[tokio::test]
 async fn a_new_fork_whose_range_starts_below_its_floor_fails_with_the_reports() {
     let mechanics = ScriptedMechanics::new([
+        Answer::ForkPins(Vec::new()),
         Answer::range(10, 20),
         Answer::refused(ErrorCode::MergeConflict),
         Answer::Replayed(Some(vec![conflict("/a.txt")])),
@@ -328,7 +338,7 @@ async fn a_new_fork_whose_range_starts_below_its_floor_fails_with_the_reports() 
         },
     ]);
     let resolver = RecordingResolver::default();
-    let session = start(&mechanics, resolver.clone()).await;
+    let session = recover(&mechanics, resolver.clone()).await;
 
     let (outcomes, state) = run_to_end(&mechanics, &resolver, session).await;
 
@@ -379,11 +389,14 @@ async fn a_fork_point_below_the_floor_fails_the_session_before_it_merges() {
         ),
     ];
     for (outcome, failure) in cases {
-        let mechanics = ScriptedMechanics::new([Answer::RangeOutcome {
-            source_head_seq: 20,
-            outcome,
-        }]);
-        let session = start(&mechanics, DefaultResolver).await;
+        let mechanics = ScriptedMechanics::new([
+            Answer::ForkPins(Vec::new()),
+            Answer::RangeOutcome {
+                source_head_seq: 20,
+                outcome,
+            },
+        ]);
+        let session = recover(&mechanics, DefaultResolver).await;
 
         let (outcomes, state) = run_to_end(&mechanics, &DefaultResolver, session).await;
 
@@ -402,11 +415,12 @@ async fn a_fork_point_below_the_floor_fails_the_session_before_it_merges() {
 #[tokio::test]
 async fn a_retry_after_commit_queue_full_returns_the_original_commit() {
     let mechanics = ScriptedMechanics::new([
+        Answer::ForkPins(Vec::new()),
         Answer::range(10, 20),
         Answer::refused(ErrorCode::CommitQueueFull),
         Answer::Committed(31),
     ]);
-    let session = start(&mechanics, DefaultResolver).await;
+    let session = recover(&mechanics, DefaultResolver).await;
 
     let (outcomes, state) = run_to_end(&mechanics, &DefaultResolver, session).await;
 
@@ -454,9 +468,12 @@ async fn errors_that_the_loop_cant_act_on_fail_the_session() {
         ),
     ];
     for (case, answers, code) in cases {
-        let mechanics =
-            ScriptedMechanics::new(std::iter::once(Answer::range(10, 20)).chain(answers));
-        let session = start(&mechanics, DefaultResolver).await;
+        let mechanics = ScriptedMechanics::new(
+            [Answer::ForkPins(Vec::new()), Answer::range(10, 20)]
+                .into_iter()
+                .chain(answers),
+        );
+        let session = recover(&mechanics, DefaultResolver).await;
 
         let (_, state) = run_to_end(&mechanics, &DefaultResolver, session).await;
 
