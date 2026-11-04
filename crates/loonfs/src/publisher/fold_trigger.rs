@@ -38,12 +38,6 @@ impl FoldTrigger {
         objects >= max_wal_tail_objects || inline_bytes >= self.inline_content_fold_at_bytes
     }
 
-    /// Returns whether the runtime folds a tail once its newest commit
-    /// reaches the idle fold age.
-    pub(crate) fn folds_idle_tails(&self) -> bool {
-        self.idle_fold_after_ms.is_some()
-    }
-
     /// Returns when a tail whose newest commit is at `newest_commit_at_ms`
     /// reaches the idle fold age, on the clock that read
     /// `newest_commit_at_ms`, or `None` when the runtime doesn't fold idle

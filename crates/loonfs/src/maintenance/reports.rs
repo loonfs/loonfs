@@ -1,6 +1,21 @@
 //! What a metadata maintenance pass and a compaction unit report.
 
-use crate::{FoldWalResponse, ManifestNo, NamespaceId};
+use crate::{FoldWalResponse, ManifestNo, MetadataMaintenanceResponse, NamespaceId};
+
+/// What one [`Maintenance::maintain_metadata_while_due`](crate::Maintenance::maintain_metadata_while_due)
+/// call did, and when its work next comes due.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataMaintenanceReport {
+    /// The call's response, as the HTTP API returns it.
+    pub response: MetadataMaintenanceResponse,
+    /// When the tail's idle fold comes due, on the runtime's monotonic timer
+    /// (see [`LoonFs::monotonic_timer`](crate::LoonFs::monotonic_timer)),
+    /// when that fold is the only work left: the outcome is
+    /// [`MetadataMaintenanceOutcome::Due`](crate::MetadataMaintenanceOutcome::Due)
+    /// only because the tail waits for its age. `None` when nothing is due,
+    /// or when other work is left.
+    pub next_due_at_ms: Option<u64>,
+}
 
 /// What the WAL fold and the compaction unit of one metadata maintenance
 /// pass did.

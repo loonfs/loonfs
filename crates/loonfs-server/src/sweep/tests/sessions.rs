@@ -300,11 +300,12 @@ async fn a_daily_pass_folds_every_idle_tail() {
 }
 
 /// Checks that a tick folds a tail at its idle fold age after the session's
-/// writer position has passed the revalidation bound. The idle fold age is
-/// longer than the bound, so until the age the ticks give the session no
-/// metadata step, and at the age one step reads the tail from the store and
-/// folds it. The fold leaves the session a current position again, so later
-/// ticks cost nothing.
+/// writer position has passed the revalidation bound. The tick right after
+/// the commit reads the idle fold's due time from the position. The idle
+/// fold age is longer than the bound, so until the age the ticks give the
+/// session no metadata step, and at the age one step reads the tail from the
+/// store and folds it. The fold leaves the session a current position again,
+/// so later ticks cost nothing.
 #[tokio::test]
 async fn a_tick_folds_an_idle_tail_after_the_position_passes_the_bound() {
     const IDLE_FOLD_AFTER_MS: u64 = 25 * 60 * 1000;
@@ -332,6 +333,7 @@ async fn a_tick_folds_an_idle_tail_after_the_position_passes_the_bound() {
     held.put_file("/note", b"data", &test_actor())
         .await
         .expect("publish");
+    server.sweep.tick().await;
     server
         .tick_after(loonfs_core::limits::READ_REVALIDATION_BOUND_MS + 1)
         .await;
@@ -353,6 +355,66 @@ async fn a_tick_folds_an_idle_tail_after_the_position_passes_the_bound() {
         server.tick_after(config.tick_interval_ms).await;
     }
     assert!(store.take().is_empty(), "the idle fold runs once");
+    server.runtime.shutdown().await.expect("shutdown");
+}
+
+/// Checks that a tick folds a tail at its idle fold age when no tick ran
+/// between the session's commit and its writer position passing the
+/// revalidation bound. The first tick after the bound reads the tail from
+/// the store, because the session has committed since the sweep last dated
+/// its tail, and that step reports when the idle fold comes due. The ticks
+/// until that age then cost nothing, and the step at that age folds the
+/// tail.
+#[tokio::test]
+async fn a_tick_folds_an_idle_tail_when_no_tick_saw_the_position() {
+    const IDLE_FOLD_AFTER_MS: u64 = 25 * 60 * 1000;
+    let directory = tempdir().expect("tempdir");
+    let store = Arc::new(RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    ));
+    let mut config = sweep_config(None);
+    config.idle_fold_after_ms = Some(IDLE_FOLD_AFTER_MS);
+    let server = SweepServer::start(store.clone(), &config, 0).await;
+    let namespace_id = namespace_id("unseen-position");
+    server
+        .runtime
+        .create_namespace(&namespace_id, &test_actor())
+        .await
+        .expect("create");
+    let held = server
+        .sweep
+        .inner
+        .namespaces
+        .open(&namespace_id)
+        .await
+        .expect("open");
+    held.put_file("/note", b"data", &test_actor())
+        .await
+        .expect("publish");
+    store.reset();
+    server
+        .tick_after(loonfs_core::limits::READ_REVALIDATION_BOUND_MS + 1)
+        .await;
+    assert!(!held.has_current_writer_position());
+    assert!(
+        !store.take().is_empty(),
+        "the first tick after the commit dates the tail from the store"
+    );
+    assert!(server.idle_fold_due_at_ms(&namespace_id).is_some());
+    server
+        .tick_after(IDLE_FOLD_AFTER_MS - loonfs_core::limits::READ_REVALIDATION_BOUND_MS - 2)
+        .await;
+    assert!(
+        store.take().is_empty(),
+        "the ticks before the idle fold age make no request"
+    );
+    server.tick_after(1).await;
+    assert_eq!(
+        server.wal_tail_objects(&namespace_id).await,
+        0,
+        "the step at the idle fold age folds the tail"
+    );
     server.runtime.shutdown().await.expect("shutdown");
 }
 
@@ -974,13 +1036,14 @@ async fn a_tick_sees_a_session_as_idle_exactly_when_the_runtime_timer_does() {
         .put_file("/note", b"data", &test_actor())
         .await
         .expect("publish");
-    assert_eq!(
-        handle.idle_fold_due_at_ms(),
-        Some(DAY_MS + idle_fold_after_ms(&config))
-    );
     drop(handle);
 
     server.tick_after(config.tick_interval_ms).await;
+    assert_eq!(
+        server.idle_fold_due_at_ms(&namespace_id),
+        Some(DAY_MS + idle_fold_after_ms(&config)),
+        "the step reports the idle fold on the runtime's timer"
+    );
     assert!(server.wal_tail_objects(&namespace_id).await > 0);
     store.reset();
     server

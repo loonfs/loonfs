@@ -2752,10 +2752,11 @@ async fn a_metadata_call_with_nothing_to_fold_takes_no_fold_permit() {
     .expect("the call doesn't wait for a fold permit")
     .expect("the metadata call");
     assert_eq!(
-        maintained.outcome,
+        maintained.response.outcome,
         crate::MetadataMaintenanceOutcome::Due,
         "the tail waits for its idle fold age"
     );
+    assert!(maintained.next_due_at_ms.is_some());
     drop(permits);
     writer.shutdown().await.expect("shutdown");
 }

@@ -165,18 +165,6 @@ impl Namespace<Writable> {
         self.session().has_current_writer_position()
     }
 
-    /// Returns when this session's last publication reaches the runtime's
-    /// idle fold age, on the runtime's monotonic clock.
-    ///
-    /// Returns `None` before the session's first publication, and when the
-    /// runtime doesn't fold idle tails (see
-    /// [`RuntimeConfig::idle_fold_after_ms`](crate::RuntimeConfig::idle_fold_after_ms)).
-    /// Reads memory only. This is a hook for a host that runs its own
-    /// maintenance sweep, such as the `loonfs-server` sweep.
-    pub fn idle_fold_due_at_ms(&self) -> Option<u64> {
-        self.session().idle_fold_due_at_ms()
-    }
-
     /// Returns whether this is the only handle on its writer session.
     ///
     /// Hosts must prevent concurrent opens while using this check to close it.

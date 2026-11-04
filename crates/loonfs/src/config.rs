@@ -263,8 +263,8 @@ pub struct RuntimeConfig {
     /// session has a current writer position, and otherwise on the runtime's
     /// wall clock from the newest commit's `committed_at_ms`. A writer
     /// session doesn't fold on age by itself. A host that sweeps its sessions
-    /// reads when a session reaches the age with
-    /// [`Namespace::idle_fold_due_at_ms`](crate::Namespace::idle_fold_due_at_ms).
+    /// reads when a tail reaches the age from
+    /// [`MetadataMaintenanceReport::next_due_at_ms`](crate::MetadataMaintenanceReport::next_due_at_ms).
     pub idle_fold_after_ms: Option<NonZeroU64>,
 }
 
