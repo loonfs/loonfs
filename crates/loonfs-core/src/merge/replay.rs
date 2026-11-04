@@ -7,7 +7,10 @@
 use super::classify::{Classifier, SubtreeCheck};
 use super::operations::BindingChange;
 use super::state::StateReader;
-use super::{fork_point, merge_start, range_start, rebase_basis, MergeAllowance, MergeRequest};
+use super::{
+    ensure_range_start_retained, fork_point, merge_start, range_start, rebase_basis,
+    MergeAllowance, MergeRequest,
+};
 use crate::commit::engine::CommitCandidate;
 use crate::engine::{NamespaceEngine, RuntimeReadContext};
 use crate::error::{CoreError, Result};
@@ -88,9 +91,11 @@ pub(super) struct HistoryPart<'v, S: ObjectStore + ?Sized> {
 
 impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// Returns the fork point of `fork`, read at `fork_context`, after it
-    /// checks that `fork` is a fork of this namespace, read at `context`, and
-    /// that the fork point is at or above this namespace's retention floor. A
-    /// rebase makes these checks before it creates its new fork.
+    /// checks that `fork` is a fork of this namespace, read at `context`, that
+    /// the fork point is at or above this namespace's retention floor, and
+    /// that the start of the fork's unmerged range is at or above the fork's
+    /// own retention floor. A rebase makes these checks before it creates its
+    /// new fork.
     pub async fn fork_point_for_rebase<F>(
         &self,
         context: &RuntimeReadContext,
@@ -100,13 +105,14 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         let main = self.namespace.load_metadata_view(context).await?;
         let fork_view = fork.namespace.load_metadata_view(fork_context).await?;
         let fork_point_seq = fork_point(fork_view.head(), &main.head().namespace_id)?;
-        merge_start(
+        let start = merge_start(
             &main.metadata_view(),
             main.head(),
             &fork_view.head().namespace_id,
             fork_point_seq,
         )
         .await?;
+        ensure_range_start_retained(&fork_view, start.after_seq)?;
         Ok(fork_point_seq)
     }
 

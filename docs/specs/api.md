@@ -2898,7 +2898,7 @@ The response contains the new fork's namespace object (`namespace`, see [`GET /v
 To rebase a fork, the server:
 
 1. Checks that the fork was made from this namespace, and reads the fork point.
-2. If `new_namespace_id` doesn't exist, refuses a fork point below this namespace's retention floor with `rebootstrap_required`, and then creates the new fork from this namespace's head, as [`POST /forks`](#613-post-forks) does. If `new_namespace_id` exists, checks that the new fork's `rebased_from` identifies the fork.
+2. If `new_namespace_id` doesn't exist, refuses a fork point below this namespace's retention floor, or a start of the fork's next merge into this namespace below the fork's own retention floor, with `rebootstrap_required`, and then creates the new fork from this namespace's head, as [`POST /forks`](#613-post-forks) does. If `new_namespace_id` exists, checks that the new fork's `rebased_from` identifies the fork.
 3. Looks up the commit receipt of `commit_id` in the new fork, and returns the new fork without a conflict report if a replay commit with that ID was committed.
 4. Takes the merge slot, as a merge does.
 5. Finds where the range starts: after the new fork's previous replay commit, or after `resume_after_seq` for the first replay commit. It refuses a start below the fork's own retention floor, or a new fork whose retention floor is above the new fork's own fork point, with `rebootstrap_required`.
