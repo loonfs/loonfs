@@ -26,6 +26,15 @@ impl PassMemory {
             held_bytes: Arc::default(),
         }
     }
+
+    /// The bytes that all of the pass's charges reserve now.
+    pub(super) fn held_bytes(&self) -> usize {
+        self.held_bytes.load(Ordering::Relaxed)
+    }
+
+    pub(super) fn limit(&self) -> usize {
+        self.memory.limit()
+    }
 }
 
 /// One reservation in the read working memory, released when it drops.
@@ -40,6 +49,10 @@ impl Charge {
             pass: pass.clone(),
             reserved_bytes: 0,
         }
+    }
+
+    pub(super) fn reserved_bytes(&self) -> usize {
+        self.reserved_bytes
     }
 
     /// Adds `bytes` to the reservation, or fails the pass when the memory
@@ -97,6 +110,10 @@ impl<T: Eq + std::hash::Hash + HeapBytes> ChargedSet<T> {
         }
     }
 
+    pub(super) fn reserved_bytes(&self) -> usize {
+        self.charge.reserved_bytes()
+    }
+
     pub(super) fn contains<Q: Eq + std::hash::Hash + ?Sized>(&self, value: &Q) -> bool
     where
         T: std::borrow::Borrow<Q>,
@@ -130,6 +147,10 @@ impl<K: Eq + std::hash::Hash + HeapBytes, V: HeapBytes> ChargedMap<K, V> {
             heap_bytes: 0,
             charge: Charge::new(pass),
         }
+    }
+
+    pub(super) fn reserved_bytes(&self) -> usize {
+        self.charge.reserved_bytes()
     }
 
     pub(super) fn get<Q: Eq + std::hash::Hash + ?Sized>(&self, key: &Q) -> Option<&V>
@@ -167,6 +188,10 @@ impl<T: HeapBytes> ChargedQueue<T> {
             heap_bytes: 0,
             charge: Charge::new(pass),
         }
+    }
+
+    pub(super) fn reserved_bytes(&self) -> usize {
+        self.charge.reserved_bytes()
     }
 
     pub(super) fn push_back(&mut self, value: T) -> Result<()> {
