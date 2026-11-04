@@ -3,7 +3,7 @@
 //! ([API section 6.12](https://github.com/loonfs/loonfs/blob/main/docs/specs/api.md#612-get-diff)).
 
 use crate::changes::{ensure_event_index_allowed, CommitScan};
-use crate::error::{CoreError, Result};
+use crate::error::{CoreError, HistoryPosition, Result};
 use crate::heap_bytes::HeapBytes;
 use crate::limits::{CHANGE_FEED_PAGE_BYTES, DIFF_PAGE_TOUCHES};
 use crate::metadata::{
@@ -78,8 +78,8 @@ async fn diff_page_within<S: ObjectStore + ?Sized>(
     crate::namespace::control::ensure_namespace_live(&head.namespace_id, head.status)?;
     let retention_floor_seq = view.retention_floor_seq();
     if from_seq < retention_floor_seq {
-        return Err(CoreError::DiffRebootstrapRequired {
-            from_seq,
+        return Err(CoreError::RebootstrapRequired {
+            below: HistoryPosition::DiffStart { from_seq },
             retention_floor_seq,
         });
     }

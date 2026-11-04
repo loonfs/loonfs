@@ -247,38 +247,16 @@ pub enum CoreError {
     /// page split a commit.
     #[error("invalid `event_index`: {0}")]
     InvalidEventIndex(String),
+    /// A position in a namespace's history that a read needs is below a
+    /// retention floor, so a base compaction might have removed the rows or
+    /// changes that the read needs. `below` says which position, and the
+    /// details report the floor and the fields that identify the position.
     #[error(
-        "change feed cursor `{after_seq}` is older than retention floor `{retention_floor_seq}`"
+        "{below} is older than retention floor `{retention_floor_seq}`{}",
+        below.consequence()
     )]
     RebootstrapRequired {
-        after_seq: ChangeSeq,
-        retention_floor_seq: ChangeSeq,
-    },
-    /// A diff's `from_seq` is below the retention floor. The error has the
-    /// change feed's code, and its details report `from_seq` where the
-    /// feed's report `after_seq`.
-    #[error("diff start `{from_seq}` is older than retention floor `{retention_floor_seq}`")]
-    DiffRebootstrapRequired {
-        from_seq: ChangeSeq,
-        retention_floor_seq: ChangeSeq,
-    },
-    /// A read view's sequence is below the retention floor, so a base
-    /// compaction might have removed the rows that the read needs. The error
-    /// has the change feed's code, and its details report only the floor.
-    #[error("read sequence `{read_seq}` is older than retention floor `{retention_floor_seq}`")]
-    ReadRebootstrapRequired {
-        read_seq: ChangeSeq,
-        retention_floor_seq: ChangeSeq,
-    },
-    /// History that a merge needs is below a retention floor. Either the
-    /// fork point is below this namespace's floor, so a base compaction might
-    /// have removed the fork's previous merge from the merge index, or the
-    /// range's start is below the fork's own floor, so the fork's change over
-    /// the range can't be computed. The error has the change feed's code, and
-    /// its details say which floor.
-    #[error("{below} is older than retention floor `{retention_floor_seq}`, so the fork can't be merged")]
-    MergeRebootstrapRequired {
-        below: MergeHistory,
+        below: HistoryPosition,
         retention_floor_seq: ChangeSeq,
     },
     /// A diff's `from_seq`, `to_seq`, or `after_seq` is out of order with the
@@ -557,10 +535,7 @@ impl CoreError {
             CoreError::UploadNotFound { .. } => ErrorCode::UploadNotFound,
             CoreError::UploadAlreadyCompleted { .. } => ErrorCode::UploadAlreadyCompleted,
             CoreError::UploadContentConflict { .. } => ErrorCode::UploadContentConflict,
-            CoreError::RebootstrapRequired { .. }
-            | CoreError::DiffRebootstrapRequired { .. }
-            | CoreError::ReadRebootstrapRequired { .. }
-            | CoreError::MergeRebootstrapRequired { .. } => ErrorCode::RebootstrapRequired,
+            CoreError::RebootstrapRequired { .. } => ErrorCode::RebootstrapRequired,
             CoreError::ExpectedFile { .. }
             | CoreError::ExpectedDirectory { .. }
             | CoreError::DestinationExists { .. } => ErrorCode::PathConflict,
@@ -666,9 +641,6 @@ impl CoreError {
             | CoreError::InvalidEventIndex(_)
             | CoreError::InvalidDiffRange { .. }
             | CoreError::RebootstrapRequired { .. }
-            | CoreError::DiffRebootstrapRequired { .. }
-            | CoreError::ReadRebootstrapRequired { .. }
-            | CoreError::MergeRebootstrapRequired { .. }
             | CoreError::NamespaceCorrupt(_)
             | CoreError::WriterFenced(_)
             | CoreError::OutcomeUnknown { .. }
@@ -728,29 +700,6 @@ impl CoreError {
                 ..ErrorDetails::default()
             }),
             CoreError::RebootstrapRequired {
-                after_seq,
-                retention_floor_seq,
-            } => Some(ErrorDetails {
-                after_seq: Some(*after_seq),
-                retention_floor_seq: Some(*retention_floor_seq),
-                ..ErrorDetails::default()
-            }),
-            CoreError::DiffRebootstrapRequired {
-                from_seq,
-                retention_floor_seq,
-            } => Some(ErrorDetails {
-                from_seq: Some(*from_seq),
-                retention_floor_seq: Some(*retention_floor_seq),
-                ..ErrorDetails::default()
-            }),
-            CoreError::ReadRebootstrapRequired {
-                retention_floor_seq,
-                ..
-            } => Some(ErrorDetails {
-                retention_floor_seq: Some(*retention_floor_seq),
-                ..ErrorDetails::default()
-            }),
-            CoreError::MergeRebootstrapRequired {
                 below,
                 retention_floor_seq,
             } => Some(ErrorDetails {
@@ -809,23 +758,41 @@ impl CoreError {
     }
 }
 
-/// The history that a merge needs below a retention floor.
+/// The position in a namespace's history that fell below a retention floor.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MergeHistory {
-    /// The fork point is below the floor of the namespace being merged into.
+pub enum HistoryPosition {
+    /// The `after_seq` cursor of a change feed read.
+    FeedCursor { after_seq: ChangeSeq },
+    /// The `from_seq` of a diff.
+    DiffStart { from_seq: ChangeSeq },
+    /// The sequence of a read view.
+    ReadSeq { read_seq: ChangeSeq },
+    /// A merge's fork point, below the floor of the namespace being merged
+    /// into, so a base compaction might have removed the fork's previous
+    /// merge from the merge index.
     ForkPoint { fork_point_seq: ChangeSeq },
-    /// The start of the fork's range is below the fork's own floor.
+    /// The start of a merge's range, below the fork's own floor, so the
+    /// fork's change over the range can't be computed.
     RangeStart {
         source_namespace_id: NamespaceId,
         source_after_seq: ChangeSeq,
     },
 }
 
-impl MergeHistory {
-    /// Returns the error details that identify the sequence and, for the
-    /// fork's own floor, the fork.
+impl HistoryPosition {
+    /// Returns the error details that identify the position. A read view's
+    /// sequence is not reported.
     fn details(&self) -> ErrorDetails {
         match self {
+            Self::FeedCursor { after_seq } => ErrorDetails {
+                after_seq: Some(*after_seq),
+                ..ErrorDetails::default()
+            },
+            Self::DiffStart { from_seq } => ErrorDetails {
+                from_seq: Some(*from_seq),
+                ..ErrorDetails::default()
+            },
+            Self::ReadSeq { .. } => ErrorDetails::default(),
             Self::ForkPoint { fork_point_seq } => ErrorDetails {
                 fork_point_seq: Some(*fork_point_seq),
                 ..ErrorDetails::default()
@@ -840,11 +807,24 @@ impl MergeHistory {
             },
         }
     }
+
+    /// Returns the clause that ends the error message after the floor.
+    fn consequence(&self) -> &'static str {
+        match self {
+            Self::FeedCursor { .. } | Self::DiffStart { .. } | Self::ReadSeq { .. } => "",
+            Self::ForkPoint { .. } | Self::RangeStart { .. } => ", so the fork can't be merged",
+        }
+    }
 }
 
-impl std::fmt::Display for MergeHistory {
+impl std::fmt::Display for HistoryPosition {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::FeedCursor { after_seq } => {
+                write!(formatter, "change feed cursor `{after_seq}`")
+            }
+            Self::DiffStart { from_seq } => write!(formatter, "diff start `{from_seq}`"),
+            Self::ReadSeq { read_seq } => write!(formatter, "read sequence `{read_seq}`"),
             Self::ForkPoint { fork_point_seq } => {
                 write!(formatter, "fork point `{fork_point_seq}`")
             }

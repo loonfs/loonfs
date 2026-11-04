@@ -208,7 +208,7 @@ pub use engine::{
     NamespaceEngine, NamespaceReaderEngine, NamespaceWriterEngine, ReadOnly, RootAccess, Writable,
 };
 pub use error::{
-    classify_store_failure, CoreError, ErrorCode, ErrorKind, MergeBound, MergeHistory,
+    classify_store_failure, CoreError, ErrorCode, ErrorKind, HistoryPosition, MergeBound,
     MetadataProjectionLoadError, MetadataViewError, Result, WriterFence,
 };
 pub use gc::GcOptions;

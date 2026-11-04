@@ -95,8 +95,8 @@ async fn a_rebase_fork_records_where_the_forks_next_merge_starts() {
         .expect_err("the fork point is below main's floor");
     assert_matches!(
         error,
-        CoreError::MergeRebootstrapRequired {
-            below: crate::error::MergeHistory::ForkPoint { fork_point_seq },
+        CoreError::RebootstrapRequired {
+            below: crate::error::HistoryPosition::ForkPoint { fork_point_seq },
             retention_floor_seq,
         } if fork_point_seq == FORK_POINT && retention_floor_seq == floor
     );
@@ -214,8 +214,8 @@ async fn a_replay_commit_reads_the_rebase_forks_own_fork_point_and_resume_after_
     .expect_err("the floor passed the rebase fork's own fork point");
     assert_matches!(
         error,
-        CoreError::MergeRebootstrapRequired {
-            below: crate::error::MergeHistory::ForkPoint { fork_point_seq },
+        CoreError::RebootstrapRequired {
+            below: crate::error::HistoryPosition::ForkPoint { fork_point_seq },
             retention_floor_seq,
         } if fork_point_seq == own_fork_point && retention_floor_seq == floor
     );

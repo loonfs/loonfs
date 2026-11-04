@@ -2,7 +2,7 @@
 //! commit's durable WAL deltas mapped to semantic filesystem events. The
 //! commit scan that pages the feed also pages the diff.
 
-use crate::error::{CoreError, Result};
+use crate::error::{CoreError, HistoryPosition, Result};
 use crate::heap_bytes::HeapBytes;
 use crate::limits::CHANGE_FEED_PAGE_BYTES;
 use crate::metadata::MetadataView;
@@ -46,7 +46,7 @@ async fn list_changes_within<S: ObjectStore + ?Sized>(
     // to be above the floor, where the feed returns commits.
     if after_seq < retention_floor_seq || (event_index > 0 && after_seq == retention_floor_seq) {
         return Err(CoreError::RebootstrapRequired {
-            after_seq,
+            below: HistoryPosition::FeedCursor { after_seq },
             retention_floor_seq,
         });
     }

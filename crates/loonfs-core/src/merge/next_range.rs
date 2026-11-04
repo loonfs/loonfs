@@ -4,7 +4,7 @@
 
 use super::{ensure_range_start_retained, fork_point, merge_start, rebase_basis};
 use crate::engine::{NamespaceEngine, RuntimeReadContext};
-use crate::error::{CoreError, MergeHistory, Result};
+use crate::error::{CoreError, HistoryPosition, Result};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{Merge, NextMergeRangeOutcome, NextMergeRangeResponse};
 
@@ -51,8 +51,8 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
                             merge,
                             next_after_seq,
                         },
-                        Err(CoreError::MergeRebootstrapRequired {
-                            below: MergeHistory::RangeStart { .. },
+                        Err(CoreError::RebootstrapRequired {
+                            below: HistoryPosition::RangeStart { .. },
                             retention_floor_seq,
                         }) => NextMergeRangeOutcome::RangeStartBelowFloor {
                             merge,
@@ -62,8 +62,8 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
                         Err(error) => return Err(error),
                     }
                 }
-                Err(CoreError::MergeRebootstrapRequired {
-                    below: MergeHistory::ForkPoint { .. },
+                Err(CoreError::RebootstrapRequired {
+                    below: HistoryPosition::ForkPoint { .. },
                     retention_floor_seq,
                 }) => NextMergeRangeOutcome::ForkPointBelowFloor {
                     retention_floor_seq,

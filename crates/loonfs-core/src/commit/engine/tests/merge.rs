@@ -787,8 +787,8 @@ async fn a_merge_whose_fork_point_is_below_the_retention_floor_is_refused() {
         assert_eq!(details.retention_floor_seq, Some(floor));
         assert_matches!(
             error,
-            CoreError::MergeRebootstrapRequired {
-                below: crate::error::MergeHistory::ForkPoint { fork_point_seq },
+            CoreError::RebootstrapRequired {
+                below: crate::error::HistoryPosition::ForkPoint { fork_point_seq },
                 retention_floor_seq,
             } if fork_point_seq == FORK_POINT && retention_floor_seq == floor
         );
