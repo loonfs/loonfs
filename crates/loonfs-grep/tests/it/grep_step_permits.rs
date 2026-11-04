@@ -119,7 +119,12 @@ async fn parked_build_step<'a>(
     namespace_id: &'a NamespaceId,
 ) -> Pin<Box<impl Future<Output = loonfs_grep::Result<GrepBuildOutcome>> + 'a>> {
     blocking.block_next();
-    let mut step = Box::pin(worker.build_step(namespace_id, GramIndexBuildPolicy::default()));
+    let mut step = Box::pin(async move {
+        worker
+            .steps(namespace_id, 0)
+            .build_step(GramIndexBuildPolicy::default())
+            .await
+    });
     tokio::select! {
         outcome = &mut step => panic!("the step finished while its read was held: {outcome:?}"),
         () = blocking.wait_until_blocked() => {}
@@ -158,7 +163,7 @@ async fn no_more_grep_steps_hold_content_than_the_limit() {
     let store: SharedObjectStore = watch.clone();
     let writer = content_object_writer(&store).await;
     let host = GrepHost::new(&store, "grep-step-permits").await;
-    let worker = worker_with(&host, &GrepPassBudget::new(NonZeroUsize::MIN));
+    let worker = &worker_with(&host, &GrepPassBudget::new(NonZeroUsize::MIN));
     let mut namespaces = Vec::new();
     for index in 0..3 {
         let namespace_id = namespace_with_files(&writer, &format!("permits-{index}")).await;
@@ -172,30 +177,27 @@ async fn no_more_grep_steps_hold_content_than_the_limit() {
     };
     watch.reset_peak();
 
-    let backfills = futures::future::try_join_all(
-        namespaces
-            .iter()
-            .map(|namespace_id| worker.build_step(namespace_id, policy)),
-    )
-    .await
-    .expect("backfill steps");
+    let backfills =
+        futures::future::try_join_all(namespaces.iter().map(|namespace_id| async move {
+            worker.steps(namespace_id, 0).build_step(policy).await
+        }))
+        .await
+        .expect("backfill steps");
     for namespace_id in &namespaces {
         put_files(&writer, namespace_id, "second").await;
     }
-    let increments = futures::future::try_join_all(
-        namespaces
-            .iter()
-            .map(|namespace_id| worker.build_step(namespace_id, policy)),
-    )
-    .await
-    .expect("incremental steps");
-    let reorganizations = futures::future::try_join_all(
-        namespaces
-            .iter()
-            .map(|namespace_id| worker.reorganize_step(namespace_id, policy)),
-    )
-    .await
-    .expect("reorganize steps");
+    let increments =
+        futures::future::try_join_all(namespaces.iter().map(|namespace_id| async move {
+            worker.steps(namespace_id, 0).build_step(policy).await
+        }))
+        .await
+        .expect("incremental steps");
+    let reorganizations =
+        futures::future::try_join_all(namespaces.iter().map(|namespace_id| async move {
+            worker.steps(namespace_id, 0).reorganize_step(policy).await
+        }))
+        .await
+        .expect("reorganize steps");
 
     for outcome in backfills.iter().chain(&increments) {
         assert_matches!(outcome, GrepBuildOutcome::Indexed { .. });
@@ -232,8 +234,12 @@ async fn workers_over_two_stores_share_one_step_permit() {
             waiting: 0
         }
     );
-    let mut waiting_step =
-        Box::pin(second_worker.build_step(&second, GramIndexBuildPolicy::default()));
+    let mut waiting_step = Box::pin(async {
+        second_worker
+            .steps(&second, 0)
+            .build_step(GramIndexBuildPolicy::default())
+            .await
+    });
     drive_until_reported(
         &mut waiting_step,
         &budget,
@@ -282,7 +288,9 @@ async fn an_up_to_date_step_on_either_worker_takes_no_permit() {
     for (worker, namespace_id) in &current {
         let outcome = bounded(
             Duration::from_secs(10),
-            worker.build_step(namespace_id, GramIndexBuildPolicy::default()),
+            worker
+                .steps(namespace_id, 0)
+                .build_step(GramIndexBuildPolicy::default()),
         )
         .await
         .expect("an up-to-date step does not wait for the held permit")
@@ -316,25 +324,27 @@ async fn a_dropped_step_returns_its_permit() {
 
     // One step takes the only permit and parks at its first content read.
     blocking.block_next();
-    let mut holding_step = Box::pin(worker.build_step(&holding, policy));
+    let mut holding_step = Box::pin(async { worker.steps(&holding, 0).build_step(policy).await });
     tokio::select! {
         outcome = &mut holding_step => panic!("the holding step finished while its read was held: {outcome:?}"),
         () = blocking.wait_until_blocked() => {}
     }
     // Another step with work waits for that permit, and is dropped waiting.
-    bounded(
-        Duration::from_millis(200),
-        worker.build_step(&waiting, policy),
-    )
+    bounded(Duration::from_millis(200), async {
+        worker.steps(&waiting, 0).build_step(policy).await
+    })
     .await
     .expect_err("a step with work waits while the only permit is held");
     drop(holding_step);
     blocking.release();
 
-    let outcome = bounded(Duration::from_secs(10), worker.build_step(&waiting, policy))
-        .await
-        .expect("both dropped steps returned the permit")
-        .expect("build step");
+    let outcome = bounded(
+        Duration::from_secs(10),
+        worker.steps(&waiting, 0).build_step(policy),
+    )
+    .await
+    .expect("both dropped steps returned the permit")
+    .expect("build step");
     assert_matches!(outcome, GrepBuildOutcome::Indexed { .. });
 }
 
@@ -351,7 +361,12 @@ async fn a_step_dropped_while_waiting_leaves_the_counts_at_zero() {
     }
 
     let holding_step = parked_build_step(&blocking, &worker, &holding).await;
-    let mut waiting_step = Box::pin(worker.build_step(&waiting, GramIndexBuildPolicy::default()));
+    let mut waiting_step = Box::pin(async {
+        worker
+            .steps(&waiting, 0)
+            .build_step(GramIndexBuildPolicy::default())
+            .await
+    });
     drive_until_reported(
         &mut waiting_step,
         &budget,

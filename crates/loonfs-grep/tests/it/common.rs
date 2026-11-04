@@ -13,8 +13,8 @@ use loonfs::{
 use loonfs_grep::entry::GrepIndexStatus;
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepBlockCache, GrepBuildOutcome, GrepDisableOutcome, GrepEnableOutcome,
-    GrepError, GrepPassBudget, GrepService, GrepWorker, NamespaceReads,
-    DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
+    GrepError, GrepPassBudget, GrepProgress, GrepReorganizeOutcome, GrepService, GrepWorker,
+    NamespaceReads, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES, DEFAULT_GREP_PUBLISH_INTERVAL_MS,
 };
 use loonfs_types::GrepIndex;
 use loonfs_types::{AbsolutePath, ChangeSeq, GrepRequest, GrepResponse, NamespaceId, PageRequest};
@@ -134,33 +134,48 @@ impl GrepHost {
         self.worker.get_grep_index(namespace_id).await
     }
 
-    /// Runs bounded build steps until the index has built through
-    /// `captured_seq`, or until a step settles short of it.
+    /// Runs steps the way the CLI's wait does, until the index has built
+    /// through `captured_seq` or a step settles short of it, and then
+    /// publishes the run's pending change.
     pub(crate) async fn catch_up_grep_index(
         &self,
         namespace_id: &NamespaceId,
         captured_seq: ChangeSeq,
     ) -> Result<GrepIndexStatus, GrepError> {
+        let mut steps = self
+            .worker
+            .steps(namespace_id, DEFAULT_GREP_PUBLISH_INTERVAL_MS);
         loop {
-            let lifecycle = self.worker.lifecycle(namespace_id).await?;
-            if loonfs_types::GrepIndexStatus::from(&lifecycle).is_built_through(captured_seq) {
-                return Ok(lifecycle);
+            let status = match steps.pending_status() {
+                Some(status) => status.clone(),
+                None => self.worker.lifecycle(namespace_id).await?,
+            };
+            if loonfs_types::GrepIndexStatus::from(&status).is_built_through(captured_seq) {
+                break;
             }
-            match self
-                .worker
-                .build_step(namespace_id, GramIndexBuildPolicy::default())
-                .await?
-            {
-                GrepBuildOutcome::Indexed { .. }
-                | GrepBuildOutcome::BackfillRestarted { .. }
-                | GrepBuildOutcome::Superseded => {}
+            match steps.step(GramIndexBuildPolicy::default()).await? {
+                GrepProgress::Built(
+                    GrepBuildOutcome::Indexed { .. }
+                    | GrepBuildOutcome::BackfillRestarted { .. }
+                    | GrepBuildOutcome::Superseded,
+                )
+                | GrepProgress::Reorganized(
+                    GrepReorganizeOutcome::UnitWritten { .. }
+                    | GrepReorganizeOutcome::Abandoned
+                    | GrepReorganizeOutcome::Superseded,
+                ) => {}
                 // Nothing this loop does next would move the index, so the
                 // caller sees where it stopped rather than a spin.
-                GrepBuildOutcome::UpToDate { .. } | GrepBuildOutcome::NotEnabled => {
-                    return self.worker.lifecycle(namespace_id).await
-                }
+                GrepProgress::Built(
+                    GrepBuildOutcome::UpToDate { .. } | GrepBuildOutcome::NotEnabled,
+                )
+                | GrepProgress::Reorganized(
+                    GrepReorganizeOutcome::NotNeeded { .. } | GrepReorganizeOutcome::NotEnabled,
+                ) => break,
             }
         }
+        steps.publish().await?;
+        self.worker.lifecycle(namespace_id).await
     }
 
     pub(crate) async fn disable_grep_index(

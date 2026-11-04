@@ -238,24 +238,6 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         GrepSteps::new(self, namespace_id, publish_interval_ms)
     }
 
-    /// Runs one bounded build step and publishes its change.
-    pub async fn build_step(
-        &self,
-        namespace_id: &NamespaceId,
-        policy: GramIndexBuildPolicy,
-    ) -> Result<GrepBuildOutcome> {
-        self.steps(namespace_id, 0).build_step(policy).await
-    }
-
-    /// Runs one bounded reorganize step and publishes its change.
-    pub async fn reorganize_step(
-        &self,
-        namespace_id: &NamespaceId,
-        policy: GramIndexBuildPolicy,
-    ) -> Result<GrepReorganizeOutcome> {
-        self.steps(namespace_id, 0).reorganize_step(policy).await
-    }
-
     /// Enables grep by pinning a snapshot and publishing a backfilling entry.
     /// Enabling an enabled index changes nothing.
     ///

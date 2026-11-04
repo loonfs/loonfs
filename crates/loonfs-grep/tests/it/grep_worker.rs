@@ -56,11 +56,13 @@ async fn drive_worker_to_current(
 ) {
     for _ in 0..512 {
         let build = worker
-            .build_step(namespace_id, policy)
+            .steps(namespace_id, 0)
+            .build_step(policy)
             .await
             .expect("worker build step");
         let reorganize = worker
-            .reorganize_step(namespace_id, policy)
+            .steps(namespace_id, 0)
+            .reorganize_step(policy)
             .await
             .expect("worker reorganize step");
         if matches!(build, GrepBuildOutcome::UpToDate { .. })
@@ -172,7 +174,8 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
         ..GramIndexBuildPolicy::default()
     };
     let first = worker
-        .build_step(&namespace_id, policy)
+        .steps(&namespace_id, 0)
+        .build_step(policy)
         .await
         .expect("first backfill page");
     assert_matches!(first, GrepBuildOutcome::Indexed { .. });
@@ -291,17 +294,16 @@ async fn exhausted_run_numbers_fail_as_index_corruption_without_writing_the_mani
 
     for error in [
         worker
-            .build_step(&namespace_id, GramIndexBuildPolicy::default())
+            .steps(&namespace_id, 0)
+            .build_step(GramIndexBuildPolicy::default())
             .await
             .expect_err("a build cannot allocate a run above the public maximum"),
         worker
-            .reorganize_step(
-                &namespace_id,
-                GramIndexBuildPolicy {
-                    max_delta_runs: NonZeroUsize::MIN,
-                    ..GramIndexBuildPolicy::default()
-                },
-            )
+            .steps(&namespace_id, 0)
+            .reorganize_step(GramIndexBuildPolicy {
+                max_delta_runs: NonZeroUsize::MIN,
+                ..GramIndexBuildPolicy::default()
+            })
             .await
             .expect_err("a reorganization cannot allocate above the public maximum"),
     ] {
@@ -490,7 +492,8 @@ async fn restart_confirms_its_checkpoint_after_an_ambiguous_manifest_write() {
     let worker = &restart_host.worker;
 
     let outcome = worker
-        .build_step(&namespace_id, GramIndexBuildPolicy::default())
+        .steps(&namespace_id, 0)
+        .build_step(GramIndexBuildPolicy::default())
         .await
         .expect("confirm written restart");
     assert_matches!(outcome, GrepBuildOutcome::BackfillRestarted { .. });
@@ -553,7 +556,8 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
     // The feed can no longer reach the watermark, which the worker must
     // read as "my basis is gone" and answer with a whole new attempt.
     let restart = worker
-        .build_step(&namespace_id, GramIndexBuildPolicy::default())
+        .steps(&namespace_id, 0)
+        .build_step(GramIndexBuildPolicy::default())
         .await
         .expect("gap restart");
     assert_matches!(restart, GrepBuildOutcome::BackfillRestarted { .. });
@@ -575,7 +579,8 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
         .await
         .expect("remove checkpoint mid-backfill");
     let vanished = worker
-        .build_step(&namespace_id, GramIndexBuildPolicy::default())
+        .steps(&namespace_id, 0)
+        .build_step(GramIndexBuildPolicy::default())
         .await
         .expect("vanished checkpoint restart");
     assert_matches!(vanished, GrepBuildOutcome::BackfillRestarted { .. });
@@ -661,7 +666,8 @@ async fn retention_passing_a_backfill_checkpoint_never_serves_a_partial_query() 
         ..GramIndexBuildPolicy::default()
     };
     let first = worker
-        .build_step(&namespace_id, policy)
+        .steps(&namespace_id, 0)
+        .build_step(policy)
         .await
         .expect("first backfill page");
     assert_matches!(
@@ -689,7 +695,8 @@ async fn retention_passing_a_backfill_checkpoint_never_serves_a_partial_query() 
     // The change-feed boundary is authoritative: a query at that watermark
     // must fail explicitly instead of treating the missing tail as empty.
     let completed = worker
-        .build_step(&namespace_id, policy)
+        .steps(&namespace_id, 0)
+        .build_step(policy)
         .await
         .expect("final backfill page");
     assert_matches!(
@@ -705,7 +712,8 @@ async fn retention_passing_a_backfill_checkpoint_never_serves_a_partial_query() 
     assert_eq!(error.code(), ErrorCode::RebootstrapRequired);
 
     let restarted = worker
-        .build_step(&namespace_id, policy)
+        .steps(&namespace_id, 0)
+        .build_step(policy)
         .await
         .expect("restart expired handoff");
     assert_matches!(restarted, GrepBuildOutcome::BackfillRestarted { .. });
@@ -911,7 +919,8 @@ async fn commits_during_backfill_are_indexed_once_by_the_feed_phase() {
         ..GramIndexBuildPolicy::default()
     };
     let first = worker
-        .build_step(&namespace_id, policy)
+        .steps(&namespace_id, 0)
+        .build_step(policy)
         .await
         .expect("first backfill page");
     assert_matches!(
@@ -1236,7 +1245,8 @@ async fn undeleting_a_subtree_deleted_before_backfill_needs_no_rebuild() {
     assert_eq!(matched_paths(&restored), vec!["/docs/a.txt", "/docs/b.txt"]);
 
     let step = worker
-        .build_step(&namespace_id, GramIndexBuildPolicy::default())
+        .steps(&namespace_id, 0)
+        .build_step(GramIndexBuildPolicy::default())
         .await
         .expect("build step after undelete");
     assert_matches!(
@@ -1290,7 +1300,12 @@ async fn a_failing_worker_step_never_blocks_a_concurrent_commit() {
 
     let actor = loonfs_test_support::test_actor();
     let (build, commit) = tokio::join!(
-        worker.build_step(&namespace_id, GramIndexBuildPolicy::default()),
+        async {
+            worker
+                .steps(&namespace_id, 0)
+                .build_step(GramIndexBuildPolicy::default())
+                .await
+        },
         namespace_writer.put_file("/during-failure.txt", b"isolated needle\n", &actor),
     );
     let error = build.expect_err("an unreadable grep entry fails the step");
@@ -1382,7 +1397,8 @@ async fn a_backfill_checkpoint_mismatch_is_corruption_without_writes() {
     .await;
     recording.reset();
     let error = worker
-        .build_step(&namespace_id, GramIndexBuildPolicy::default())
+        .steps(&namespace_id, 0)
+        .build_step(GramIndexBuildPolicy::default())
         .await
         .expect_err("mismatch");
     assert_matches!(error, GrepError::IndexCorrupt { .. });
@@ -1880,11 +1896,13 @@ async fn grep_worker_pins_reorganized_tail_and_pagination_results() {
             .await
             .expect("write indexed file");
         worker
-            .build_step(&namespace_id, policy)
+            .steps(&namespace_id, 0)
+            .build_step(policy)
             .await
             .expect("new build");
         worker
-            .reorganize_step(&namespace_id, policy)
+            .steps(&namespace_id, 0)
+            .reorganize_step(policy)
             .await
             .expect("new reorganization");
     }
@@ -2208,7 +2226,8 @@ async fn enable_disable_and_warm_queries_read_and_write_no_grep_object() {
     let host = GrepHost::new(&store, "entry-query").await;
     host.worker.enable(&namespace_id).await.expect("enable");
     host.worker
-        .build_step(&namespace_id, GramIndexBuildPolicy::default())
+        .steps(&namespace_id, 0)
+        .build_step(GramIndexBuildPolicy::default())
         .await
         .expect("empty backfill");
     let grep_request = request("needle");
@@ -2571,13 +2590,11 @@ async fn a_direct_build_policy_rejects_oversized_pages_without_panicking() {
     for limit in [loonfs_types::MAX_PAGE_LIMIT as usize + 1, usize::MAX] {
         let error = host
             .worker
-            .build_step(
-                &namespace_id,
-                GramIndexBuildPolicy {
-                    max_files_per_step: nonzero_usize(limit),
-                    ..GramIndexBuildPolicy::default()
-                },
-            )
+            .steps(&namespace_id, 0)
+            .build_step(GramIndexBuildPolicy {
+                max_files_per_step: nonzero_usize(limit),
+                ..GramIndexBuildPolicy::default()
+            })
             .await
             .expect_err("an oversized policy returns an error");
         assert_eq!(error.code(), ErrorCode::InvalidRequest);
@@ -2587,13 +2604,11 @@ async fn a_direct_build_policy_rejects_oversized_pages_without_panicking() {
         );
     }
     host.worker
-        .build_step(
-            &namespace_id,
-            GramIndexBuildPolicy {
-                max_files_per_step: nonzero_usize(loonfs_types::MAX_PAGE_LIMIT as usize),
-                ..GramIndexBuildPolicy::default()
-            },
-        )
+        .steps(&namespace_id, 0)
+        .build_step(GramIndexBuildPolicy {
+            max_files_per_step: nonzero_usize(loonfs_types::MAX_PAGE_LIMIT as usize),
+            ..GramIndexBuildPolicy::default()
+        })
         .await
         .expect("the maximum page size is accepted");
 }

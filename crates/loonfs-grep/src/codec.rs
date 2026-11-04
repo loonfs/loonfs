@@ -493,6 +493,20 @@ pub mod lookup {
         format!("{}-", content_revision_probe(content_id, size_bytes))
     }
 
+    /// The prefix of one content value's `content_revisions` rows for one
+    /// inode.
+    pub(crate) fn content_revision_inode_prefix(
+        content_id: &ContentId,
+        size_bytes: u64,
+        inode_id: InodeId,
+    ) -> String {
+        format!(
+            "{}{}-",
+            content_revision_prefix(content_id, size_bytes),
+            inode_id.body()
+        )
+    }
+
     /// A `content_revisions` row key, which sorts one value's revisions by
     /// inode and then newest first.
     pub(crate) fn content_revision_row_key(
@@ -502,9 +516,8 @@ pub mod lookup {
         revision_no: RevisionNo,
     ) -> String {
         format!(
-            "{}{}-{:020}",
-            content_revision_prefix(content_id, size_bytes),
-            inode_id.body(),
+            "{}{:020}",
+            content_revision_inode_prefix(content_id, size_bytes, inode_id),
             u64::MAX - revision_no.0
         )
     }
@@ -665,6 +678,10 @@ mod tests {
         assert_eq!(
             revision.filter_key(),
             "content-revision-0000000000000000000000001a-00000000000000000007"
+        );
+        assert_eq!(
+            lookup::content_revision_inode_prefix(&value.content_id(), 7, InodeId(9)),
+            "content-revision-0000000000000000000000001a-00000000000000000007-00000000000000000000000009-"
         );
         assert!(revision
             .row_key()

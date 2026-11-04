@@ -2698,7 +2698,8 @@ async fn build_active_grep_index(
     worker.enable(namespace_id).await.expect("enable grep");
     loop {
         match worker
-            .build_step(namespace_id, GramIndexBuildPolicy::default())
+            .steps(namespace_id, 0)
+            .build_step(GramIndexBuildPolicy::default())
             .await
             .expect("build step")
         {

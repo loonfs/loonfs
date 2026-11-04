@@ -59,14 +59,15 @@ impl ValueFiles {
             .resume
             .as_ref()
             .filter(|resume| resume.position().value == value);
-        let prefix = lookup::content_revision_prefix(&value.content_id(), value.size_bytes);
+        let content_id = value.content_id();
+        let inode_prefix = |inode_id| {
+            lookup::content_revision_inode_prefix(&content_id, value.size_bytes, inode_id)
+        };
         let lower = match resume {
-            None => prefix,
-            Some(GrepResume::InFile { position, .. }) => {
-                format!("{prefix}{}-", position.inode_id.body())
-            }
+            None => lookup::content_revision_prefix(&content_id, value.size_bytes),
+            Some(GrepResume::InFile { position, .. }) => inode_prefix(position.inode_id),
             Some(GrepResume::AfterFile { position }) => {
-                string_prefix_upper_bound(&format!("{prefix}{}-", position.inode_id.body()))
+                string_prefix_upper_bound(&inode_prefix(position.inode_id))
                     .expect("a row key prefix should have an upper bound")
             }
         };
