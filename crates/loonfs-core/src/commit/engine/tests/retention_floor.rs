@@ -26,9 +26,7 @@ fn undelete(commit_id: &str, inode_id: InodeId, deletion_seq: ChangeSeq) -> Comm
         FilesystemOperation::Undelete {
             inode_id,
             deletion_seq,
-            destination_path: None,
-            destination_parent_inode_id: None,
-            destination_display_name: None,
+            destination: loonfs_types::options::UndeleteDestination::Recorded,
         },
     )
 }

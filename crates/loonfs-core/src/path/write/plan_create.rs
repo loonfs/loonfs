@@ -365,39 +365,3 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
         })
     }
 }
-
-/// Reads an undelete request's destination fields, which name at most one
-/// destination.
-pub(super) fn undelete_destination(
-    path: Option<&AbsolutePath>,
-    parent_inode_id: Option<InodeId>,
-    display_name: Option<&DisplayName>,
-) -> Result<UndeleteDestination> {
-    let (field, message) = match (path, parent_inode_id, display_name) {
-        (None, None, None) => return Ok(UndeleteDestination::Recorded),
-        (Some(path), None, None) => return Ok(UndeleteDestination::Path(path.clone())),
-        (None, Some(parent_inode_id), Some(display_name)) => {
-            return Ok(UndeleteDestination::Name {
-                parent_inode_id,
-                display_name: display_name.clone(),
-            })
-        }
-        (Some(_), _, _) => (
-            "destination_path",
-            "`destination_path` cannot be combined with `destination_parent_inode_id` \
-             or `destination_display_name`",
-        ),
-        (None, Some(_), None) => (
-            "destination_display_name",
-            "`destination_parent_inode_id` requires `destination_display_name`",
-        ),
-        (None, None, Some(_)) => (
-            "destination_parent_inode_id",
-            "`destination_display_name` requires `destination_parent_inode_id`",
-        ),
-    };
-    Err(CoreError::InvalidCommitField {
-        field,
-        message: message.to_owned(),
-    })
-}

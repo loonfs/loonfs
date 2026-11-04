@@ -627,9 +627,9 @@ async fn moves_are_authorized_as_the_equivalent_grant() {
     let undelete = FilesystemOperation::Undelete {
         inode_id: recover.inode_id,
         deletion_seq: deletion.committed_seq,
-        destination_path: Some(AbsolutePath::parse("/team/recovered").expect("path")),
-        destination_parent_inode_id: None,
-        destination_display_name: None,
+        destination: loonfs_types::options::UndeleteDestination::Path(
+            AbsolutePath::parse("/team/recovered").expect("path"),
+        ),
     };
     for (principal, operation, expected) in [
         ("editor", move_path("/team/rename", "/team/renamed"), None),
@@ -1781,9 +1781,7 @@ async fn undelete_authorizes_state_and_destination_before_errors() {
             FilesystemOperation::Undelete {
                 inode_id,
                 deletion_seq,
-                destination_path: None,
-                destination_parent_inode_id: None,
-                destination_display_name: None,
+                destination: loonfs_types::options::UndeleteDestination::Recorded,
             },
         )
         .await
@@ -1800,9 +1798,9 @@ async fn undelete_authorizes_state_and_destination_before_errors() {
             FilesystemOperation::Undelete {
                 inode_id: visible_file.inode_id,
                 deletion_seq: visible_deletion.committed_seq,
-                destination_path: Some(AbsolutePath::parse(destination_path).expect("path")),
-                destination_parent_inode_id: None,
-                destination_display_name: None,
+                destination: loonfs_types::options::UndeleteDestination::Path(
+                    AbsolutePath::parse(destination_path).expect("path"),
+                ),
             },
         )
         .await
@@ -1886,9 +1884,10 @@ async fn inode_forms_require_the_rights_of_their_path_forms() {
     let undelete_under = |parent_inode_id, name: &str| FilesystemOperation::Undelete {
         inode_id: kept.inode_id,
         deletion_seq,
-        destination_path: None,
-        destination_parent_inode_id: Some(parent_inode_id),
-        destination_display_name: Some(DisplayName::parse(name).expect("name")),
+        destination: loonfs_types::options::UndeleteDestination::Name {
+            parent_inode_id,
+            display_name: DisplayName::parse(name).expect("name"),
+        },
     };
     for (principal, operation, expected) in [
         ("stranger", copy("copy"), Some(ErrorCode::InodeNotFound)),

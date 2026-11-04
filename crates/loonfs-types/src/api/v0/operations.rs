@@ -130,6 +130,91 @@ impl utoipa::ToSchema for FileContent {
     }
 }
 
+/// The wire fields of [`UndeleteDestination`], which an undelete includes beside its other fields.
+#[derive(Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+struct UndeleteDestinationFields {
+    /// The absolute path to restore the inode to. It can't be combined with
+    /// `destination_parent_inode_id`.
+    #[serde(default)]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    destination_path: Option<AbsolutePath>,
+    /// The directory to restore the inode into. It requires `destination_display_name`.
+    #[serde(default, with = "crate::inode_id::public::option")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    destination_parent_inode_id: Option<InodeId>,
+    /// The inode's name in `destination_parent_inode_id`.
+    #[serde(default)]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    destination_display_name: Option<DisplayName>,
+}
+
+impl Serialize for UndeleteDestination {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut fields = serializer.serialize_struct("UndeleteDestination", 2)?;
+        match self {
+            Self::Recorded => {}
+            Self::Path(path) => fields.serialize_field("destination_path", path)?,
+            Self::Name {
+                parent_inode_id,
+                display_name,
+            } => {
+                fields
+                    .serialize_field("destination_parent_inode_id", &parent_inode_id.to_string())?;
+                fields.serialize_field("destination_display_name", display_name)?;
+            }
+        }
+        fields.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for UndeleteDestination {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let fields = UndeleteDestinationFields::deserialize(deserializer)?;
+        match (
+            fields.destination_path,
+            fields.destination_parent_inode_id,
+            fields.destination_display_name,
+        ) {
+            (None, None, None) => Ok(Self::Recorded),
+            (Some(path), None, None) => Ok(Self::Path(path)),
+            (None, Some(parent_inode_id), Some(display_name)) => Ok(Self::Name {
+                parent_inode_id,
+                display_name,
+            }),
+            (Some(_), _, _) => Err(serde::de::Error::custom(
+                "`destination_path` cannot be combined with `destination_parent_inode_id` or \
+                 `destination_display_name`",
+            )),
+            (None, Some(_), None) => Err(serde::de::Error::custom(
+                "`destination_parent_inode_id` requires `destination_display_name`",
+            )),
+            (None, None, Some(_)) => Err(serde::de::Error::custom(
+                "`destination_display_name` requires `destination_parent_inode_id`",
+            )),
+        }
+    }
+}
+
+#[cfg(feature = "openapi")]
+impl utoipa::PartialSchema for UndeleteDestination {
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+        <UndeleteDestinationFields as utoipa::PartialSchema>::schema()
+    }
+}
+
+#[cfg(feature = "openapi")]
+impl utoipa::ToSchema for UndeleteDestination {
+    fn schemas(
+        schemas: &mut Vec<(
+            String,
+            utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>,
+        )>,
+    ) {
+        <UndeleteDestinationFields as utoipa::ToSchema>::schemas(schemas);
+    }
+}
+
 /// One filesystem operation.
 ///
 /// The server rejects unknown fields, and a variant without fields requires an empty object.
@@ -366,23 +451,9 @@ pub enum FilesystemOperation {
         /// The deletion sequence that the caller observed. It prevents the undelete from cancelling
         /// a newer deletion of the inode.
         deletion_seq: ChangeSeq,
-        /// The absolute path to restore the inode to. It can't be combined with
-        /// `destination_parent_inode_id`.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[cfg_attr(feature = "openapi", schema(nullable = false))]
-        destination_path: Option<AbsolutePath>,
-        /// The directory to restore the inode into. It requires `destination_display_name`.
-        #[serde(
-            default,
-            skip_serializing_if = "Option::is_none",
-            with = "crate::inode_id::public::option"
-        )]
-        #[cfg_attr(feature = "openapi", schema(nullable = false))]
-        destination_parent_inode_id: Option<InodeId>,
-        /// The inode's name in `destination_parent_inode_id`.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[cfg_attr(feature = "openapi", schema(nullable = false))]
-        destination_display_name: Option<DisplayName>,
+        /// Where the undelete binds the restored inode.
+        #[serde(flatten)]
+        destination: UndeleteDestination,
     },
     /// An operation that restores an older revision as the current revision of the file at a path.
     #[cfg_attr(
@@ -746,21 +817,10 @@ impl FilesystemOperation {
         deletion_seq: ChangeSeq,
         destination: &UndeleteDestination,
     ) -> Self {
-        let (destination_path, destination_parent_inode_id, destination_display_name) =
-            match destination {
-                UndeleteDestination::Recorded => (None, None, None),
-                UndeleteDestination::Path(path) => (Some(path.clone()), None, None),
-                UndeleteDestination::Name {
-                    parent_inode_id,
-                    display_name,
-                } => (None, Some(*parent_inode_id), Some(display_name.clone())),
-            };
         Self::Undelete {
             inode_id,
             deletion_seq,
-            destination_path,
-            destination_parent_inode_id,
-            destination_display_name,
+            destination: destination.clone(),
         }
     }
 
@@ -1096,6 +1156,42 @@ mod tests {
     }
 
     #[test]
+    fn an_undelete_destination_is_one_path_or_one_parent_and_name() {
+        for (destination, message) in [
+            (
+                serde_json::json!({
+                    "destination_path": "/restored.txt",
+                    "destination_parent_inode_id": "ino_00000000000000000000000001",
+                    "destination_display_name": "restored.txt"
+                }),
+                "`destination_path` cannot be combined with `destination_parent_inode_id` or \
+                 `destination_display_name`",
+            ),
+            (
+                serde_json::json!({ "destination_parent_inode_id": "ino_00000000000000000000000001" }),
+                "`destination_parent_inode_id` requires `destination_display_name`",
+            ),
+            (
+                serde_json::json!({ "destination_display_name": "restored.txt" }),
+                "`destination_display_name` requires `destination_parent_inode_id`",
+            ),
+        ] {
+            let mut document = serde_json::json!({
+                "kind": "undelete",
+                "inode_id": "ino_00000000000000000000000007",
+                "deletion_seq": 8
+            });
+            document
+                .as_object_mut()
+                .expect("operation object")
+                .extend(destination.as_object().expect("destination fields").clone());
+            let error = serde_json::from_value::<FilesystemOperation>(document)
+                .expect_err("an undelete names at most one destination");
+            assert!(error.to_string().contains(message), "{error}");
+        }
+    }
+
+    #[test]
     fn filesystem_operations_default_omitted_behavior_fields() {
         let put: FilesystemOperation = serde_json::from_value(serde_json::json!({
             "kind": "put_file",
@@ -1223,9 +1319,7 @@ mod tests {
                 FilesystemOperation::Undelete {
                     inode_id: InodeId(7),
                     deletion_seq: ChangeSeq(8),
-                    destination_path: Some(path("/docs/restored")),
-                    destination_parent_inode_id: None,
-                    destination_display_name: None,
+                    destination: UndeleteDestination::Path(path("/docs/restored")),
                 },
                 serde_json::json!({
                     "kind": "undelete",

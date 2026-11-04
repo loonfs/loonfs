@@ -642,9 +642,7 @@ async fn undelete_in_the_fork(family: &Family, inode_id: InodeId, deleted: &Comm
             FilesystemOperation::Undelete {
                 inode_id,
                 deletion_seq: deleted.committed_seq,
-                destination_path: None,
-                destination_parent_inode_id: None,
-                destination_display_name: None,
+                destination: loonfs_types::options::UndeleteDestination::Recorded,
             },
             Vec::new(),
         )
@@ -1144,9 +1142,7 @@ async fn the_split_hint_measures_a_range_as_the_planner_plans_it() {
         FilesystemOperation::Undelete {
             inode_id: undeleted,
             deletion_seq: deleted.committed_seq,
-            destination_path: None,
-            destination_parent_inode_id: None,
-            destination_display_name: None,
+            destination: loonfs_types::options::UndeleteDestination::Recorded,
         },
         FilesystemOperation::MovePath {
             source_path: path("/docs/a.txt"),

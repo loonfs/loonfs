@@ -26,6 +26,7 @@ use loonfs_types::format::segment_blocks::{DecodedDataBlock, SegmentIndexEntry};
 use loonfs_types::format::wal::{
     MergeRecord, WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent,
 };
+use loonfs_types::options::UndeleteDestination;
 use loonfs_types::{
     AbsolutePath, AccessGrants, ActorId, AttributeKey, AttributeValue, Attributes, BindingVersion,
     ChangeSeq, Checksum, ChecksumHex, CommitFingerprint, CommitId, CommitPrecondition, ContentId,
@@ -337,11 +338,11 @@ impl HeapBytes for FilesystemOperation {
                 destination_display_name,
                 ..
             } => destination_display_name.heap_bytes(),
-            Self::Undelete {
-                destination_path,
-                destination_display_name,
-                ..
-            } => destination_path.heap_bytes() + destination_display_name.heap_bytes(),
+            Self::Undelete { destination, .. } => match destination {
+                UndeleteDestination::Recorded => 0,
+                UndeleteDestination::Path(path) => path.heap_bytes(),
+                UndeleteDestination::Name { display_name, .. } => display_name.heap_bytes(),
+            },
             Self::RestoreRevisionByInode { .. } => 0,
             Self::UpdateAttributes {
                 path, set, remove, ..

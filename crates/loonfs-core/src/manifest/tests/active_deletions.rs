@@ -301,9 +301,9 @@ async fn undelete<S: ObjectStore + ?Sized>(
         FilesystemOperation::Undelete {
             inode_id,
             deletion_seq,
-            destination_path: Some(AbsolutePath::parse(absolute_path).expect("path")),
-            destination_parent_inode_id: None,
-            destination_display_name: None,
+            destination: loonfs_types::options::UndeleteDestination::Path(
+                AbsolutePath::parse(absolute_path).expect("path"),
+            ),
         },
         context,
     )

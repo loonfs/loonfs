@@ -654,11 +654,9 @@ fn an_undelete_that_misses_the_active_deletion_reports_both_sequences() {
                     FilesystemOperation::Undelete {
                         inode_id: fresh.inode_id,
                         deletion_seq: ChangeSeq(fresh.head_seq.0 + 1),
-                        destination_path: Some(
+                        destination: loonfs::UndeleteDestination::Path(
                             parse_mutation_path("/docs/back.txt").expect("valid mutation path"),
                         ),
-                        destination_parent_inode_id: None,
-                        destination_display_name: None,
                     },
                 ],
             },

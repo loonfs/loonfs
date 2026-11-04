@@ -42,19 +42,20 @@ fn copy_by_inode(
     }
 }
 
-fn undelete(
+/// An undelete of the deletion at `deletion_seq` that binds `inode_id` as
+/// `name` under the root.
+fn undelete_under_root(
     inode_id: InodeId,
     deletion_seq: loonfs_types::ChangeSeq,
-    destination_path: Option<&str>,
-    destination_parent_inode_id: Option<InodeId>,
-    destination_display_name: Option<&str>,
+    name: &str,
 ) -> FilesystemOperation {
     FilesystemOperation::Undelete {
         inode_id,
         deletion_seq,
-        destination_path: destination_path.map(|path| AbsolutePath::parse(path).expect("path")),
-        destination_parent_inode_id,
-        destination_display_name: destination_display_name.map(display_name),
+        destination: loonfs_types::options::UndeleteDestination::Name {
+            parent_inode_id: ROOT_INODE_ID,
+            display_name: display_name(name),
+        },
     }
 }
 
@@ -990,69 +991,11 @@ async fn undelete_binds_under_a_parent_inode() {
     .expect("delete file")
     .committed_seq;
 
-    for (operation, field) in [
-        (
-            undelete(
-                report_inode_id,
-                deletion_seq,
-                Some("/restored.txt"),
-                Some(ROOT_INODE_ID),
-                Some("restored.txt"),
-            ),
-            "destination_path",
-        ),
-        (
-            undelete(
-                report_inode_id,
-                deletion_seq,
-                None,
-                Some(ROOT_INODE_ID),
-                None,
-            ),
-            "destination_display_name",
-        ),
-        (
-            undelete(
-                report_inode_id,
-                deletion_seq,
-                None,
-                None,
-                Some("restored.txt"),
-            ),
-            "destination_parent_inode_id",
-        ),
-    ] {
-        let error = submit_operation(
-            &store,
-            &namespace_id,
-            CommitId::generate(),
-            operation,
-            &context,
-        )
-        .await
-        .expect_err("a destination is one path or one parent and name");
-        match error {
-            CoreError::FailedOperation { error: source, .. } => match *source {
-                CoreError::InvalidCommitField {
-                    field: actual_field,
-                    ..
-                } => assert_eq!(actual_field, field),
-                other => panic!("expected an invalid field, got {other:?}"),
-            },
-            other => panic!("expected a failed operation, got {other:?}"),
-        }
-    }
     let taken = submit_operation(
         &store,
         &namespace_id,
         CommitId::generate(),
-        undelete(
-            report_inode_id,
-            deletion_seq,
-            None,
-            Some(ROOT_INODE_ID),
-            Some("TAKEN.txt"),
-        ),
+        undelete_under_root(report_inode_id, deletion_seq, "TAKEN.txt"),
         &context,
     )
     .await
@@ -1063,13 +1006,7 @@ async fn undelete_binds_under_a_parent_inode() {
         &store,
         &namespace_id,
         commit_id("undelete-under-root"),
-        undelete(
-            report_inode_id,
-            deletion_seq,
-            None,
-            Some(ROOT_INODE_ID),
-            Some("restored.txt"),
-        ),
+        undelete_under_root(report_inode_id, deletion_seq, "restored.txt"),
         &context,
     )
     .await

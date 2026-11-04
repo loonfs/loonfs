@@ -2,7 +2,6 @@
 //! the commit operations it needs.
 
 use super::intent::{CommitIntent, FilesystemOperation};
-use super::plan_create::undelete_destination;
 use super::planned_pieces::CommitPieces;
 use super::preconditions::{
     validate_access_precondition, validate_attributes_precondition, validate_expected_file_state,
@@ -276,16 +275,9 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
             Op::Undelete {
                 inode_id,
                 deletion_seq,
-                destination_path,
-                destination_parent_inode_id,
-                destination_display_name,
+                destination,
             } => {
-                let destination = undelete_destination(
-                    destination_path.as_ref(),
-                    *destination_parent_inode_id,
-                    destination_display_name.as_ref(),
-                )?;
-                self.plan_undelete(*inode_id, *deletion_seq, destination)
+                self.plan_undelete(*inode_id, *deletion_seq, destination.clone())
                     .await
             }
             Op::UpdateAttributes {
@@ -812,9 +804,14 @@ mod tests {
         let undelete = |destination: Option<&str>| FilesystemOperation::Undelete {
             inode_id: deleted_inode_id,
             deletion_seq: deletion.committed_seq,
-            destination_path: destination.map(|path| AbsolutePath::parse(path).expect("path")),
-            destination_parent_inode_id: None,
-            destination_display_name: None,
+            destination: destination.map_or(
+                loonfs_types::options::UndeleteDestination::Recorded,
+                |path| {
+                    loonfs_types::options::UndeleteDestination::Path(
+                        AbsolutePath::parse(path).expect("path"),
+                    )
+                },
+            ),
         };
         let staged = crate::test_support::namespace_store(&store, &namespace_id)
             .store_bytes_as_content(b"staged")
