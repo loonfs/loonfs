@@ -33,9 +33,10 @@ pub async fn compact_groups_without_false_positives<S: ObjectStore + ?Sized>(
     groups: &[MetadataFamilyGroup],
     hidden: &[InodeId],
 ) {
+    // Each compaction takes at most the default policy's fan-in, so a group
+    // with more runs needs more than one compaction.
+    let max_runs = MetadataRunPolicy::default().max_input_runs_per_step.get();
     for &group in groups {
-        // Each compaction takes at most `MAX_COMPACTION_INPUT_RUNS` runs, so a
-        // group with more runs needs more than one compaction.
         let mut compacted_every_run = false;
         for _ in 0..8 {
             let current = super::namespace_store(store, namespace_id)
@@ -48,11 +49,11 @@ pub async fn compact_groups_without_false_positives<S: ObjectStore + ?Sized>(
                 .filter(|run| group_run_descriptors(run, group).next().is_some())
                 .collect::<Vec<_>>();
             runs.sort_by_key(|run| (run.tier != RunTier::Base, run.run_seq));
-            compacted_every_run = runs.len() <= crate::limits::MAX_COMPACTION_INPUT_RUNS;
+            compacted_every_run = runs.len() <= max_runs;
             if runs.is_empty() {
                 break;
             }
-            runs.truncate(crate::limits::MAX_COMPACTION_INPUT_RUNS);
+            runs.truncate(max_runs);
             let spec = MetadataCompactionSpec::new(
                 group,
                 runs.iter().map(|run| run.run_no).collect(),

@@ -18,11 +18,6 @@ use loonfs_objectstore::{
 };
 use std::num::NonZeroU64;
 
-/// Maximum run fan-in for either compaction execution path. Larger groups are
-/// compacted in several publications, keeping decoded input blocks independent of
-/// history size.
-pub(crate) const MAX_COMPACTION_INPUT_RUNS: usize = 8;
-
 /// Caps each Bloom filter used by compaction and content collection.
 pub const MAX_BLOOM_FILTER_BYTES: usize = 64 * 1024 * 1024;
 

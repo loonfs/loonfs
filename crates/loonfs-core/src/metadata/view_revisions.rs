@@ -95,62 +95,38 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         ))
     }
 
-    /// Returns up to `limit` of the inode's revisions after `start_after`,
-    /// newest first.
-    ///
-    /// The lookup serves a view at or above its manifest's head. Below the
-    /// head, a page can come back short, because the lookup reads `limit`
-    /// manifest rows and then drops the rows above the view's sequence, so a
-    /// caller that treats a short page as the end misses older revisions.
-    pub(crate) async fn revisions_by_inode_page_desc(
-        &self,
-        inode_id: InodeId,
-        start_after: Option<manifest_index::RevisionPagePosition>,
-        limit: usize,
-    ) -> Result<Vec<RevisionRecord>> {
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-        let mut revisions = manifest_index::revisions_by_inode_page_desc(
-            self.manifest_segments(),
-            inode_id,
-            start_after,
-            limit,
-        )
-        .await?;
-        revisions.extend(self.row_revisions_by_inode_page_desc(inode_id, start_after));
-        revisions.retain(|revision| revision.committed_seq <= self.visible_seq());
-        revisions.sort_by_key(|revision| std::cmp::Reverse(revision_order_key(revision)));
-        revisions.truncate(limit);
-        Ok(revisions)
-    }
-
     /// Returns up to `limit` of the view's revisions whose row keys are at or
     /// after `lower_bound`, with their row keys, in key order (by inode, and
-    /// newest first within each inode).
+    /// newest first within each inode). With an `inode_id`, the page holds
+    /// only that inode's revisions.
     ///
     /// The manifest's rows merge with the WAL tail's rows, and the page reads
     /// manifest rows until it has `limit` rows at or below the view's
     /// sequence, so a page below the manifest's head is short only at the end
-    /// of the family.
+    /// of the range.
     pub(crate) async fn revisions_page(
         &self,
         lower_bound: &str,
+        inode_id: Option<InodeId>,
         limit: usize,
     ) -> Result<Vec<(String, RevisionRecord)>> {
         let visible_seq = self.visible_seq();
         let mut tail: Vec<(String, RevisionRecord)> = self
             .row_states()
             .flat_map(|state| state.revisions())
-            .filter(|revision| revision.committed_seq <= visible_seq)
+            .filter(|revision| {
+                revision.committed_seq <= visible_seq
+                    && inode_id.is_none_or(|inode_id| revision.inode_id == inode_id)
+            })
             .map(|revision| (revision_row_key(revision), revision.clone()))
             .filter(|(row_key, _)| row_key.as_str() >= lower_bound)
             .collect();
         tail.sort_by(|(left, _), (right, _)| left.cmp(right));
         let segments = self.manifest_segments();
-        // A short page is the end of the family.
+        // A short page is the end of the range.
         let refill = |lower_bound: String| async move {
-            let rows = manifest_index::revisions_page(segments, &lower_bound, limit).await?;
+            let rows =
+                manifest_index::revisions_page(segments, &lower_bound, inode_id, limit).await?;
             Ok(ManifestPage {
                 more: rows.len() >= limit,
                 rows,
@@ -162,18 +138,9 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             let Some((row_key, revision)) = merge.next(refill).await? else {
                 break;
             };
-            if revision.committed_seq > visible_seq {
-                continue;
+            if revision.committed_seq <= visible_seq {
+                rows.push((row_key, revision));
             }
-            // A row present in both the manifest and the tail is one
-            // revision, not two.
-            if rows
-                .last()
-                .is_some_and(|(last_key, _)| *last_key == row_key)
-            {
-                continue;
-            }
-            rows.push((row_key, revision));
         }
         Ok(rows)
     }
@@ -348,26 +315,6 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             .max_by_key(|revision| revision_order_key(revision))
             .cloned()
     }
-
-    fn row_revisions_by_inode_page_desc(
-        &self,
-        inode_id: InodeId,
-        start_after: Option<manifest_index::RevisionPagePosition>,
-    ) -> Vec<RevisionRecord> {
-        let mut revisions = self
-            .row_states()
-            .flat_map(|state| state.revisions())
-            .filter(|revision| {
-                revision.inode_id == inode_id
-                    && revision.committed_seq <= self.visible_seq()
-                    && start_after
-                        .is_none_or(|position| revision_is_after_position_desc(revision, position))
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        revisions.sort_by_key(|revision| std::cmp::Reverse(revision_order_key(revision)));
-        revisions
-    }
 }
 
 fn attributes_order_key(
@@ -400,16 +347,4 @@ fn revision_row_key(revision: &RevisionRecord) -> String {
 
 fn revision_order_key(record: &RevisionRecord) -> (RevisionNo, loonfs_types::ChangeSeq, u32) {
     (record.revision_no, record.committed_seq, record.delta_index)
-}
-
-fn revision_is_after_position_desc(
-    record: &RevisionRecord,
-    position: manifest_index::RevisionPagePosition,
-) -> bool {
-    revision_order_key(record)
-        < (
-            position.revision_no,
-            position.committed_seq,
-            position.revision_delta_index,
-        )
 }

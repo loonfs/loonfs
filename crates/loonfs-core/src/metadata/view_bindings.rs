@@ -245,17 +245,10 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             ManifestTailMerge::new(range.lower_bound.clone(), tail, TieOrder::TailFirst);
         let mut entries = Vec::with_capacity(limit);
         let mut removed_position: Option<(ChangeSeq, InodeId)> = None;
-        let mut last_row_key: Option<String> = None;
         while entries.len() < limit {
-            let Some((row_key, record)) = merge.next(refill).await? else {
+            let Some((_, record)) = merge.next(refill).await? else {
                 break;
             };
-            // A row present in both the manifest and the replayed tail is one
-            // deletion, not two.
-            if last_row_key.as_deref() == Some(row_key.as_str()) {
-                continue;
-            }
-            last_row_key = Some(row_key);
             let position = (record.deletion_seq, record.root_inode_id);
             match recoverable_deletion_from_active_record(record) {
                 None => removed_position = Some(position),

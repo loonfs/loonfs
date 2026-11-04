@@ -240,27 +240,6 @@ async fn newest_edge_rows<S: ObjectStore + ?Sized>(
     Ok(edges)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct RevisionPagePosition {
-    pub(super) revision_no: RevisionNo,
-    pub(super) committed_seq: ChangeSeq,
-    pub(super) revision_delta_index: u32,
-}
-
-impl RevisionPagePosition {
-    pub(crate) fn after(
-        revision_no: RevisionNo,
-        committed_seq: ChangeSeq,
-        revision_delta_index: u32,
-    ) -> Self {
-        Self {
-            revision_no,
-            committed_seq,
-            revision_delta_index,
-        }
-    }
-}
-
 /// Returns the inode's newest revision at or below `visible_seq`.
 ///
 /// An inode's revision numbers increase with the sequence, so the family's
@@ -310,57 +289,39 @@ pub(super) async fn revision_by_inode_no<S: ObjectStore + ?Sized>(
         .filter(|revision| revision.committed_seq <= visible_seq))
 }
 
-pub(super) async fn revisions_by_inode_page_desc<S: ObjectStore + ?Sized>(
-    segments: &VerifiedMetadataSegments<'_, S>,
-    inode_id: InodeId,
-    start_after: Option<RevisionPagePosition>,
-    limit: usize,
-) -> Result<Vec<RevisionRecord>> {
-    if limit == 0 {
-        return Ok(Vec::new());
-    }
-    let inode_prefix = lookup_keys::revision_prefix(inode_id);
-    let filter_probe = lookup_keys::revision_probe(inode_id);
-    let lower_bound = start_after
-        .map(|position| {
-            lookup_keys::after_row_key(&lookup_keys::revision_row_key(
-                inode_id,
-                position.revision_no,
-                position.committed_seq,
-                position.revision_delta_index,
-            ))
-        })
-        .unwrap_or_else(|| inode_prefix.clone());
-    segments
-        .scan_range_page_for_lookup(
-            MetadataRowFamily::Revisions,
-            &lower_bound,
-            string_prefix_upper_bound(&inode_prefix).as_deref(),
-            limit,
-            &filter_probe,
-        )
-        .await?
-        .into_iter()
-        .map(revision_from_manifest_row)
-        .collect()
-}
-
 /// Returns up to `limit` rows of the revisions family from `lower_bound`, in
-/// key order, with each row's stored key, whatever their sequences.
+/// key order, with each row's stored key, whatever their sequences. With an
+/// `inode_id`, the page holds only that inode's revisions.
 pub(super) async fn revisions_page<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     lower_bound: &str,
+    inode_id: Option<InodeId>,
     limit: usize,
 ) -> Result<Vec<(String, RevisionRecord)>> {
-    segments
-        .scan_range_page_with_keys(
-            MetadataRowFamily::Revisions,
-            lower_bound,
-            string_prefix_upper_bound(lookup_keys::REVISION_ROW_PREFIX).as_deref(),
-            limit,
-        )
-        .await?
-        .into_iter()
+    let rows = match inode_id {
+        Some(inode_id) => {
+            segments
+                .scan_range_page_with_keys_for_lookup(
+                    MetadataRowFamily::Revisions,
+                    lower_bound,
+                    string_prefix_upper_bound(&lookup_keys::revision_prefix(inode_id)).as_deref(),
+                    limit,
+                    &lookup_keys::revision_probe(inode_id),
+                )
+                .await?
+        }
+        None => {
+            segments
+                .scan_range_page_with_keys(
+                    MetadataRowFamily::Revisions,
+                    lower_bound,
+                    string_prefix_upper_bound(lookup_keys::REVISION_ROW_PREFIX).as_deref(),
+                    limit,
+                )
+                .await?
+        }
+    };
+    rows.into_iter()
         .map(|(row_key, row)| Ok((row_key, revision_from_manifest_row(row)?)))
         .collect()
 }

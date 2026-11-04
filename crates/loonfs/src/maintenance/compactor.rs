@@ -362,7 +362,10 @@ impl Compactor {
                 .await;
             return ControlFlow::Break(MetadataCompactionOutcome::Fenced);
         }
-        if !loonfs_core::metadata_compaction_due(&basis.manifest, compaction_policy) {
+        if !self
+            .engine(namespace_id)
+            .metadata_compaction_due(&basis.manifest, compaction_policy)
+        {
             return ControlFlow::Break(MetadataCompactionOutcome::NotNeeded);
         }
         ControlFlow::Continue(Some(basis))
