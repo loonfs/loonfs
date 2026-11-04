@@ -182,14 +182,14 @@ impl Fixture {
     }
 
     /// Returns how many reads started from the writer's position and how
-    /// many from the read cache.
+    /// many refreshed or loaded the namespace's head.
     fn head_sources(&self) -> (u64, u64) {
         let source = |label| self.counter("loonfs.read_head.source", &[("source", label)]);
-        (source("position"), source("anchor"))
+        (source("position"), source("refreshed") + source("loaded"))
     }
 
-    /// Returns how many read cache lookups of a namespace head hit and how
-    /// many missed.
+    /// Returns how many lookups of a namespace head in the read cache hit
+    /// and how many missed.
     fn head_cache_lookups(&self) -> (usize, usize) {
         let stats = self.writer.metadata_cache().stats();
         (stats.heads.hits, stats.heads.misses)

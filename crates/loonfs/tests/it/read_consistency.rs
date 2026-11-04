@@ -104,22 +104,28 @@ async fn fixture(name: &str) -> Fixture {
     }
 }
 
+/// Returns how many reads of the runtime with `recorder` took their head
+/// from `source`.
+fn reads_from(recorder: &DefaultMetricsRecorder, source: &str) -> u64 {
+    let snapshot = recorder.snapshot();
+    let entry = snapshot
+        .by_name("loonfs.read_head.source")
+        .find(|entry| entry.labels == [("source", source)])
+        .unwrap_or_else(|| panic!("no `{source}` read head source"));
+    match entry.value {
+        MetricValue::Counter(value) => value,
+        ref other => panic!("expected a counter, found {other:?}"),
+    }
+}
+
 impl Fixture {
-    /// Returns how many reader runtime reads took the anchor after
-    /// confirming its head, and how many took it as it was.
-    fn anchor_sources(&self) -> (u64, u64) {
-        let snapshot = self.recorder.snapshot();
-        let source = |label| {
-            let entry = snapshot
-                .by_name("loonfs.read_head.source")
-                .find(|entry| entry.labels == [("source", label)])
-                .unwrap_or_else(|| panic!("no `{label}` read head source"));
-            match entry.value {
-                MetricValue::Counter(value) => value,
-                ref other => panic!("expected a counter, found {other:?}"),
-            }
-        };
-        (source("anchor"), source("eventual"))
+    /// Returns how many reader runtime reads refreshed the cached head, and
+    /// how many took it as it was.
+    fn cached_head_sources(&self) -> (u64, u64) {
+        (
+            reads_from(&self.recorder, "refreshed"),
+            reads_from(&self.recorder, "eventual"),
+        )
     }
 
     async fn shutdown(self) {
@@ -343,7 +349,7 @@ async fn an_eventual_read_sends_no_request_within_its_maximum_staleness() {
         )
         .await
         .expect("strong read");
-    let (anchors, eventual_reads) = fixture.anchor_sources();
+    let (refreshes, eventual_reads) = fixture.cached_head_sources();
 
     fixture.recording.reset();
     fixture.clock.advance_ms(INTERVAL_MS - 1);
@@ -380,7 +386,10 @@ async fn an_eventual_read_sends_no_request_within_its_maximum_staleness() {
         .expect("eventual read");
     assert_eq!(file.bytes, b"file");
     assert_eq!(fixture.recording.take(), []);
-    assert_eq!(fixture.anchor_sources(), (anchors, eventual_reads + 3));
+    assert_eq!(
+        fixture.cached_head_sources(),
+        (refreshes, eventual_reads + 3)
+    );
 
     fixture.clock.advance_ms(1);
     let confirmed = reader
@@ -406,7 +415,10 @@ async fn an_eventual_read_sends_no_request_within_its_maximum_staleness() {
         ] if manifest_key.starts_with(&metadata_manifest_prefix(&fixture.namespace_id))
             && wal_key.starts_with(&wal_prefix(&fixture.namespace_id))
     );
-    assert_eq!(fixture.anchor_sources(), (anchors + 1, eventual_reads + 3));
+    assert_eq!(
+        fixture.cached_head_sources(),
+        (refreshes + 1, eventual_reads + 3)
+    );
     fixture.shutdown().await;
 }
 
@@ -512,16 +524,18 @@ async fn an_eventual_read_after_a_strong_read_never_reads_an_older_head() {
 }
 
 /// Creates a read-only runtime over `store` whose head cache has
-/// `max_head_bytes`, with a manual clock and a one-second manifest check
-/// interval.
+/// `max_head_bytes`, with a manual clock, a one-second manifest check
+/// interval, and `recorder` for its metrics.
 async fn budgeted_reader(
     store: &SharedObjectStore,
     clock: Arc<ManualClock>,
+    recorder: Arc<DefaultMetricsRecorder>,
     max_head_bytes: usize,
 ) -> LoonFs<ReadOnly> {
     LoonFs::builder_with_store(store.clone())
         .read_only()
         .monotonic_timer(clock)
+        .metrics_recorder(recorder)
         .config(loonfs::RuntimeConfig {
             manifest_revalidation_interval_ms: INTERVAL_MS,
             ..loonfs::RuntimeConfig::default()
@@ -544,14 +558,20 @@ async fn keeps_the_head(
     namespace_id: &NamespaceId,
     max_head_bytes: usize,
 ) -> bool {
-    let reader =
-        budgeted_reader(store, Arc::new(ManualClock::new(1_000_000)), max_head_bytes).await;
+    let recorder = Arc::new(DefaultMetricsRecorder::new());
+    let reader = budgeted_reader(
+        store,
+        Arc::new(ManualClock::new(1_000_000)),
+        recorder.clone(),
+        max_head_bytes,
+    )
+    .await;
     let namespace = reader.namespace(namespace_id);
     namespace
         .stat_with_options("/file.txt", &strong())
         .await
         .expect("strong read");
-    let misses = reader.metadata_cache().stats().heads.misses;
+    let loads = reads_from(&recorder, "loaded");
     namespace
         .stat_with_options(
             "/file.txt",
@@ -562,7 +582,7 @@ async fn keeps_the_head(
         )
         .await
         .expect("eventual read");
-    reader.metadata_cache().stats().heads.misses == misses
+    reads_from(&recorder, "loaded") == loads
 }
 
 /// Checks that an eventual read after a strong read never reads an older
@@ -614,7 +634,8 @@ async fn an_eventual_read_after_a_strong_read_of_a_head_too_large_to_cache_loads
         }
     }
     let clock = Arc::new(ManualClock::new(1_000_000));
-    let reader = budgeted_reader(&store, clock.clone(), upper).await;
+    let recorder = Arc::new(DefaultMetricsRecorder::new());
+    let reader = budgeted_reader(&store, clock.clone(), recorder.clone(), upper).await;
     let namespace = reader.namespace(&namespace_id);
     let before = namespace
         .stat_with_options("/file.txt", &strong())
@@ -644,7 +665,7 @@ async fn an_eventual_read_after_a_strong_read_of_a_head_too_large_to_cache_loads
         .expect("strong read");
     assert_eq!(strong.head_seq, commit.committed_seq);
 
-    let misses = reader.metadata_cache().stats().heads.misses;
+    let loads = reads_from(&recorder, "loaded");
     let after = namespace
         .stat_with_options(
             "/file.txt",
@@ -657,8 +678,8 @@ async fn an_eventual_read_after_a_strong_read_of_a_head_too_large_to_cache_loads
         .expect("eventual read");
     assert_eq!(after.head_seq, commit.committed_seq);
     assert_eq!(
-        reader.metadata_cache().stats().heads.misses,
-        misses + 1,
+        reads_from(&recorder, "loaded"),
+        loads + 1,
         "the eventual read loads the namespace"
     );
     peer.shutdown().await.expect("peer shutdown");

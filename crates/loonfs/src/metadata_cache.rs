@@ -8,7 +8,7 @@ use loonfs_core::cache::{
     SharedSegmentBlocks,
 };
 use std::fmt;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use tiered_segment_blocks::TieredSegmentBlocks;
 
@@ -39,15 +39,6 @@ pub const DEFAULT_MAX_COMPLETED_UPLOAD_SESSION_BYTES: usize = 32 * 1024 * 1024;
 pub const DEFAULT_MAX_CONTENT_OBJECT_BYTES: usize = 96 * 1024 * 1024;
 /// Default size of the largest content object the cache keeps: 1 MiB.
 pub const DEFAULT_MAX_CACHED_OBJECT_BYTES: u64 = 1024 * 1024;
-
-/// Whether a cache lookup found its entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CacheLookup {
-    /// The cache had the entry.
-    Hit,
-    /// The lookup went to the store.
-    Miss,
-}
 
 /// Decoded metadata that one or more runtimes read through.
 ///
@@ -85,8 +76,6 @@ struct MetadataCacheInner {
     next_runtime_scope: AtomicU64,
     object_store_scopes: Mutex<ObjectStoreScopes>,
     read_ahead_window_bytes: usize,
-    head_hits: AtomicUsize,
-    head_misses: AtomicUsize,
 }
 
 impl fmt::Debug for MetadataCache {
@@ -132,11 +121,7 @@ impl MetadataCache {
                 .as_ref()
                 .map(|ssd| ssd.stats()),
             manifests: self.inner.segment_blocks.manifest_stats(),
-            heads: DecodedBlockCacheStats {
-                hits: self.inner.head_hits.load(Ordering::Relaxed),
-                misses: self.inner.head_misses.load(Ordering::Relaxed),
-                ..self.inner.heads_and_wal_tails.head_stats()
-            },
+            heads: self.inner.heads_and_wal_tails.head_stats(),
             wal_tails: self.inner.heads_and_wal_tails.tail_stats(),
             content_objects: self.inner.objects.content_object_stats(),
             completed_upload_sessions: self.inner.completed_upload_sessions.stats(),
@@ -210,16 +195,6 @@ impl MetadataCache {
         if let Some(ssd) = &self.inner.ssd_segment_blocks {
             ssd.close().await;
         }
-    }
-
-    /// Records one namespace head lookup that a read used to start from the
-    /// cache or that sent it to the store.
-    pub(crate) fn record_head_lookup(&self, lookup: CacheLookup) {
-        let counter = match lookup {
-            CacheLookup::Hit => &self.inner.head_hits,
-            CacheLookup::Miss => &self.inner.head_misses,
-        };
-        counter.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -415,8 +390,6 @@ impl MetadataCacheBuilder {
                 next_runtime_scope: AtomicU64::new(0),
                 object_store_scopes: Mutex::default(),
                 read_ahead_window_bytes: self.read_ahead_window_bytes,
-                head_hits: AtomicUsize::new(0),
-                head_misses: AtomicUsize::new(0),
             }),
         }
     }
@@ -440,13 +413,6 @@ pub struct MetadataCacheStats {
     /// The decoded manifests.
     pub manifests: DecodedBlockCacheStats,
     /// The namespace heads.
-    ///
-    /// `hits` counts the reads that started from a cached head, whether
-    /// they took the head as it was or refreshed it, and `misses` the reads
-    /// that loaded the head from the store because the cache had none. A
-    /// read can look its head up in the cache more than once while it
-    /// confirms the head, so these count each read once, where the cache's
-    /// own lookup counts would count each lookup.
     pub heads: DecodedBlockCacheStats,
     /// The WAL-tail projections.
     pub wal_tails: DecodedBlockCacheStats,
