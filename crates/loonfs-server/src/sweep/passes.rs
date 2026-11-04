@@ -8,6 +8,7 @@ use futures::stream::FuturesUnordered;
 use futures::{FutureExt as _, StreamExt as _};
 use loonfs::{ChangeSeq, MetadataMaintenanceOutcome, NamespaceId, NamespaceSessionStatus};
 use loonfs_http::{panic_message, HeldNamespace};
+use std::collections::HashSet;
 use std::panic::AssertUnwindSafe;
 use std::time::Duration;
 use tokio::time::MissedTickBehavior;
@@ -266,17 +267,28 @@ impl Sweep {
         let inner = &self.inner;
         let mut ticks = tokio::time::interval(Duration::from_millis(inner.config.tick_interval_ms));
         ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        // Each interval starts a visit to every held session. The claim skips
-        // a session that an earlier interval's visit still has.
+        // Each interval starts a visit to every held session that has no
+        // visit still pending or running, so a session has one visit at a
+        // time and the pending visits never outnumber the held sessions. The
+        // pending visits are polled before an interval starts more. The claim
+        // skips a session that a maintenance call or a pass has.
         let mut visits = FuturesUnordered::new();
+        let mut visiting = HashSet::new();
         loop {
             tokio::select! {
                 biased;
                 () = inner.stop.cancelled() => break,
-                _ = ticks.tick() => visits.extend(
-                    self.held_ids().map(|namespace_id| self.tick_session(namespace_id).boxed()),
-                ),
-                Some(()) = visits.next() => {}
+                Some(namespace_id) = visits.next() => {
+                    visiting.remove(&namespace_id);
+                }
+                _ = ticks.tick() => {
+                    for namespace_id in self.held_ids() {
+                        if visiting.insert(namespace_id.clone()) {
+                            let visit = self.tick_session(namespace_id.clone());
+                            visits.push(visit.map(move |()| namespace_id).boxed());
+                        }
+                    }
+                }
             }
         }
         // The running visits see the stop at their next check and return.
