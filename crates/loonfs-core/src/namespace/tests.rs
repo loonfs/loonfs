@@ -6,12 +6,13 @@ use crate::test_support::WriterAt;
 use crate::wal::tests::publish;
 use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_objectstore::{
-    keys::{hint, metadata_manifest_object},
+    keys::{hint, metadata_manifest_object, metadata_manifest_prefix, wal_prefix},
     local_fs_store::LocalFsStore,
     ObjectStore,
 };
 use loonfs_test_support::stores::{
-    BlockingStore, FailStore, InjectedError, KeyPredicate, OperationSelector, RecordingStore,
+    BlockingStore, FailStore, InjectedError, KeyPredicate, OperationSelector, RecordedOperation,
+    RecordingStore,
 };
 use loonfs_types::options::AttributeInclusion;
 use loonfs_types::{ErrorCode, ManifestNo, NamespaceId};
@@ -522,4 +523,64 @@ async fn a_fork_that_loses_target_publication_deletes_its_source_pin() {
             .expect("source pins")
             .is_empty());
     }
+}
+
+/// Checks that a writer session's deletion over unfolded commits moves the
+/// session's position onto the fold's manifest, so the attempt that
+/// publishes the tombstone takes the head from the position and reads
+/// neither the hint nor the WAL between the fold and the tombstone.
+#[tokio::test]
+async fn a_deletion_publishes_its_tombstone_from_the_position_its_fold_moved() {
+    let directory = tempdir().expect("directory");
+    let store = RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    );
+    let namespace_id = NamespaceId::parse("deleted-after-fold").expect("namespace");
+    let context = context();
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
+        .await
+        .expect("bootstrap");
+    let mut engine = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(&store, &namespace_id),
+        context.writer_id.clone(),
+    );
+    publish(&mut engine, "first").await.expect("first commit");
+    let last = publish(&mut engine, "second").await.expect("second commit");
+    store.reset();
+
+    let deleted = engine
+        .delete_namespace(Default::default())
+        .await
+        .expect("delete");
+
+    assert_eq!(deleted.head_seq, last.committed_seq);
+    let operations = store.take();
+    let manifest_prefix = metadata_manifest_prefix(&namespace_id);
+    let manifest_puts = operations
+        .iter()
+        .enumerate()
+        .filter(|(_, operation)| {
+            matches!(operation, RecordedOperation::Put { key, .. } if key.starts_with(&manifest_prefix))
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let [fold, tombstone] = manifest_puts[..] else {
+        panic!("the fold and the tombstone, got {operations:?}");
+    };
+    let (hint, wal_prefix) = (hint(&namespace_id), wal_prefix(&namespace_id));
+    let between = &operations[fold + 1..tombstone];
+    assert!(
+        !between
+            .iter()
+            .any(|operation| operation.key() == hint || operation.key().starts_with(&wal_prefix)),
+        "{between:?}"
+    );
+    let current = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_current_manifest()
+        .await
+        .expect("current manifest");
+    assert!(current.payload().status.is_deleted());
+    assert_eq!(current.object_key, operations[tombstone].key());
 }

@@ -12,12 +12,14 @@ use crate::metadata::MetadataState;
 use crate::namespace::basis::{MetadataBasis, PublicationBasis};
 use crate::namespace::bootstrap::bootstrap_metadata_state;
 use crate::namespace::control::LoadedManifest;
+use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::namespace::state::NamespaceReadState;
 use crate::segment::cache::{
     DecodedMetadataSegmentBlock, MetadataSegmentCache, MetadataSegmentCacheKey,
 };
 use crate::segment::runs::{manifest_cache_heap_bytes, runs_newest_first};
 use crate::segment::scan::VerifiedMetadataSegments;
+use crate::wal::{replay_discovered_tail, ProjectedWalTail};
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::ManifestRef;
@@ -95,6 +97,21 @@ impl<S: ObjectStore + ?Sized> LoadedMetadataBasis<'_, S> {
     /// Reconstructs the head from which this basis replays its WAL tail.
     pub(crate) fn replay_head(&self, current_head: &NamespaceReadState) -> NamespaceReadState {
         head_from_manifest(current_head, self.segments.manifest())
+    }
+
+    /// Replays `anchor`'s WAL tail over this basis, which is loaded from the
+    /// anchor's manifest.
+    pub(crate) fn project_tail(
+        &self,
+        anchor: &NamespaceReadAnchor,
+    ) -> crate::error::Result<Arc<ProjectedWalTail>> {
+        let replayed = replay_discovered_tail(
+            &self.replay_head(&anchor.read_state),
+            &self.base_state,
+            &anchor.tail,
+        )
+        .map_err(CoreError::MetadataProjection)?;
+        Ok(Arc::new(replayed.projected_tail))
     }
 }
 

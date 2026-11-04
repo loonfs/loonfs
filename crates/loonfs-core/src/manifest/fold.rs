@@ -17,7 +17,6 @@ use crate::segment::runs::flatten_manifest_segments;
 use crate::segment::scan::VerifiedMetadataSegments;
 use crate::storage::tail_content::{assemble_tail_content, write_tail_content, ContentWrites};
 use crate::time::{Observation, OperationClock};
-use crate::wal::replay_discovered_tail;
 use crate::wal::ProjectedWalTail;
 use crate::wal::WalPublishError;
 use futures::{stream, TryStreamExt};
@@ -224,27 +223,19 @@ impl<S: ObjectStore> NamespaceStore<S> {
         &self,
         observed: Observation,
     ) -> Result<ManifestProjection<'_, S>> {
-        let anchor = self.load_read_anchor(observed).await?;
-        let basis = anchor.basis();
-        let basis_checked = anchor.checked.clone();
-        let head = anchor.read_state;
-        crate::namespace::control::ensure_namespace_live(&head.namespace_id, head.status)?;
+        let anchor = self.load_live_read_anchor(observed).await?;
         let loaded_basis = super::load::metadata_basis_from_manifest(
             &self.store,
             Some(&self.segment_cache),
             &anchor.manifest,
         );
-        let manifest_head = loaded_basis.replay_head(&head);
-        let manifest_segments = loaded_basis.segments;
-        let replayed =
-            replay_discovered_tail(&manifest_head, &loaded_basis.base_state, &anchor.tail)
-                .map_err(CoreError::MetadataProjection)?;
+        let tail_state = loaded_basis.project_tail(&anchor)?;
         Ok(ManifestProjection {
-            head,
-            basis,
-            basis_checked,
-            manifest_segments,
-            tail_state: Arc::new(replayed.projected_tail),
+            basis: anchor.basis(),
+            basis_checked: anchor.checked,
+            head: anchor.read_state,
+            manifest_segments: loaded_basis.segments,
+            tail_state,
         })
     }
 
