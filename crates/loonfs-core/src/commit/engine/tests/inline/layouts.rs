@@ -941,11 +941,13 @@ async fn collection_keeps_shared_objects_named_only_by_an_unfolded_restore() {
     let basis = metadata_basis_from_manifest(&store, None, &manifest);
     let rows = basis
         .segments
-        .scan_range_page_with_keys(
+        .scan_range(
             MetadataRowFamily::Revisions,
             MetadataRowFamily::Revisions.row_key_prefix(),
             None,
             32,
+            None,
+            crate::segment::Readahead::Enabled,
         )
         .await
         .expect("manifest revisions");
@@ -1459,7 +1461,7 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
         let basis = metadata_basis_from_manifest(&store, None, &manifest);
         let rows = basis
             .segments
-            .scan_range_page_with_keys(
+            .scan_range(
                 MetadataRowFamily::ContentLayouts,
                 &format!("content-layout-{}-", content_ref.content_id.body()),
                 Some(&format!(
@@ -1467,6 +1469,8 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
                     content_ref.content_id.body()
                 )),
                 32,
+                None,
+                crate::segment::Readahead::Enabled,
             )
             .await
             .expect("layouts");

@@ -54,7 +54,14 @@ async fn a_byte_budgeted_cache_admits_wide_scans_and_holds_to_its_budget() {
     .expect("load segments");
 
     let revisions = segments
-        .scan_prefix(ApiMetadataRowFamily::Revisions, "revision-")
+        .scan_range(
+            ApiMetadataRowFamily::Revisions,
+            "revision-",
+            string_prefix_upper_bound("revision-").as_deref(),
+            usize::MAX,
+            None,
+            scan::Readahead::Enabled,
+        )
         .await
         .expect("scan revisions");
     let after_first = cache.stats();
@@ -76,7 +83,14 @@ async fn a_byte_budgeted_cache_admits_wide_scans_and_holds_to_its_budget() {
     .expect("load fresh segments");
     store.reset();
     let repeated = fresh_segments
-        .scan_prefix(ApiMetadataRowFamily::Revisions, "revision-")
+        .scan_range(
+            ApiMetadataRowFamily::Revisions,
+            "revision-",
+            string_prefix_upper_bound("revision-").as_deref(),
+            usize::MAX,
+            None,
+            scan::Readahead::Enabled,
+        )
         .await
         .expect("repeated scan");
     let after_repeat = cache.stats();
@@ -95,11 +109,13 @@ async fn a_byte_budgeted_cache_admits_wide_scans_and_holds_to_its_budget() {
     let upper_bound = super::string_prefix_upper_bound(&lower_bound);
     let before_range = cache.stats();
     let page = segments
-        .scan_range_page(
+        .scan_range(
             ApiMetadataRowFamily::DirentryBinds,
             &lower_bound,
             upper_bound.as_deref(),
             8,
+            None,
+            scan::Readahead::Enabled,
         )
         .await
         .expect("scan range page");
@@ -119,11 +135,13 @@ async fn a_byte_budgeted_cache_admits_wide_scans_and_holds_to_its_budget() {
     .expect("load fresh segments");
     store.reset();
     let repeated_page = fresh_segments
-        .scan_range_page(
+        .scan_range(
             ApiMetadataRowFamily::DirentryBinds,
             &lower_bound,
             upper_bound.as_deref(),
             8,
+            None,
+            scan::Readahead::Enabled,
         )
         .await
         .expect("repeated scan range page");
@@ -199,7 +217,14 @@ async fn concurrent_scans_share_one_fetch_per_segment() {
     .expect("load solo segments");
     store.reset();
     let solo = solo_segments
-        .scan_prefix(ApiMetadataRowFamily::Revisions, "revision-")
+        .scan_range(
+            ApiMetadataRowFamily::Revisions,
+            "revision-",
+            string_prefix_upper_bound("revision-").as_deref(),
+            usize::MAX,
+            None,
+            scan::Readahead::Enabled,
+        )
         .await
         .expect("solo scan");
     let solo_fetches = store.count(OperationSelector::Read);
@@ -226,9 +251,24 @@ async fn concurrent_scans_share_one_fetch_per_segment() {
     .await
     .expect("load second segments");
     store.reset();
+    let upper_bound = string_prefix_upper_bound("revision-");
     let (first, second) = tokio::join!(
-        first_segments.scan_prefix(ApiMetadataRowFamily::Revisions, "revision-"),
-        second_segments.scan_prefix(ApiMetadataRowFamily::Revisions, "revision-"),
+        first_segments.scan_range(
+            ApiMetadataRowFamily::Revisions,
+            "revision-",
+            upper_bound.as_deref(),
+            usize::MAX,
+            None,
+            scan::Readahead::Enabled
+        ),
+        second_segments.scan_range(
+            ApiMetadataRowFamily::Revisions,
+            "revision-",
+            upper_bound.as_deref(),
+            usize::MAX,
+            None,
+            scan::Readahead::Enabled
+        ),
     );
     let paired_fetches = store.count(OperationSelector::Read);
     assert_eq!(first.expect("first scan"), second.expect("second scan"));
@@ -313,7 +353,14 @@ async fn scan_between_manifest_loads(
             .await
             .expect("load segments");
     segments
-        .scan_prefix(ApiMetadataRowFamily::Revisions, "revision-")
+        .scan_range(
+            ApiMetadataRowFamily::Revisions,
+            "revision-",
+            string_prefix_upper_bound("revision-").as_deref(),
+            usize::MAX,
+            None,
+            scan::Readahead::Enabled,
+        )
         .await
         .expect("scan revisions");
     store.reset();
@@ -437,17 +484,19 @@ async fn segment_range_page_merges_base_and_delta_in_row_key_order() {
     let upper_bound = super::string_prefix_upper_bound(&lower_bound);
     // Each put writes its file's bind and its first revision's summary row.
     let page = segments
-        .scan_range_page(
+        .scan_range(
             ApiMetadataRowFamily::DirentryBinds,
             &lower_bound,
             upper_bound.as_deref(),
             4,
+            None,
+            scan::Readahead::Enabled,
         )
         .await
         .expect("scan range page");
     let display_names =
         page.into_iter()
-            .filter_map(|row| match row {
+            .filter_map(|(_, row)| match row {
                 MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
                     state:
                         loonfs_types::format::manifest::DirentryBindingState::Bound {
@@ -509,17 +558,26 @@ async fn lookup_skips_segments_whose_filter_rules_the_name_out() {
     // Resolve /docs, then look up beta's bind under it through the filtered
     // scan the visibility adapter uses.
     let docs_binds = segments
-        .scan_prefix(
+        .scan_range(
             ApiMetadataRowFamily::DirentryBinds,
             &loonfs_types::format::manifest::lookup_keys::direntry_parent_prefix(
                 loonfs_types::ROOT_INODE_ID,
             ),
+            string_prefix_upper_bound(
+                &loonfs_types::format::manifest::lookup_keys::direntry_parent_prefix(
+                    loonfs_types::ROOT_INODE_ID,
+                ),
+            )
+            .as_deref(),
+            usize::MAX,
+            None,
+            scan::Readahead::Enabled,
         )
         .await
         .expect("scan root binds");
     let docs_inode = docs_binds
         .iter()
-        .find_map(|row| match row {
+        .find_map(|(_, row)| match row {
             MetadataRow::DirentryBinding(crate::metadata::DirentryBindingRecord {
                 child_inode_id,
                 ..
@@ -534,10 +592,12 @@ async fn lookup_skips_segments_whose_filter_rules_the_name_out() {
     );
     let prefix = format!("{filter_probe}-");
     let rows = segments
-        .scan_prefix_for_lookup(
+        .scan_range(
             ApiMetadataRowFamily::DirentryBinds,
             &prefix,
-            &filter_probe,
+            string_prefix_upper_bound(&prefix).as_deref(),
+            usize::MAX,
+            Some(&filter_probe),
             super::scan::Readahead::Disabled,
         )
         .await
@@ -890,10 +950,12 @@ async fn point_lookups_skip_inline_filtered_runs_without_fetches() {
 
     store.reset();
     let rows = segments
-        .scan_prefix_for_lookup(
+        .scan_range(
             ApiMetadataRowFamily::DirentryBinds,
             &prefix,
-            &probe,
+            string_prefix_upper_bound(&prefix).as_deref(),
+            usize::MAX,
+            Some(&probe),
             super::scan::Readahead::Enabled,
         )
         .await
@@ -939,10 +1001,12 @@ async fn point_lookups_skip_inline_filtered_runs_without_fetches() {
             .expect("load stripped segments");
     store.reset();
     let stripped_rows = stripped_segments
-        .scan_prefix_for_lookup(
+        .scan_range(
             ApiMetadataRowFamily::DirentryBinds,
             &prefix,
-            &probe,
+            string_prefix_upper_bound(&prefix).as_deref(),
+            usize::MAX,
+            Some(&probe),
             super::scan::Readahead::Enabled,
         )
         .await
@@ -1528,7 +1592,14 @@ async fn two_loaded_views_share_one_read_working_pool_and_return_the_same_rows()
     .await
     .expect("probe view");
     let expected = probe
-        .scan_prefix(ApiMetadataRowFamily::DirentryBinds, "")
+        .scan_range(
+            ApiMetadataRowFamily::DirentryBinds,
+            "",
+            None,
+            usize::MAX,
+            None,
+            scan::Readahead::Enabled,
+        )
         .await
         .expect("probe rows");
     let working_bytes = probe_pool.in_use();
@@ -1555,9 +1626,16 @@ async fn two_loaded_views_share_one_read_working_pool_and_return_the_same_rows()
     .expect("second view");
     for view in [&first, &second] {
         assert_eq!(
-            view.scan_prefix(ApiMetadataRowFamily::DirentryBinds, "")
-                .await
-                .expect("rows"),
+            view.scan_range(
+                ApiMetadataRowFamily::DirentryBinds,
+                "",
+                None,
+                usize::MAX,
+                None,
+                scan::Readahead::Enabled
+            )
+            .await
+            .expect("rows"),
             expected
         );
     }
@@ -1565,7 +1643,14 @@ async fn two_loaded_views_share_one_read_working_pool_and_return_the_same_rows()
     store.reset();
     assert_eq!(
         first
-            .scan_prefix(ApiMetadataRowFamily::DirentryBinds, "")
+            .scan_range(
+                ApiMetadataRowFamily::DirentryBinds,
+                "",
+                None,
+                usize::MAX,
+                None,
+                scan::Readahead::Enabled
+            )
             .await
             .expect("first reread"),
         expected
@@ -1574,7 +1659,14 @@ async fn two_loaded_views_share_one_read_working_pool_and_return_the_same_rows()
     store.reset();
     assert_eq!(
         second
-            .scan_prefix(ApiMetadataRowFamily::DirentryBinds, "")
+            .scan_range(
+                ApiMetadataRowFamily::DirentryBinds,
+                "",
+                None,
+                usize::MAX,
+                None,
+                scan::Readahead::Enabled
+            )
             .await
             .expect("second reread"),
         expected
@@ -1583,13 +1675,27 @@ async fn two_loaded_views_share_one_read_working_pool_and_return_the_same_rows()
     drop(first);
     assert_eq!(pool.in_use(), 0);
     second
-        .scan_prefix(ApiMetadataRowFamily::DirentryBinds, "")
+        .scan_range(
+            ApiMetadataRowFamily::DirentryBinds,
+            "",
+            None,
+            usize::MAX,
+            None,
+            scan::Readahead::Enabled,
+        )
         .await
         .expect("read after release");
     assert_eq!(pool.in_use(), working_bytes);
     store.reset();
     second
-        .scan_prefix(ApiMetadataRowFamily::DirentryBinds, "")
+        .scan_range(
+            ApiMetadataRowFamily::DirentryBinds,
+            "",
+            None,
+            usize::MAX,
+            None,
+            scan::Readahead::Enabled,
+        )
         .await
         .expect("retained reread");
     assert_eq!(store.count(OperationSelector::Read), 0);

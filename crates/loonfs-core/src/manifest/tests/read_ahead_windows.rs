@@ -100,9 +100,19 @@ async fn a_scan_over_small_blocks_sends_one_get_for_each_window_of_stored_bytes(
     store.reset();
 
     let page = view
-        .scan_range_page(FAMILY, "", None, expected.len())
+        .scan_range(
+            FAMILY,
+            "",
+            None,
+            expected.len(),
+            None,
+            scan::Readahead::Enabled,
+        )
         .await
-        .expect("scan the segment");
+        .expect("scan the segment")
+        .into_iter()
+        .map(|(_, row)| row)
+        .collect::<Vec<_>>();
 
     assert_eq!(page, expected);
     let data_gets: Vec<u64> = store
@@ -284,7 +294,7 @@ async fn a_scan_decodes_only_the_blocks_it_reads() {
     store.reset();
 
     let first = view
-        .scan_range_page_with_keys(FAMILY, "", None, 1)
+        .scan_range(FAMILY, "", None, 1, None, scan::Readahead::Enabled)
         .await
         .expect("first page");
     assert_eq!(first.len(), 1);
@@ -301,7 +311,14 @@ async fn a_scan_decodes_only_the_blocks_it_reads() {
         .count();
     let lower = format!("{}\0", first[0].0);
     let rest = view
-        .scan_range_page_with_keys(FAMILY, &lower, None, rows_in_window - 1)
+        .scan_range(
+            FAMILY,
+            &lower,
+            None,
+            rows_in_window - 1,
+            None,
+            scan::Readahead::Enabled,
+        )
         .await
         .expect("the rest of the window");
     assert_eq!(rest.len(), rows_in_window - 1);

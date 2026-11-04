@@ -174,45 +174,18 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
         // Matching on the stored row key: the scan already selected the rows
         // by that key, and recomputing keys from rows allocates per row.
         Ok(self
-            .scan_prefix_rows(family, key, Some(filter_probe), Readahead::Enabled)
+            .scan_range(
+                family,
+                key,
+                string_prefix_upper_bound(key).as_deref(),
+                usize::MAX,
+                Some(filter_probe),
+                Readahead::Enabled,
+            )
             .await?
             .into_iter()
             .find(|(row_key, _)| row_key == key)
             .map(|(_, row)| row))
-    }
-
-    /// Whole-prefix scan without a bloom probe or a row limit: every segment
-    /// in range is read. No production read is allowed to cost the whole
-    /// family, so this exists only for the test-only inspection
-    /// materialization, which is defined as reading everything.
-    #[cfg(test)]
-    pub(crate) async fn scan_prefix(
-        &self,
-        family: MetadataRowFamily,
-        prefix: &str,
-    ) -> Result<Vec<MetadataRow>, ManifestLoadError> {
-        Ok(strip_row_keys(
-            self.scan_prefix_rows(family, prefix, None, Readahead::Enabled)
-                .await?,
-        ))
-    }
-
-    /// [`Self::scan_prefix`] for a point lookup: `filter_probe` is the
-    /// family's exact filter key for the value being looked up, so each
-    /// candidate segment's bloom filter is consulted before its index or
-    /// data — a negative skips the segment without fetching either. Scans
-    /// coarser than the filter key must use [`Self::scan_prefix`] instead.
-    pub(crate) async fn scan_prefix_for_lookup(
-        &self,
-        family: MetadataRowFamily,
-        prefix: &str,
-        filter_probe: &str,
-        readahead: Readahead,
-    ) -> Result<Vec<MetadataRow>, ManifestLoadError> {
-        Ok(strip_row_keys(
-            self.scan_prefix_rows(family, prefix, Some(filter_probe), readahead)
-                .await?,
-        ))
     }
 
     /// Returns up to `limit` rows of `prefix` at or after `lower_bound` from
@@ -255,7 +228,7 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
     /// filter admitted the prefix by a false positive, and then the lookup
     /// reads the next admitted run. A lookup that needs every fact for a
     /// prefix (a revision listing or a tombstone check) uses
-    /// [`Self::scan_prefix_for_lookup`] instead, and so does a read below a
+    /// [`Self::scan_range`] instead, and so does a read below a
     /// run's sequence ([`Self::every_row_is_visible_at`]), because the newest
     /// run's rows could all be above the read.
     pub(crate) async fn scan_prefix_in_newest_run_for_lookup(
@@ -304,110 +277,6 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
         self.scan_runs.iter().all(|run| run.run_seq <= visible_seq)
     }
 
-    pub(crate) async fn scan_range_page(
-        &self,
-        family: MetadataRowFamily,
-        lower_bound: &str,
-        upper_bound: Option<&str>,
-        limit: usize,
-    ) -> Result<Vec<MetadataRow>, ManifestLoadError> {
-        Ok(strip_row_keys(
-            self.scan_range_page_with_keys(family, lower_bound, upper_bound, limit)
-                .await?,
-        ))
-    }
-
-    /// [`Self::scan_range_page`], returning each row with its stored row
-    /// key, for callers that page by row key and would otherwise recompute
-    /// every key from its row.
-    pub(crate) async fn scan_range_page_with_keys(
-        &self,
-        family: MetadataRowFamily,
-        lower_bound: &str,
-        upper_bound: Option<&str>,
-        limit: usize,
-    ) -> Result<Vec<(String, MetadataRow)>, ManifestLoadError> {
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-        self.scan_range_page_rows(
-            family,
-            lower_bound,
-            upper_bound,
-            limit,
-            None,
-            Readahead::Enabled,
-        )
-        .await
-    }
-
-    /// [`Self::scan_range_page_for_lookup`] with each row's key, for a lookup
-    /// that pages by row key.
-    pub(crate) async fn scan_range_page_with_keys_for_lookup(
-        &self,
-        family: MetadataRowFamily,
-        lower_bound: &str,
-        upper_bound: Option<&str>,
-        limit: usize,
-        filter_probe: &str,
-    ) -> Result<Vec<(String, MetadataRow)>, ManifestLoadError> {
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-        self.scan_range_page_rows(
-            family,
-            lower_bound,
-            upper_bound,
-            limit,
-            Some(filter_probe),
-            Readahead::Enabled,
-        )
-        .await
-    }
-
-    /// [`Self::scan_range_page`] for a point lookup within one filter key's
-    /// range; see [`Self::scan_prefix_for_lookup`] for the probe contract.
-    pub(crate) async fn scan_range_page_for_lookup(
-        &self,
-        family: MetadataRowFamily,
-        lower_bound: &str,
-        upper_bound: Option<&str>,
-        limit: usize,
-        filter_probe: &str,
-    ) -> Result<Vec<MetadataRow>, ManifestLoadError> {
-        Ok(strip_row_keys(
-            self.scan_range_page_with_keys_for_lookup(
-                family,
-                lower_bound,
-                upper_bound,
-                limit,
-                filter_probe,
-            )
-            .await?,
-        ))
-    }
-
-    /// A prefix scan is a range scan over `[prefix, upper_bound(prefix))`
-    /// with no row limit; rows come back in row-key order.
-    async fn scan_prefix_rows(
-        &self,
-        family: MetadataRowFamily,
-        prefix: &str,
-        filter_probe: Option<&str>,
-        readahead: Readahead,
-    ) -> Result<Vec<(String, MetadataRow)>, ManifestLoadError> {
-        let upper_bound = string_prefix_upper_bound(prefix);
-        self.scan_range_page_rows(
-            family,
-            prefix,
-            upper_bound.as_deref(),
-            usize::MAX,
-            filter_probe,
-            readahead,
-        )
-        .await
-    }
-
     /// Whether a lookup should touch this segment at all: false only when
     /// the segment's bloom filter proves the probe key absent. A skipped
     /// segment costs one tiny cached filter read instead of index and data
@@ -439,7 +308,16 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
         }
     }
 
-    async fn scan_range_page_rows(
+    /// Returns up to `limit` rows of `family` in `[lower_bound, upper_bound)`,
+    /// with each row's stored key, in row-key order. A `None` upper bound
+    /// ends the range at the family's last row.
+    ///
+    /// With a `filter_probe`, the scan is a point lookup: the probe is the
+    /// family's exact filter key for the value being looked up, so each
+    /// candidate segment's bloom filter is consulted before its index or
+    /// data, and a negative skips the segment without fetching either. A
+    /// scan coarser than the filter key passes no probe.
+    pub(crate) async fn scan_range(
         &self,
         family: MetadataRowFamily,
         lower_bound: &str,
@@ -448,6 +326,9 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
         filter_probe: Option<&str>,
         readahead: Readahead,
     ) -> Result<Vec<(String, MetadataRow)>, ManifestLoadError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
         let mut candidates = Vec::new();
         for run in self.scan_runs.iter() {
             self.push_run_candidates(&mut candidates, run, family, lower_bound, upper_bound)?;
@@ -655,10 +536,6 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
         }
         Ok(admissions)
     }
-}
-
-fn strip_row_keys(rows: Vec<(String, MetadataRow)>) -> Vec<MetadataRow> {
-    rows.into_iter().map(|(_, row)| row).collect()
 }
 
 pub(crate) fn ordered_manifest_segments<'a>(

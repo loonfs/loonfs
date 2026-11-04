@@ -287,9 +287,12 @@ pub(super) async fn family_rows<S: ObjectStore + ?Sized>(
         .expect("load the current manifest");
     super::super::metadata_basis_from_manifest(store, None, &current)
         .segments
-        .scan_prefix(family, "")
+        .scan_range(family, "", None, usize::MAX, None, scan::Readahead::Enabled)
         .await
         .expect("scan the family")
+        .into_iter()
+        .map(|(_, row)| row)
+        .collect::<Vec<_>>()
 }
 
 /// The inodes that a row stores state for, or the edge it records.

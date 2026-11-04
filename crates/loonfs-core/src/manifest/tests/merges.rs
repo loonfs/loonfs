@@ -134,12 +134,19 @@ async fn merges_are_indexed_in_the_tail_and_the_fold_newest_first_for_each_fork(
         .expect("load the current manifest");
     let fork_a = super::super::metadata_basis_from_manifest(&store, None, &current)
         .segments
-        .scan_prefix(
+        .scan_range(
             ApiMetadataRowFamily::Merges,
             &lookup_keys::merge_prefix(&fork("fork-a")),
+            string_prefix_upper_bound(&lookup_keys::merge_prefix(&fork("fork-a"))).as_deref(),
+            usize::MAX,
+            None,
+            scan::Readahead::Enabled,
         )
         .await
-        .expect("scan the fork's merges");
+        .expect("scan the fork's merges")
+        .into_iter()
+        .map(|(_, row)| row)
+        .collect::<Vec<_>>();
     assert_eq!(fork_a, expected[..2]);
     for (fork_name, newest) in [
         ("fork-a", Some(indexed(&repeat))),

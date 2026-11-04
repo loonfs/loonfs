@@ -788,9 +788,19 @@ async fn stored_active_deletions<S: ObjectStore + ?Sized>(
         .expect("load the current manifest");
     super::super::metadata_basis_from_manifest(store, None, &current)
         .segments
-        .scan_prefix(ApiMetadataRowFamily::ActiveDeletions, "")
+        .scan_range(
+            ApiMetadataRowFamily::ActiveDeletions,
+            "",
+            None,
+            usize::MAX,
+            None,
+            scan::Readahead::Enabled,
+        )
         .await
         .expect("scan the family")
+        .into_iter()
+        .map(|(_, row)| row)
+        .collect::<Vec<_>>()
         .into_iter()
         .map(|row| match row {
             MetadataRow::ActiveDeletion(record) => (

@@ -214,7 +214,7 @@ async fn bounded_pages_merge_overlapping_runs_and_binding_versions() {
         while actual.len() < window.len() || window.end == expected.len() {
             let view = scan::VerifiedMetadataSegments::from_runs(&store, &cache, runs.clone());
             let page = view
-                .scan_range_page_with_keys(FAMILY, &lower, None, limit)
+                .scan_range(FAMILY, &lower, None, limit, None, scan::Readahead::Enabled)
                 .await
                 .expect("merged page");
             let peak = view.peak_page_rows();
@@ -291,7 +291,14 @@ async fn bounded_pages_open_and_refill_segments_in_a_concurrent_window() {
         );
         watched.inner().arm();
         let view = scan::VerifiedMetadataSegments::from_runs(&watched, &cache, runs.clone());
-        let mut page = std::pin::pin!(view.scan_range_page(FAMILY, &lower, None, limit));
+        let mut page = std::pin::pin!(view.scan_range(
+            FAMILY,
+            &lower,
+            None,
+            limit,
+            None,
+            scan::Readahead::Enabled
+        ));
         // Yield between polls so Tokio can replenish the cooperative budget
         // after cache hits, before the next store request starts.
         for _ in 0..64 {
@@ -312,7 +319,13 @@ async fn bounded_pages_open_and_refill_segments_in_a_concurrent_window() {
             .take(limit)
             .cloned()
             .collect();
-        assert_eq!(page.await.expect("merged page"), wanted);
+        let rows: Vec<_> = page
+            .await
+            .expect("merged page")
+            .into_iter()
+            .map(|(_, row)| row)
+            .collect();
+        assert_eq!(rows, wanted);
         assert_eq!(view.peak_page_rows(), limit);
         assert_eq!(watched.reads().peak_in_flight, 16);
     }
@@ -359,9 +372,19 @@ async fn disabled_readahead_loads_a_cold_key_range_in_one_data_get() {
     let prefix = format!("{filter_probe}-");
     store.reset();
     let actual = view
-        .scan_prefix_for_lookup(FAMILY, &prefix, &filter_probe, scan::Readahead::Disabled)
+        .scan_range(
+            FAMILY,
+            &prefix,
+            string_prefix_upper_bound(&prefix).as_deref(),
+            usize::MAX,
+            Some(&filter_probe),
+            scan::Readahead::Disabled,
+        )
         .await
-        .expect("prefix scan");
+        .expect("prefix scan")
+        .into_iter()
+        .map(|(_, row)| row)
+        .collect::<Vec<_>>();
     assert_eq!(actual, expected);
     let data_gets: Vec<_> = store
         .take_gets()
@@ -558,14 +581,19 @@ async fn a_lookup_scan_decodes_each_block_it_reads_once_through_a_small_block_ca
     store.reset();
 
     let actual = view
-        .scan_prefix_for_lookup(
+        .scan_range(
             FAMILY,
             &format!("{filter_probe}-"),
-            &filter_probe,
+            string_prefix_upper_bound(&format!("{filter_probe}-")).as_deref(),
+            usize::MAX,
+            Some(&filter_probe),
             scan::Readahead::Enabled,
         )
         .await
-        .expect("prefix scan");
+        .expect("prefix scan")
+        .into_iter()
+        .map(|(_, row)| row)
+        .collect::<Vec<_>>();
     assert_eq!(actual, expected);
     let reads = blocks.reads.lock().expect("reads lock").len();
     let gets = store.count(OperationSelector::Read);
@@ -702,7 +730,7 @@ async fn lookup_readahead_retains_bytes_and_checks_rows_only_when_requested() {
                 &descriptor,
                 ChangeSeq(1),
                 &lower,
-                loonfs_types::format::segment_blocks::string_prefix_upper_bound(&lower).as_deref(),
+                string_prefix_upper_bound(&lower).as_deref(),
                 1,
                 scan::Readahead::Enabled,
             )

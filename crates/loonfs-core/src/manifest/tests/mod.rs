@@ -114,7 +114,13 @@ async fn load_manifest_projection_metadata_state<S: ObjectStore + ?Sized>(
     let tail_rows = projection.tail_state.merged_rows();
     let mut metadata_state = MetadataStateBuilder::default();
     for family in ApiMetadataRowFamily::ALL {
-        let mut rows = projection.manifest_segments.scan_prefix(family, "").await?;
+        let mut rows = projection
+            .manifest_segments
+            .scan_range(family, "", None, usize::MAX, None, scan::Readahead::Enabled)
+            .await?
+            .into_iter()
+            .map(|(_, row)| row)
+            .collect::<Vec<_>>();
         rows.extend(manifest_rows_for_family(&tail_rows, family));
         rows.sort_by_key(|row| row.row_key_for_family(family));
         append_rows_to_metadata(&mut metadata_state, family, "checkpoint projection", &rows)?;

@@ -795,23 +795,21 @@ mod tests {
         let basis = crate::manifest::metadata_basis_from_manifest(&store, None, &manifest);
         let rows = basis
             .segments
-            .scan_range_page(
+            .scan_range(
                 loonfs_types::format::manifest::MetadataRowFamily::Commits,
                 &loonfs_types::format::manifest::lookup_keys::commit_row_key(ChangeSeq(2)),
                 None,
                 2,
+                None,
+                crate::segment::Readahead::Enabled,
             )
             .await
             .expect("commit row page");
         assert_eq!(rows.len(), 2);
         assert_eq!(basis.segments.peak_page_rows(), 2);
         assert_eq!(
-            rows.iter()
-                .map(|row| {
-                    row.row_key_for_family(
-                        loonfs_types::format::manifest::MetadataRowFamily::Commits,
-                    )
-                })
+            rows.into_iter()
+                .map(|(row_key, _)| row_key)
                 .collect::<Vec<_>>(),
             [2, 3].map(|seq| {
                 loonfs_types::format::manifest::lookup_keys::commit_row_key(ChangeSeq(seq))

@@ -231,11 +231,13 @@ impl ListedDeletions {
                 return Ok(ControlFlow::Break(WalkStop::Cancelled));
             }
             let rows = segments
-                .scan_range_page_with_keys(
+                .scan_range(
                     MetadataRowFamily::ActiveDeletions,
                     &self.lower_bound,
                     self.upper_bound.as_deref(),
                     KEPT_INODE_SCAN_ROWS,
+                    None,
+                    crate::segment::Readahead::Enabled,
                 )
                 .await?;
             self.scanned_to_end = rows.len() < KEPT_INODE_SCAN_ROWS;
