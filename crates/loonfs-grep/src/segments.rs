@@ -2,7 +2,7 @@
 //! merges read them through, and the reads of one key range that lookups
 //! make.
 
-mod texts;
+mod keys;
 
 use crate::cache::GrepBlockCache;
 use crate::codec::{lookup, ContentValue, IndexRow, ValueRow};
@@ -18,12 +18,12 @@ use bytes::Bytes;
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
 use futures::{stream, FutureExt, StreamExt, TryStreamExt};
+use keys::KeyLookup;
 use loonfs::engine::SegmentBlockLoader;
 use loonfs::MAX_PENDING_SEGMENT_BYTES;
 use loonfs_objectstore::keys::extension_segment_object_key;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::hex::hex_decode_bytes;
-use loonfs_types::format::manifest::lookup_keys::after_row_key;
 use loonfs_types::format::manifest::ExtensionSegmentRef;
 use loonfs_types::format::segment_blocks::{
     decode_filter_block, index_blocks_for_key_range, key_range_may_intersect, DecodedDataBlock,
@@ -181,60 +181,6 @@ impl<S: ObjectStore + ?Sized> GrepSegments<'_, S> {
         Ok(range_rows)
     }
 
-    /// Reads the rows of `descriptor` whose keys are in `keys`, from the data
-    /// blocks that the segment's index lists for those keys.
-    async fn rows_at_keys(
-        &self,
-        descriptor: &ExtensionSegmentRef,
-        keys: &BTreeSet<String>,
-    ) -> Result<Vec<IndexRow>> {
-        let (Some(first), Some(last)) = (keys.first(), keys.last()) else {
-            return Ok(Vec::new());
-        };
-        if !key_range_may_intersect(
-            &descriptor.min_row_key,
-            &descriptor.max_row_key,
-            descriptor.row_count,
-            first,
-            Some(&after_row_key(last)),
-        ) {
-            return Ok(Vec::new());
-        }
-        let object_key = self.object_key(descriptor);
-        let entries =
-            load_index_block(self.store, self.block_cache, &object_key, descriptor).await?;
-        let blocks: BTreeSet<usize> = keys
-            .iter()
-            .filter_map(|key| {
-                index_blocks_for_key_range(&entries, key, Some(&after_row_key(key))).next()
-            })
-            .collect();
-        let blocks: Vec<usize> = blocks.into_iter().collect();
-        let mut loaded = stream::iter(0..blocks.len())
-            .map(|index| {
-                load_data_block(
-                    self.store,
-                    self.block_cache,
-                    &object_key,
-                    &descriptor.segment_id,
-                    &entries[blocks[index]].block,
-                )
-            })
-            .buffered(GREP_READS_IN_FLIGHT);
-        let mut rows = Vec::new();
-        while let Some(block) = loaded.try_next().await? {
-            rows.extend(
-                block
-                    .row_keys
-                    .iter()
-                    .zip(&block.rows)
-                    .filter(|(row_key, _)| keys.contains(*row_key))
-                    .map(|(_, row)| row.clone()),
-            );
-        }
-        Ok(rows)
-    }
-
     /// Returns the values at `ordinals` in the value table of the run whose
     /// segments are `run`. Every ordinal has to be in the table, because a
     /// posting refers to it.
@@ -243,22 +189,20 @@ impl<S: ObjectStore + ?Sized> GrepSegments<'_, S> {
         run: &[ExtensionSegmentRef],
         ordinals: &BTreeSet<u64>,
     ) -> Result<BTreeMap<u64, ContentValue>> {
-        let keys: BTreeSet<String> = ordinals
+        let lookups: Vec<KeyLookup> = ordinals
             .iter()
-            .map(|ordinal| lookup::value_row_key(*ordinal))
+            .map(|ordinal| KeyLookup::new(lookup::value_row_key(*ordinal), None))
             .collect();
-        let mut reads = stream::iter(0..run.len())
-            .map(|index| self.rows_at_keys(&run[index], &keys))
-            .buffered(GREP_READS_IN_FLIGHT);
-        let mut values = BTreeMap::new();
+        let rows = self
+            .rows_at_keys(run, &lookups, GREP_READS_IN_FLIGHT)
+            .await?;
         let object_key = run
             .first()
             .map(|segment| self.object_key(segment))
             .unwrap_or_default();
-        while let Some(rows) = reads.try_next().await? {
-            for row in value_rows(&object_key, rows)? {
-                values.insert(row.ordinal, row.value());
-            }
+        let mut values = BTreeMap::new();
+        for row in value_rows(&object_key, rows.into_iter().map(|found| found.row))? {
+            values.insert(row.ordinal, row.value());
         }
         if let Some(missing) = ordinals
             .iter()
