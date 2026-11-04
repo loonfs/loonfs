@@ -4,7 +4,7 @@
 use super::error::ManifestLoadError;
 use super::load::metadata_basis_from_manifest;
 use super::publish::ManifestChange;
-use super::published::{PublicationReport, PublishedManifest};
+use super::published::PublicationReport;
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::Result;
 use crate::in_flight::STORE_READS_IN_FLIGHT;
@@ -158,7 +158,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             manifest: current,
             checked: clock.origin(),
         };
-        let ((floor, advanced), current, _) = self
+        let update = self
             .namespace
             .update_live_manifest(
                 Some(basis),
@@ -167,25 +167,20 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                     // Another advance can publish a floor at or above `target` after
                     // the first load.
                     if payload.retention_floor_seq >= target {
-                        return Ok(ManifestChange::Finished((
-                            payload.retention_floor_seq,
-                            false,
-                        )));
+                        return Ok(ManifestChange::Finished(payload.retention_floor_seq));
                     }
                     verify_manifest_segments_exist(&self.namespace.store, &payload).await?;
                     payload.retention_floor_seq = target;
-                    Ok(ManifestChange::Next(Box::new(payload), (target, true)))
+                    Ok(ManifestChange::Next(Box::new(payload), target))
                 },
             )
             .await?;
-        Ok(PublicationReport {
-            response: AdvanceRetentionResponse {
+        Ok(update
+            .into_report()
+            .map(|retention_floor_seq| AdvanceRetentionResponse {
                 namespace_id: self.namespace.namespace_id.clone(),
-                retention_floor_seq: floor,
-            },
-            published: advanced
-                .then(|| PublishedManifest::new(&current.envelope, Some(publication.origin()))),
-        })
+                retention_floor_seq,
+            }))
     }
 
     /// Sets the namespace's retention window, or clears it when
@@ -200,28 +195,24 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         retention_window_ms: Option<NonZeroU64>,
     ) -> Result<PublicationReport<SetRetentionWindowResponse>> {
         let clock = self.namespace.start_clock();
-        let (changed, current, _) = self
+        let update = self
             .namespace
             .update_live_manifest(
                 None,
                 &clock,
                 |mut payload: NamespaceManifestPayload| async move {
                     if payload.retention_window_ms == retention_window_ms {
-                        return Ok(ManifestChange::Finished(false));
+                        return Ok(ManifestChange::Finished(()));
                     }
                     payload.retention_window_ms = retention_window_ms;
-                    Ok(ManifestChange::Next(Box::new(payload), true))
+                    Ok(ManifestChange::Next(Box::new(payload), ()))
                 },
             )
             .await?;
-        Ok(PublicationReport {
-            response: SetRetentionWindowResponse {
-                namespace_id: self.namespace.namespace_id.clone(),
-                retention_window_ms: retention_window_ms.map(NonZeroU64::get),
-            },
-            published: changed
-                .then(|| PublishedManifest::new(&current.envelope, Some(clock.origin()))),
-        })
+        Ok(update.into_report().map(|()| SetRetentionWindowResponse {
+            namespace_id: self.namespace.namespace_id.clone(),
+            retention_window_ms: retention_window_ms.map(NonZeroU64::get),
+        }))
     }
 }
 

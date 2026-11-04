@@ -61,7 +61,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     pub(crate) async fn acquire_writer(&self, writer_id: &WriterId) -> Result<WriterAcquisition> {
         let clock = self.start_clock();
         let acquired_at_ms = clock.request_at_ms();
-        let (acquired, manifest, hint) = self
+        let update = self
             .update_live_manifest(
                 None,
                 &clock,
@@ -85,11 +85,14 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 },
             )
             .await?;
-        let hint = hint.expect("a claim starts from no basis, so it loads the hint");
-        let claim = PublishedManifest::new(&manifest.envelope, Some(clock.origin()));
+        let claim = update.current_manifest();
+        let acquired = update.response;
+        let hint = update
+            .hint
+            .expect("a claim starts from no basis, so it loads the hint");
         let mut tip = clock.observe();
         let mut anchor = self
-            .load_read_anchor_from_manifest(manifest, hint, clock.origin())
+            .load_read_anchor_from_manifest(update.current, hint, clock.origin())
             .await?;
         // Only the publication budget bounds this loop, because a lost fence race means the
         // old writer wrote a WAL object, and stopping after a count would make the

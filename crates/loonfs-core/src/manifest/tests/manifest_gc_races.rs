@@ -1,6 +1,7 @@
 //! Manifest discovery while a lagging hint advances and old manifests are swept.
 
 use super::*;
+use crate::manifest::publish::ManifestUpdate;
 use loonfs_test_support::stores::MetadataMapStore;
 use std::assert_matches;
 
@@ -312,11 +313,14 @@ async fn a_stale_basis_whose_successor_was_collected_publishes_after_the_current
         .expect("the basis's successor")
         .is_none());
 
-    let ((), published, hint) = crate::test_support::namespace_store(&store, &namespace_id)
+    let ManifestUpdate {
+        current: published,
+        hint,
+        ..
+    } = crate::test_support::namespace_store(&store, &namespace_id)
         .update_manifest(
             Some(basis),
             &OperationClock::start(0, clock),
-            crate::limits::MAX_CONTENTION_ATTEMPTS,
             |current: crate::namespace::control::LoadedManifest| async move {
                 Ok(super::super::publish::ManifestChange::Next(
                     Box::new(current.payload().clone()),

@@ -2,8 +2,7 @@
 
 use crate::commit::publish_view::WriterPosition;
 use crate::error::{CoreError, Result};
-use crate::limits::MAX_CONTENTION_ATTEMPTS;
-use crate::manifest::publish::ManifestChange;
+use crate::manifest::publish::{ManifestChange, ManifestUpdate};
 use crate::manifest::{load_position_basis, PublicationReport, PublishedManifest};
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::control::LoadedManifest;
@@ -44,73 +43,62 @@ impl<S: ObjectStore> NamespaceStore<S> {
         // lock, because a future that a closure returns can't borrow the
         // closure's own state.
         let position = Mutex::new(position);
-        self.update_manifest(
-            basis,
-            clock,
-            MAX_CONTENTION_ATTEMPTS,
-            |current: LoadedManifest| {
-                let acquired_writer = &acquired_writer;
-                let position = &position;
-                async move {
-                    let mut payload = current.payload().clone();
-                    let held = position
-                        .lock()
-                        .expect("the deletion's position lock should not be poisoned")
-                        .clone()
-                        .filter(|held| held.read_basis.basis.manifest() == &current.manifest());
-                    let head = match &held {
-                        Some(held) => held.read_basis.head.clone(),
-                        None => self.load_read_anchor(clock.observe()).await?.read_state,
-                    };
-                    super::control::ensure_namespace_live(&head.namespace_id, head.status)?;
-                    ensure_writer_not_fenced(&head, acquired_writer)?;
-                    if let Some(expected) = options.expected_head_seq {
-                        if head.seq != expected {
-                            return Err(CoreError::StaleHeadPrecondition {
-                                expected,
-                                actual: head.seq,
-                            });
-                        }
+        self.update_manifest(basis, clock, |current: LoadedManifest| {
+            let acquired_writer = &acquired_writer;
+            let position = &position;
+            async move {
+                let mut payload = current.payload().clone();
+                let held = position
+                    .lock()
+                    .expect("the deletion's position lock should not be poisoned")
+                    .clone()
+                    .filter(|held| held.read_basis.basis.manifest() == &current.manifest());
+                let head = match &held {
+                    Some(held) => held.read_basis.head.clone(),
+                    None => self.load_read_anchor(clock.observe()).await?.read_state,
+                };
+                super::control::ensure_namespace_live(&head.namespace_id, head.status)?;
+                ensure_writer_not_fenced(&head, acquired_writer)?;
+                if let Some(expected) = options.expected_head_seq {
+                    if head.seq != expected {
+                        return Err(CoreError::StaleHeadPrecondition {
+                            expected,
+                            actual: head.seq,
+                        });
                     }
-                    if payload.folded_wal_no < head.wal_no {
-                        clock.ensure_metadata_publication_budget(&self.namespace_id)?;
-                        let folded = self.fold_wal_tail(held.clone(), clock).await?;
-                        *position
-                            .lock()
-                            .expect("the deletion's position lock should not be poisoned") = held
-                            .filter(|_| folds_head(&folded.manifest, &head))
-                            .map(|mut held| {
-                                held.read_basis.basis =
-                                    MetadataBasis::new(folded.manifest.manifest.clone());
-                                held
-                            });
-                        return Ok(ManifestChange::Again);
-                    }
-                    payload.status = NamespaceStatus::Deleted {
-                        deleted_at_ms: clock.request_at_ms(),
-                    };
-                    // A tombstone lists no extension segments, so they're
-                    // collected once no pin keeps a manifest that lists them
-                    // (format spec, "Extensions").
-                    for entry in payload.extensions.values_mut() {
-                        entry.runs.clear();
-                    }
-                    let response = DeleteNamespaceResponse {
-                        namespace_id: self.namespace_id.clone(),
-                        head_seq: payload.head_seq,
-                    };
-                    Ok(ManifestChange::Next(Box::new(payload), response))
                 }
-            },
-        )
-        .await
-        .map(|(response, tombstone, _)| PublicationReport {
-            response,
-            published: Some(PublishedManifest::new(
-                &tombstone.envelope,
-                Some(clock.origin()),
-            )),
+                if payload.folded_wal_no < head.wal_no {
+                    clock.ensure_metadata_publication_budget(&self.namespace_id)?;
+                    let folded = self.fold_wal_tail(held.clone(), clock).await?;
+                    *position
+                        .lock()
+                        .expect("the deletion's position lock should not be poisoned") = held
+                        .filter(|_| folds_head(&folded.manifest, &head))
+                        .map(|mut held| {
+                            held.read_basis.basis =
+                                MetadataBasis::new(folded.manifest.manifest.clone());
+                            held
+                        });
+                    return Ok(ManifestChange::Again);
+                }
+                payload.status = NamespaceStatus::Deleted {
+                    deleted_at_ms: clock.request_at_ms(),
+                };
+                // A tombstone lists no extension segments, so they're
+                // collected once no pin keeps a manifest that lists them
+                // (format spec, "Extensions").
+                for entry in payload.extensions.values_mut() {
+                    entry.runs.clear();
+                }
+                let response = DeleteNamespaceResponse {
+                    namespace_id: self.namespace_id.clone(),
+                    head_seq: payload.head_seq,
+                };
+                Ok(ManifestChange::Next(Box::new(payload), response))
+            }
         })
+        .await
+        .map(ManifestUpdate::into_report)
     }
 }
 

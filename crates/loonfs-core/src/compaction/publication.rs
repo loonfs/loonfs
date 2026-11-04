@@ -6,10 +6,9 @@ use super::plan::{group_run_descriptors, CompactionPlacement, MetadataCompaction
 use super::step::{CompactionUnitOutcome, MetadataCompactionCancellation};
 use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
-use crate::limits::METADATA_COMPACTION_BUDGET_MS;
+use crate::limits::{MAX_CONTENTION_ATTEMPTS, METADATA_COMPACTION_BUDGET_MS};
 use crate::manifest::fold::{next_run_no_after, no_manifest_after};
-use crate::manifest::publish::ManifestChange;
-use crate::manifest::published::PublishedManifest;
+use crate::manifest::publish::{ManifestChange, ManifestUpdate};
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::store::NamespaceStore;
 use crate::namespace::PublicationBasis;
@@ -22,15 +21,6 @@ use loonfs_types::format::manifest::{
 };
 use loonfs_types::{ChangeSeq, CompactorEpoch, NamespaceId};
 use std::collections::BTreeSet;
-
-/// Publication attempts one finalization makes before giving up.
-///
-/// Only an unrelated publication between the load and the manifest
-/// put-if-absent costs an attempt, and the next attempt loads the manifest
-/// that won. A namespace publishing fast enough to win four in a row is one
-/// where running the unit again later is better than spinning
-/// here, and running it again is always safe.
-const MAX_FINALIZATION_ATTEMPTS: usize = 4;
 
 pub(crate) struct CompactionPublication {
     pub(crate) compactor_epoch: CompactorEpoch,
@@ -72,7 +62,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .update_manifest(
                 basis,
                 &publication.publication,
-                MAX_FINALIZATION_ATTEMPTS,
                 |current: LoadedManifest| async move {
                     let settled = |outcome| Ok(ManifestChange::Finished(Some(outcome)));
                     if publication.expired() {
@@ -132,13 +121,13 @@ impl<S: ObjectStore> NamespaceStore<S> {
             )
             .await;
         match finalized {
-            Ok((Some(outcome), _, _)) => Ok(outcome),
-            Ok((None, published, _)) => Ok(CompactionUnitOutcome::Published {
+            Ok(ManifestUpdate {
+                response: Some(outcome),
+                ..
+            }) => Ok(outcome),
+            Ok(update) => Ok(CompactionUnitOutcome::Published {
                 group: spec.group(),
-                manifest: PublishedManifest::new(
-                    &published.envelope,
-                    Some(publication.publication.origin()),
-                ),
+                manifest: update.current_manifest(),
                 input_runs: spec.input_runs(),
                 rows_read: result.rows_read,
                 rows_written: result.rows_written,
@@ -151,7 +140,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 tracing::info!(
                     namespace_id = self.namespace_id.as_str(),
                     families = ?spec.families(),
-                    attempts = MAX_FINALIZATION_ATTEMPTS,
+                    attempts = MAX_CONTENTION_ATTEMPTS,
                     "metadata compaction unit lost every publication attempt; a later unit plans it again"
                 );
                 Ok(CompactionUnitOutcome::Abandoned)

@@ -920,8 +920,8 @@ async fn a_unit_retries_over_a_fold_and_the_loop_stops_after_three_abandoned_uni
         manifest_no
     );
 
-    // Every put loses: each unit abandons after its four attempts, and the
-    // loop stops after three abandoned units in a row.
+    // Every put loses: each unit abandons after its attempts run out, and
+    // the loop stops after three abandoned units in a row.
     store.interceptor().races_run.store(0, SeqCst);
     store.interceptor().races_left.store(64, SeqCst);
     assert_eq!(
@@ -934,8 +934,8 @@ async fn a_unit_retries_over_a_fold_and_the_loop_stops_after_three_abandoned_uni
     );
     assert_eq!(
         store.interceptor().races_run.load(SeqCst),
-        3 * 4,
-        "the loop stops after three abandoned units of four attempts each"
+        3 * loonfs_core::limits::MAX_CONTENTION_ATTEMPTS,
+        "the loop stops after three abandoned units"
     );
 
     store.interceptor().races_left.store(0, SeqCst);

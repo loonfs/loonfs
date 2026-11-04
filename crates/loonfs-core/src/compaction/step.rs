@@ -303,7 +303,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// report includes the manifest that records the claim.
     pub async fn claim_compactor(&self) -> Result<PublicationReport<CompactorEpoch>> {
         let clock = self.namespace.start_clock();
-        let (epoch, claimed, _) = self
+        let update = self
             .namespace
             .update_live_manifest(
                 None,
@@ -318,12 +318,6 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 },
             )
             .await?;
-        Ok(PublicationReport {
-            response: epoch,
-            published: Some(PublishedManifest::new(
-                &claimed.envelope,
-                Some(clock.origin()),
-            )),
-        })
+        Ok(update.into_report())
     }
 }

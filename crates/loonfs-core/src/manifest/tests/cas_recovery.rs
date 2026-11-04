@@ -1,6 +1,7 @@
 //! Numbered publication, discovery, and retention contracts.
 
 use super::*;
+use crate::manifest::publish::ManifestUpdate;
 use loonfs_objectstore::ListedObject;
 use loonfs_test_support::stores::replace_object;
 use loonfs_types::format::control::{encode_control_state, ControlObjectKind, HintPayload};
@@ -483,11 +484,12 @@ async fn discovery_probes_windows_above_the_hint_and_a_missing_hint_reads_as_abs
         );
     }
 
-    let ((), tombstone, _) = crate::test_support::namespace_store(&store, &namespace_id)
+    let ManifestUpdate {
+        current: tombstone, ..
+    } = crate::test_support::namespace_store(&store, &namespace_id)
         .update_manifest(
             None,
             &OperationClock::start(0, crate::test_support::std_timer()),
-            crate::limits::MAX_CONTENTION_ATTEMPTS,
             |current: crate::namespace::control::LoadedManifest| async move {
                 let mut payload = current.payload().clone();
                 payload.status =
@@ -653,11 +655,14 @@ async fn a_manifest_update_returns_the_hint_it_loaded_and_leaves_it_unraised() {
         .expect("stored hint");
     store.reset();
     let deadline = OperationClock::start(0, Arc::new(StdMonotonicTimer::default()));
-    let ((), published, hint) = crate::test_support::namespace_store(&store, &namespace_id)
+    let ManifestUpdate {
+        current: published,
+        hint,
+        ..
+    } = crate::test_support::namespace_store(&store, &namespace_id)
         .update_manifest(
             None,
             &deadline,
-            crate::limits::MAX_CONTENTION_ATTEMPTS,
             |current: crate::namespace::control::LoadedManifest| async move {
                 Ok(super::super::publish::ManifestChange::Next(
                     Box::new(current.payload().clone()),
@@ -699,7 +704,6 @@ async fn a_manifest_update_stops_after_the_contention_limit() {
             .update_manifest(
                 None,
                 &deadline,
-                crate::limits::MAX_CONTENTION_ATTEMPTS,
                 |current: crate::namespace::control::LoadedManifest| {
                     attempts += 1;
                     let store = &store;
