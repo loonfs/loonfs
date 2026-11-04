@@ -271,13 +271,22 @@ fn config_checks(
 
 /// Checks a remote profile's server: connectivity, authentication, health,
 /// and the capability document.
+///
+/// One health request answers two checks: an API error proves the server is
+/// reachable and fails health, and a transport error fails connectivity and
+/// skips health.
 async fn remote_checks(checks: &mut Vec<DoctorCheck>, target: &ResolvedTarget) {
-    let result = target.remote_connectivity().await;
-    checks.push(check_from_backend_result(
-        DoctorCheckName::Connectivity,
-        "connected to the server",
-        result,
-    ));
+    let health = match target.client.get_health().await {
+        Ok(()) => Some(Ok(())),
+        Err(error @ loonfs_client::ClientError::Api { .. }) => Some(Err(CliError::from(error))),
+        Err(error) => {
+            checks.push(failed(DoctorCheckName::Connectivity, error.into()));
+            None
+        }
+    };
+    if health.is_some() {
+        checks.push(ok(DoctorCheckName::Connectivity, "connected to the server"));
+    }
 
     let capabilities = target
         .client
@@ -292,12 +301,14 @@ async fn remote_checks(checks: &mut Vec<DoctorCheck>, target: &ResolvedTarget) {
         Err(error) => failed(DoctorCheckName::Auth, error.clone()),
     });
 
-    let result = target.remote_health().await;
-    checks.push(check_from_backend_result(
-        DoctorCheckName::Health,
-        "server health endpoint answered successfully",
-        result,
-    ));
+    checks.push(match health {
+        Some(result) => check_from_backend_result(
+            DoctorCheckName::Health,
+            "server health endpoint answered successfully",
+            result,
+        ),
+        None => skipped(DoctorCheckName::Health, "the server could not be reached"),
+    });
     checks.push(capability_document_check(capabilities));
 }
 

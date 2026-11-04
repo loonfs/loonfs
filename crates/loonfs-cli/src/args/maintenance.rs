@@ -99,7 +99,7 @@ pub(crate) enum MaintenanceStoreCommand {
 pub(crate) struct MaintenanceIndexEnableArgs {
     /// Return as soon as the index is enabled, without waiting for the
     /// backfill.
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["max_steps", "deadline_ms"])]
     pub no_wait: bool,
     /// Stop after this many steps (one bounded index step on an embedded
     /// profile, or one status check on a remote profile). The command exits

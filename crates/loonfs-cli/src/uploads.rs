@@ -1,14 +1,14 @@
 //! Durable recovery records for file-backed PUT attempts.
 
 use crate::error::{CliError, Result};
-use crate::state_file::{state_directory, OwnedStateFile};
+use crate::state_file::{keyed_path, OwnedStateFile};
 use loonfs_client::{
     CommitOptions, MultipartUploadResume, NamespacePath, PutFileJournal, PutFileOptions,
 };
 use loonfs_types::{
-    ActorId, ChecksumAlgorithm, Commit, CommitId, CommitPrecondition, CommitRequest,
-    CompletedUploadPart, DestinationBehavior, ErrorCode, FilesystemOperation, InodeId, RevisionNo,
-    UploadId,
+    AbsolutePath, ActorId, ChecksumAlgorithm, Commit, CommitId, CommitPrecondition, CommitRequest,
+    CompletedUploadPart, DestinationBehavior, ErrorCode, FilesystemOperation, InodeId, NamespaceId,
+    RevisionNo, UploadId,
 };
 use serde::{Deserialize, Serialize};
 use std::io;
@@ -91,7 +91,6 @@ enum UploadProgress {
         multipart: Option<MultipartUploadResume>,
     },
     Prepared {
-        actor_id: ActorId,
         request: Box<CommitRequest>,
         upload_id: Option<UploadId>,
     },
@@ -134,23 +133,32 @@ pub(crate) struct UploadJournal {
 }
 
 impl UploadJournal {
+    /// Sends the prepared request again as the attempt's actor, and renews
+    /// its content token from the upload session when the content it names
+    /// is no longer prepared.
     pub(crate) async fn replay(
         &self,
         client: &loonfs_client::Client,
         namespace_id: &loonfs_types::NamespaceId,
-        request: &CommitRequest,
-        actor_id: &ActorId,
     ) -> Result<loonfs_types::Commit> {
-        let error = match client.commit(namespace_id, actor_id, request).await {
+        let (actor_id, mut request, upload_id) = {
+            let state = self.lock();
+            let prepared = match &state.progress {
+                UploadProgress::Prepared { request, upload_id } => {
+                    Some(((**request).clone(), upload_id.clone()))
+                }
+                UploadProgress::Uploading { .. } => None,
+            };
+            let (request, upload_id) =
+                prepared.expect("a replayed journal should hold a prepared request");
+            (state.attempt.actor_id.clone(), request, upload_id)
+        };
+        let error = match client.commit(namespace_id, &actor_id, &request).await {
             Ok(commit) => return Ok(commit),
             Err(error) if error.code() == Some(loonfs_types::ErrorCode::ContentNotPrepared) => {
                 error
             }
             Err(error) => return Err(error.into()),
-        };
-        let upload_id = match &self.lock().progress {
-            UploadProgress::Prepared { upload_id, .. } => upload_id.clone(),
-            UploadProgress::Uploading { .. } => None,
         };
         let Some(upload_id) = upload_id else {
             return Err(error.into());
@@ -163,32 +171,31 @@ impl UploadJournal {
         else {
             return Err(error.into());
         };
-        let mut request = request.clone();
         request.content_tokens = vec![token];
-        Ok(client.commit(namespace_id, actor_id, &request).await?)
+        Ok(client.commit(namespace_id, &actor_id, &request).await?)
     }
 
     pub(crate) fn for_upload(
         profile: &str,
-        target: &str,
+        target_identity: &str,
         spec: &NamespacePath,
         local_path: &Path,
         attempt: UploadAttempt,
     ) -> io::Result<Self> {
         let key = journal_key(
             profile,
-            target,
+            target_identity,
             spec,
             local_path,
             attempt.commit_id.as_ref(),
         )?;
-        let dir = state_directory(UPLOADS_SUBDIR).ok_or_else(|| {
+        let path = keyed_path(UPLOADS_SUBDIR, &key).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
                 "upload journals require an absolute XDG_STATE_HOME or HOME",
             )
         })?;
-        Self::open_at(dir.join(format!("{key}.json")), attempt)
+        Self::open_at(path, attempt)
     }
 
     fn open_at(path: PathBuf, mut attempt: UploadAttempt) -> io::Result<Self> {
@@ -213,15 +220,8 @@ impl UploadJournal {
                 if attempt != recorded.attempt {
                     return Err(journal_error(&path, "PUT options changed; resume with the original options or use a new `--commit-id` for another attempt"));
                 }
-                if let UploadProgress::Prepared {
-                    request,
-                    actor_id: prepared_actor_id,
-                    ..
-                } = &recorded.progress
-                {
-                    if prepared_actor_id != &recorded.attempt.actor_id
-                        || !request_matches_options(request, &recorded.attempt.options())
-                    {
+                if let UploadProgress::Prepared { request, .. } = &recorded.progress {
+                    if !request_matches_options(request, &recorded.attempt.options()) {
                         return Err(journal_error(
                             &path,
                             "prepared request does not match its PUT options",
@@ -391,7 +391,6 @@ impl UploadJournal {
         self.update(|progress| match progress {
             UploadProgress::Uploading { .. } => {
                 *progress = UploadProgress::Prepared {
-                    actor_id: actor_id.clone(),
                     request: Box::new(request.clone()),
                     upload_id: upload_id.cloned(),
                 };
@@ -399,14 +398,8 @@ impl UploadJournal {
             }
             UploadProgress::Prepared {
                 request: saved,
-                actor_id: saved_actor,
                 upload_id: saved_upload,
-            } if **saved == *request
-                && saved_actor == actor_id
-                && saved_upload.as_ref() == upload_id =>
-            {
-                Ok(())
-            }
+            } if **saved == *request && saved_upload.as_ref() == upload_id => Ok(()),
             UploadProgress::Prepared { .. } => {
                 Err(self.error("the prepared commit request cannot change"))
             }
@@ -436,22 +429,32 @@ fn journal_error(path: &Path, error: impl std::fmt::Display) -> io::Error {
     io::Error::other(format!("upload journal `{}`: {error}", path.display()))
 }
 
-fn journal_key(
-    profile: &str,
-    target: &str,
-    spec: &NamespacePath,
+/// The inputs that key an upload journal's path.
+type JournalKey<'a> = (
+    &'a str,
+    &'a str,
+    &'a NamespaceId,
+    &'a AbsolutePath,
+    Vec<u8>,
+    Option<&'a CommitId>,
+);
+
+fn journal_key<'a>(
+    profile: &'a str,
+    target_identity: &'a str,
+    spec: &'a NamespacePath,
     local_path: &Path,
-    commit_id: Option<&CommitId>,
-) -> io::Result<String> {
+    commit_id: Option<&'a CommitId>,
+) -> io::Result<JournalKey<'a>> {
     let local_path = local_path.canonicalize()?;
-    Ok(loonfs_types::sha256_hex(&serde_json::to_vec(&(
+    Ok((
         profile,
-        target,
+        target_identity,
         spec.namespace(),
         spec.absolute_path(),
-        local_path.as_os_str().as_encoded_bytes(),
+        local_path.as_os_str().as_encoded_bytes().to_vec(),
         commit_id,
-    ))?))
+    ))
 }
 
 #[cfg(test)]
@@ -535,24 +538,14 @@ mod tests {
         let request = journal.prepared_request().expect("prepared request");
         store.reset();
         let commit = journal
-            .replay(
-                &target.client,
-                spec.namespace(),
-                &request,
-                &journal.actor_id(),
-            )
+            .replay(&target.client, spec.namespace())
             .await
             .expect("renew and publish");
         assert_eq!(commit.commit_id, request.commit_id);
         assert_eq!(store.counts().puts, 0);
         assert_eq!(journal.prepared_request(), Some(request.clone()));
         let replayed = journal
-            .replay(
-                &target.client,
-                spec.namespace(),
-                &request,
-                &journal.actor_id(),
-            )
+            .replay(&target.client, spec.namespace())
             .await
             .expect("replay committed request");
         assert_eq!(replayed.committed_seq, commit.committed_seq);
@@ -986,9 +979,15 @@ mod tests {
         std::fs::write(&first, b"data").expect("source");
         std::fs::write(&other, b"data").expect("source");
         let spec = NamespacePath::parse("demo", "/file").expect("path");
-        let key = |profile, url, spec: &NamespacePath, file: &Path, id| {
+        fn key<'a>(
+            profile: &'a str,
+            url: &'a str,
+            spec: &'a NamespacePath,
+            file: &Path,
+            id: Option<&'a CommitId>,
+        ) -> JournalKey<'a> {
             journal_key(profile, url, spec, file, id).expect("key")
-        };
+        }
         let original = key("default", "https://one", &spec, &first, None);
         assert_eq!(original, key("default", "https://one", &spec, &first, None));
         for candidate in [

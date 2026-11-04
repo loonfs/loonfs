@@ -201,15 +201,10 @@ pub(crate) async fn put_payload(
     let options = retained_options.as_ref().unwrap_or(options);
     let result = async {
         if let Some(journal) = journal.as_ref() {
-            if let Some(request) = journal.prepared_request() {
+            if journal.prepared_request().is_some() {
                 progress.phase("committing");
                 return journal
-                    .replay(
-                        &context.profile.target.client,
-                        context.namespace(),
-                        &request,
-                        actor,
-                    )
+                    .replay(&context.profile.target.client, context.namespace())
                     .await;
             }
             if let Some(committed) =
@@ -248,7 +243,7 @@ fn resume_journal(
     );
     UploadJournal::for_upload(
         &context.profile.profile_name,
-        context.profile.target.journal_identity(),
+        context.profile.target.target_identity(),
         spec,
         local_path,
         attempt,

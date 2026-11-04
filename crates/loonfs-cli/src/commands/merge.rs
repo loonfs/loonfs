@@ -21,7 +21,7 @@ pub(crate) async fn run_merge(
     let record = MergeRecordFile::open(
         args.record.as_deref(),
         &context.profile_name,
-        context.target.journal_identity(),
+        context.target.target_identity(),
         &args.namespace_id,
         &args.fork_id,
     )

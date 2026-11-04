@@ -194,10 +194,11 @@ fn remote_doctor_checks_transport_auth_health_and_capabilities() {
         features: BTreeMap::new(),
         limits: BTreeMap::new(),
     };
+    // One health request, then capabilities and the namespace: a second
+    // health request would take the namespace's response.
     let (server_url, server) = json_response_server(vec![
         serde_json::json!({}),
         serde_json::to_value(document).expect("capabilities JSON"),
-        serde_json::json!({}),
         serde_json::json!({
             "namespace_id": "demo",
             "access": {"kind": "unrestricted"},
