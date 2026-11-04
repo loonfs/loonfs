@@ -216,6 +216,7 @@ impl ContentLocation {
                     .map_err(|error| DurableContentValidationError::Store {
                         object_key: object_key.clone(),
                         message: error.public_message().into_owned(),
+                        kind: error.kind(),
                     })?
                     .ok_or_else(|| DurableContentValidationError::MissingContentObject {
                         object_key: object_key.clone(),
