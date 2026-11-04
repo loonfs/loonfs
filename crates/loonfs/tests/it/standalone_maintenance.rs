@@ -2,7 +2,8 @@
 //! namespace.
 
 use loonfs::{
-    CreateSnapshotOptions, LoonFs, MaintainMetadataOptions, SharedObjectStore, WalFoldStepOutcome,
+    CreateSnapshotOptions, FoldWalOutcome, FoldWalResponse, LoonFs, MaintainMetadataOptions,
+    SharedObjectStore,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
@@ -68,7 +69,7 @@ async fn a_fresh_runtime_folds_a_short_tail_once_its_newest_commit_is_idle() {
             .await
             .expect("young tail")
             .wal_fold,
-        WalFoldStepOutcome::NotNeeded,
+        None,
         "a tail younger than the idle period waits"
     );
     clock.set_ms(COMMITTED_AT_MS + idle_ms);
@@ -78,7 +79,7 @@ async fn a_fresh_runtime_folds_a_short_tail_once_its_newest_commit_is_idle() {
             .await
             .expect("idle rule off")
             .wal_fold,
-        WalFoldStepOutcome::NotNeeded,
+        None,
         "a runtime without an idle fold age leaves a short tail"
     );
     assert_matches!(
@@ -87,7 +88,10 @@ async fn a_fresh_runtime_folds_a_short_tail_once_its_newest_commit_is_idle() {
             .await
             .expect("idle fold")
             .wal_fold,
-        WalFoldStepOutcome::Folded { .. }
+        Some(FoldWalResponse {
+            outcome: FoldWalOutcome::Published,
+            ..
+        })
     );
     let diagnostics = maintenance
         .diagnostics(&namespace_id)
@@ -100,7 +104,7 @@ async fn a_fresh_runtime_folds_a_short_tail_once_its_newest_commit_is_idle() {
             .await
             .expect("folded tail")
             .wal_fold,
-        WalFoldStepOutcome::NotNeeded
+        None
     );
 }
 

@@ -82,15 +82,10 @@ impl Maintenance {
         namespace_id: &NamespaceId,
     ) -> Result<AcknowledgeRetentionFloorReport> {
         trace::in_operation(
-            operation_span!(
-                self.compactor.core,
-                "acknowledge_retention_floor",
-                namespace_id
-            ),
+            operation_span!(self.core, "acknowledge_retention_floor", namespace_id),
             async {
-                let before = RetentionFloors::of(
-                    &self.compactor.load_live_basis(namespace_id).await?.manifest,
-                );
+                let before =
+                    RetentionFloors::of(&self.load_live_basis(namespace_id).await?.manifest);
                 let report = |after, outcome| AcknowledgeRetentionFloorReport {
                     namespace_id: namespace_id.clone(),
                     before,
@@ -103,33 +98,27 @@ impl Maintenance {
                         AcknowledgeRetentionFloorOutcome::AlreadyAcknowledged,
                     ));
                 }
-                self.compactor
-                    .publisher
+                self.publisher
                     .fold_namespace(namespace_id, FoldWhen::Always)
                     .await?;
-                let folded = RetentionFloors::of(
-                    &self.compactor.load_live_basis(namespace_id).await?.manifest,
-                );
+                let folded =
+                    RetentionFloors::of(&self.load_live_basis(namespace_id).await?.manifest);
                 if folded.is_acknowledged() {
                     return Ok(report(folded, AcknowledgeRetentionFloorOutcome::Folded));
                 }
                 let acquired = self
-                    .compactor
                     .engine(namespace_id)
                     .acquire_writer_epoch()
                     .await
                     .map_err(Error::from);
-                self.compactor
-                    .publisher
+                self.publisher
                     .finish_publication(namespace_id, acquired)
                     .await?;
-                self.compactor
-                    .publisher
+                self.publisher
                     .fold_namespace(namespace_id, FoldWhen::Always)
                     .await?;
-                let fenced = RetentionFloors::of(
-                    &self.compactor.load_live_basis(namespace_id).await?.manifest,
-                );
+                let fenced =
+                    RetentionFloors::of(&self.load_live_basis(namespace_id).await?.manifest);
                 Ok(report(fenced, AcknowledgeRetentionFloorOutcome::Fenced))
             },
         )

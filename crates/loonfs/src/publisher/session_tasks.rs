@@ -4,10 +4,9 @@
 
 use super::PublisherRegistry;
 use super::{FoldWhen, NamespaceFold, NamespacePublisher, NamespacePublisherState};
-use crate::maintenance::Compactor;
 use crate::trace::phase_event;
-use crate::MaintainMetadataOptions;
 use crate::{Error, FoldWalOutcome, Result};
+use crate::{MaintainMetadataOptions, Maintenance};
 use futures::FutureExt;
 use loonfs_core::limits::FOLD_AT_WAL_OBJECTS;
 use loonfs_core::Phase;
@@ -124,12 +123,12 @@ impl NamespacePublisher {
 
     /// Runs compaction units over this session's namespace while compaction
     /// is due, through the namespace's one compaction path (see
-    /// [`Compactor::compact_namespace`]).
+    /// [`Maintenance::compact_namespace`]).
     async fn run_compaction(&self) {
-        let Some(compactor) = self.compactor() else {
+        let Some(maintenance) = self.maintenance() else {
             return;
         };
-        let result = Box::pin(compactor.compact_namespace(
+        let result = Box::pin(maintenance.compact_namespace(
             &self.namespace_id,
             MaintainMetadataOptions::default().compaction_policy,
             None,
@@ -148,15 +147,15 @@ impl NamespacePublisher {
         }
     }
 
-    /// The runtime's compaction loop, acting as this session's writer.
-    /// `None` once the writer or the session table is gone.
-    fn compactor(&self) -> Option<Compactor> {
+    /// The runtime's maintenance, acting as this session's writer. `None`
+    /// once the writer or the session table is gone.
+    fn maintenance(&self) -> Option<Maintenance> {
         let writer = self.context.writer.upgrade()?;
         let publisher = PublisherRegistry {
             shared: self.shared.upgrade()?,
         };
         let writer_id = writer.writer_id.clone();
-        Some(Compactor::new(
+        Some(Maintenance::new(
             self.context.runtime_core.clone(),
             publisher,
             writer,

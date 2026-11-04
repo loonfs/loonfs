@@ -1,29 +1,25 @@
-//! The compaction loop of a writable runtime, which
-//! [`Maintenance`](crate::Maintenance) and each writer session run over a
-//! namespace: compaction units under the namespace's compaction lock, and the
-//! runtime's compactor epochs.
+//! The compaction loop that [`Maintenance`] and each writer session run over
+//! a namespace: compaction units under the namespace's compaction lock, and
+//! the runtime's compactor epochs.
 
-use super::{MetadataCompactionOutcome, MetadataCompactionReport};
-use crate::publisher::{NamespaceChange, PublisherRegistry};
-use crate::runtime_core::RuntimeCore;
+use super::{Maintenance, MetadataCompactionOutcome, MetadataCompactionReport};
+use crate::publisher::NamespaceChange;
 use crate::{Error, Result};
 use crate::{
     MetadataMaintenanceOutcome, MetadataMaintenanceResponse, NamespaceId, SharedObjectStore,
-    WriterState,
 };
 use loonfs_core::control::PublicationBasis;
 use loonfs_core::{CoreError, MetadataCompactionCancellation};
-use loonfs_types::{CompactorEpoch, WriterId};
+use loonfs_types::CompactorEpoch;
 use std::ops::ControlFlow;
-use std::sync::Arc;
 
 /// Abandoned compaction units in a row after which
-/// [`Compactor::compact_namespace`] stops, so a loop whose units
+/// [`Maintenance::compact_namespace`] stops, so a loop whose units
 /// keep finding their inputs replaced, or keep losing every publication
 /// attempt, can't spin.
 const MAX_LOST_COMPACTION_RACES: usize = 3;
 
-/// Compaction units that one call of [`Compactor::compact_namespace`]
+/// Compaction units that one call of [`Maintenance::compact_namespace`]
 /// publishes before it returns,
 /// so a namespace with a backlog cannot keep its caller waiting for long.
 pub(super) const MAX_COMPACTION_UNITS_PER_CALL: usize = 16;
@@ -57,51 +53,8 @@ fn compaction_outcome(outcome: loonfs_core::CompactionUnitOutcome) -> MetadataCo
     }
 }
 
-/// The compaction loop of one writable runtime, acting as one writer ID.
-///
-/// It shares the runtime's compactor epochs, so a session's compaction and
-/// the runtime's [`Maintenance`](crate::Maintenance) values never fence each
-/// other.
-#[derive(Clone)]
-pub(crate) struct Compactor {
-    pub(crate) core: RuntimeCore,
-    pub(crate) publisher: PublisherRegistry,
-    pub(crate) writer: Arc<WriterState>,
-    pub(crate) writer_id: WriterId,
-    /// A narrowed row budget for the tests that need a family group whose
-    /// window is too large for a `metadata` pass. See
-    /// [`Maintenance::starve_compaction_row_budget`](crate::Maintenance::starve_compaction_row_budget).
-    #[cfg(test)]
-    pub(super) compaction_row_budget: Option<std::num::NonZeroUsize>,
-    /// A narrowed per-segment row budget for the tests that need many
-    /// compacted segments. See
-    /// [`Maintenance::narrow_segment_row_budget`](crate::Maintenance::narrow_segment_row_budget).
-    #[cfg(test)]
-    pub(super) segment_row_budget: Option<std::num::NonZeroUsize>,
-}
-
-impl Compactor {
-    /// Returns the compaction loop of the runtime that `core`, `publisher`,
-    /// and `writer` belong to, acting as `writer_id`.
-    pub(crate) fn new(
-        core: RuntimeCore,
-        publisher: PublisherRegistry,
-        writer: Arc<WriterState>,
-        writer_id: WriterId,
-    ) -> Self {
-        Self {
-            core,
-            publisher,
-            writer,
-            writer_id,
-            #[cfg(test)]
-            compaction_row_budget: None,
-            #[cfg(test)]
-            segment_row_budget: None,
-        }
-    }
-
-    /// A mutating engine that commits as this loop's writer ID.
+impl Maintenance {
+    /// A mutating engine that commits as this value's writer ID.
     pub(super) fn engine(
         &self,
         namespace_id: &NamespaceId,

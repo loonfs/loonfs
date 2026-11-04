@@ -1387,7 +1387,7 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_wal_object_co
             .maintain_metadata_with_options(&namespace, &options)
             .await
             .expect("maintenance without a writer");
-        assert_eq!(step.wal_fold, crate::WalFoldStepOutcome::NotNeeded);
+        assert_eq!(step.wal_fold, None);
         assert_eq!(
             family_requests(&store, DurableObjectFamily::WalObject),
             7,
@@ -1422,7 +1422,7 @@ async fn inline_bytes_make_automatic_and_explicit_folds_due_before_wal_object_co
             .maintain_metadata_with_options(&namespace, &options)
             .await
             .expect("pass after the fold");
-        assert_eq!(again.wal_fold, crate::WalFoldStepOutcome::NotNeeded);
+        assert_eq!(again.wal_fold, None);
         let usage = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace)
             .load_wal_tail_usage()
             .await
@@ -1504,7 +1504,13 @@ async fn a_pass_folds_inline_bytes_that_a_position_past_the_bound_records() {
         .maintain_metadata_with_options(&namespace, &MaintainMetadataOptions::default())
         .await
         .expect("pass");
-    assert_matches!(step.wal_fold, crate::WalFoldStepOutcome::Folded { .. });
+    assert_matches!(
+        step.wal_fold,
+        Some(crate::FoldWalResponse {
+            outcome: crate::FoldWalOutcome::Published,
+            ..
+        })
+    );
     let usage = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace)
         .load_wal_tail_usage()
         .await

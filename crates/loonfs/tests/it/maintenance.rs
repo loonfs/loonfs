@@ -3,9 +3,9 @@
 use crate::common::*;
 use loonfs::publish::{parse_mutation_path, CommitIntent, FilesystemOperation};
 use loonfs::{
-    ChangeSeq, CommitId, CreateSnapshotOptions, ErrorCode, FoldWalOutcome, MaintainMetadataOptions,
-    ManifestNo, MetadataCompactionOutcome, MetadataCompactionPolicy, NamespaceId,
-    SharedObjectStore, WalFoldStepOutcome,
+    ChangeSeq, CommitId, CreateSnapshotOptions, ErrorCode, FoldWalOutcome, FoldWalResponse,
+    MaintainMetadataOptions, ManifestNo, MetadataCompactionOutcome, MetadataCompactionPolicy,
+    NamespaceId, SharedObjectStore,
 };
 use loonfs_objectstore::keys::{hint, metadata_manifest_object};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -187,11 +187,13 @@ fn maintenance_step_at_wal_object_threshold_folds_the_wal() {
     let response = fs
         .maintain_metadata_blocking(&namespace_id, metadata_options(2))
         .expect("maintenance pass");
-    assert_eq!(
+    assert_matches!(
         response.wal_fold,
-        WalFoldStepOutcome::Folded {
-            manifest_head_seq: ChangeSeq(1)
-        }
+        Some(FoldWalResponse {
+            outcome: FoldWalOutcome::Published,
+            manifest_head_seq: ChangeSeq(1),
+            ..
+        })
     );
 
     let status = fs
@@ -231,11 +233,13 @@ fn metadata_run_does_not_advance_retention() {
     let response = fs
         .maintain_metadata_blocking(&namespace_id, metadata_options(1))
         .expect("step without retention");
-    assert_eq!(
+    assert_matches!(
         response.wal_fold,
-        WalFoldStepOutcome::Folded {
-            manifest_head_seq: ChangeSeq(1)
-        }
+        Some(FoldWalResponse {
+            outcome: FoldWalOutcome::Published,
+            manifest_head_seq: ChangeSeq(1),
+            ..
+        })
     );
     assert_eq!(
         fs.namespace_diagnostics_blocking(&namespace_id)
@@ -326,11 +330,13 @@ fn the_typed_wrappers_are_single_action_steps() {
     let metadata = fs
         .maintain_metadata_blocking(&namespace_id, metadata_options(1))
         .expect("upkeep-only step");
-    assert_eq!(
+    assert_matches!(
         metadata.wal_fold,
-        WalFoldStepOutcome::Folded {
-            manifest_head_seq: ChangeSeq(2)
-        },
+        Some(FoldWalResponse {
+            outcome: FoldWalOutcome::Published,
+            manifest_head_seq: ChangeSeq(2),
+            ..
+        }),
         "the metadata request runs only metadata maintenance"
     );
 
@@ -388,11 +394,13 @@ fn maintenance_step_after_existing_manifest_writes_delta_manifest() {
     let step = fs
         .maintain_metadata_blocking(&namespace_id, metadata_options(1))
         .expect("second maintenance pass");
-    assert_eq!(
+    assert_matches!(
         step.wal_fold,
-        WalFoldStepOutcome::Folded {
-            manifest_head_seq: ChangeSeq(2)
-        }
+        Some(FoldWalResponse {
+            outcome: FoldWalOutcome::Published,
+            manifest_head_seq: ChangeSeq(2),
+            ..
+        })
     );
 
     let status = fs
@@ -595,7 +603,7 @@ fn maintenance_step_counts_wal_objects_not_commits() {
     let response = fs
         .maintain_metadata_blocking(&namespace_id, metadata_options(3))
         .expect("maintenance pass");
-    assert_eq!(response.wal_fold, WalFoldStepOutcome::NotNeeded);
+    assert_eq!(response.wal_fold, None);
 
     fs.mutate_blocking(&namespace_id, create_directory_request("create-c", "/c"))
         .expect("second WAL object commit");
@@ -603,11 +611,13 @@ fn maintenance_step_counts_wal_objects_not_commits() {
     let response = fs
         .maintain_metadata_blocking(&namespace_id, metadata_options(3))
         .expect("maintenance pass at WAL object threshold");
-    assert_eq!(
+    assert_matches!(
         response.wal_fold,
-        WalFoldStepOutcome::Folded {
-            manifest_head_seq: ChangeSeq(3)
-        }
+        Some(FoldWalResponse {
+            outcome: FoldWalOutcome::Published,
+            manifest_head_seq: ChangeSeq(3),
+            ..
+        })
     );
 }
 
@@ -653,12 +663,14 @@ async fn maintenance_step_treats_manifest_number_collision_as_benign_race() {
     );
     let step = step.expect("maintenance pass should not fail on metadata root publish race");
 
-    assert_eq!(
+    assert_matches!(
         step.wal_fold,
-        WalFoldStepOutcome::AlreadyPublished {
-            attempted_seq: ChangeSeq(1),
-            current_manifest_no: ManifestNo(3),
-        }
+        Some(FoldWalResponse {
+            outcome: FoldWalOutcome::AlreadyCurrent,
+            target_head_seq: ChangeSeq(1),
+            manifest_no: ManifestNo(3),
+            ..
+        })
     );
     let status = fs
         .maintenance

@@ -3073,7 +3073,6 @@ async fn maintenance_invalidation_leaves_the_writer_tail() {
 
     let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("maintenance"));
     maintenance
-        .compactor
         .publisher
         .invalidate_namespace(&namespace_id, NamespaceChange::Unchanged)
         .await;

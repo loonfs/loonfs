@@ -738,7 +738,6 @@ async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
     store.reset();
     assert_eq!(
         maintenance
-            .compactor
             .compact_once(
                 &namespace,
                 MetadataCompactionPolicy::SizeTiered,
@@ -753,8 +752,8 @@ async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
     assert_eq!(store.counts().puts, 0);
     let cloned = maintenance.clone();
     let (first, second) = tokio::join!(
-        maintenance.compactor.compactor_epoch(&namespace),
-        cloned.compactor.compactor_epoch(&namespace)
+        maintenance.compactor_epoch(&namespace),
+        cloned.compactor_epoch(&namespace)
     );
     let epoch = first.expect("first claim");
     assert_eq!(second.expect("shared claim"), epoch);
@@ -773,17 +772,12 @@ async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
         .expect("other process")
         .maintenance(loonfs_test_support::ids::writer_id("other"));
     assert_eq!(
-        other
-            .compactor
-            .compactor_epoch(&namespace)
-            .await
-            .expect("new claim"),
+        other.compactor_epoch(&namespace).await.expect("new claim"),
         loonfs_types::CompactorEpoch(epoch.0 + 1)
     );
     store.reset();
     assert_eq!(
         maintenance
-            .compactor
             .compactor_epoch(&namespace)
             .await
             .expect("remembered claim"),
@@ -791,7 +785,6 @@ async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
     );
     assert_eq!(
         maintenance
-            .compactor
             .compact_once(
                 &namespace,
                 MetadataCompactionPolicy::SizeTiered,
@@ -889,7 +882,6 @@ async fn a_unit_retries_over_a_fold_and_the_loop_stops_after_three_abandoned_uni
         write_and_fold(&writer, &maintenance, &namespace, &format!("/file-{index}")).await;
     }
     maintenance
-        .compactor
         .compactor_epoch(&namespace)
         .await
         .expect("claim the namespace before the races start");
@@ -945,7 +937,6 @@ async fn a_unit_retries_over_a_fold_and_the_loop_stops_after_three_abandoned_uni
         .await
         .expect("another process")
         .maintenance(loonfs_test_support::ids::writer_id("other"))
-        .compactor
         .compactor_epoch(&namespace)
         .await
         .expect("another process claims the namespace");
@@ -991,7 +982,6 @@ async fn a_metadata_loop_call_stops_after_its_unit_cap() {
         write_and_fold(&writer, &maintenance, &namespace, &format!("/file-{index}")).await;
     }
     maintenance
-        .compactor
         .compactor_epoch(&namespace)
         .await
         .expect("claim the namespace first, so each later manifest is one unit");
@@ -1024,7 +1014,7 @@ async fn a_metadata_loop_call_stops_after_its_unit_cap() {
     }
     assert_eq!(
         published[0],
-        loonfs_types::u64_from_usize(super::compactor::MAX_COMPACTION_UNITS_PER_CALL),
+        loonfs_types::u64_from_usize(super::compaction::MAX_COMPACTION_UNITS_PER_CALL),
         "one call publishes exactly the cap"
     );
     assert!(
@@ -1100,7 +1090,6 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
             .expect("fold the tail");
     }
     maintenance
-        .compactor
         .compactor_epoch(&claimed)
         .await
         .expect("claim the namespace");
@@ -1197,7 +1186,6 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
         .expect("another process");
     other
         .maintenance(loonfs_test_support::ids::writer_id("other"))
-        .compactor
         .compactor_epoch(&claimed)
         .await
         .expect("another process claims the namespace");
