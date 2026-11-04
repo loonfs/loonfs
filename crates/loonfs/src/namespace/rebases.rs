@@ -6,8 +6,8 @@ use super::merges::{missing_fork, MergeOutcome, PlannedCommit, PlannedMerge};
 use crate::publisher::MergeSlot;
 use crate::trace::{self, operation_span};
 use crate::{
-    ActorId, CommitId, Consistency, CoreError, Error, LoonFs, MergeConflict, MergeForkOptions,
-    Namespace, NamespaceId, NamespaceMetadata, RebaseForkResponse, Result, Writable,
+    ActorId, CommitId, Consistency, CoreError, LoonFs, MergeConflict, MergeForkOptions, Namespace,
+    NamespaceId, NamespaceMetadata, RebaseForkResponse, Result, Writable,
 };
 use loonfs_core::MergeRequest;
 
@@ -18,12 +18,13 @@ impl LoonFs<Writable> {
     /// ([API section 6.16](https://github.com/loonfs/loonfs/blob/main/docs/specs/api.md#616-post-rebases)).
     ///
     /// Before it creates anything, the call checks that
-    /// `source_namespace_id` is a fork of `namespace_id` and that the fork
-    /// point is at or above `namespace_id`'s retention floor. Creating the
-    /// new fork needs the right to fork `namespace_id`, as
-    /// [`Self::fork_namespace`] does. A namespace that already exists and
-    /// isn't a rebase's new fork of `namespace_id` for `source_namespace_id`
-    /// returns `invalid_request`.
+    /// `source_namespace_id` is a fork of `namespace_id`, that the fork
+    /// point is at or above `namespace_id`'s retention floor, and that the
+    /// start of the fork's unmerged range is at or above the fork's own
+    /// retention floor. Creating the new fork needs the right to fork
+    /// `namespace_id`, as [`Self::fork_namespace`] does. A namespace that
+    /// already exists and isn't a rebase's new fork of `namespace_id` for
+    /// `source_namespace_id` returns `invalid_request`.
     pub async fn fork_namespace_for_rebase(
         &self,
         namespace_id: &NamespaceId,
@@ -34,19 +35,13 @@ impl LoonFs<Writable> {
         trace::in_operation(
             operation_span!(self.core, "fork_namespace_for_rebase", namespace_id),
             async {
-                match self.namespace(new_namespace_id).metadata().await {
-                    Ok(existing) => {
-                        return ensure_rebase(
-                            existing,
-                            namespace_id,
-                            source_namespace_id,
-                            new_namespace_id,
-                        );
-                    }
-                    Err(Error::Core(CoreError::NamespaceNotFound {
-                        namespace_id: missing,
-                    })) if missing == *new_namespace_id => {}
-                    Err(error) => return Err(error),
+                if let Some(existing) = self.find_fork_target(new_namespace_id).await? {
+                    return ensure_rebase(
+                        existing,
+                        namespace_id,
+                        source_namespace_id,
+                        new_namespace_id,
+                    );
                 }
                 self.namespace(namespace_id).ensure_administrator().await?;
                 let main = self

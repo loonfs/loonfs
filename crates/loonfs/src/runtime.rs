@@ -28,7 +28,7 @@ use crate::publisher::{NamespaceChange, NamespaceSession, PublisherRegistry};
 use crate::runtime_core::RuntimeCore;
 use crate::trace::{self, operation_span};
 use crate::{
-    ActorId, CapabilityDocument, CreateNamespaceOptions, Error, ExecutionBudget,
+    ActorId, CapabilityDocument, CoreError, CreateNamespaceOptions, Error, ExecutionBudget,
     ForkNamespaceOptions, InlineContentPolicy, Maintenance, MetadataCache, Namespace, NamespaceId,
     Result, SharedObjectStore, StoreConfig,
 };
@@ -433,6 +433,12 @@ impl LoonFs<Writable> {
                 self.namespace(source_namespace_id)
                     .ensure_administrator()
                     .await?;
+                if self.find_fork_target(new_namespace_id).await?.is_some() {
+                    return Err(CoreError::NamespaceExists {
+                        namespace_id: new_namespace_id.clone(),
+                    }
+                    .into());
+                }
                 let snapshot_id = options.snapshot_id.as_ref();
                 self.install_fork(
                     source_namespace_id,
@@ -448,6 +454,26 @@ impl LoonFs<Writable> {
             },
         )
         .await
+    }
+
+    /// Returns the metadata of `new_namespace_id` when the namespace exists,
+    /// and `None` when it doesn't. A fork reads its target with this before
+    /// it folds the source, so a fork into an existing namespace folds
+    /// nothing; core's own check before it creates the fork still refuses a
+    /// target that a concurrent caller creates in between.
+    pub(crate) async fn find_fork_target(
+        &self,
+        new_namespace_id: &NamespaceId,
+    ) -> Result<Option<crate::NamespaceMetadata>> {
+        match self.namespace(new_namespace_id).metadata().await {
+            Ok(existing) => Ok(Some(existing)),
+            Err(Error::Core(CoreError::NamespaceNotFound { namespace_id }))
+                if namespace_id == *new_namespace_id =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Installs the fork of `source_namespace_id` into `new_namespace_id`
@@ -515,6 +541,54 @@ mod tests {
     };
     use std::sync::Arc;
     use tempfile::tempdir;
+
+    /// Checks that a fork into a namespace that exists returns
+    /// `namespace_exists` before it folds the source, so the source keeps its
+    /// manifest and the commit in its WAL tail.
+    #[tokio::test]
+    async fn a_fork_into_an_existing_namespace_folds_nothing() {
+        let temp_dir = tempdir().expect("tempdir");
+        let runtime = LoonFs::builder_with_store(Arc::new(
+            LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+        ))
+        .writer_id(loonfs_test_support::ids::writer_id("fork-writer"))
+        .build()
+        .await
+        .expect("build writer");
+        let actor = loonfs_test_support::test_actor();
+        let [source_id, taken_id] = ["source", "taken"].map(namespace_id);
+        for id in [&source_id, &taken_id] {
+            runtime
+                .create_namespace(id, &actor)
+                .await
+                .expect("create namespace");
+        }
+        let source = runtime.open_namespace(&source_id).expect("open source");
+        source
+            .put_file("/file.txt", b"body", &actor)
+            .await
+            .expect("a commit in the source's tail");
+        let maintenance = runtime.maintenance(loonfs_test_support::ids::writer_id("fork-writer"));
+        let manifest_and_tail = || async {
+            let diagnostics = maintenance
+                .diagnostics(&source_id)
+                .await
+                .expect("diagnostics");
+            (
+                diagnostics.current_manifest_no,
+                diagnostics.wal_tail_objects,
+            )
+        };
+        let before = manifest_and_tail().await;
+        assert!(before.1 > 0, "the source has a WAL tail to fold");
+
+        let error = runtime
+            .fork_namespace(&source_id, &taken_id, &actor)
+            .await
+            .expect_err("the target exists");
+        assert_eq!(error.code(), ErrorCode::NamespaceExists);
+        assert_eq!(manifest_and_tail().await, before);
+    }
 
     #[tokio::test]
     async fn converting_a_builder_to_read_only_keeps_the_shared_settings() {

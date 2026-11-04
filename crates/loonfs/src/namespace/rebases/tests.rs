@@ -1,7 +1,9 @@
-//! Replay commits that race another writer of the rebase's new fork, and
-//! retries of a replay commit that committed.
+//! Replay commits that race another writer of the rebase's new fork,
+//! retries of a replay commit that committed, and a rebase that the fork's
+//! own retention floor refuses.
 
 use super::super::merges::{PlannedCommit, PlannedMerge};
+use crate::test_support::maintenance_past_the_grace_window;
 use crate::{
     ActorId, CommitId, DeleteOptions, ErrorCode, LoonFs, Maintenance, MergeForkOptions, NamespaceId,
 };
@@ -76,6 +78,65 @@ async fn a_retry_of_a_committed_replay_folds_nothing() {
         manifest_nos(&maintenance, [&fork_id, &rebase_id]).await,
         before
     );
+}
+
+/// Checks that a rebase of a fork whose own retention floor is above the
+/// start of the fork's next merge returns `rebootstrap_required` before it
+/// creates the new fork, and folds nothing: main keeps its manifest and the
+/// commit in its WAL tail.
+#[tokio::test]
+async fn a_rebase_of_a_fork_below_its_own_floor_creates_nothing() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
+    let runtime = LoonFs::builder_with_store(store.clone())
+        .writer_id(writer_id("rebase-writer"))
+        .build()
+        .await
+        .expect("runtime");
+    let [main_id, fork_id, rebase_id] = ["main", "main-fork", "main-rebase"].map(namespace_id);
+    runtime
+        .create_namespace(&main_id, &actor())
+        .await
+        .expect("main");
+    let main = runtime.open_namespace(&main_id).expect("open main");
+    main.put_file("/a.txt", b"a", &actor()).await.expect("seed");
+    runtime
+        .fork_namespace(&main_id, &fork_id, &actor())
+        .await
+        .expect("fork");
+    let fork = runtime.open_namespace(&fork_id).expect("open the fork");
+    for path in ["/b.txt", "/c.txt"] {
+        fork.put_file(path, b"b", &actor())
+            .await
+            .expect("write in the fork");
+    }
+    let maintenance = fork.maintenance();
+    maintenance.fold_wal(&fork_id).await.expect("fold the fork");
+    maintenance_past_the_grace_window(store)
+        .await
+        .advance_retention_floor(&fork_id)
+        .await
+        .expect("advance the fork's floor");
+    main.put_file("/later.txt", b"later", &actor())
+        .await
+        .expect("a commit in main's tail");
+    let before = manifest_nos(&maintenance, [&main_id, &fork_id]).await;
+
+    let error = runtime
+        .fork_namespace_for_rebase(&main_id, &fork_id, &rebase_id, &actor())
+        .await
+        .expect_err("the fork's floor");
+    assert_eq!(error.code(), ErrorCode::RebootstrapRequired);
+    assert_eq!(
+        manifest_nos(&maintenance, [&main_id, &fork_id]).await,
+        before
+    );
+    let missing = runtime
+        .namespace(&rebase_id)
+        .metadata()
+        .await
+        .expect_err("no new fork");
+    assert_eq!(missing.code(), ErrorCode::NamespaceNotFound);
 }
 
 /// Returns the current manifest number of each namespace.
