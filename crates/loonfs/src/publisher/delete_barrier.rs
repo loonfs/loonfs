@@ -21,9 +21,11 @@ impl NamespacePublisher {
             Ok(outcome) => outcome,
             Err(_) => {
                 // Contain deletion panics so the worker can continue. Deletion has no commit
-                // receipt for reconciliation, so report an internal error to its callers.
+                // receipt for reconciliation, so report the task failure to its callers.
                 self.record_panic();
-                Err(CoreError::Internal("delete task aborted mid-delete".to_owned()).into())
+                Err(Error::RuntimeTask(
+                    "delete task aborted mid-delete".to_owned(),
+                ))
             }
         };
         let deleted = outcome

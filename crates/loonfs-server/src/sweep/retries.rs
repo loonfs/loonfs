@@ -44,10 +44,7 @@ impl CallFailure {
     /// Whether the failure says that the namespace is gone, which ends a
     /// held session's maintenance of it.
     pub(super) fn namespace_gone(&self) -> bool {
-        matches!(
-            self.code(),
-            ErrorCode::NamespaceNotFound | ErrorCode::NamespaceDeleted
-        )
+        self.code().is_namespace_gone()
     }
 }
 

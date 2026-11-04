@@ -302,20 +302,16 @@ pub enum CoreError {
     },
     #[error("the outcome of the write to `{object_key}` is unknown: {message}")]
     OutcomeUnknown { object_key: String, message: String },
-    /// A compare-and-swap loop on a control object used every attempt it was
-    /// allowed. Concurrent writers changed the object, or, on snapshot
-    /// renewal, a transport failure left an attempt's outcome unconfirmed.
-    /// Retrying can succeed.
+    /// A bounded loop on a control object used every attempt it was allowed.
+    /// Concurrent writers changed the object, a read found a newer manifest
+    /// or ran past its revalidation bound, or, on snapshot renewal, a
+    /// transport failure left an attempt's outcome unconfirmed. Retrying can
+    /// succeed.
     #[error(
-        "`{object_key}` reached the limit of {} compare-and-swap attempts",
+        "the operation on `{object_key}` used every one of its {} attempts",
         crate::limits::MAX_CONTENTION_ATTEMPTS
     )]
     StoreContention { object_key: String },
-    /// A panic that the runtime caught in background work, or a task that
-    /// failed to join. It uses the `server_error` code, and the message is the
-    /// detail. A bug in this process's own computation panics instead.
-    #[error("internal error: {0}")]
-    Internal(String),
     #[error("namespace `{namespace_id}` does not exist")]
     NamespaceNotFound { namespace_id: NamespaceId },
     #[error("namespace `{namespace_id}` already exists")]
@@ -498,7 +494,6 @@ impl CoreError {
             CoreError::VisiblePath(error) => error.code(),
             CoreError::DurableContent(error) => error.code(),
             CoreError::CommitValidation(error) => error.code(),
-            CoreError::Internal(_) => ErrorCode::ServerError,
             CoreError::Store { kind, .. } => classify_store_failure(*kind),
             CoreError::WalPublish(error) => error.code(),
             CoreError::OutcomeUnknown { .. } => ErrorCode::OutcomeUnknown,
@@ -677,7 +672,6 @@ impl CoreError {
             | CoreError::WriterFenced(_)
             | CoreError::OutcomeUnknown { .. }
             | CoreError::StoreContention { .. }
-            | CoreError::Internal(_)
             | CoreError::NamespaceNotFound { .. }
             | CoreError::NamespaceExists { .. }
             | CoreError::NamespaceDeleted { .. }
@@ -1123,7 +1117,9 @@ mod tests {
         assert_eq!(details.actual_head_seq, Some(ChangeSeq(45)));
 
         // Errors without machine-usable identity stay detail-free.
-        assert!(CoreError::Internal("boom".to_owned()).details().is_none());
+        assert!(CoreError::NamespaceCorrupt("boom".to_owned())
+            .details()
+            .is_none());
     }
 
     #[test]

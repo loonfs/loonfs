@@ -48,13 +48,6 @@ pub enum ControlObjectLoadError {
         message: String,
         kind: ObjectStoreErrorKind,
     },
-    /// A read found a newer manifest, or ran past its revalidation bound, on
-    /// every attempt it was allowed. Retrying can succeed.
-    #[error(
-        "`{object_key}` was superseded or went stale on each of {} read attempts",
-        crate::limits::MAX_CONTENTION_ATTEMPTS
-    )]
-    StoreContention { object_key: String },
 }
 
 impl ControlObjectLoadError {
@@ -69,7 +62,6 @@ impl ControlObjectLoadError {
             | Self::ChecksumMismatch { .. }
             | Self::Codec { .. } => ErrorCode::NamespaceCorrupt,
             Self::Store { kind, .. } => crate::error::classify_store_failure(*kind),
-            Self::StoreContention { .. } => ErrorCode::StoreContention,
         }
     }
 }

@@ -444,6 +444,15 @@ impl ErrorCode {
             | ErrorCode::ServerError => false,
         }
     }
+
+    /// Returns whether the namespace that the failed call names doesn't exist
+    /// or was deleted.
+    pub fn is_namespace_gone(self) -> bool {
+        matches!(
+            self,
+            ErrorCode::NamespaceNotFound | ErrorCode::NamespaceDeleted
+        )
+    }
 }
 
 impl fmt::Display for ErrorCode {

@@ -5,9 +5,7 @@ use super::retries::SweepCall;
 use super::visit::Overlap;
 use super::{index_pending, lock, GarbageCollection, RunningSweep, Sweep, SweepState};
 use futures::{FutureExt as _, StreamExt as _};
-use loonfs::{
-    ChangeSeq, ErrorCode, MetadataMaintenanceOutcome, NamespaceId, NamespaceSessionStatus,
-};
+use loonfs::{ChangeSeq, MetadataMaintenanceOutcome, NamespaceId, NamespaceSessionStatus};
 use loonfs_http::{panic_message, HeldNamespace};
 use std::panic::AssertUnwindSafe;
 use std::time::Duration;
@@ -100,9 +98,7 @@ impl Sweep {
         };
         let due = match metadata {
             _ if !open => Due::Close(Close::Ended),
-            Some(Err(ErrorCode::NamespaceDeleted | ErrorCode::NamespaceNotFound)) => {
-                Due::Close(Close::Ended)
-            }
+            Some(Err(code)) if code.is_namespace_gone() => Due::Close(Close::Ended),
             metadata => {
                 let metadata_settled = metadata.map_or(!positioned, |answer| {
                     answer == Ok(MetadataMaintenanceOutcome::CaughtUp)

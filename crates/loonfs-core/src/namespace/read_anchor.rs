@@ -115,10 +115,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 Err(error) => return Err(error.into()),
             }
         }
-        Err(ControlObjectLoadError::StoreContention {
-            object_key: manifest.object_key,
-        }
-        .into())
+        Err(CoreError::contention_exhausted(&manifest.object_key))
     }
 
     pub async fn manifest_has_successor(

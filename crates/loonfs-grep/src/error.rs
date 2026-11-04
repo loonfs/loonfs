@@ -92,13 +92,18 @@ impl GrepError {
     /// Builds the grep error for a failed object-store operation on
     /// `object_key`.
     ///
-    /// An immutable key that contains a different object means that grep's
-    /// derived state is corrupt, so that error becomes
-    /// [`GrepError::IndexCorrupt`].
+    /// An immutable key that contains a different object, or an object
+    /// without a stored checksum, means that grep's derived state is
+    /// corrupt, so either error becomes [`GrepError::IndexCorrupt`].
     pub(crate) fn store(object_key: impl Into<String>, error: &ObjectStoreError) -> Self {
         match error {
             ObjectStoreError::DifferentObject { object_key: key } => Self::IndexCorrupt {
                 message: format!("immutable object `{key}` already exists with different bytes"),
+            },
+            ObjectStoreError::StoredChecksumMissing { object_key: key } => Self::IndexCorrupt {
+                message: format!(
+                    "immutable object `{key}` already exists without a stored checksum"
+                ),
             },
             error => Self::StoreUnavailable {
                 object_key: object_key.into(),
@@ -194,12 +199,18 @@ mod tests {
         }
 
         let key = "namespaces/demo/extensions/grep/segments/seg";
-        let different = ObjectStoreError::DifferentObject {
-            object_key: key.to_owned(),
-        };
-        assert_eq!(
-            GrepError::store(key, &different).code(),
-            ErrorCode::IndexCorrupt
-        );
+        for corrupt in [
+            ObjectStoreError::DifferentObject {
+                object_key: key.to_owned(),
+            },
+            ObjectStoreError::StoredChecksumMissing {
+                object_key: key.to_owned(),
+            },
+        ] {
+            assert_eq!(
+                GrepError::store(key, &corrupt).code(),
+                ErrorCode::IndexCorrupt
+            );
+        }
     }
 }
