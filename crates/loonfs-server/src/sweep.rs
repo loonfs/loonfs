@@ -37,8 +37,8 @@ const MAX_GREP_STEPS_PER_VISIT: usize = 16;
 const MAX_SWEEP_BACKOFF_MS: u64 = 60 * 60 * 1000;
 
 /// The sweep's current values for one held session: the seqs that it last
-/// indexed and collected, when its tail's idle fold comes due, and the retry
-/// state of each call that ticks retry.
+/// indexed and collected, what the last metadata step reported about the
+/// tail, and the retry state of each call that ticks retry.
 pub(crate) struct SweepState {
     indexed_seq: Option<ChangeSeq>,
     collected_seq: Option<ChangeSeq>,
@@ -47,6 +47,11 @@ pub(crate) struct SweepState {
     /// as the last metadata step that succeeded reported it (see
     /// [`MetadataMaintenanceReport::next_due_at_ms`](loonfs::MetadataMaintenanceReport::next_due_at_ms)).
     idle_fold_due_at_ms: Option<u64>,
+    /// The highest seq the session had committed when its last metadata
+    /// step started, whether or not that step succeeded, and `None` before
+    /// the first step. A commit since then can leave work in the tail that
+    /// no step has dated.
+    last_step_seq: Option<ChangeSeq>,
     metadata_retry: SweepRetry,
     index_retry: SweepRetry,
     gc_retry: SweepRetry,
@@ -61,6 +66,7 @@ impl HostState for SweepState {
             collected_seq: None,
             collected_at_ms: opened_at_ms,
             idle_fold_due_at_ms: None,
+            last_step_seq: None,
             metadata_retry: SweepRetry::default(),
             index_retry: SweepRetry::default(),
             gc_retry: SweepRetry::default(),
@@ -116,7 +122,9 @@ pub enum GarbageCollection {
 /// position gets no metadata step, because it isn't writing and the daily
 /// pass maintains its namespace's metadata, except one step from the store
 /// once its tail reaches the idle fold age that the session's last step
-/// reported. Metadata that remains unfinished waits `maintenance_interval_ms`
+/// reported, or once it has committed since that step, so that the tail of
+/// a session whose position lapsed before a tick saw it is dated too.
+/// Metadata that remains unfinished waits `maintenance_interval_ms`
 /// before the next step, or less when the step reported an earlier idle
 /// fold. Collection runs
 /// once the session's published seq has moved and `gc_interval_ms` has

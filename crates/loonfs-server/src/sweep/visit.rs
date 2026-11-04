@@ -63,6 +63,9 @@ impl Sweep {
         entry: Option<&Mutex<HeldNamespace<SweepState>>>,
     ) -> Result<MetadataMaintenanceOutcome, ErrorCode> {
         let inner = &self.inner;
+        // The seq before the step, so a commit during the step counts as one
+        // the step didn't see, and the next tick runs the step again.
+        let seq = entry.map(|entry| lock(entry).handle.last_published_seq());
         let result = contain(
             inner
                 .maintenance
@@ -84,6 +87,7 @@ impl Sweep {
         // is asked again at that age if it comes first.
         let positioned = entry.is_some_and(|entry| {
             let mut held = lock(entry);
+            held.host_state.last_step_seq = seq.flatten();
             if outcome.is_ok() {
                 held.host_state.idle_fold_due_at_ms = next_due_at_ms;
             }

@@ -271,13 +271,15 @@ impl Sweep {
 
 /// Returns whether a held session's metadata step is due at `now_ms`: its
 /// retry time has come, and the session has a current writer position, or
-/// its tail has reached the idle fold age that its last step reported. A
-/// step without a position reads the store, so it runs only for that idle
-/// fold, and its own report replaces the due time.
+/// its tail has reached the idle fold age that its last step reported, or
+/// the session has committed since its last step. A step without a position
+/// reads the store, so it runs only for that idle fold, or once to date a
+/// tail that no step has seen, and its own report replaces the due time.
 fn metadata_due(held: &HeldNamespace<SweepState>, positioned: bool, now_ms: u64) -> bool {
     let state = &held.host_state;
     now_ms >= state.metadata_retry.retry_at_ms
         && (positioned
+            || held.handle.last_published_seq() != state.last_step_seq
             || state
                 .idle_fold_due_at_ms
                 .is_some_and(|due_at_ms| now_ms >= due_at_ms))
