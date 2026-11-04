@@ -2,11 +2,12 @@
 
 use crate::error::{CoreError, Result};
 use crate::limits::MAX_CONTENTION_ATTEMPTS;
+use crate::manifest::published::{PublicationReport, PublishedManifest};
 use crate::namespace::basis::PublicationBasis;
 use crate::namespace::control::{ensure_namespace_live, LoadedHint, LoadedManifest};
 use crate::namespace::store::NamespaceStore;
 use crate::phase::Phase;
-use crate::time::OperationClock;
+use crate::time::{Observation, OperationClock};
 use bytes::Bytes;
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::ObjectStoreExtension;
@@ -48,6 +49,39 @@ pub(crate) enum ManifestChange<T> {
     Again,
 }
 
+/// What one call of [`NamespaceStore::update_manifest`] did: the response of
+/// its last attempt, and the manifest that's current after the call.
+pub(crate) struct ManifestUpdate<T> {
+    pub(crate) response: T,
+    /// The manifest that the call published, or that the last attempt built
+    /// on when that attempt returned `Finished`.
+    pub(crate) current: LoadedManifest,
+    /// Whether the call published `current`.
+    pub(crate) published: bool,
+    /// The hint that the last attempt to load the current manifest through
+    /// the hint read, or `None` when no attempt did.
+    pub(crate) hint: Option<LoadedHint>,
+    /// When the caller started the call's clock.
+    started: Observation,
+}
+
+impl<T> ManifestUpdate<T> {
+    /// Returns the current manifest, with the start of the call's clock as
+    /// its start observation: no manifest followed it then.
+    pub(crate) fn current_manifest(&self) -> PublishedManifest {
+        PublishedManifest::new(&self.current.envelope, Some(self.started.clone()))
+    }
+
+    /// Returns the response, and the current manifest when the call
+    /// published it.
+    pub(crate) fn into_report(self) -> PublicationReport<T> {
+        PublicationReport {
+            published: self.published.then(|| self.current_manifest()),
+            response: self.response,
+        }
+    }
+}
+
 /// Where the next attempt of [`update_manifest`] starts.
 enum NextAttempt {
     /// Builds on this manifest without a request first.
@@ -72,7 +106,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// builds on the newest manifest above the one that the attempt built on.
     /// An attempt whose check is at the revalidation bound loads the current
     /// manifest through the hint instead. The call returns `store_contention`
-    /// once `attempts` attempts have each lost their put or returned `Again`.
+    /// once [`MAX_CONTENTION_ATTEMPTS`] attempts have each lost their put or
+    /// returned `Again`.
     /// The caller starts `clock` before the call, so
     /// `METADATA_PUBLICATION_BUDGET_MS` covers every attempt, from the first
     /// request to the last put.
@@ -84,8 +119,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// successor, and a put that loses proves that it had one (format spec,
     /// "Publishing a materialized file set").
     ///
-    /// If any attempt loaded the current manifest through the hint, the call
-    /// returns the hint that the last such attempt read, and otherwise `None`.
     /// The call doesn't raise the hint. The runtime that published the manifest
     /// raises the hint afterward with
     /// [`NamespaceStore::raise_hint`].
@@ -93,9 +126,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
         &self,
         basis: Option<PublicationBasis>,
         clock: &OperationClock,
-        attempts: usize,
         mut change: F,
-    ) -> Result<(T, LoadedManifest, Option<LoadedHint>)>
+    ) -> Result<ManifestUpdate<T>>
     where
         F: FnMut(LoadedManifest) -> Fut,
         Fut: std::future::Future<Output = Result<ManifestChange<T>>>,
@@ -103,6 +135,13 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let mut next = basis.map(NextAttempt::BuildOn);
         let mut hint = None;
         let mut attempt = 0;
+        let update = |response, current, published, hint| ManifestUpdate {
+            response,
+            current,
+            published,
+            hint,
+            started: clock.origin(),
+        };
         loop {
             attempt += 1;
             let found = match next.take() {
@@ -141,7 +180,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                         .await?;
                     let (lost_to, winner) = match outcome {
                         ManifestPublicationOutcome::Published(published) => {
-                            return Ok((result, published, hint));
+                            return Ok(update(result, published, true, hint));
                         }
                         ManifestPublicationOutcome::CoveredByCurrent(winner) => {
                             ("covered_by_current", winner)
@@ -153,7 +192,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     tracing::debug!(
                         namespace_id = self.namespace_id.as_str(),
                         attempt,
-                        attempts,
+                        attempts = MAX_CONTENTION_ATTEMPTS,
                         lost_to,
                         "a manifest publication lost its put"
                     );
@@ -165,18 +204,19 @@ impl<S: ObjectStore> NamespaceStore<S> {
                         checked: current.checked,
                     }));
                 }
-                ManifestChange::Finished(result) => return Ok((result, current.manifest, hint)),
+                ManifestChange::Finished(result) => {
+                    return Ok(update(result, current.manifest, false, hint));
+                }
                 ManifestChange::Again => next = Some(NextAttempt::BuildAbove(current)),
             }
-            if attempt >= attempts {
+            if attempt >= MAX_CONTENTION_ATTEMPTS {
                 return Err(CoreError::contention_exhausted(&built_on));
             }
         }
     }
 
     /// Publishes the next manifest after the current one of a live namespace,
-    /// through [`Self::update_manifest`] with [`MAX_CONTENTION_ATTEMPTS`]
-    /// attempts.
+    /// through [`Self::update_manifest`].
     ///
     /// Each attempt returns `namespace_deleted` when the manifest that the
     /// attempt builds on is a tombstone, and otherwise passes a copy of that
@@ -186,22 +226,17 @@ impl<S: ObjectStore> NamespaceStore<S> {
         basis: Option<PublicationBasis>,
         clock: &OperationClock,
         mut change: F,
-    ) -> Result<(T, LoadedManifest, Option<LoadedHint>)>
+    ) -> Result<ManifestUpdate<T>>
     where
         F: FnMut(NamespaceManifestPayload) -> Fut,
         Fut: std::future::Future<Output = Result<ManifestChange<T>>>,
     {
-        self.update_manifest(
-            basis,
-            clock,
-            MAX_CONTENTION_ATTEMPTS,
-            |current: LoadedManifest| {
-                let payload = current.payload();
-                let changed = ensure_namespace_live(&payload.namespace_id, payload.status)
-                    .map(|()| change(payload.clone()));
-                async move { changed?.await }
-            },
-        )
+        self.update_manifest(basis, clock, |current: LoadedManifest| {
+            let payload = current.payload();
+            let changed = ensure_namespace_live(&payload.namespace_id, payload.status)
+                .map(|()| change(payload.clone()));
+            async move { changed?.await }
+        })
         .await
     }
 

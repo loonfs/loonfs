@@ -2,11 +2,10 @@
 //! builds on, and the next manifest, which lists the change.
 
 use super::publish::ManifestChange;
-use super::published::{PublicationReport, PublishedManifest};
+use super::published::PublicationReport;
 use super::validate::validate_manifest;
 use crate::engine::{NamespaceEngine, RuntimeReadContext, Writable};
 use crate::error::{CoreError, Result};
-use crate::limits::MAX_CONTENTION_ATTEMPTS;
 use crate::manifest::load_basis_metadata_segments;
 use crate::namespace::control::{ensure_namespace_live, LoadedManifest};
 use crate::namespace::PublicationBasis;
@@ -106,37 +105,39 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     ) -> Result<PublicationReport<ExtensionPublication>> {
         let built_on = basis.find_entry(name);
         let checked = basis.clock.observe();
-        let (published, manifest, _) = self
+        let update = self
             .namespace
             .update_manifest(
                 Some(basis.basis.clone()),
                 &basis.clock,
-                MAX_CONTENTION_ATTEMPTS,
                 |current: LoadedManifest| {
                     let change = extension_change(&current, name, built_on, &mut entry_at);
                     async move { change }
                 },
             )
             .await?;
-        if !published {
+        if !update.published {
             return Ok(PublicationReport {
                 response: ExtensionPublication::Superseded,
                 published: None,
             });
         }
-        let report = PublishedManifest::new(&manifest.envelope, Some(basis.clock.origin()));
+        let published = update.current_manifest();
         Ok(PublicationReport {
             response: ExtensionPublication::Published(ExtensionBasis {
-                basis: PublicationBasis { manifest, checked },
+                basis: PublicationBasis {
+                    manifest: update.current,
+                    checked,
+                },
                 clock: self.namespace.start_clock(),
             }),
-            published: Some(report),
+            published: Some(published),
         })
     }
 }
 
 /// Returns the manifest after `current` with the change from `entry_at` as
-/// the entry of extension `name`, or `Finished(false)` when `current`'s entry
+/// the entry of extension `name`, or `Finished` when `current`'s entry
 /// of `name` isn't `built_on`.
 ///
 /// Returns `namespace_deleted` when `current` is a tombstone.
@@ -145,11 +146,11 @@ fn extension_change(
     name: &ExtensionName,
     built_on: Option<&ExtensionEntry>,
     entry_at: &mut impl FnMut(RunNo) -> (ExtensionEntry, RunNo),
-) -> Result<ManifestChange<bool>> {
+) -> Result<ManifestChange<()>> {
     let payload = current.payload();
     ensure_namespace_live(&payload.namespace_id, payload.status)?;
     if payload.extensions.get(name) != built_on {
-        return Ok(ManifestChange::Finished(false));
+        return Ok(ManifestChange::Finished(()));
     }
     let (entry, next_run_no) = entry_at(payload.next_run_no);
     // A run number above the public maximum wouldn't decode, so the
@@ -166,7 +167,7 @@ fn extension_change(
     next.next_run_no = next_run_no;
     validate_manifest(&current.object_key, &next)
         .expect("an extension's publication should list valid runs");
-    Ok(ManifestChange::Next(Box::new(next), true))
+    Ok(ManifestChange::Next(Box::new(next), ()))
 }
 
 impl<S: ObjectStore, M> NamespaceEngine<S, M> {

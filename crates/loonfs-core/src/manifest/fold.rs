@@ -8,7 +8,6 @@ use crate::engine::{NamespaceEngine, Writable};
 use crate::error::CoreError;
 use crate::error::Result;
 use crate::in_flight::STORE_WRITES_IN_FLIGHT;
-use crate::limits::MAX_CONTENTION_ATTEMPTS;
 use crate::metadata::MetadataView;
 use crate::namespace::basis::{MetadataBasis, PublicationBasis};
 use crate::namespace::control::LoadedManifest;
@@ -198,18 +197,13 @@ impl<S: ObjectStore> NamespaceStore<S> {
             layouts: None,
         });
         let folded = self
-            .update_manifest(
-                Some(publication_basis),
-                clock,
-                MAX_CONTENTION_ATTEMPTS,
-                |current: LoadedManifest| {
-                    let fold = &fold;
-                    async move { fold.lock().await.attempt(current).await }
-                },
-            )
+            .update_manifest(Some(publication_basis), clock, |current: LoadedManifest| {
+                let fold = &fold;
+                async move { fold.lock().await.attempt(current).await }
+            })
             .await;
-        let (outcome, manifest, _) = match folded {
-            Ok(folded) => folded,
+        let update = match folded {
+            Ok(update) => update,
             // Every attempt lost its manifest number to another publication.
             Err(CoreError::StoreContention { .. }) => {
                 return Err(CoreError::WalPublish(WalPublishError::NumberTaken))
@@ -221,8 +215,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
         Ok(FoldedWalTail::new(
             &self.namespace_id,
             fold.into_inner().projection.head.seq,
-            PublishedManifest::new(&manifest.envelope, Some(clock.origin())),
-            outcome,
+            update.current_manifest(),
+            update.response,
         ))
     }
 

@@ -2781,6 +2781,126 @@ async fn a_unit_that_loses_its_put_publishes_over_the_winner_unless_its_inputs_m
     }
 }
 
+/// Changes the retention window from another process before each of the
+/// first `losses` manifest puts it sees.
+#[derive(Debug)]
+struct WindowChangesBeforeManifestPuts {
+    rival: LocalFsStore,
+    namespace_id: NamespaceId,
+    losses: usize,
+    manifest_puts: AtomicUsize,
+}
+
+#[async_trait]
+impl Interceptor for WindowChangesBeforeManifestPuts {
+    type Guard = ();
+
+    async fn before(&self, context: &OperationContext<'_>) -> (Intercept, ()) {
+        if !OperationSelector::Put.matches(context.kind())
+            || loonfs_objectstore::layout::manifest_no_of(context.key()).is_none()
+        {
+            return (Intercept::Continue, ());
+        }
+        let put = self.manifest_puts.fetch_add(1, Ordering::SeqCst);
+        if put < self.losses {
+            let window_ms = std::num::NonZeroU64::new(put as u64 + 1).expect("nonzero window");
+            crate::test_support::NamespaceFixture::new(
+                &self.rival,
+                &self.namespace_id,
+                &test_context(),
+            )
+            .engine()
+            .set_retention_window(Some(window_ms))
+            .await
+            .expect("the rival changes the window");
+        }
+        (Intercept::Continue, ())
+    }
+}
+
+/// Checks that a unit whose put loses to an unrelated publication on all but
+/// its last attempt publishes over the last winner, and writes its output
+/// segments once.
+#[tokio::test]
+async fn a_unit_whose_puts_lose_to_unrelated_publications_publishes_without_rewriting_its_output() {
+    let losses = crate::limits::MAX_CONTENTION_ATTEMPTS - 1;
+    let policy = MetadataRunPolicy {
+        max_delta_runs: NonZeroUsize::MIN,
+        ..MetadataRunPolicy::default()
+    };
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    seed_bindings_workload(
+        &LocalFsStore::new(temp_dir.path()).expect("store"),
+        &namespace_id,
+    )
+    .await;
+    let recorded = RecordingStore::metadata_segments(InterceptStore::with_interceptor(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        WindowChangesBeforeManifestPuts {
+            rival: LocalFsStore::new(temp_dir.path()).expect("store"),
+            namespace_id: namespace_id.clone(),
+            losses,
+            manifest_puts: AtomicUsize::new(0),
+        },
+    ));
+    let outcome = {
+        let mut fixture = crate::test_support::NamespaceFixture::new(
+            &recorded,
+            &namespace_id,
+            &crate::test_support::writer_at("test-writer", 0),
+        );
+        fixture.namespace.run_policy = policy;
+        fixture
+    }
+    .engine()
+    .compact_metadata_unit(
+        None,
+        MetadataCompactionPolicy::CompactImmediately,
+        CompactionAdmission::AnySize,
+        loonfs_types::CompactorEpoch(0),
+        &MetadataCompactionCancellation::default(),
+    )
+    .await
+    .expect("run the unit");
+
+    let CompactionUnitOutcome::Published {
+        manifest,
+        output_segments,
+        ..
+    } = outcome
+    else {
+        panic!("the unit must publish over the last winner, got {outcome:?}");
+    };
+    assert_eq!(
+        recorded
+            .inner()
+            .interceptor()
+            .manifest_puts
+            .load(Ordering::SeqCst),
+        losses + 1,
+        "every put but the last lost"
+    );
+    assert_eq!(
+        recorded.count(OperationSelector::Put),
+        output_segments,
+        "the unit wrote its output segments once"
+    );
+    let current = crate::test_support::namespace_store(
+        &LocalFsStore::new(temp_dir.path()).expect("store"),
+        &namespace_id,
+    )
+    .load_current_manifest()
+    .await
+    .expect("current manifest");
+    assert_eq!(manifest.manifest, current.manifest());
+    assert_eq!(
+        current.payload().retention_window_ms,
+        std::num::NonZeroU64::new(losses as u64),
+        "the last rival's window survives"
+    );
+}
+
 /// Checks that a fold whose manifest a unit publishes over doesn't make the
 /// unit's group due again. The unit leaves its group with a base and the
 /// fold's run, and two runs aren't a tier, so the fold's run waits for later
