@@ -4,8 +4,7 @@ use crate::common::*;
 use loonfs::publish::{parse_mutation_path, CommitIntent, FilesystemOperation};
 use loonfs::{
     ChangeSeq, CommitId, CreateSnapshotOptions, ErrorCode, FoldWalOutcome, FoldWalResponse,
-    MaintainMetadataOptions, ManifestNo, MetadataCompactionOutcome, MetadataCompactionPolicy,
-    NamespaceId, SharedObjectStore,
+    ManifestNo, MetadataCompactionOutcome, NamespaceId, SharedObjectStore,
 };
 use loonfs_objectstore::keys::{hint, metadata_manifest_object};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -305,13 +304,7 @@ fn the_typed_wrappers_are_single_action_steps() {
         (FoldWalOutcome::Published, ChangeSeq(1))
     );
     let compaction = fs
-        .maintain_metadata_blocking(
-            &namespace_id,
-            MaintainMetadataOptions {
-                compaction_policy: MetadataCompactionPolicy::CompactImmediately,
-                ..metadata_options(1)
-            },
-        )
+        .maintain_metadata_blocking(&namespace_id, metadata_options(1))
         .expect("compaction step after the fold")
         .compaction;
     assert_eq!(
@@ -468,8 +461,8 @@ fn a_standalone_maintenance_drives_metadata_compaction_itself() {
         .expect("status before the call")
         .current_manifest_no;
 
-    // Nothing here has outgrown the row budget, so this call publishes the
-    // unit the planner chose, as the next maintenance pass would have.
+    // The call publishes the unit that the planner chooses, as the next
+    // maintenance pass would.
     assert_matches!(
         block_on(
             fs.maintenance

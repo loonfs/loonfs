@@ -307,7 +307,6 @@ async fn seed(store: &SharedObjectStore, shape: &Shape) {
         .maintenance(loonfs_test_support::ids::writer_id("seed-maintenance"));
     let fold = MaintainMetadataOptions {
         max_wal_tail_objects: std::num::NonZeroU64::MIN,
-        ..Default::default()
     };
     for index in 0..shape.namespaces {
         let namespace_id = shape.namespace(index);

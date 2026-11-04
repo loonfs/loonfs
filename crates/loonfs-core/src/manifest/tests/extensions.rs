@@ -143,7 +143,6 @@ async fn every_publication_copies_the_entry_and_a_tombstone_empties_its_runs() {
         .compact_metadata_unit(
             None,
             MetadataCompactionPolicy::CompactImmediately,
-            crate::compaction::CompactionAdmission::AnySize,
             CompactorEpoch(0),
             &MetadataCompactionCancellation::default(),
         )
@@ -242,7 +241,6 @@ impl EntryCopy {
                     .compact_metadata_unit(
                         None,
                         MetadataCompactionPolicy::CompactImmediately,
-                        crate::compaction::CompactionAdmission::AnySize,
                         CompactorEpoch(0),
                         &MetadataCompactionCancellation::default(),
                     )

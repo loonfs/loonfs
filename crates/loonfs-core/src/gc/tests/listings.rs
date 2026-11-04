@@ -192,7 +192,6 @@ async fn superseded_views_add_segment_reads_only_for_uncovered_layout_segments()
                 .compact_metadata_unit(
                     None,
                     MetadataCompactionPolicy::CompactImmediately,
-                    crate::compaction::CompactionAdmission::AnySize,
                     loonfs_types::CompactorEpoch(0),
                     &crate::compaction::MetadataCompactionCancellation::default(),
                 )
@@ -320,7 +319,6 @@ async fn a_pass_reads_each_layout_segment_once_per_scan_however_many_roots_list_
         .compact_metadata_unit(
             None,
             MetadataCompactionPolicy::CompactImmediately,
-            crate::compaction::CompactionAdmission::AnySize,
             loonfs_types::CompactorEpoch(0),
             &crate::compaction::MetadataCompactionCancellation::default()
         )

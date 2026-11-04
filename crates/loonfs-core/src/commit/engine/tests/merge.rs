@@ -8,8 +8,7 @@ mod rebase;
 use super::*;
 use crate::changes::list_changes_after;
 use crate::compaction::{
-    CompactionAdmission, CompactionUnitOutcome, MetadataCompactionCancellation,
-    MetadataCompactionPolicy,
+    CompactionUnitOutcome, MetadataCompactionCancellation, MetadataCompactionPolicy,
 };
 use crate::manifest::RetentionTarget;
 use crate::test_support::NamespaceFixture;
@@ -718,7 +717,6 @@ async fn advance_floor_and_compact(
             .compact_metadata_unit(
                 None,
                 MetadataCompactionPolicy::CompactImmediately,
-                CompactionAdmission::AnySize,
                 CompactorEpoch(0),
                 &MetadataCompactionCancellation::default(),
             )

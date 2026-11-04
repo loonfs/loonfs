@@ -5,8 +5,8 @@
 use super::PublisherRegistry;
 use super::{FoldWhen, NamespaceFold, NamespacePublisher, NamespacePublisherState};
 use crate::trace::phase_event;
+use crate::Maintenance;
 use crate::{Error, FoldWalOutcome, Result};
-use crate::{MaintainMetadataOptions, Maintenance};
 use futures::FutureExt;
 use loonfs_core::limits::FOLD_AT_WAL_OBJECTS;
 use loonfs_core::Phase;
@@ -130,7 +130,6 @@ impl NamespacePublisher {
         };
         let result = Box::pin(maintenance.compact_namespace(
             &self.namespace_id,
-            MaintainMetadataOptions::default().compaction_policy,
             None,
             &self.compaction_cancellation,
         ))

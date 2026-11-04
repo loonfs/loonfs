@@ -170,20 +170,15 @@ pub(crate) fn metadata_options(max_wal_tail_objects: u64) -> MaintainMetadataOpt
     MaintainMetadataOptions {
         max_wal_tail_objects: std::num::NonZeroU64::new(max_wal_tail_objects)
             .expect("a fold threshold should be nonzero"),
-        ..MaintainMetadataOptions::default()
     }
 }
 
 /// Runs explicit compaction until no family group is due, so every group
 /// ends in one base run and the retention floor's rules have been applied.
 pub(crate) async fn compact_until_done(maintenance: &Maintenance, namespace_id: &NamespaceId) {
-    let options = MaintainMetadataOptions {
-        compaction_policy: loonfs::MetadataCompactionPolicy::CompactImmediately,
-        ..MaintainMetadataOptions::default()
-    };
     for _ in 0..32 {
         let step = maintenance
-            .maintain_metadata_with_options(namespace_id, &options)
+            .compact_metadata(namespace_id, &loonfs::MaintenanceCancellation::new())
             .await
             .expect("compact metadata");
         if step.compaction == loonfs::MetadataCompactionOutcome::NotNeeded {

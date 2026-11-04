@@ -1092,7 +1092,6 @@ async fn compact_below_the_floor<S: ObjectStore>(store: &S, namespace_id: &Names
         .compact_metadata_unit(
             None,
             MetadataCompactionPolicy::CompactImmediately,
-            crate::compaction::CompactionAdmission::AnySize,
             loonfs_types::CompactorEpoch(0),
             &crate::compaction::MetadataCompactionCancellation::default(),
         )
@@ -1915,7 +1914,6 @@ async fn gc_reclaims_manifests_superseded_by_wal_folds() {
         .compact_metadata_unit(
             None,
             MetadataCompactionPolicy::default(),
-            crate::compaction::CompactionAdmission::AnySize,
             loonfs_types::CompactorEpoch(0),
             &crate::compaction::MetadataCompactionCancellation::default(),
         )

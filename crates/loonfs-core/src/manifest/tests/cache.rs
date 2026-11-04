@@ -1779,7 +1779,6 @@ async fn compactions_read_input_without_the_cache_and_insert_only_their_output()
     .compact_metadata_unit(
         None,
         MetadataCompactionPolicy::CompactImmediately,
-        crate::compaction::CompactionAdmission::AnySize,
         loonfs_types::CompactorEpoch(0),
         &crate::compaction::MetadataCompactionCancellation::default(),
     )

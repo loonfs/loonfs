@@ -125,7 +125,6 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
             .compact_metadata_unit(
                 None,
                 loonfs_core::MetadataCompactionPolicy::CompactImmediately,
-                loonfs_core::CompactionAdmission::AnySize,
                 loonfs_types::CompactorEpoch(0),
                 &loonfs_core::MetadataCompactionCancellation::default(),
             )
@@ -826,7 +825,6 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
             .compact_metadata_unit(
                 None,
                 loonfs_core::MetadataCompactionPolicy::CompactImmediately,
-                loonfs_core::CompactionAdmission::AnySize,
                 loonfs_types::CompactorEpoch(0),
                 &loonfs_core::MetadataCompactionCancellation::default(),
             )
@@ -921,7 +919,6 @@ async fn a_fork_removes_an_inherited_deletions_rows_without_a_writer_session() {
             .compact_metadata_unit(
                 None,
                 loonfs_core::MetadataCompactionPolicy::CompactImmediately,
-                loonfs_core::CompactionAdmission::AnySize,
                 loonfs_types::CompactorEpoch(0),
                 &loonfs_core::MetadataCompactionCancellation::default(),
             )
@@ -1015,7 +1012,6 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
             .compact_metadata_unit(
                 None,
                 loonfs_core::MetadataCompactionPolicy::CompactImmediately,
-                loonfs_core::CompactionAdmission::AnySize,
                 loonfs_types::CompactorEpoch(0),
                 &loonfs_core::MetadataCompactionCancellation::default(),
             )

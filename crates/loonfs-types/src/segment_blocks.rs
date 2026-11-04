@@ -34,9 +34,6 @@ const _: () = assert!(
         && DEFAULT_MIN_COMPACTION_RUNS.get() <= DEFAULT_MAX_DELTA_RUNS.get()
         && DEFAULT_MIN_COMPACTION_RUNS.get() <= DEFAULT_MAX_COMPACTION_INPUT_RUNS.get()
 );
-/// Maximum number of rows that one bounded maintenance step reads, such as the
-/// compaction unit of one metadata maintenance pass.
-pub const DEFAULT_MAX_COMPACTION_INPUT_ROWS: NonZeroUsize = NonZeroUsize::new(131_072).unwrap();
 /// Maximum decoded input that one build or compaction keeps in memory at once.
 pub const DEFAULT_MAX_COMPACTION_INPUT_BYTES: NonZeroUsize =
     NonZeroUsize::new(64 * 1024 * 1024).unwrap();

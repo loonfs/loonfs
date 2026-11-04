@@ -9,7 +9,7 @@ use crate::compaction::plan::MetadataCompactionSpec;
 use crate::compaction::plan::{group_run_descriptors, plan_group};
 use crate::compaction::publication::{input_segment_keys, CompactionPublication};
 use crate::compaction::step::MetadataCompactionCancellation;
-use crate::compaction::step::{CompactionAdmission, MetadataCompactionPolicy};
+use crate::compaction::step::MetadataCompactionPolicy;
 use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::segment::row::manifest_row_commit_seq;
 use crate::segment::runs::MetadataFamilyGroup;
@@ -197,8 +197,7 @@ async fn seed_bindings_workload(store: &LocalFsStore, namespace_id: &NamespaceId
 ///
 /// Renames are what make it lopsided. Every rename writes a bind and an
 /// unbind under the same parent, and no inode row and no revision row, so the
-/// parent grows while the rest of the namespace stays where it was. That is
-/// the shape the old per-step row budget had no answer for.
+/// parent grows while the rest of the namespace stays where it was.
 async fn seed_one_wide_directory(store: &LocalFsStore, namespace_id: &NamespaceId) {
     let context = test_context();
     bootstrap_namespace(store, namespace_id, &context)
@@ -270,12 +269,10 @@ async fn seed_one_wide_directory(store: &LocalFsStore, namespace_id: &NamespaceI
 // Driving a job
 // -------------------------------------------------------------------------
 
-/// A budget that admits the whole group in one unit, whatever the row budget
-/// of a `metadata` pass.
+/// A budget that admits the whole group in one unit.
 fn compact_everything_policy() -> MetadataRunPolicy {
     MetadataRunPolicy {
         max_delta_runs: NonZeroUsize::MIN,
-        max_decoded_input_rows_per_step: NonZeroUsize::new(4_000_000).expect("nonzero"),
         max_decoded_input_bytes_per_step: NonZeroUsize::new(1 << 30).expect("nonzero"),
         max_input_runs_per_step: NonZeroUsize::new(64).expect("nonzero"),
         ..MetadataRunPolicy::default()
@@ -288,40 +285,6 @@ fn starving_policy() -> MetadataRunPolicy {
     MetadataRunPolicy {
         max_delta_runs: NonZeroUsize::MIN,
         max_decoded_input_bytes_per_step: NonZeroUsize::MIN,
-        ..MetadataRunPolicy::default()
-    }
-}
-
-/// A per-step row budget one row short of what `group`'s base run holds.
-///
-/// That is the production condition: no window over this group makes progress,
-/// so a step hands it to a job, while every other group is still compacted normally
-/// on the steps around it.
-async fn policy_that_starves_the_group<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    group: MetadataFamilyGroup,
-) -> MetadataRunPolicy {
-    let segments = load_current_manifest_segments(store, namespace_id).await;
-    let base_rows: u64 = runs_newest_first(segments.manifest().payload())
-        .iter()
-        .filter(|run| run.tier == RunTier::Base)
-        .flat_map(|run| run.segments.iter())
-        .filter(|family_segments| group.families().contains(&family_segments.family))
-        .flat_map(|family_segments| &family_segments.segments)
-        .map(|descriptor| descriptor.row_count)
-        .sum();
-    assert!(
-        base_rows > 1,
-        "the seed must leave this group a base run to starve"
-    );
-    MetadataRunPolicy {
-        max_delta_runs: NonZeroUsize::MIN,
-        max_decoded_input_rows_per_step: NonZeroUsize::new(
-            usize::try_from(base_rows).expect("test row counts are small") - 1,
-        )
-        .expect("nonzero"),
-        max_rows_per_segment: NonZeroUsize::new(4).expect("nonzero"),
         ..MetadataRunPolicy::default()
     }
 }
@@ -594,7 +557,6 @@ async fn compact_group_whole<S: ObjectStore + ?Sized>(
     .compact_metadata_unit(
         None,
         MetadataCompactionPolicy::CompactImmediately,
-        crate::compaction::CompactionAdmission::AnySize,
         loonfs_types::CompactorEpoch(0),
         &crate::compaction::MetadataCompactionCancellation::default(),
     )
@@ -629,7 +591,7 @@ async fn the_planner_takes_the_groups_oldest_window_whole() {
     let floor_seq = read_floor_seq(&store, &namespace_id).await;
     let segments = load_current_manifest_segments(&store, &namespace_id).await;
 
-    // A one-byte buffer and a one-row budget change nothing about the plan.
+    // A one-byte buffer changes nothing about the plan.
     for policy in [compact_everything_policy(), starving_policy()] {
         let spec = plan_group(
             segments.manifest().payload(),
@@ -651,174 +613,6 @@ async fn the_planner_takes_the_groups_oldest_window_whole() {
             input.len() > 1,
             "this workload must leave a base under at least one delta run"
         );
-    }
-}
-
-/// Checks that a unit that admits only windows within the row budget reports
-/// a larger window as too large, reads only the manifest, and publishes
-/// nothing, and that a unit that admits any size compacts the same window
-/// whole.
-#[tokio::test]
-async fn a_window_over_the_row_budget_is_too_large_for_a_bounded_call() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    seed_bindings_workload(&store, &namespace_id).await;
-    let group = MetadataFamilyGroup::Bindings;
-    let policy = policy_that_starves_the_group(&store, &namespace_id, group).await;
-
-    // The tiers of delta runs are compacted within the budget first. Then the group's
-    // base and the run its tier was compacted into make a window over it.
-    let store = loonfs_test_support::stores::RecordingStore::new(store, KeyPredicate::any());
-    let mut too_large = None;
-    for _ in 0..16 {
-        let before = current_manifest_number(&store, &namespace_id).await;
-        store.take();
-        match compact_unit_with(
-            &store,
-            &namespace_id,
-            policy,
-            CompactionAdmission::WithinRowBudget,
-        )
-        .await
-        {
-            CompactionUnitOutcome::Published { .. } => {}
-            CompactionUnitOutcome::TooLarge { group } => {
-                too_large = Some((group, before));
-                break;
-            }
-            other => panic!("a bounded unit compacts or reports a window too large, got {other:?}"),
-        }
-    }
-    let (planned, before) = too_large.expect("a bounded unit reports the group too large");
-    assert_eq!(planned, group);
-    assert!(
-        store.take().iter().all(|operation| matches!(
-            parse_object_key(operation.key()).map(|key| key.family()),
-            Some(DurableObjectFamily::Hint | DurableObjectFamily::MetadataManifest)
-        )),
-        "a unit that's too large reads only the manifest"
-    );
-    assert_eq!(
-        current_manifest_number(&store, &namespace_id).await,
-        before,
-        "a window that's too large publishes nothing"
-    );
-
-    let report =
-        compact_unit_with(&store, &namespace_id, policy, CompactionAdmission::AnySize).await;
-    let CompactionUnitOutcome::Published {
-        group: compacted,
-        input_runs,
-        ..
-    } = report
-    else {
-        panic!("a unit that admits any size compacts the window, got {report:?}");
-    };
-    assert_eq!(compacted, group);
-    assert!(
-        input_runs > 1,
-        "the window is compacted whole, base included"
-    );
-    let segments = load_current_manifest_segments(&store, &namespace_id).await;
-    let runs = input_runs_for_group(segments.manifest(), group);
-    assert_eq!(runs.len(), 1, "the group ends in one run");
-    assert_eq!(runs[0].tier, RunTier::Base);
-}
-
-/// Runs one compaction unit with compactor epoch 0 and the given admission.
-async fn compact_unit_with<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    policy: MetadataRunPolicy,
-    admission: CompactionAdmission,
-) -> CompactionUnitOutcome {
-    {
-        let mut fixture = crate::test_support::NamespaceFixture::new(
-            store,
-            namespace_id,
-            &crate::test_support::writer_at("test-writer", 0),
-        );
-        fixture.namespace.run_policy = policy;
-        fixture
-    }
-    .engine()
-    .compact_metadata_unit(
-        None,
-        MetadataCompactionPolicy::default(),
-        admission,
-        loonfs_types::CompactorEpoch(0),
-        &MetadataCompactionCancellation::default(),
-    )
-    .await
-    .expect("run a compaction unit")
-}
-
-/// Checks that a unit that admits only windows within the row budget compacts
-/// small delta batches, and never reports one as too large.
-#[tokio::test]
-async fn small_delta_batches_are_compacted_within_the_row_budget() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = test_context();
-    seed_bindings_workload(&store, &namespace_id).await;
-    let group = MetadataFamilyGroup::Bindings;
-    let policy = MetadataRunPolicy {
-        max_delta_runs: NonZeroUsize::MIN,
-        ..MetadataRunPolicy::default()
-    };
-
-    // Budgets this group fits, so every unit compacts.
-    let mut compactions = 0usize;
-    for _ in 0..16 {
-        let report = compact_unit_with(
-            &store,
-            &namespace_id,
-            policy,
-            CompactionAdmission::WithinRowBudget,
-        )
-        .await;
-        match report {
-            CompactionUnitOutcome::Published {
-                group: compacted, ..
-            } => {
-                if compacted == group {
-                    compactions += 1;
-                }
-            }
-            CompactionUnitOutcome::NotNeeded => break,
-            other => panic!("a window within the row budget must be compacted, got {other:?}"),
-        }
-    }
-    assert!(
-        compactions > 0,
-        "the ordinary compaction must do this group's work"
-    );
-
-    // A new delta batch is compacted within the row budget too.
-    for round in 0..3u64 {
-        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
-            .write_file_bytes(&format!("/steady-{round}.txt"), b"steady\n", None)
-            .await
-            .expect("write a file");
-        create_checkpoint(&store, &namespace_id, &context)
-            .await
-            .expect("checkpoint the write");
-    }
-    for _ in 0..16 {
-        let report = compact_unit_with(
-            &store,
-            &namespace_id,
-            policy,
-            CompactionAdmission::WithinRowBudget,
-        )
-        .await;
-        match report {
-            CompactionUnitOutcome::Published { .. } => {}
-            CompactionUnitOutcome::NotNeeded => break,
-            other => panic!("a window within the row budget must be compacted, got {other:?}"),
-        }
     }
 }
 
@@ -2033,7 +1827,7 @@ async fn a_compaction_keeps_its_reads_and_its_decoded_blocks_bounded() {
 }
 
 #[tokio::test]
-async fn one_directory_far_past_the_row_budget_streams_a_row_at_a_time() {
+async fn one_wide_directory_streams_a_row_at_a_time() {
     let job_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(job_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -2104,41 +1898,6 @@ async fn one_directory_far_past_the_row_budget_streams_a_row_at_a_time() {
 // The whole arc, through the step maintenance calls
 // -------------------------------------------------------------------------
 
-/// The unbind rows a floor covers, which is the churn a rebuild reclaims.
-fn unbinds_at_or_below(
-    rows: &BTreeMap<ApiMetadataRowFamily, Vec<MetadataRow>>,
-    floor_seq: ChangeSeq,
-) -> usize {
-    rows[&ApiMetadataRowFamily::DirentryBinds]
-        .iter()
-        .filter(|row| {
-            matches!(row, MetadataRow::DirentryBinding(binding) if !binding.is_bound() && binding.committed_seq <= floor_seq)
-        })
-        .count()
-}
-
-/// The group's segments the manifest holds outside a spec's input runs: the
-/// runs that arrived after the job was planned.
-async fn group_segments_outside_the_job<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    spec: &MetadataCompactionSpec,
-    group: MetadataFamilyGroup,
-) -> BTreeSet<String> {
-    let inputs: BTreeSet<RunNo> = spec.inputs().iter().copied().collect();
-    load_current_manifest_segments(store, namespace_id)
-        .await
-        .manifest()
-        .payload()
-        .runs
-        .iter()
-        .filter(|run| !inputs.contains(&run.run_no))
-        .flat_map(|run| &run.segments)
-        .filter(|descriptor| group.families().contains(&descriptor.family))
-        .map(metadata_segment_object_key)
-        .collect()
-}
-
 /// Every object key the current manifest references.
 async fn referenced_segment_keys<S: ObjectStore + ?Sized>(
     store: &S,
@@ -2153,278 +1912,6 @@ async fn referenced_segment_keys<S: ObjectStore + ?Sized>(
         .flat_map(|run| &run.segments)
         .map(metadata_segment_object_key)
         .collect()
-}
-
-#[tokio::test]
-async fn an_over_budget_group_is_rebuilt_by_a_job_while_maintenance_carries_on() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = test_context();
-    seed_bindings_workload(&store, &namespace_id).await;
-    let group = MetadataFamilyGroup::Bindings;
-    let policy = policy_that_starves_the_group(&store, &namespace_id, group).await;
-    let floor_seq = read_floor_seq(&store, &namespace_id).await;
-    let rows_before = group_rows_of_current_manifest(&store, &namespace_id, group).await;
-    assert!(
-        unbinds_at_or_below(&rows_before, floor_seq) > 0,
-        "the seed must leave churn the floor covers, or a rebuild reclaims nothing"
-    );
-    let mut visible = visible_namespace(&store, &namespace_id).await;
-    assert!(
-        visible
-            .iter()
-            .any(|state| matches!(state.file, CurrentFile::Visible { .. })),
-        "the seed must leave something to read"
-    );
-
-    let mut active: Option<MetadataCompactionSpec> = None;
-    let mut steps_with_a_job_running = 0usize;
-    let mut arrived_keys = BTreeSet::new();
-    let mut published_jobs = 0usize;
-    let mut settled = false;
-
-    for _step in 0..64 {
-        let report = compact_unit_with(
-            &store,
-            &namespace_id,
-            policy,
-            CompactionAdmission::WithinRowBudget,
-        )
-        .await;
-        match report {
-            CompactionUnitOutcome::Published {
-                group: compacted, ..
-            } => {
-                if active.is_some() {
-                    assert_ne!(
-                        compacted, group,
-                        "no step may compact the group a job is rebuilding"
-                    );
-                }
-            }
-            CompactionUnitOutcome::TooLarge {
-                group: planned_group,
-            } => {
-                // One long unit at a time per namespace: a report that
-                // arrives while one runs is skipped.
-                if active.is_none() {
-                    assert_eq!(planned_group, group, "this budget starves this group first");
-                    let spec = compaction_spec_for_group(&store, &namespace_id, group).await;
-                    active = Some(spec.clone());
-                    if arrived_keys.is_empty() {
-                        // A run arrives while the first job runs. It is
-                        // outside that job's input, so the job never reads
-                        // it and the publication must be written underneath it.
-                        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
-                            .write_file_bytes(
-                                "/arrived-mid-job.txt",
-                                b"arrived while the job ran\n",
-                                None,
-                            )
-                            .await
-                            .expect("write a file while the job runs");
-                        create_checkpoint(&store, &namespace_id, &context)
-                            .await
-                            .expect("checkpoint it");
-                        arrived_keys =
-                            group_segments_outside_the_job(&store, &namespace_id, &spec, group)
-                                .await;
-                        assert!(
-                            !arrived_keys.is_empty(),
-                            "the arriving run must sit outside the job's input"
-                        );
-                        visible = visible_namespace(&store, &namespace_id).await;
-                    }
-                }
-            }
-            CompactionUnitOutcome::Abandoned
-            | CompactionUnitOutcome::Fenced
-            | CompactionUnitOutcome::Cancelled => {
-                panic!("no concurrent publisher exists in this test")
-            }
-            CompactionUnitOutcome::NotNeeded if active.is_none() => {
-                settled = true;
-                break;
-            }
-            CompactionUnitOutcome::NotNeeded => {}
-        }
-
-        // Every step leaves a manifest the loader accepts and a read
-        // answering exactly what it answered before.
-        assert_eq!(
-            visible_namespace(&store, &namespace_id).await,
-            visible,
-            "a step changed what a read answers"
-        );
-
-        // Another caller can step while the job runs in its own task.
-        // Waiting a few steps and then running it here is the same
-        // interleaving with the timing taken out: the steps in between did
-        // ordinary work against a manifest that holds the job's whole input.
-        if let Some(spec) = active.clone() {
-            steps_with_a_job_running += 1;
-            if steps_with_a_job_running.is_multiple_of(3) {
-                publish_planned_compaction(&store, &namespace_id, &context, policy, &spec).await;
-                published_jobs += 1;
-                active = None;
-                if published_jobs == 1 {
-                    let referenced = referenced_segment_keys(&store, &namespace_id).await;
-                    assert!(
-                        arrived_keys.is_subset(&referenced),
-                        "the run that arrived while the job ran must survive its publication"
-                    );
-                }
-                assert_eq!(
-                    visible_namespace(&store, &namespace_id).await,
-                    visible,
-                    "the job's publication changed what a read answers"
-                );
-            }
-        }
-    }
-
-    assert!(published_jobs > 0, "the group must be rebuilt by a job");
-    assert!(
-        settled,
-        "maintenance must settle with nothing left to compact"
-    );
-
-    let segments = load_current_manifest_segments(&store, &namespace_id).await;
-    let base_runs = input_runs_for_group(segments.manifest(), group)
-        .into_iter()
-        .filter(|run| run.tier == RunTier::Base)
-        .count();
-    drop(segments);
-    assert_eq!(base_runs, 1, "the group must end in one base run");
-
-    let rows_after = group_rows_of_current_manifest(&store, &namespace_id, group).await;
-    assert_eq!(
-        unbinds_at_or_below(&rows_after, floor_seq),
-        0,
-        "every unbind the floor covered must be gone"
-    );
-    assert!(
-        rows_after.values().map(Vec::len).sum::<usize>()
-            < rows_before.values().map(Vec::len).sum::<usize>(),
-        "the rebuild must reclaim rows"
-    );
-}
-
-/// Runs units that admit only windows within the row budget until one
-/// reports a group as too large, and returns that group's plan.
-///
-/// A unit compacts the group with the most delta rows, so the starved group is
-/// reached after the groups that still fit have been compacted.
-async fn step_until_a_compaction_is_planned<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    _context: &WriterAt,
-    policy: MetadataRunPolicy,
-) -> MetadataCompactionSpec {
-    for _step in 0..64 {
-        let report = compact_unit_with(
-            store,
-            namespace_id,
-            policy,
-            CompactionAdmission::WithinRowBudget,
-        )
-        .await;
-        match report {
-            CompactionUnitOutcome::TooLarge { group } => {
-                return compaction_spec_for_group(store, namespace_id, group).await
-            }
-            CompactionUnitOutcome::Published { .. } => {}
-            other => panic!("expected a compaction or a window too large, got {other:?}"),
-        }
-    }
-    panic!("no unit found a window too large")
-}
-
-#[tokio::test]
-async fn a_job_that_dies_mid_run_leaves_orphans_and_the_next_step_plans_it_again() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = test_context();
-    seed_bindings_workload(
-        &LocalFsStore::new(temp_dir.path()).expect("store"),
-        &namespace_id,
-    )
-    .await;
-    let group = MetadataFamilyGroup::Bindings;
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let policy = policy_that_starves_the_group(&store, &namespace_id, group).await;
-
-    let spec = step_until_a_compaction_is_planned(&store, &namespace_id, &context, policy).await;
-    let visible = visible_namespace(&store, &namespace_id).await;
-    let manifest_before = current_manifest_number(&store, &namespace_id).await;
-
-    // The attempt dies partway through, which is what a cancellation and a
-    // kill leave behind alike: output segments and nothing else. The
-    // cancellation happens after a number of reads rather than at a boundary
-    // the test picked, so several thresholds are tried until one happens after
-    // the job has written something.
-    let mut orphans = BTreeSet::new();
-    for reads_before_cancel in [8usize, 16, 24, 32] {
-        let cancellation = MetadataCompactionCancellation::default();
-        let dying_store = CancelAfterReadsStore {
-            inner: LocalFsStore::new(temp_dir.path()).expect("store"),
-            cancellation: cancellation.clone(),
-            reads_before_cancel,
-            reads: AtomicUsize::new(0),
-        };
-        let outcome =
-            run_planned_compaction_under(&dying_store, &namespace_id, policy, &spec, &cancellation)
-                .await;
-        assert_eq!(
-            outcome,
-            CompactionUnitOutcome::Cancelled,
-            "the cancellation must happen before the job finishes"
-        );
-        assert_eq!(
-            current_manifest_number(&store, &namespace_id).await,
-            manifest_before,
-            "a job that died must publish nothing"
-        );
-        assert_eq!(
-            visible_namespace(&store, &namespace_id).await,
-            visible,
-            "and must leave what a read answers exactly where it was"
-        );
-        orphans.extend(orphan_segment_keys(&store, &namespace_id).await);
-        if !orphans.is_empty() {
-            break;
-        }
-    }
-    assert!(
-        !orphans.is_empty(),
-        "an attempt must leave the segments it had written staged"
-    );
-    let referenced = referenced_segment_keys(&store, &namespace_id).await;
-    assert!(
-        orphans.is_disjoint(&referenced),
-        "and nothing may reference them"
-    );
-
-    let spec = step_until_a_compaction_is_planned(&store, &namespace_id, &context, policy).await;
-    publish_planned_compaction(&store, &namespace_id, &context, policy, &spec).await;
-
-    assert_eq!(
-        visible_namespace(&store, &namespace_id).await,
-        visible,
-        "the rebuild must leave what a read answers where it was"
-    );
-    let segments = load_current_manifest_segments(&store, &namespace_id).await;
-    let runs = input_runs_for_group(segments.manifest(), group);
-    drop(segments);
-    assert_eq!(runs.len(), 1, "the group must end in one run");
-    assert_eq!(runs[0].tier, RunTier::Base);
-    // The first attempt's segments are still staged and still named by
-    // nothing: orphans for the collector, not state anything reads.
-    let referenced = referenced_segment_keys(&store, &namespace_id).await;
-    let staged_now = orphan_segment_keys(&store, &namespace_id).await;
-    assert!(orphans.is_subset(&staged_now));
-    assert!(orphans.is_disjoint(&referenced));
 }
 
 /// Publishes a competing manifest the first time the finalizer writes its
@@ -2728,7 +2215,6 @@ async fn a_unit_that_loses_its_put_publishes_over_the_winner_unless_its_inputs_m
         .compact_metadata_unit(
             None,
             MetadataCompactionPolicy::CompactImmediately,
-            CompactionAdmission::AnySize,
             loonfs_types::CompactorEpoch(0),
             &MetadataCompactionCancellation::default(),
         )
@@ -2867,7 +2353,6 @@ async fn a_unit_whose_puts_lose_to_unrelated_publications_publishes_without_rewr
     .compact_metadata_unit(
         None,
         MetadataCompactionPolicy::CompactImmediately,
-        CompactionAdmission::AnySize,
         loonfs_types::CompactorEpoch(0),
         &MetadataCompactionCancellation::default(),
     )
@@ -2979,7 +2464,6 @@ async fn a_fold_that_a_unit_publishes_over_leaves_its_run_for_a_later_tier() {
         .compact_metadata_unit(
             None,
             MetadataCompactionPolicy::SizeTiered,
-            CompactionAdmission::AnySize,
             loonfs_types::CompactorEpoch(0),
             &MetadataCompactionCancellation::default(),
         )
@@ -3211,7 +2695,6 @@ async fn a_backlogged_job_limits_input_and_preserves_unselected_runs() {
 #[tokio::test]
 async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_publication() {
     use crate::limits::METADATA_COMPACTION_BUDGET_MS;
-    use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
     use loonfs_test_support::stores::RecordingStore;
 
     let directory = tempdir().expect("tempdir");
@@ -3281,32 +2764,26 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
             })
     };
     store.reset();
-    for admission in [
-        CompactionAdmission::WithinRowBudget,
-        CompactionAdmission::AnySize,
-    ] {
-        let unit = {
-            let mut fixture = crate::test_support::NamespaceFixture::new(
-                &store,
-                &namespace,
-                &crate::test_support::writer_at("test-writer", 0),
-            );
-            fixture.namespace.run_policy = compact_everything_policy();
-            fixture
-        }
-        .engine()
-        .compact_metadata_unit(
-            None,
-            MetadataCompactionPolicy::CompactImmediately,
-            admission,
-            epoch,
-            &cancellation,
-        )
-        .await
-        .expect("unit fence");
-        assert_eq!(unit, CompactionUnitOutcome::Fenced);
-        assert!(reads_only_manifests(&store));
+    let unit = {
+        let mut fixture = crate::test_support::NamespaceFixture::new(
+            &store,
+            &namespace,
+            &crate::test_support::writer_at("test-writer", 0),
+        );
+        fixture.namespace.run_policy = compact_everything_policy();
+        fixture
     }
+    .engine()
+    .compact_metadata_unit(
+        None,
+        MetadataCompactionPolicy::CompactImmediately,
+        epoch,
+        &cancellation,
+    )
+    .await
+    .expect("unit fence");
+    assert_eq!(unit, CompactionUnitOutcome::Fenced);
+    assert!(reads_only_manifests(&store));
 
     publication.compactor_epoch = next_epoch;
     timer.set_ms(METADATA_COMPACTION_BUDGET_MS + 1);
@@ -3581,7 +3058,6 @@ async fn a_unit_loads_the_current_manifest_only_without_a_basis() {
         .compact_metadata_unit(
             basis,
             MetadataCompactionPolicy::default(),
-            CompactionAdmission::AnySize,
             loonfs_types::CompactorEpoch(0),
             &MetadataCompactionCancellation::default(),
         )
@@ -3708,7 +3184,6 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
     .compact_metadata_unit(
         None,
         MetadataCompactionPolicy::CompactImmediately,
-        CompactionAdmission::AnySize,
         epoch,
         &MetadataCompactionCancellation::default(),
     )
@@ -3776,7 +3251,6 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
     .compact_metadata_unit(
         None,
         MetadataCompactionPolicy::CompactImmediately,
-        CompactionAdmission::AnySize,
         epoch,
         &MetadataCompactionCancellation::default(),
     )

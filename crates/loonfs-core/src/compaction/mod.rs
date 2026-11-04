@@ -14,6 +14,5 @@ pub use self::merge_iterator::{
     refill_iterators, select_next_iterator, SegmentBlockLoader, SegmentRowIterator,
 };
 pub use self::step::{
-    CompactionAdmission, CompactionUnitOutcome, MetadataCompactionCancellation,
-    MetadataCompactionPolicy,
+    CompactionUnitOutcome, MetadataCompactionCancellation, MetadataCompactionPolicy,
 };

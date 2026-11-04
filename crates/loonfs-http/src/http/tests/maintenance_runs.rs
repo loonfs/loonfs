@@ -2,8 +2,8 @@
 //! runs against namespaces that do not exist or are deleted.
 
 use super::*;
+use loonfs::MaintainMetadataOptions;
 use loonfs::MetadataCompactionOutcome;
-use loonfs::{MaintainMetadataOptions, MaintenanceCancellation};
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_test_support::ids::writer_id;
 use loonfs_test_support::stores::{RecordedOperation, RecordingStore};
@@ -106,11 +106,11 @@ fn segment_reads_and_manifest_puts(store: &RecordingStore<LocalFsStore>) -> (usi
     counts
 }
 
-/// Checks that one `metadata` run does the work that a client's `metadata`
-/// and `metadata_compaction` runs did, with the same metadata segment reads
-/// and the same manifest publications.
+/// Checks that one `metadata` run does the work of repeated passes until a
+/// pass finds nothing due, with the same metadata segment reads and the same
+/// manifest publications.
 #[tokio::test]
-async fn one_metadata_run_does_the_work_of_the_step_and_compaction_runs() {
+async fn one_metadata_run_does_the_work_of_repeated_passes() {
     let directory = tempdir().expect("tempdir");
     let store = Arc::new(RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
@@ -130,9 +130,6 @@ async fn one_metadata_run_does_the_work_of_the_step_and_compaction_runs() {
     .await
     .expect("app");
 
-    // These are the calls of a client that ran one pass per `metadata` run,
-    // and one unit per `metadata_compaction` run whenever a pass reported a
-    // window too large for it, until a pass found nothing due.
     store.reset();
     let mut units = 0;
     loop {
@@ -144,15 +141,6 @@ async fn one_metadata_run_does_the_work_of_the_step_and_compaction_runs() {
         match step.compaction {
             MetadataCompactionOutcome::NotNeeded => break,
             MetadataCompactionOutcome::Published { .. } => units += 1,
-            MetadataCompactionOutcome::MetadataCompactionRequired => {
-                let unit = state
-                    .maintenance
-                    .compact_metadata(&stepped, &MaintenanceCancellation::new())
-                    .await
-                    .expect("compaction unit");
-                assert_matches!(unit.compaction, MetadataCompactionOutcome::Published { .. });
-                units += 1;
-            }
             outcome => panic!("no other publisher runs in this test, not {outcome:?}"),
         }
     }

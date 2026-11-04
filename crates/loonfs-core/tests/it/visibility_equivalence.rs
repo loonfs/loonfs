@@ -992,7 +992,6 @@ async fn drain_compaction(
             .compact_metadata_unit(
                 None,
                 loonfs_core::MetadataCompactionPolicy::default(),
-                loonfs_core::CompactionAdmission::AnySize,
                 loonfs_types::CompactorEpoch(0),
                 &loonfs_core::MetadataCompactionCancellation::default(),
             )

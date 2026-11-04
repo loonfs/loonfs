@@ -124,11 +124,10 @@ impl CompactionInstruments {
     }
 
     /// Reports one finished compaction unit and any window it compacted. A
-    /// unit that found nothing to compact, or a window too large for its call,
-    /// reports nothing.
+    /// unit that found nothing to compact reports nothing.
     pub(crate) fn finished(&self, outcome: &crate::Result<CompactionUnitOutcome>, elapsed_ms: u64) {
         let (outcome, totals) = match outcome {
-            Ok(CompactionUnitOutcome::NotNeeded | CompactionUnitOutcome::TooLarge { .. }) => return,
+            Ok(CompactionUnitOutcome::NotNeeded) => return,
             Ok(CompactionUnitOutcome::Published {
                 rows_read,
                 rows_written,

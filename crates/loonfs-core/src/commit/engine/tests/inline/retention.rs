@@ -50,7 +50,6 @@ async fn compact_and_check_pair(
         .compact_metadata_unit(
             None,
             MetadataCompactionPolicy::CompactImmediately,
-            crate::compaction::CompactionAdmission::AnySize,
             loonfs_types::CompactorEpoch(0),
             &crate::compaction::MetadataCompactionCancellation::default(),
         )

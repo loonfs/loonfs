@@ -826,21 +826,6 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         self
     }
 
-    /// Narrows the rows, by their runs' descriptor counts, that a window of
-    /// this engine's compaction units may list when a unit admits only
-    /// windows within the row budget, so a test can starve that budget with
-    /// a few thousand rows. Test-only: folds and every other budget are
-    /// unchanged.
-    #[cfg(any(test, feature = "test-support"))]
-    #[must_use]
-    pub fn narrow_compaction_input_rows(
-        mut self,
-        max_decoded_input_rows_per_step: std::num::NonZeroUsize,
-    ) -> Self {
-        self.namespace.run_policy.max_decoded_input_rows_per_step = max_decoded_input_rows_per_step;
-        self
-    }
-
     /// Returns a commit engine for this engine's namespace: a one-shot
     /// writer session that acquires its own epoch.
     pub fn commit_engine(&self) -> NamespaceCommitEngine<S>

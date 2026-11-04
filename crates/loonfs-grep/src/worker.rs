@@ -21,8 +21,7 @@ use loonfs::engine::{next_run_no_after, DecodedBlockCacheConfig, DecodedBlockCac
 use loonfs::{CoreError, CreateSnapshotOptions, LoonFs, Maintenance, ReadOnly, Writable};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::segment_blocks::{
-    DEFAULT_MAX_COMPACTION_INPUT_ROWS, DEFAULT_MAX_DELTA_RUNS, DEFAULT_MAX_ROWS_PER_SEGMENT,
-    DEFAULT_TARGET_BLOCK_BYTES,
+    DEFAULT_MAX_DELTA_RUNS, DEFAULT_MAX_ROWS_PER_SEGMENT, DEFAULT_TARGET_BLOCK_BYTES,
 };
 use loonfs_types::GrepIndex;
 use loonfs_types::{ChangeSeq, NamespaceId, PinId, RunNo};
@@ -56,6 +55,8 @@ pub(crate) const GREP_WORKER_REQUESTS_IN_FLIGHT: usize = 8;
 const GREP_WORKER_BLOCK_CACHE_DECODED_BYTES: usize = 256 * DEFAULT_TARGET_BLOCK_BYTES.get();
 // Keep grep's fold threshold independent of metadata reorganization limits.
 const GREP_MAX_MID_RUNS: NonZeroUsize = NonZeroUsize::new(8).unwrap();
+/// Rows one reorganize step rewrites before it publishes and yields.
+const GREP_REORGANIZE_MAX_INPUT_ROWS_PER_STEP: NonZeroUsize = NonZeroUsize::new(131_072).unwrap();
 
 /// Writer-side budgets for one grep build or reorganize step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,7 +84,7 @@ impl Default for GramIndexBuildPolicy {
             max_rows_per_segment: DEFAULT_MAX_ROWS_PER_SEGMENT,
             max_delta_runs: DEFAULT_MAX_DELTA_RUNS,
             max_mid_runs: GREP_MAX_MID_RUNS,
-            max_decoded_input_rows_per_step: DEFAULT_MAX_COMPACTION_INPUT_ROWS,
+            max_decoded_input_rows_per_step: GREP_REORGANIZE_MAX_INPUT_ROWS_PER_STEP,
         }
     }
 }

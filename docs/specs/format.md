@@ -2541,7 +2541,6 @@ These are defaults for the reference producer and runtime. A target size can be 
 | Inline filter threshold | 1,024 stored bytes |
 | Target segment rows | 65,536 |
 | Target decoded segment size | 8 MiB |
-| Maximum compaction input rows in one metadata maintenance pass | 131,072 |
 | Maximum decoded input one compaction keeps in memory | 64 MiB |
 | Automatic WAL-fold threshold | 32 WAL objects |
 | Idle WAL-fold period | 15 minutes |

@@ -12,14 +12,13 @@ Compaction works on family groups, which [Metadata rows and row keys](../specs/f
 
 Within a group, the automatic size-tiered policy looks for a size tier, as [Compaction windows](../specs/format.md#102-compaction-windows) describes. A tier starts at a run and grows toward older runs while each older run is at most four times the size of the smallest run already in it. The newest tier of at least four runs (`MetadataRunPolicy::min_compaction_runs`) is due, and the unit merges the whole tier, up to eight runs. A tier reaches the base when the base is at most four times the tier's smallest run, so the base is rewritten after newer runs of at least a quarter of its size build up. A group with eight delta runs (`MetadataRunPolicy::max_delta_runs`) and no tier merges a window of its newest runs. The window starts with the two newest runs and grows toward older runs while each older run is at most four times the total size of the runs already in it. Stored bytes and row counts come from the manifest's descriptors, so planning reads no segment.
 
-The unit merges the whole window it selects. A `metadata` maintenance pass doesn't run a long compaction, so it admits only a window whose runs have at most 131,072 rows, and it reports a larger window as `metadata_compaction_required`. `Maintenance::compact_metadata`, and `Maintenance::maintain_metadata_while_due` after that report, run a unit that admits a window of any size.
+The unit merges the whole window it selects, whatever its size. `Maintenance::compact_metadata` merges a group's runs whatever their sizes, one window per call.
 
 | Policy or bound | Behavior |
 | --- | --- |
 | `SizeTiered` | Merges a tier of at least four runs of similar size, or a window of a group's newest runs once the group has eight delta runs. |
 | `CompactImmediately` | Merges a group's runs whatever their sizes, for explicit compaction. A group of more than eight runs merges the runs above a large base first. |
 | Eight-run limit | Applies to every unit, including explicit requests. |
-| Row budget of a `metadata` pass | At most 131,072 rows in the selected window. |
 | Merge input | At most 64 MiB of decoded data-block input in memory at once. |
 
 A large backlog can need several publications. Explicit compaction merges one window per call, so a caller repeats the call for as long as it publishes. Automatic size tiering reduces repeated rewrites of the base, but obsolete metadata can stay until enough newer data builds up.

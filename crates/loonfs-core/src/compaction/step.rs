@@ -2,8 +2,9 @@
 //!
 //! A unit selects one family group and a window of at most
 //! `max_input_runs_per_step` complete runs from the current manifest's
-//! descriptors (see [`super::plan`]), rewrites the window into one run with
-//! [`super::group_compaction`], and publishes the replacement
+//! descriptors (see [`super::plan`]), rewrites the whole window into one run
+//! with [`super::group_compaction`] whatever the number of rows its runs list,
+//! and publishes the replacement
 //! manifest through [`super::publication`]. A base compaction may apply retention,
 //! and a delta compaction drops only superseded layouts. [`MetadataCompactionPolicy`]
 //! sets which runs a group compacts, and when. A unit publishes under the
@@ -34,6 +35,7 @@ pub enum MetadataCompactionPolicy {
     /// Compact a tier of similar-size runs once it has
     /// [`MetadataRunPolicy::min_compaction_runs`](crate::segment::MetadataRunPolicy::min_compaction_runs) runs, and a group's newest
     /// runs once it has [`MetadataRunPolicy::max_delta_runs`](crate::segment::MetadataRunPolicy::max_delta_runs) delta runs.
+    /// Background compaction plans with this policy.
     #[default]
     SizeTiered,
     /// Compact a group's runs whatever their sizes, for an explicit compaction
@@ -41,28 +43,11 @@ pub enum MetadataCompactionPolicy {
     CompactImmediately,
 }
 
-/// Which windows one compaction call may compact.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CompactionAdmission {
-    /// Any window, whatever the number of rows its runs list.
-    AnySize,
-    /// A window whose runs list at most `max_decoded_input_rows_per_step`
-    /// rows, so the call never runs a long compaction. A larger window
-    /// returns [`CompactionUnitOutcome::TooLarge`].
-    WithinRowBudget,
-}
-
 /// How one compaction unit ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompactionUnitOutcome {
     /// No family group has eligible input.
     NotNeeded,
-    /// The selected window lists more rows than the call admits, so the unit
-    /// compacted nothing.
-    TooLarge {
-        /// The group the unit selected.
-        group: MetadataFamilyGroup,
-    },
     /// The unit compacted one family group's window and published the next
     /// manifest. The new run is the group's base when the window started at
     /// the group's oldest run, and a bigger delta run otherwise.
@@ -110,9 +95,10 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     ///
     /// The unit plans from `basis`, a manifest that the caller already has,
     /// or from the current manifest that it loads when `basis` is `None`, and
-    /// reads its input runs without the cache. `admission` determines whether
-    /// the unit may compact a window over the run policy's row budget, and the
-    /// compaction checks `cancellation` between blocks. The unit publishes through
+    /// reads its input runs without the cache. The unit compacts the whole
+    /// window that `compaction_policy` selects, whatever the number of rows
+    /// its runs list, and the compaction checks `cancellation` between
+    /// blocks. The unit publishes through
     /// `finalize_metadata_compaction`, starting from the
     /// manifest it planned from, and finalization retries a lost put over the
     /// manifest that won while the unit's input segments are unchanged. The
@@ -130,7 +116,6 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         &self,
         basis: Option<PublicationBasis>,
         compaction_policy: MetadataCompactionPolicy,
-        admission: CompactionAdmission,
         compactor_epoch: CompactorEpoch,
         cancellation: &MetadataCompactionCancellation,
     ) -> Result<CompactionUnitOutcome> {
@@ -162,18 +147,6 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         ) else {
             return Ok(CompactionUnitOutcome::NotNeeded);
         };
-        if admission == CompactionAdmission::WithinRowBudget
-            && spec.input_rows()
-                > self
-                    .namespace
-                    .run_policy
-                    .max_decoded_input_rows_per_step
-                    .get() as u64
-        {
-            return Ok(CompactionUnitOutcome::TooLarge {
-                group: spec.group(),
-            });
-        }
         // What the unit is about to read, recorded before it reads anything.
         // Finalization compares the manifest against this, so the run it
         // publishes stands in for exactly the segments it compacted.
@@ -268,7 +241,7 @@ fn log_unit_outcome(
             families = ?spec.families(),
             "metadata compaction unit fenced"
         ),
-        CompactionUnitOutcome::NotNeeded | CompactionUnitOutcome::TooLarge { .. } => {}
+        CompactionUnitOutcome::NotNeeded => {}
     }
 }
 

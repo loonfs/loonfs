@@ -54,15 +54,16 @@ impl Namespace<Writable> {
     /// admitted work, waits for the fold and the compaction, and ends the
     /// session.
     ///
-    /// The compaction stops at once while it waits for a compaction permit
-    /// or runs a `metadata` pass, and at its next block while it runs a unit
-    /// of any size, so close never waits for another session's compaction. From the moment this is called, commits and deletes through
-    /// every clone of this handle fail with `writer_session_closed`, and so
-    /// does [`LoonFs::open_namespace`] for this namespace until the drain
-    /// finishes. After this returns, the next open starts a new session,
-    /// which acquires a new writer epoch. Closing a session that no longer
-    /// admits work only waits for its drain, and the report says it was not
-    /// open. Fails with `shutting_down` after shutdown begins.
+    /// The compaction stops at once while it waits for a compaction permit,
+    /// and at its next block while it runs a unit, so close never waits for
+    /// another session's compaction. From the moment this is called, commits
+    /// and deletes through every clone of this handle fail with
+    /// `writer_session_closed`, and so does [`LoonFs::open_namespace`] for
+    /// this namespace until the drain finishes. After this returns, the next
+    /// open starts a new session, which acquires a new writer epoch. Closing
+    /// a session that no longer admits work only waits for its drain, and the
+    /// report says it was not open. Fails with `shutting_down` after shutdown
+    /// begins.
     pub async fn close(self) -> Result<CloseNamespaceReport> {
         trace::in_operation(
             operation_span!(self.core, "close", self.namespace_id),

@@ -255,7 +255,6 @@ impl Family {
                 .compact_metadata_unit(
                     None,
                     loonfs_core::MetadataCompactionPolicy::CompactImmediately,
-                    loonfs_core::CompactionAdmission::AnySize,
                     loonfs_types::CompactorEpoch(0),
                     &loonfs_core::MetadataCompactionCancellation::default(),
                 )
