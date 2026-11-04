@@ -8,11 +8,10 @@ use crate::entry::{GrepPruning, GrepReorganizeState};
 use crate::reads::{published_revision, NamespaceReads};
 use crate::segments::GrepSegments;
 use crate::{GrepError, Result};
-use loonfs::CoreError;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::ExtensionSegmentRef;
 use loonfs_types::format::segment_blocks::{SegmentFilter, SegmentFilterBuilder};
-use loonfs_types::{u64_from_usize, ChangeSeq, InodeId, RevisionNo, RunNo};
+use loonfs_types::{u64_from_usize, ChangeSeq, ErrorCode, InodeId, RevisionNo, RunNo};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Bytes of the revision filter's payload in one filter row, half of a data
@@ -206,7 +205,7 @@ pub(super) async fn re_reference_check_fails<S: ObjectStore + ?Sized>(
     };
     let values = match values_since(reads, pruning.filter_seq).await {
         Ok(values) => values,
-        Err(error) if below_retention_floor(&error) => return Ok(true),
+        Err(error) if error.code() == ErrorCode::RebootstrapRequired => return Ok(true),
         Err(error) => return Err(error),
     };
     for (run_no, translation) in translations {
@@ -223,17 +222,6 @@ pub(super) async fn re_reference_check_fails<S: ObjectStore + ?Sized>(
         }
     }
     Ok(false)
-}
-
-/// Whether `error` means that a read at an earlier sequence is no longer
-/// possible, because the retention floor passed it.
-fn below_retention_floor(error: &GrepError) -> bool {
-    matches!(
-        error,
-        GrepError::Runtime(loonfs::Error::Core(
-            CoreError::ReadRebootstrapRequired { .. } | CoreError::RebootstrapRequired { .. }
-        ))
-    )
 }
 
 /// Reads the change feed after `filter_seq`, and returns the content values

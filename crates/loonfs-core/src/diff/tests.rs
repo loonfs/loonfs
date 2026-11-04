@@ -423,8 +423,8 @@ async fn a_floor_advance_between_two_pages_fails_the_later_page() {
         .expect_err("the floor passed the diff's start");
     assert_matches!(
         error,
-        CoreError::DiffRebootstrapRequired {
-            from_seq: failed,
+        CoreError::RebootstrapRequired {
+            below: crate::error::HistoryPosition::DiffStart { from_seq: failed },
             retention_floor_seq,
         } if failed == from_seq && retention_floor_seq == advanced
     );

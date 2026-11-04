@@ -535,10 +535,16 @@ async fn a_base_reorganization_drops_a_dead_value_and_keeps_a_referenced_one() {
     assert_eq!(fixture.grep_paths("live needle").await, ["/a.txt"]);
 }
 
-#[tokio::test]
-async fn the_re_reference_check_abandons_a_reorganization_whose_dropped_value_comes_back() {
-    let fixture = ContentFixture::new("re-reference-check").await;
-    fixture.put("/a.txt", b"a comeback needle\n").await;
+/// Indexes `/a.txt` with `bytes` and then with a line appended, moves the
+/// retention floor to the head, and runs the first step of a base
+/// reorganization that drops the first value. Returns the first value's
+/// content reference and the policy whose later steps finish the
+/// reorganization.
+async fn start_a_pruning_base_reorganization(
+    fixture: &ContentFixture,
+    bytes: &[u8],
+) -> (ContentRef, GramIndexBuildPolicy) {
+    fixture.put("/a.txt", bytes).await;
     let first = fixture.content_ref("/a.txt").await;
     fixture
         .host
@@ -586,6 +592,36 @@ async fn the_re_reference_check_abandons_a_reorganization_whose_dropped_value_co
         pruning.is_some(),
         "the first step records the revisions that its pruning keeps"
     );
+    (first, to_base)
+}
+
+/// Runs reorganize steps under `policy` until one finishes or abandons the
+/// reorganization, and returns that step's outcome.
+async fn reorganize_until_settled(
+    fixture: &ContentFixture,
+    policy: GramIndexBuildPolicy,
+) -> GrepReorganizeOutcome {
+    let mut outcome = fixture.reorganize_step(policy).await;
+    for _ in 0..64 {
+        if !matches!(
+            outcome,
+            GrepReorganizeOutcome::UnitWritten {
+                completed: false,
+                ..
+            }
+        ) {
+            break;
+        }
+        outcome = fixture.reorganize_step(policy).await;
+    }
+    outcome
+}
+
+#[tokio::test]
+async fn the_re_reference_check_abandons_a_reorganization_whose_dropped_value_comes_back() {
+    let fixture = ContentFixture::new("re-reference-check").await;
+    let (first, to_base) =
+        start_a_pruning_base_reorganization(&fixture, b"a comeback needle\n").await;
 
     // A commit brings the first value back, and a build step finds its
     // `texts` row in the reorganization's inputs and skips it.
@@ -598,20 +634,10 @@ async fn the_re_reference_check_abandons_a_reorganization_whose_dropped_value_co
             ..
         }
     );
-    let mut outcome = fixture.reorganize_step(to_base).await;
-    for _ in 0..64 {
-        if !matches!(
-            outcome,
-            GrepReorganizeOutcome::UnitWritten {
-                completed: false,
-                ..
-            }
-        ) {
-            break;
-        }
-        outcome = fixture.reorganize_step(to_base).await;
-    }
-    assert_eq!(outcome, GrepReorganizeOutcome::Abandoned);
+    assert_eq!(
+        reorganize_until_settled(&fixture, to_base).await,
+        GrepReorganizeOutcome::Abandoned
+    );
     let manifest = fixture.manifest().await;
     assert!(manifest.reorganize().is_none());
     assert!(manifest.runs().iter().all(|run| run.level != 2));
@@ -625,4 +651,22 @@ async fn the_re_reference_check_abandons_a_reorganization_whose_dropped_value_co
         BTreeSet::from(["/a.txt".to_owned(), "/b.txt".to_owned()])
     );
     assert_eq!(fixture.text_rows(&ContentValue::of(&first)).await, [true]);
+}
+
+#[tokio::test]
+async fn a_reorganization_whose_pruning_falls_below_the_retention_floor_is_abandoned() {
+    let fixture = ContentFixture::new("pruning-below-floor").await;
+    let (_, to_base) = start_a_pruning_base_reorganization(&fixture, b"a floored needle\n").await;
+    // The floor passes the sequence that the pruning recorded, so the last
+    // step can't read the commits after it to check for a re-reference.
+    fixture.put("/b.txt", b"a later needle\n").await;
+    fixture.advance_retention_floor().await;
+
+    assert_eq!(
+        reorganize_until_settled(&fixture, to_base).await,
+        GrepReorganizeOutcome::Abandoned
+    );
+    let manifest = fixture.manifest().await;
+    assert!(manifest.reorganize().is_none());
+    assert!(manifest.runs().iter().all(|run| run.level != 2));
 }

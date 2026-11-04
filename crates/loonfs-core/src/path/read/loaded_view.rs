@@ -4,7 +4,7 @@
 use super::current_files::resolve_visible_inode;
 use crate::authorize::{Absence, ReadAccess};
 use crate::engine::RuntimeReadContext;
-use crate::error::{CoreError, Result};
+use crate::error::{CoreError, HistoryPosition, Result};
 use crate::manifest::load_basis_metadata_segments;
 use crate::metadata::{LeafRevisionPreload, MetadataView};
 use crate::namespace::basis::ReadBasis;
@@ -69,8 +69,10 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .payload()
             .retention_floor_seq;
         if visible_seq < retention_floor_seq {
-            return Err(CoreError::ReadRebootstrapRequired {
-                read_seq: visible_seq,
+            return Err(CoreError::RebootstrapRequired {
+                below: HistoryPosition::ReadSeq {
+                    read_seq: visible_seq,
+                },
                 retention_floor_seq,
             });
         }

@@ -18,7 +18,7 @@ use crate::authorize::Authorizer;
 use crate::commit::candidates::commit_response_from_commit_receipt;
 use crate::commit::engine::CommitCandidate;
 use crate::engine::{NamespaceEngine, RuntimeReadContext};
-use crate::error::{CoreError, MergeBound, MergeHistory, Result};
+use crate::error::{CoreError, HistoryPosition, MergeBound, Result};
 use crate::metadata::MetadataView;
 use crate::namespace::state::NamespaceReadState;
 use crate::path::read::LoadedMetadataView;
@@ -351,8 +351,8 @@ pub(crate) async fn merge_start<S: ObjectStore + ?Sized>(
         rebase.map_or(fork_point_seq, |(basis, _)| basis.manifest.head_seq);
     let retention_floor_seq = view.retention_floor_seq();
     if checked_fork_point_seq < retention_floor_seq {
-        return Err(CoreError::MergeRebootstrapRequired {
-            below: MergeHistory::ForkPoint {
+        return Err(CoreError::RebootstrapRequired {
+            below: HistoryPosition::ForkPoint {
                 fork_point_seq: checked_fork_point_seq,
             },
             retention_floor_seq,
@@ -437,8 +437,8 @@ fn ensure_range_start_retained<S: ObjectStore + ?Sized>(
 ) -> Result<()> {
     let fork_floor_seq = fork_view.retention_floor_seq();
     if source_after_seq < fork_floor_seq {
-        return Err(CoreError::MergeRebootstrapRequired {
-            below: MergeHistory::RangeStart {
+        return Err(CoreError::RebootstrapRequired {
+            below: HistoryPosition::RangeStart {
                 source_namespace_id: fork_view.head().namespace_id.clone(),
                 source_after_seq,
             },
