@@ -41,11 +41,10 @@ impl MetricLabel for ReadHeadSource {
 /// A runtime built without a recorder reports into a
 /// [`NoopMetricsRecorder`].
 pub(crate) struct RuntimeInstruments {
-    /// Whether the host gave the runtime a recorder. A runtime without one
-    /// doesn't wrap its object store, so its object-store calls go to the
-    /// store directly.
-    wraps_object_store: bool,
-    object_store: Arc<ObjectStoreInstruments>,
+    /// The object-store instruments, present when the host gave the runtime
+    /// a recorder. A runtime without one doesn't wrap its object store, so
+    /// its object-store calls go to the store directly.
+    object_store: Option<Arc<ObjectStoreInstruments>>,
     pub(crate) compactions: CompactionInstruments,
     pub(crate) publisher: PublisherInstruments,
     pub(crate) gc: GcInstruments,
@@ -60,10 +59,12 @@ impl RuntimeInstruments {
     /// Builds the instrument set a handle reports through, registering the
     /// fully-labeled ones now and the rest as their labels first appear.
     pub(crate) fn new(recorder: Option<Arc<dyn MetricsRecorder>>) -> Arc<Self> {
-        let wraps_object_store = recorder.is_some();
+        let object_store = recorder
+            .as_ref()
+            .map(|recorder| Arc::new(ObjectStoreInstruments::new(Arc::clone(recorder))));
         let recorder = recorder.unwrap_or_else(|| Arc::new(NoopMetricsRecorder));
         Arc::new(Self {
-            wraps_object_store,
+            object_store,
             compactions: CompactionInstruments::register(recorder.as_ref()),
             publisher: PublisherInstruments::register(recorder.as_ref()),
             gc: GcInstruments::register(recorder.as_ref()),
@@ -94,7 +95,6 @@ impl RuntimeInstruments {
                 "Paths that diff pages resolved",
                 &[],
             ),
-            object_store: Arc::new(ObjectStoreInstruments::new(recorder)),
         })
     }
 
@@ -115,9 +115,8 @@ impl RuntimeInstruments {
     /// An object-store recorder that bridges samples into these
     /// instruments, or `None` for a runtime built without a recorder.
     pub(crate) fn object_store_recorder(&self) -> Option<Arc<dyn ObjectStoreMetricsRecorder>> {
-        if !self.wraps_object_store {
-            return None;
-        }
-        Some(Arc::clone(&self.object_store) as Arc<dyn ObjectStoreMetricsRecorder>)
+        self.object_store
+            .clone()
+            .map(|instruments| instruments as Arc<dyn ObjectStoreMetricsRecorder>)
     }
 }

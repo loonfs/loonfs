@@ -159,30 +159,16 @@ fn wrong_kind(object_key: &str, message: &str) -> ManifestLoadError {
     }
 }
 
-/// Counters and occupancy of the shared segment blocks.
-///
-/// The first fields are the counters that every cache reports (see
-/// [`DecodedBlockCacheStats`])
-/// for the data, index, and filter blocks, and the rest count what the
-/// segment filters did. [`SharedSegmentBlocks::manifest_stats`] returns the
-/// counters of the manifests.
+/// The lookups that the bloom filters of segments settled.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct MetadataSegmentCacheStats {
-    pub hits: usize,
-    pub misses: usize,
-    pub inserts: usize,
-    pub evictions: usize,
-    pub evicted_decoded_bytes: usize,
-    pub rejections: usize,
-    pub rejected_decoded_bytes: usize,
-    pub cached_decoded_bytes: usize,
-    /// Segments a scan skipped because their bloom filter ruled the lookup
-    /// key out before any index or data fetch.
-    pub filter_skips: usize,
-    /// Segments whose filter admitted a lookup that then matched no rows.
+pub struct SegmentFilterStats {
+    /// Segments skipped because their bloom filter ruled out a lookup before
+    /// any index or data read.
+    pub skips: usize,
+    /// Segments whose filter admitted a lookup that matched no rows.
     /// Approximate: a lookup narrower than the filter key (an exact unbind,
     /// a single revision) can count a true admission here.
-    pub filter_false_positives: usize,
+    pub false_positives: usize,
 }
 
 /// The key of a metadata segment block in the segment block cache.
@@ -239,7 +225,7 @@ pub struct SharedSegmentBlocks {
     /// The data, index, and filter blocks.
     blocks: SegmentEntries,
     manifests: SegmentEntries,
-    filter_stats: MetadataSegmentFilterStatsInner,
+    filter_counters: SegmentFilterCounters,
 }
 
 impl std::fmt::Debug for SharedSegmentBlocks {
@@ -247,14 +233,15 @@ impl std::fmt::Debug for SharedSegmentBlocks {
         formatter
             .debug_struct("SharedSegmentBlocks")
             .field("stats", &self.stats())
+            .field("filter_stats", &self.filter_stats())
             .finish_non_exhaustive()
     }
 }
 
 #[derive(Debug, Default)]
-struct MetadataSegmentFilterStatsInner {
-    filter_skips: AtomicUsize,
-    filter_false_positives: AtomicUsize,
+struct SegmentFilterCounters {
+    skips: AtomicUsize,
+    false_positives: AtomicUsize,
 }
 
 impl SharedSegmentBlocks {
@@ -264,7 +251,7 @@ impl SharedSegmentBlocks {
         Self {
             blocks: DecodedBlockCache::new(DecodedBlockCacheConfig::new(max_segment_bytes)),
             manifests: DecodedBlockCache::new(DecodedBlockCacheConfig::new(max_manifest_bytes)),
-            filter_stats: MetadataSegmentFilterStatsInner::default(),
+            filter_counters: SegmentFilterCounters::default(),
         }
     }
 
@@ -284,23 +271,16 @@ impl SharedSegmentBlocks {
     }
 
     /// Returns the counters and occupancy of the data, index, and filter
-    /// blocks, and the counters of the segment filters.
-    pub fn stats(&self) -> MetadataSegmentCacheStats {
-        let blocks = self.blocks.stats();
-        MetadataSegmentCacheStats {
-            hits: blocks.hits,
-            misses: blocks.misses,
-            inserts: blocks.inserts,
-            evictions: blocks.evictions,
-            evicted_decoded_bytes: blocks.evicted_decoded_bytes,
-            rejections: blocks.rejections,
-            rejected_decoded_bytes: blocks.rejected_decoded_bytes,
-            cached_decoded_bytes: blocks.cached_decoded_bytes,
-            filter_skips: self.filter_stats.filter_skips.load(Ordering::Relaxed),
-            filter_false_positives: self
-                .filter_stats
-                .filter_false_positives
-                .load(Ordering::Relaxed),
+    /// blocks.
+    pub fn stats(&self) -> DecodedBlockCacheStats {
+        self.blocks.stats()
+    }
+
+    /// Returns the counters of the segment filters.
+    pub fn filter_stats(&self) -> SegmentFilterStats {
+        SegmentFilterStats {
+            skips: self.filter_counters.skips.load(Ordering::Relaxed),
+            false_positives: self.filter_counters.false_positives.load(Ordering::Relaxed),
         }
     }
 }
@@ -409,10 +389,16 @@ impl MetadataSegmentCache {
             .await
     }
 
-    /// Returns the counters of the blocks and the segment filters in the
-    /// whole shared cache, across every scope.
-    pub fn stats(&self) -> MetadataSegmentCacheStats {
+    /// Returns the counters of the blocks in the whole shared cache, across
+    /// every scope.
+    pub fn stats(&self) -> DecodedBlockCacheStats {
         self.shared.stats()
+    }
+
+    /// Returns the counters of the segment filters in the whole shared
+    /// cache, across every scope.
+    pub fn filter_stats(&self) -> SegmentFilterStats {
+        self.shared.filter_stats()
     }
 
     /// Returns the counters of the manifests in the whole shared cache,
@@ -423,15 +409,15 @@ impl MetadataSegmentCache {
 
     pub(super) fn record_filter_skip(&self) {
         self.shared
-            .filter_stats
-            .filter_skips
+            .filter_counters
+            .skips
             .fetch_add(1, Ordering::Relaxed);
     }
 
     pub(super) fn record_filter_false_positive(&self) {
         self.shared
-            .filter_stats
-            .filter_false_positives
+            .filter_counters
+            .false_positives
             .fetch_add(1, Ordering::Relaxed);
     }
 

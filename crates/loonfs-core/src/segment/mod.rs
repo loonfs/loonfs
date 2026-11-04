@@ -38,7 +38,7 @@ pub(crate) mod segment_block_cache;
 
 pub use self::cache::{
     DecodedMetadataSegmentBlock, DecodedSegmentBlock, MetadataSegmentCache,
-    MetadataSegmentCacheKey, MetadataSegmentCacheStats, SegmentBlockKind, SegmentCacheKey,
+    MetadataSegmentCacheKey, SegmentBlockKind, SegmentCacheKey, SegmentFilterStats,
     SharedSegmentBlocks,
 };
 pub use self::index_block_load::decode_stored_block;

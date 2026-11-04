@@ -153,8 +153,8 @@ pub mod cache {
     pub use crate::segment::{
         decode_stored_block, DecodedMetadataSegmentBlock, DecodedSegmentBlock, LoadedSegmentBlock,
         MemorySegmentBlocks, MetadataRunManifest, MetadataSegmentCache, MetadataSegmentCacheKey,
-        MetadataSegmentCacheStats, SegmentBlockCache, SegmentBlockKind, SegmentBlockLoad,
-        SegmentCacheKey, SharedSegmentBlocks,
+        SegmentBlockCache, SegmentBlockKind, SegmentBlockLoad, SegmentCacheKey, SegmentFilterStats,
+        SharedSegmentBlocks,
     };
     pub use crate::shared_check::SharedCheck;
     pub use crate::wal::ProjectedWalTail;

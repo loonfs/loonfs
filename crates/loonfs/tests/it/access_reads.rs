@@ -538,6 +538,43 @@ async fn a_stat_batch_returns_readable_unknown_and_unreadable_inodes_in_request_
     );
 }
 
+#[tokio::test]
+async fn listing_a_checkpoints_files_requires_an_administrator() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let writer = LoonFs::builder_with_store(store)
+        .writer_id(loonfs_test_support::ids::writer_id(
+            "checkpoint-files-access",
+        ))
+        .build()
+        .await
+        .expect("writer");
+    let namespace_id = namespace_id("checkpoint-files-access");
+    publish_team_and_private_files(&writer, &namespace_id, 1).await;
+    let checkpoint = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace")
+        .with_subject(subject("prn_root"))
+        .create_snapshot("checkpoint")
+        .await
+        .expect("create checkpoint");
+    let list = |principal: &str| {
+        writer
+            .read_only()
+            .with_subject(subject(principal))
+            .namespace(&namespace_id)
+            .list_checkpoint_files(&checkpoint.snapshot_id)
+            .page()
+    };
+
+    let error = list("viewer")
+        .await
+        .expect_err("a reader of /team isn't an administrator");
+    assert_eq!(error.code(), ErrorCode::Forbidden);
+    let page = list("prn_root").await.expect("the administrator's listing");
+    assert_eq!(page.files.len(), 2);
+}
+
 fn team_file(index: usize) -> String {
     format!("/team/file-{index}")
 }
