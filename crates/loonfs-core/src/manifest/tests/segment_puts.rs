@@ -41,7 +41,9 @@ async fn seed_tail(store: &LocalFsStore, namespace_id: &NamespaceId) {
         .acquire_writer_epoch(&context.writer_id)
         .await
         .expect("writer");
-    for index in 0..36 {
+    // At two rows per segment, each row family has more segments than one
+    // put wave holds.
+    for index in 0..2 * STORE_WRITES_IN_FLIGHT + 8 {
         crate::test_support::NamespaceFixture::new(store, namespace_id, &context)
             .write_file_bytes(&format!("/file-{index:03}"), b"content", None)
             .await
