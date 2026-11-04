@@ -18,7 +18,7 @@ use std::sync::Arc;
 /// Below this, one GET costs less than separate ranged reads of the filter,
 /// index, and data blocks; 128 KiB covers a segment of one or two 64 KiB data
 /// blocks.
-const MAX_WHOLE_SEGMENT_LOAD_BYTES: u64 = 128 * 1024;
+pub(crate) const MAX_WHOLE_SEGMENT_LOAD_BYTES: u64 = 128 * 1024;
 // Matches the private metadata span limit in segment/data_block_load.rs.
 const MAX_BULK_LOAD_BYTES: u64 = 4 * 1024 * 1024;
 
@@ -84,11 +84,6 @@ async fn load_index_section_bytes<S: ObjectStore + ?Sized>(
     Ok(bytes.to_vec())
 }
 
-struct WholeSegment {
-    filter: Arc<SegmentFilter>,
-    entries: Arc<Vec<SegmentIndexEntry>>,
-}
-
 pub(crate) fn segment_object_bytes(
     object_key: &str,
     descriptor: &ExtensionSegmentRef,
@@ -104,176 +99,164 @@ pub(crate) fn segment_object_bytes(
         })
 }
 
-async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
-    store: &S,
-    cache: &GrepBlockCache,
-    object_key: &str,
-    descriptor: &ExtensionSegmentRef,
-    object_bytes: u64,
-) -> Result<WholeSegment> {
-    let whole_handle = BlockHandle {
-        offset: 0,
-        stored_bytes: u32::try_from(object_bytes).expect(
-            "callers load a whole segment only at or below `MAX_WHOLE_SEGMENT_LOAD_BYTES`, so its \
-             size should fit u32",
-        ),
-        decoded_bytes: 0,
-        crc32c: 0,
-    };
-    let bytes = load_index_section_bytes(store, object_key, &whole_handle).await?;
-    let section = |handle: &BlockHandle| -> Option<&[u8]> {
-        let start = usize::try_from(handle.offset).ok()?;
-        let end = start.checked_add(handle.stored_bytes as usize)?;
-        bytes.get(start..end)
-    };
-    let index_bytes = section(&descriptor.index_block).ok_or_else(|| GrepError::IndexCorrupt {
-        message: format!("index segment `{object_key}` index block exceeds the object bounds"),
-    })?;
-    let entries = Arc::new(
-        decode_index_block(index_bytes, &descriptor.index_block)
-            .map_err(|error| index_segment_corrupt(object_key, "index block", &error))?,
-    );
-    let filter_bytes =
-        section(&descriptor.filter_block).ok_or_else(|| GrepError::IndexCorrupt {
-            message: format!("index segment `{object_key}` filter block exceeds the object bounds"),
-        })?;
-    let filter = Arc::new(
-        decode_filter_block(filter_bytes, &descriptor.filter_block)
-            .map_err(|error| index_segment_corrupt(object_key, "filter block", &error))?,
-    );
-    for entry in entries.iter() {
-        let stored = section(&entry.block).ok_or_else(|| GrepError::IndexCorrupt {
-            message: format!("index segment `{object_key}` data block exceeds the object bounds"),
-        })?;
-        let block = Arc::new(
-            decode_data_block_rows::<IndexRow>(stored, &entry.block)
-                .map_err(|error| index_segment_corrupt(object_key, "data block", &error))?,
-        );
-        cache.insert(
-            cache_key(&descriptor.segment_id, SegmentBlockKind::Data, &entry.block),
-            DecodedGrepBlock::Data {
-                block,
-                decoded_bytes: entry.block.decoded_bytes as usize,
-            },
-        );
-    }
-    Ok(WholeSegment { filter, entries })
-}
-
+/// Loads the filter block of `descriptor`'s segment through `cache` when it
+/// is set (see [`load_section`]).
 pub(crate) async fn load_filter_block<S: ObjectStore + ?Sized>(
     store: &S,
     cache: Option<&GrepBlockCache>,
     object_key: &str,
     descriptor: &ExtensionSegmentRef,
 ) -> Result<Arc<SegmentFilter>> {
-    let handle = &descriptor.filter_block;
-    let load = || async {
-        if let Some(cache) = cache {
-            let object_bytes = segment_object_bytes(object_key, descriptor)?;
-            if object_bytes <= MAX_WHOLE_SEGMENT_LOAD_BYTES {
-                let whole = load_and_publish_segment_sections(
-                    store,
-                    cache,
-                    object_key,
-                    descriptor,
-                    object_bytes,
-                )
-                .await?;
-                cache.insert(
-                    cache_key(
-                        &descriptor.segment_id,
-                        SegmentBlockKind::Index,
-                        &descriptor.index_block,
-                    ),
-                    DecodedGrepBlock::Index {
-                        entries: whole.entries,
-                        decoded_bytes: descriptor.index_block.decoded_bytes as usize,
-                    },
-                );
-                return Ok(DecodedGrepBlock::Filter {
-                    filter: whole.filter,
-                    decoded_bytes: handle.decoded_bytes as usize,
-                });
-            }
-        }
-        let bytes = load_index_section_bytes(store, object_key, handle).await?;
-        let filter = Arc::new(
-            decode_filter_block(&bytes, handle)
-                .map_err(|error| index_segment_corrupt(object_key, "filter block", &error))?,
-        );
-        Ok::<_, GrepError>(DecodedGrepBlock::Filter {
-            filter,
-            decoded_bytes: handle.decoded_bytes as usize,
-        })
-    };
-    let decoded = match cache {
-        Some(cache) => {
-            let key = cache_key(&descriptor.segment_id, SegmentBlockKind::Filter, handle);
-            cache.get_or_load(&key, load).await?
-        }
-        None => load().await?,
-    };
-    decoded
-        .filter()
-        .ok_or_else(|| cache_kind_corrupt(object_key, "filter"))
+    load_section(
+        store,
+        cache,
+        object_key,
+        descriptor,
+        SegmentBlockKind::Filter,
+    )
+    .await?
+    .filter()
+    .ok_or_else(|| cache_kind_corrupt(object_key, "filter"))
 }
 
+/// Loads the index block of `descriptor`'s segment through `cache` when it
+/// is set (see [`load_section`]).
 pub(crate) async fn load_index_block<S: ObjectStore + ?Sized>(
     store: &S,
     cache: Option<&GrepBlockCache>,
     object_key: &str,
     descriptor: &ExtensionSegmentRef,
 ) -> Result<Arc<Vec<SegmentIndexEntry>>> {
-    let handle = &descriptor.index_block;
+    load_section(
+        store,
+        cache,
+        object_key,
+        descriptor,
+        SegmentBlockKind::Index,
+    )
+    .await?
+    .index()
+    .ok_or_else(|| cache_kind_corrupt(object_key, "index"))
+}
+
+/// Loads the `want` block of `descriptor`'s segment, its filter block or its
+/// index block, through `cache` when it is set.
+///
+/// The index block ends the segment object and the filter block comes just
+/// before it, so one ranged read from the wanted block to the end of the
+/// object covers the filter together with the index block, and a lookup that
+/// the filter admits reads nothing more before its data blocks. Through a
+/// cache, a segment object of at most [`MAX_WHOLE_SEGMENT_LOAD_BYTES`] is read
+/// whole. The blocks that the read covers go into the cache.
+async fn load_section<S: ObjectStore + ?Sized>(
+    store: &S,
+    cache: Option<&GrepBlockCache>,
+    object_key: &str,
+    descriptor: &ExtensionSegmentRef,
+    want: SegmentBlockKind,
+) -> Result<DecodedGrepBlock> {
+    let wanted = match want {
+        SegmentBlockKind::Filter => &descriptor.filter_block,
+        _ => &descriptor.index_block,
+    };
     let load = || async {
-        if let Some(cache) = cache {
-            let object_bytes = segment_object_bytes(object_key, descriptor)?;
-            if object_bytes <= MAX_WHOLE_SEGMENT_LOAD_BYTES {
-                let whole = load_and_publish_segment_sections(
-                    store,
-                    cache,
-                    object_key,
-                    descriptor,
-                    object_bytes,
-                )
-                .await?;
-                cache.insert(
-                    cache_key(
-                        &descriptor.segment_id,
-                        SegmentBlockKind::Filter,
-                        &descriptor.filter_block,
+        let object_bytes = segment_object_bytes(object_key, descriptor)?;
+        let whole_object = cache.is_some() && object_bytes <= MAX_WHOLE_SEGMENT_LOAD_BYTES;
+        let start = if whole_object { 0 } else { wanted.offset };
+        let read = BlockHandle {
+            offset: start,
+            stored_bytes: object_bytes
+                .checked_sub(start)
+                .and_then(|bytes| u32::try_from(bytes).ok())
+                .ok_or_else(|| GrepError::IndexCorrupt {
+                    message: format!(
+                        "index segment `{object_key}` descriptor names a block past the end of \
+                         its object"
                     ),
-                    DecodedGrepBlock::Filter {
-                        filter: whole.filter,
-                        decoded_bytes: descriptor.filter_block.decoded_bytes as usize,
-                    },
-                );
-                return Ok(DecodedGrepBlock::Index {
-                    entries: whole.entries,
-                    decoded_bytes: handle.decoded_bytes as usize,
-                });
+                })?,
+            decoded_bytes: 0,
+            crc32c: 0,
+        };
+        let bytes = load_index_section_bytes(store, object_key, &read).await?;
+        let decode = |kind, handle: &BlockHandle| {
+            Ok::<_, GrepError>((
+                kind,
+                *handle,
+                decode_section(object_key, &bytes, start, kind, handle)?,
+            ))
+        };
+        let mut blocks = vec![decode(SegmentBlockKind::Index, &descriptor.index_block)?];
+        if descriptor.filter_block.offset >= start {
+            blocks.push(decode(SegmentBlockKind::Filter, &descriptor.filter_block)?);
+        }
+        if whole_object {
+            let entries = blocks[0]
+                .2
+                .clone()
+                .index()
+                .expect("the first block is the index");
+            for entry in entries.iter() {
+                blocks.push(decode(SegmentBlockKind::Data, &entry.block)?);
             }
         }
-        let bytes = load_index_section_bytes(store, object_key, handle).await?;
-        let entries = Arc::new(
-            decode_index_block(&bytes, handle)
-                .map_err(|error| index_segment_corrupt(object_key, "index block", &error))?,
-        );
-        Ok::<_, GrepError>(DecodedGrepBlock::Index {
-            entries,
-            decoded_bytes: handle.decoded_bytes as usize,
-        })
-    };
-    let decoded = match cache {
-        Some(cache) => {
-            let key = cache_key(&descriptor.segment_id, SegmentBlockKind::Index, handle);
-            cache.get_or_load(&key, load).await?
+        let mut found = None;
+        for (kind, handle, block) in blocks {
+            match cache {
+                _ if kind == want => found = Some(block),
+                Some(cache) => {
+                    cache.insert(cache_key(&descriptor.segment_id, kind, &handle), block);
+                }
+                None => {}
+            }
         }
-        None => load().await?,
+        Ok::<_, GrepError>(found.expect("the read covers the wanted block"))
     };
-    decoded
-        .index()
-        .ok_or_else(|| cache_kind_corrupt(object_key, "index"))
+    match cache {
+        Some(cache) => {
+            let key = cache_key(&descriptor.segment_id, want, wanted);
+            cache.get_or_load(&key, load).await
+        }
+        None => load().await,
+    }
+}
+
+/// Decodes the `kind` block at `handle` from `bytes`, which a read of the
+/// segment object from offset `start` returned.
+fn decode_section(
+    object_key: &str,
+    bytes: &[u8],
+    start: u64,
+    kind: SegmentBlockKind,
+    handle: &BlockHandle,
+) -> Result<DecodedGrepBlock> {
+    let stored = handle
+        .offset
+        .checked_sub(start)
+        .and_then(|offset| usize::try_from(offset).ok())
+        .and_then(|offset| bytes.get(offset..offset.checked_add(handle.stored_bytes as usize)?))
+        .ok_or_else(|| GrepError::IndexCorrupt {
+            message: format!(
+                "index segment `{object_key}` {kind:?} block exceeds the object bounds"
+            ),
+        })?;
+    let decoded_bytes = handle.decoded_bytes as usize;
+    match kind {
+        SegmentBlockKind::Filter => Ok(DecodedGrepBlock::Filter {
+            filter: Arc::new(
+                decode_filter_block(stored, handle)
+                    .map_err(|error| index_segment_corrupt(object_key, "filter block", &error))?,
+            ),
+            decoded_bytes,
+        }),
+        SegmentBlockKind::Index => Ok(DecodedGrepBlock::Index {
+            entries: Arc::new(
+                decode_index_block(stored, handle)
+                    .map_err(|error| index_segment_corrupt(object_key, "index block", &error))?,
+            ),
+            decoded_bytes,
+        }),
+        _ => decode_data_cache_block(object_key, stored, handle),
+    }
 }
 
 pub(crate) async fn load_data_block<S: ObjectStore + ?Sized>(
