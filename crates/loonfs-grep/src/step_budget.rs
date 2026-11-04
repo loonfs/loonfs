@@ -1,10 +1,9 @@
 //! The limit on grep steps that keep file content or index segments, which
 //! a host shares across its grep workers.
 
+use loonfs::engine::{BudgetPermit, PermitPool, PoolCounts};
 use std::num::NonZeroUsize;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::sync::{Semaphore, SemaphorePermit};
 
 /// Default for how many grep build and reorganize steps keep file content or
 /// index segments at once.
@@ -18,81 +17,33 @@ pub const DEFAULT_MAX_CONCURRENT_GREP_STEPS: NonZeroUsize = NonZeroUsize::new(2)
 /// runtimes or stores those workers serve.
 #[derive(Debug, Clone)]
 pub struct GrepPassBudget {
-    inner: Arc<GrepPassBudgetInner>,
-}
-
-#[derive(Debug)]
-struct GrepPassBudgetInner {
-    permits: Semaphore,
-    max_concurrent_steps: usize,
-    waiting: AtomicUsize,
-}
-
-/// Steps that have a permit of a [`GrepPassBudget`], and steps that wait for
-/// one.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct GrepPassBudgetStats {
-    /// Steps that have a permit.
-    pub running: usize,
-    /// Steps that found work and wait for a permit.
-    pub waiting: usize,
+    permits: Arc<PermitPool>,
 }
 
 impl GrepPassBudget {
     /// Creates a budget that lets `max_concurrent_steps` steps keep file
     /// content or index segments at once.
     pub fn new(max_concurrent_steps: NonZeroUsize) -> Self {
-        let max_concurrent_steps = max_concurrent_steps.get().min(Semaphore::MAX_PERMITS);
         Self {
-            inner: Arc::new(GrepPassBudgetInner {
-                permits: Semaphore::new(max_concurrent_steps),
-                max_concurrent_steps,
-                waiting: AtomicUsize::new(0),
-            }),
+            permits: Arc::new(PermitPool::new(max_concurrent_steps, None)),
         }
     }
 
-    /// Reports the steps running and waiting right now.
-    pub fn stats(&self) -> GrepPassBudgetStats {
-        GrepPassBudgetStats {
-            running: self.inner.max_concurrent_steps - self.inner.permits.available_permits(),
-            waiting: self.inner.waiting.load(Ordering::Relaxed),
-        }
+    /// Reports the steps that have a permit and the steps that found work
+    /// and wait for one.
+    pub fn stats(&self) -> PoolCounts {
+        self.permits.counts()
     }
 
     /// Waits for a permit to keep file content or index segments. Dropping
     /// the wait or the permit returns it.
-    pub(crate) async fn permit(&self) -> SemaphorePermit<'_> {
-        let _waiting = WaitingStep::new(&self.inner.waiting);
-        self.inner
-            .permits
-            .acquire()
-            .await
-            .expect("grep step permit semaphore should remain open")
+    pub(crate) async fn permit(&self) -> BudgetPermit<'_> {
+        self.permits.acquire().await
     }
 }
 
 impl Default for GrepPassBudget {
     fn default() -> Self {
         Self::new(DEFAULT_MAX_CONCURRENT_GREP_STEPS)
-    }
-}
-
-/// A step counted as waiting until its wait ends, whether it got a permit
-/// or was dropped.
-struct WaitingStep<'a> {
-    waiting: &'a AtomicUsize,
-}
-
-impl<'a> WaitingStep<'a> {
-    fn new(waiting: &'a AtomicUsize) -> Self {
-        waiting.fetch_add(1, Ordering::Relaxed);
-        Self { waiting }
-    }
-}
-
-impl Drop for WaitingStep<'_> {
-    fn drop(&mut self) {
-        self.waiting.fetch_sub(1, Ordering::Relaxed);
     }
 }

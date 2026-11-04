@@ -1,10 +1,10 @@
 //! How many grep steps hold file content or index segments at once.
 
 use crate::common::GrepHost;
+use loonfs::engine::PoolCounts;
 use loonfs::{InlineContentPolicy, LoonFs, NamespaceId, SharedObjectStore, Writable};
 use loonfs_grep::{
-    GramIndexBuildPolicy, GrepBuildOutcome, GrepPassBudget, GrepPassBudgetStats,
-    GrepReorganizeOutcome, GrepWorker,
+    GramIndexBuildPolicy, GrepBuildOutcome, GrepPassBudget, GrepReorganizeOutcome, GrepWorker,
 };
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -137,7 +137,7 @@ async fn parked_build_step<'a>(
 async fn drive_until_reported(
     step: &mut (impl Future<Output = loonfs_grep::Result<GrepBuildOutcome>> + Unpin),
     budget: &GrepPassBudget,
-    expected: GrepPassBudgetStats,
+    expected: PoolCounts,
 ) {
     let reported = async {
         while budget.stats() != expected {
@@ -229,7 +229,7 @@ async fn workers_over_two_stores_share_one_step_permit() {
     let holding_step = parked_build_step(&blocking, &first_worker, &first).await;
     assert_eq!(
         budget.stats(),
-        GrepPassBudgetStats {
+        PoolCounts {
             running: 1,
             waiting: 0
         }
@@ -243,7 +243,7 @@ async fn workers_over_two_stores_share_one_step_permit() {
     drive_until_reported(
         &mut waiting_step,
         &budget,
-        GrepPassBudgetStats {
+        PoolCounts {
             running: 1,
             waiting: 1,
         },
@@ -258,7 +258,7 @@ async fn workers_over_two_stores_share_one_step_permit() {
         .expect("the waiting step takes the permit the first step returned")
         .expect("waiting step");
     assert_matches!(outcome, GrepBuildOutcome::Indexed { .. });
-    assert_eq!(budget.stats(), GrepPassBudgetStats::default());
+    assert_eq!(budget.stats(), PoolCounts::default());
 }
 
 #[tokio::test]
@@ -299,7 +299,7 @@ async fn an_up_to_date_step_on_either_worker_takes_no_permit() {
     }
     assert_eq!(
         budget.stats(),
-        GrepPassBudgetStats {
+        PoolCounts {
             running: 1,
             waiting: 0
         }
@@ -370,7 +370,7 @@ async fn a_step_dropped_while_waiting_leaves_the_counts_at_zero() {
     drive_until_reported(
         &mut waiting_step,
         &budget,
-        GrepPassBudgetStats {
+        PoolCounts {
             running: 1,
             waiting: 1,
         },
@@ -379,7 +379,7 @@ async fn a_step_dropped_while_waiting_leaves_the_counts_at_zero() {
     drop(waiting_step);
     assert_eq!(
         budget.stats(),
-        GrepPassBudgetStats {
+        PoolCounts {
             running: 1,
             waiting: 0
         }
@@ -388,5 +388,5 @@ async fn a_step_dropped_while_waiting_leaves_the_counts_at_zero() {
     blocking.release();
     let outcome = holding_step.await.expect("holding step");
     assert_matches!(outcome, GrepBuildOutcome::Indexed { .. });
-    assert_eq!(budget.stats(), GrepPassBudgetStats::default());
+    assert_eq!(budget.stats(), PoolCounts::default());
 }
