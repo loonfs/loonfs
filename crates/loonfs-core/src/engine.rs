@@ -22,7 +22,6 @@ use crate::storage::content_location::ContentLocation;
 use crate::storage::content_stream::{verify_content_import, FileContentStream, StreamRange};
 use crate::wal::ProjectedWalTail;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::control::ManifestRef;
 use loonfs_types::options::{AccessState, CommitSplitting, DiffOptions, ListOptions, StatOptions};
 use loonfs_types::ListChangesResponse;
 use loonfs_types::{ChangeFeedPosition, EffectiveLimit};
@@ -114,10 +113,6 @@ pub struct NamespaceEngine<S, M> {
     mode: M,
     pub(crate) subject: Option<Subject>,
     read_authority: ReadAuthority,
-    /// The manifest that a caller's fold of the WAL tail published or found
-    /// current, which a snapshot or a fork of the current head pins first,
-    /// or `None` to fold the tail before the pin.
-    pub(crate) folded_manifest: Option<ManifestRef>,
 }
 
 impl<S: ObjectStore, M> NamespaceEngine<S, M> {
@@ -127,7 +122,6 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             mode,
             subject: None,
             read_authority: ReadAuthority::Subject,
-            folded_manifest: None,
         }
     }
 
@@ -814,14 +808,6 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Returns the writer id used for epoch acquisition and commit publication.
     pub fn writer_id(&self) -> &WriterId {
         &self.mode.writer_id
-    }
-
-    /// Sets the manifest that the caller's fold of the WAL tail published or
-    /// found current, so a snapshot or a fork of the current head pins that
-    /// manifest instead of folding the tail first.
-    pub fn with_folded_manifest(mut self, manifest: ManifestRef) -> Self {
-        self.folded_manifest = Some(manifest);
-        self
     }
 
     /// Narrows the rows one segment that this engine writes may contain, so a

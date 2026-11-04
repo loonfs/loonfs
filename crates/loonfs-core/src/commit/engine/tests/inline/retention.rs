@@ -94,18 +94,20 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
     let original = publish(&mut engine, &context, request)
         .await
         .expect("original inline commit");
-    let snapshot = crate::test_support::namespace_store(&store, &namespace_id)
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let snapshot = namespace
         .create_pin(
             PinOwner::User {
                 name: "before reuse".into(),
                 expires_at_ms: Some(u64::MAX),
             },
-            None,
+            crate::test_support::folded_manifest(&namespace)
+                .await
+                .expect("fold the WAL tail"),
             &context.clock(),
         )
         .await
-        .expect("pin the original history")
-        .response;
+        .expect("pin the original history");
     let floor = crate::test_support::NamespaceFixture::new(
         &store,
         &namespace_id,

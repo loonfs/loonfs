@@ -138,9 +138,16 @@ async fn a_new_namespace_returns_the_state_its_first_manifest_records() {
     .await
     .expect("source data");
     store.reset();
-    let forked = crate::test_support::NamespaceFixture::new(&store, &source, &context())
+    let fixture = crate::test_support::NamespaceFixture::new(&store, &source, &context());
+    let forked = fixture
         .engine()
-        .fork_namespace(&target, &loonfs_test_support::test_actor(), None)
+        .fork_namespace(
+            &target,
+            &loonfs_test_support::test_actor(),
+            crate::test_support::folded_manifest(&fixture.namespace)
+                .await
+                .expect("fold the WAL tail"),
+        )
         .await
         .expect("fork");
     assert_eq!(
@@ -151,25 +158,13 @@ async fn a_new_namespace_returns_the_state_its_first_manifest_records() {
             ("put", metadata_manifest_object(&target, &ManifestNo(1))),
         ]
     );
-    assert!(forked.response.fork_basis.is_some());
+    assert!(forked.fork_basis.is_some());
     assert_eq!(
-        forked.response,
+        forked,
         crate::test_support::namespace_store(&store, &target)
             .load_metadata()
             .await
             .expect("load the fork")
-    );
-    // The fork folded the source's tail, and the report includes the fold's
-    // manifest so the runtime can raise the source's hint.
-    assert_eq!(
-        forked.published.map(|published| published.manifest),
-        Some(
-            crate::test_support::namespace_store(&store, &source)
-                .load_current_manifest()
-                .await
-                .expect("source manifest")
-                .manifest()
-        )
     );
 }
 
@@ -210,12 +205,19 @@ async fn an_ambiguous_first_manifest_confirms_only_a_forks_creation() {
         .await
         .expect("allow existing returns the created namespace");
     assert_eq!(adopted, existing);
-    let created = crate::test_support::NamespaceFixture::new(&store, &source, &context())
+    let fixture = crate::test_support::NamespaceFixture::new(&store, &source, &context());
+    let created = fixture
         .engine()
-        .fork_namespace(&target, &actor_id, None)
+        .fork_namespace(
+            &target,
+            &actor_id,
+            crate::test_support::folded_manifest(&fixture.namespace)
+                .await
+                .expect("fold the WAL tail"),
+        )
         .await
         .expect("fork source pin proves authorship from matching bytes");
-    assert!(created.response.fork_basis.is_some());
+    assert!(created.fork_basis.is_some());
     assert_eq!(store.attempts(), 2);
     assert_eq!(store.remaining(), 0);
 }
@@ -240,9 +242,16 @@ async fn nested_forks_read_copied_runs_without_source_control_reads() {
     )
     .await
     .expect("source data");
-    crate::test_support::NamespaceFixture::new(&store, &source, &context())
+    let fixture = crate::test_support::NamespaceFixture::new(&store, &source, &context());
+    fixture
         .engine()
-        .fork_namespace(&target, &loonfs_test_support::test_actor(), None)
+        .fork_namespace(
+            &target,
+            &loonfs_test_support::test_actor(),
+            crate::test_support::folded_manifest(&fixture.namespace)
+                .await
+                .expect("fold the WAL tail"),
+        )
         .await
         .expect("fork");
     let target_manifest = crate::test_support::namespace_store(&store, &target)
@@ -264,9 +273,16 @@ async fn nested_forks_read_copied_runs_without_source_control_reads() {
     )
     .await
     .expect("unfolded child data");
-    crate::test_support::NamespaceFixture::new(&store, &target, &context())
+    let fixture = crate::test_support::NamespaceFixture::new(&store, &target, &context());
+    fixture
         .engine()
-        .fork_namespace(&nested, &loonfs_test_support::test_actor(), None)
+        .fork_namespace(
+            &nested,
+            &loonfs_test_support::test_actor(),
+            crate::test_support::folded_manifest(&fixture.namespace)
+                .await
+                .expect("fold the WAL tail"),
+        )
         .await
         .expect("nested fork");
     let manifest = crate::test_support::namespace_store(&store, &nested)
@@ -456,9 +472,16 @@ async fn fork_into_a_deleted_id_writes_no_source_pin() {
     .await
     .expect("delete target");
     store.reset();
-    let error = crate::test_support::NamespaceFixture::new(&store, &source, &context)
+    let fixture = crate::test_support::NamespaceFixture::new(&store, &source, &context);
+    let error = fixture
         .engine()
-        .fork_namespace(&target, &loonfs_test_support::test_actor(), None)
+        .fork_namespace(
+            &target,
+            &loonfs_test_support::test_actor(),
+            crate::test_support::folded_manifest(&fixture.namespace)
+                .await
+                .expect("fold the WAL tail"),
+        )
         .await
         .expect_err("deleted target");
     assert_eq!(error.code(), ErrorCode::NamespaceDeleted);
@@ -492,7 +515,13 @@ async fn a_fork_that_loses_target_publication_deletes_its_source_pin() {
             .expect("source");
         store.block_next();
         let engine = crate::test_support::NamespaceFixture::new(&store, &source, &setup).engine();
-        let fork = engine.fork_namespace(&target, &actor, None);
+        let fork = engine.fork_namespace(
+            &target,
+            &actor,
+            crate::test_support::folded_manifest(&engine.namespace)
+                .await
+                .expect("fold the WAL tail"),
+        );
         let competing_create = async {
             store.wait_until_blocked().await;
             crate::test_support::NamespaceFixture::new(store.inner(), &target, &setup)

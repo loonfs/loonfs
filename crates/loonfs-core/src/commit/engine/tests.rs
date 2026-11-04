@@ -1540,17 +1540,20 @@ async fn publish_views_reuse_cached_segment_blocks_across_publishes() {
         .results
         .remove(0)
         .expect("seed publish");
-    crate::test_support::namespace_store(&store, &namespace_id)
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    namespace
         .create_pin(
             loonfs_types::format::control::PinOwner::User {
                 name: "test-pin".to_owned(),
                 expires_at_ms: None,
             },
-            None,
+            crate::test_support::folded_manifest(&namespace)
+                .await
+                .expect("fold the WAL tail"),
             &writer.clock(),
         )
         .await
-        .map(|report| crate::pin::checkpoint_summary(report.response))
+        .map(crate::pin::checkpoint_summary)
         .expect("checkpoint");
 
     // Without a cache, every publish view re-fetches the segment blocks

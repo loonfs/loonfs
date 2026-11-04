@@ -305,7 +305,15 @@ async fn an_append_in_a_fork_to_an_inherited_file_reports_its_offset() {
         .await
         .expect("create file");
     let forked = namespace_engine(&store, &source, &context)
-        .fork_namespace(&fork, &loonfs_test_support::test_actor(), None)
+        .fork_namespace(
+            &fork,
+            &loonfs_test_support::test_actor(),
+            loonfs_core::test_support::folded_manifest(
+                &loonfs_core::test_support::namespace_store(&store, &source),
+            )
+            .await
+            .expect("fold the WAL tail"),
+        )
         .await
         .expect("fork");
     submit_operation(
@@ -325,7 +333,7 @@ async fn an_append_in_a_fork_to_an_inherited_file_reports_its_offset() {
                 .await
                 .expect("fold the fork's WAL tail into commit rows");
         }
-        let changes = list_changes_after(&store, &fork, forked.response.head_seq)
+        let changes = list_changes_after(&store, &fork, forked.head_seq)
             .await
             .expect("read the fork's change feed");
         let [FilesystemChange::ContentChanged {

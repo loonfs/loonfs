@@ -202,7 +202,13 @@ async fn maintenance_preserves_writer_and_logical_head() {
         .expect("namespace state");
 
     engine
-        .create_snapshot("test-pin".to_owned(), None)
+        .create_snapshot(
+            "test-pin".to_owned(),
+            None,
+            loonfs_core::test_support::folded_manifest(&namespace_store(&store, &namespace_id))
+                .await
+                .expect("fold the WAL tail"),
+        )
         .await
         .expect("checkpoint");
     engine

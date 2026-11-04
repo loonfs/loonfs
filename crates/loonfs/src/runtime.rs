@@ -33,6 +33,7 @@ use crate::{
     Result, SharedObjectStore, StoreConfig,
 };
 use loonfs_core::NamespaceWriterEngine;
+use loonfs_types::format::control::ManifestRef;
 use loonfs_types::{
     u64_from_usize, CompactorEpoch, Subject, WriterId, FEATURE_COMMIT_INLINE_CONTENT,
     FEATURE_MERGES, LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES_PER_OPERATION,
@@ -439,18 +440,29 @@ impl LoonFs<Writable> {
                     }
                     .into());
                 }
-                let snapshot_id = options.snapshot_id.as_ref();
-                self.install_fork(
-                    source_namespace_id,
-                    new_namespace_id,
-                    snapshot_id.is_none(),
-                    |engine| async move {
-                        engine
-                            .fork_namespace(new_namespace_id, actor, snapshot_id)
+                match options.snapshot_id.as_ref() {
+                    Some(snapshot_id) => {
+                        let result = self
+                            .engine(source_namespace_id)
+                            .fork_namespace_at_snapshot(new_namespace_id, actor, snapshot_id)
                             .await
-                    },
-                )
-                .await
+                            .map_err(Error::from);
+                        self.finish_fork(source_namespace_id, new_namespace_id, result)
+                            .await
+                    }
+                    None => {
+                        self.install_fork(
+                            source_namespace_id,
+                            new_namespace_id,
+                            |engine, manifest| async move {
+                                engine
+                                    .fork_namespace(new_namespace_id, actor, manifest)
+                                    .await
+                            },
+                        )
+                        .await
+                    }
+                }
             },
         )
         .await
@@ -476,41 +488,41 @@ impl LoonFs<Writable> {
         }
     }
 
-    /// Installs the fork of `source_namespace_id` into `new_namespace_id`
-    /// that `fork` makes with the source's engine, and moves this runtime's
-    /// views of both namespaces past the fork.
+    /// Installs the fork of `source_namespace_id`'s current head into
+    /// `new_namespace_id` that `fork` makes with the source's engine, and
+    /// moves this runtime's views of both namespaces past the fork.
     ///
-    /// When `fold` says that the fork pins the source's current head, the
-    /// source's WAL tail is folded first, through the source's one fold path,
-    /// and the fork pins the fold's manifest (see
+    /// The source's WAL tail is folded first, through the source's one fold
+    /// path, and `fork` pins the fold's manifest (see
     /// [`PublisherRegistry::pin_after_fold`]).
     pub(crate) async fn install_fork<Fork>(
         &self,
         source_namespace_id: &NamespaceId,
         new_namespace_id: &NamespaceId,
-        fold: bool,
-        mut fork: impl FnMut(NamespaceWriterEngine<SharedObjectStore>) -> Fork,
+        mut fork: impl FnMut(NamespaceWriterEngine<SharedObjectStore>, ManifestRef) -> Fork,
     ) -> Result<crate::NamespaceMetadata>
     where
-        Fork: std::future::Future<
-            Output = loonfs_core::Result<loonfs_core::PublicationReport<crate::NamespaceMetadata>>,
-        >,
+        Fork: std::future::Future<Output = loonfs_core::Result<crate::NamespaceMetadata>>,
     {
-        let result = if fold {
-            self.mode
-                .publisher
-                .pin_after_fold(source_namespace_id, |manifest| {
-                    fork(
-                        self.engine(source_namespace_id)
-                            .with_folded_manifest(manifest),
-                    )
-                })
-                .await
-        } else {
-            fork(self.engine(source_namespace_id))
-                .await
-                .map_err(Error::from)
-        };
+        let result = self
+            .mode
+            .publisher
+            .pin_after_fold(source_namespace_id, |manifest| {
+                fork(self.engine(source_namespace_id), manifest)
+            })
+            .await;
+        self.finish_fork(source_namespace_id, new_namespace_id, result)
+            .await
+    }
+
+    /// Moves this runtime's views of `source_namespace_id` and
+    /// `new_namespace_id` past a fork whose result is `result`.
+    async fn finish_fork(
+        &self,
+        source_namespace_id: &NamespaceId,
+        new_namespace_id: &NamespaceId,
+        result: Result<crate::NamespaceMetadata>,
+    ) -> Result<crate::NamespaceMetadata> {
         // The runtime drops its view of the source after a fork, as it does
         // after a creation or a deletion (see the read freshness design
         // note), so the source's publisher drops its position instead of
@@ -519,8 +531,7 @@ impl LoonFs<Writable> {
             .mode
             .publisher
             .finish_namespace_mutation(source_namespace_id, result, |_| NamespaceChange::Unknown)
-            .await
-            .map(|report| report.response);
+            .await;
         if result.is_ok() {
             self.mode
                 .publisher

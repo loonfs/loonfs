@@ -41,9 +41,16 @@ async fn family<S: ObjectStore + Clone>(store: S, names: &[&str]) -> Vec<Namespa
 }
 
 async fn fork<S: ObjectStore + Clone>(store: S, source: &NamespaceId, target: &NamespaceId) {
-    crate::test_support::NamespaceFixture::new(store, source, &context(1_000))
+    let fixture = crate::test_support::NamespaceFixture::new(store, source, &context(1_000));
+    fixture
         .engine()
-        .fork_namespace(target, &loonfs_test_support::test_actor(), None)
+        .fork_namespace(
+            target,
+            &loonfs_test_support::test_actor(),
+            crate::test_support::folded_manifest(&fixture.namespace)
+                .await
+                .expect("fold the WAL tail"),
+        )
         .await
         .expect("fork");
 }
@@ -302,12 +309,15 @@ async fn a_fork_pin_whose_target_has_no_manifest_is_skipped() {
     let root = &family[0];
     // An installation that hasn't finished has written its pin and nothing
     // else.
-    crate::test_support::namespace_store(&store, root)
+    let namespace = crate::test_support::namespace_store(&store, root);
+    namespace
         .create_pin(
             PinOwner::Fork {
                 target_namespace_id: NamespaceId::parse("pending").expect("namespace"),
             },
-            None,
+            crate::test_support::folded_manifest(&namespace)
+                .await
+                .expect("fold the WAL tail"),
             &context(1_000).clock(),
         )
         .await
@@ -403,12 +413,15 @@ async fn a_pass_fails_when_a_members_fork_targets_do_not_fit_the_read_memory() {
     for index in 0..limit_bytes / 128 {
         let target_namespace_id =
             NamespaceId::parse(format!("pending-{index:0120}")).expect("namespace");
-        crate::test_support::namespace_store(&store, fork)
+        let namespace = crate::test_support::namespace_store(&store, fork);
+        namespace
             .create_pin(
                 PinOwner::Fork {
                     target_namespace_id,
                 },
-                None,
+                crate::test_support::folded_manifest(&namespace)
+                    .await
+                    .expect("fold the WAL tail"),
                 &context(1_000).clock(),
             )
             .await

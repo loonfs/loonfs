@@ -1,11 +1,10 @@
-//! Folds the WAL and creates a verified pin for the resulting manifest.
+//! Creates a verified pin of a manifest that a caller's fold published or
+//! found current.
 
 use super::record::{write_pin, PinBasisVerification};
-use crate::control_update::{retry_while_contended, CasOutcome};
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::CoreError;
 use crate::error::Result;
-use crate::manifest::PublicationReport;
 use crate::namespace::store::NamespaceStore;
 use crate::time::OperationClock;
 use loonfs_objectstore::ObjectStore;
@@ -17,93 +16,43 @@ use loonfs_types::{PinId, Snapshot};
 const MAX_SNAPSHOT_NAME_CHARS: usize = 128;
 
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
-    /// Creates a snapshot of the current namespace head.
+    /// Creates a snapshot of `manifest`, the manifest that the caller's fold
+    /// of the WAL tail published or found current.
     ///
     /// Every call generates a fresh `PinId`, and `name` is a label, not a
-    /// key. When WAL objects follow the current manifest's `folded_wal_no`,
-    /// the method first folds them into a new manifest without compacting
-    /// metadata, unless [`Self::with_folded_manifest`] set the manifest of
-    /// the caller's own fold, and then a manifest that stopped being current
-    /// before the snapshot's verification returns `checkpoint_unavailable`.
-    /// A snapshot with `expires_at_ms` can't be read after that time, and it
-    /// stays listed until collection deletes it. `None` keeps the snapshot
-    /// until it's deleted. The report includes the manifest the fold
-    /// published.
+    /// key. A manifest that stopped being current before the snapshot's
+    /// verification returns `checkpoint_unavailable`, so the caller folds
+    /// and snapshots again. A snapshot with `expires_at_ms` can't be read
+    /// after that time, and it stays listed until collection deletes it.
+    /// `None` keeps the snapshot until it's deleted.
     pub async fn create_snapshot(
         &self,
         name: String,
         expires_at_ms: Option<u64>,
-    ) -> Result<PublicationReport<Snapshot>> {
+        manifest: ManifestRef,
+    ) -> Result<Snapshot> {
         self.namespace
             .create_pin(
                 PinOwner::User {
                     name,
                     expires_at_ms,
                 },
-                self.folded_manifest.clone(),
+                manifest,
                 &self.namespace.start_clock(),
             )
             .await
-            .map(|report| report.map(super::snapshot_summary))
+            .map(super::snapshot_summary)
     }
 }
 
 impl<S: ObjectStore> NamespaceStore<S> {
-    /// Folds the WAL tail and creates a verified pin of the manifest that
-    /// covers it, for `owner`.
+    /// Creates a verified pin of `manifest` for `owner`.
     ///
-    /// When the caller passes `folded`, the manifest that its own fold
-    /// published or found current, the call pins that manifest without a
-    /// fold, and returns `checkpoint_unavailable` when the manifest stopped
-    /// being current before the pin's verification, so the caller can fold
-    /// and pin again.
+    /// `manifest` is the manifest that the caller's fold published or found
+    /// current. The call returns `checkpoint_unavailable` when the manifest
+    /// stopped being current before the pin's verification, so the caller
+    /// can fold and pin again.
     pub(crate) async fn create_pin(
-        &self,
-        owner: PinOwner,
-        folded: Option<ManifestRef>,
-        clock: &OperationClock,
-    ) -> Result<PublicationReport<PinPayload>> {
-        validate_pin_owner(&owner)?;
-        if let Some(manifest) = folded {
-            return Ok(PublicationReport {
-                response: self.create_pin_at_basis(owner, manifest, clock).await?,
-                published: None,
-            });
-        }
-        let owner = &owner;
-        // An attempt can publish its fold and then fail to write the pin, so the
-        // report keeps the newest fold any attempt published.
-        let published_slot = std::sync::Mutex::new(None);
-        let published = &published_slot;
-        let created = retry_while_contended(|| async move {
-            let folded = self.fold_wal_tail(None, clock).await?;
-            if let Some(manifest) = folded.published() {
-                *published
-                    .lock()
-                    .expect("the published-fold slot should not be poisoned") = Some(manifest);
-            }
-
-            match self
-                .create_pin_at_basis(owner.clone(), folded.manifest.manifest, clock)
-                .await
-            {
-                Ok(pin) => Ok(CasOutcome::Settled(pin)),
-                Err(error @ CoreError::CheckpointUnavailable(_)) => {
-                    Ok(CasOutcome::Contended(error))
-                }
-                Err(error) => Err(error),
-            }
-        })
-        .await?;
-        Ok(PublicationReport {
-            response: created?,
-            published: published_slot
-                .into_inner()
-                .expect("the published-fold slot should not be poisoned"),
-        })
-    }
-
-    pub(crate) async fn create_pin_at_basis(
         &self,
         owner: PinOwner,
         manifest: ManifestRef,
@@ -127,7 +76,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let error = match verification {
             Ok(PinBasisVerification::Verified) => return Ok(record),
             Ok(PinBasisVerification::Invalid) => CoreError::CheckpointUnavailable(
-                "checkpoint publication retry exhausted".to_owned(),
+                "the pinned manifest stopped being current before the pin was verified".to_owned(),
             ),
             Err(error) => error,
         };

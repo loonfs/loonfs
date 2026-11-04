@@ -136,17 +136,19 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     context: &WriterAt,
 ) -> crate::error::Result<loonfs_types::Checkpoint> {
-    crate::test_support::namespace_store(store, namespace_id)
+    let namespace = crate::test_support::namespace_store(store, namespace_id);
+    let manifest = crate::test_support::folded_manifest(&namespace).await?;
+    namespace
         .create_pin(
             loonfs_types::format::control::PinOwner::User {
                 name: "test-pin".to_owned(),
                 expires_at_ms: None,
             },
-            None,
+            manifest,
             &context.clock(),
         )
         .await
-        .map(|report| crate::pin::checkpoint_summary(report.response))
+        .map(crate::pin::checkpoint_summary)
 }
 
 pub(crate) use crate::test_support::writer_at;

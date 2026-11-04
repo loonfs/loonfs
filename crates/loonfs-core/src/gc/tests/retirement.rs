@@ -51,9 +51,16 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
         .await
         .expect("bootstrap source");
     let source_content = publish_owned_content(&inner, &source, 2).await;
-    crate::test_support::NamespaceFixture::new(&inner, &source, &setup)
+    let fixture = crate::test_support::NamespaceFixture::new(&inner, &source, &setup);
+    fixture
         .engine()
-        .fork_namespace(&target, &loonfs_test_support::test_actor(), None)
+        .fork_namespace(
+            &target,
+            &loonfs_test_support::test_actor(),
+            crate::test_support::folded_manifest(&fixture.namespace)
+                .await
+                .expect("fold the WAL tail"),
+        )
         .await
         .expect("fork target");
     write_test_file(&inner, &target, "/owned.txt", "target-write", &setup).await;
@@ -266,9 +273,16 @@ async fn a_fork_basis_naming_its_pin_with_a_different_checksum_is_corrupt() {
         .create()
         .await
         .expect("bootstrap");
-    crate::test_support::NamespaceFixture::new(&store, &source, &setup)
+    let fixture = crate::test_support::NamespaceFixture::new(&store, &source, &setup);
+    fixture
         .engine()
-        .fork_namespace(&target, &loonfs_test_support::test_actor(), None)
+        .fork_namespace(
+            &target,
+            &loonfs_test_support::test_actor(),
+            crate::test_support::folded_manifest(&fixture.namespace)
+                .await
+                .expect("fold the WAL tail"),
+        )
         .await
         .expect("fork");
     let current = crate::test_support::namespace_store(&store, &target)

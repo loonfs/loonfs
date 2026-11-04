@@ -983,7 +983,13 @@ async fn a_fork_reads_the_sources_attributes_before_and_after_its_first_fold() {
 
     let target = namespace_id("fork");
     namespace_engine(&store, &source, &context)
-        .fork_namespace(&target, &loonfs_test_support::test_actor(), None)
+        .fork_namespace(
+            &target,
+            &loonfs_test_support::test_actor(),
+            loonfs_core::test_support::folded_manifest(&namespace_store(&store, &source))
+                .await
+                .expect("fold the WAL tail"),
+        )
         .await
         .expect("fork the namespace");
 

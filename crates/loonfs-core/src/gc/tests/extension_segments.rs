@@ -149,9 +149,16 @@ async fn an_inherited_extension_segment_stays_until_no_family_member_lists_it() 
     let inherited = extension_segment(&source, 1);
     let inherited_key = write_segment(&store, &inherited).await;
     publish_run(&store, &source, inherited.clone()).await;
-    crate::test_support::NamespaceFixture::new(&store, &source, &setup)
+    let fixture = crate::test_support::NamespaceFixture::new(&store, &source, &setup);
+    fixture
         .engine()
-        .fork_namespace(&fork, &loonfs_test_support::test_actor(), None)
+        .fork_namespace(
+            &fork,
+            &loonfs_test_support::test_actor(),
+            crate::test_support::folded_manifest(&fixture.namespace)
+                .await
+                .expect("fold the WAL tail"),
+        )
         .await
         .expect("fork");
     let first = crate::test_support::namespace_store(&store, &fork)

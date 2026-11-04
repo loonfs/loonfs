@@ -44,18 +44,20 @@ impl Fixture {
                 .await
                 .expect("fold");
         }
-        let snapshot = crate::test_support::namespace_store(&store, &source)
+        let namespace = crate::test_support::namespace_store(&store, &source);
+        let snapshot = namespace
             .create_pin(
                 PinOwner::User {
                     name: "historical".into(),
                     expires_at_ms: Some(u64::MAX),
                 },
-                None,
+                crate::test_support::folded_manifest(&namespace)
+                    .await
+                    .expect("fold the WAL tail"),
                 &setup.clock(),
             )
             .await
-            .expect("snapshot")
-            .response;
+            .expect("snapshot");
         let selected = crate::test_support::namespace_store(&store, &source)
             .load_current_manifest()
             .await
@@ -170,10 +172,10 @@ async fn snapshot_fork_survives_snapshot_deletion_during_an_older_gc_pass() {
         gc_gate.wait_until_blocked().await;
         crate::test_support::NamespaceFixture::new(&fork_gate, &fixture.source, &fixture.context)
             .engine()
-            .fork_namespace(
+            .fork_namespace_at_snapshot(
                 &fixture.target,
                 &loonfs_test_support::test_actor(),
-                Some(&fixture.snapshot.pin_id),
+                &fixture.snapshot.pin_id,
             )
             .await
             .expect("install historical fork")
@@ -225,7 +227,7 @@ async fn snapshot_fork_refuses_a_snapshot_deleted_before_post_write_verification
         crate::test_support::NamespaceFixture::new(&gate, &fixture.source, &fixture.context)
             .engine();
     let (fork, ()) = tokio::join!(
-        engine.fork_namespace(&fixture.target, &actor, Some(&fixture.snapshot.pin_id)),
+        engine.fork_namespace_at_snapshot(&fixture.target, &actor, &fixture.snapshot.pin_id),
         async {
             gate.wait_until_blocked().await;
             assert_eq!(
@@ -284,7 +286,7 @@ async fn snapshot_fork_refuses_a_source_deleted_before_post_write_verification()
         crate::test_support::NamespaceFixture::new(&gate, &fixture.source, &fixture.context)
             .engine();
     let (fork, ()) = tokio::join!(
-        engine.fork_namespace(&fixture.target, &actor, Some(&fixture.snapshot.pin_id)),
+        engine.fork_namespace_at_snapshot(&fixture.target, &actor, &fixture.snapshot.pin_id),
         async {
             gate.wait_until_blocked().await;
             crate::test_support::namespace_store(fixture.store.as_ref(), &fixture.source)
@@ -324,18 +326,20 @@ async fn snapshot_fork_refuses_a_snapshot_that_expired_after_the_fork_call_began
     bootstrap_namespace(&inner, &source, &context)
         .await
         .expect("bootstrap");
-    let snapshot = crate::test_support::namespace_store(&inner, &source)
+    let namespace = crate::test_support::namespace_store(&inner, &source);
+    let snapshot = namespace
         .create_pin(
             PinOwner::User {
                 name: "short".into(),
                 expires_at_ms: Some(context.now_ms + 10),
             },
-            None,
+            crate::test_support::folded_manifest(&namespace)
+                .await
+                .expect("fold the WAL tail"),
             &context.clock(),
         )
         .await
-        .expect("snapshot")
-        .response;
+        .expect("snapshot");
     let store = BlockingStore::new(
         RecordingStore::new(inner, KeyPredicate::prefix(pin_prefix(&source))),
         KeyPredicate::exact(hint(&target)),
@@ -351,7 +355,7 @@ async fn snapshot_fork_refuses_a_snapshot_that_expired_after_the_fork_call_began
     }
     .engine();
     let (fork, ()) = tokio::join!(
-        namespace.fork_namespace(&target, &actor, Some(&snapshot.pin_id)),
+        namespace.fork_namespace_at_snapshot(&target, &actor, &snapshot.pin_id),
         async {
             store.wait_until_blocked().await;
             clock.advance_ms(10);

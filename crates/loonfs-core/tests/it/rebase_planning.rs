@@ -56,7 +56,16 @@ impl Family {
                 .expect("seed");
         }
         namespace_engine(&family.store, &family.main, &family.writer)
-            .fork_namespace(&family.fork, &loonfs_test_support::test_actor(), None)
+            .fork_namespace(
+                &family.fork,
+                &loonfs_test_support::test_actor(),
+                loonfs_core::test_support::folded_manifest(&namespace_store(
+                    &family.store,
+                    &family.main,
+                ))
+                .await
+                .expect("fold the WAL tail"),
+            )
             .await
             .expect("fork main");
         family
@@ -90,10 +99,14 @@ impl Family {
             &loonfs_test_support::test_actor(),
             &self.fork,
             fork_point_seq,
+            loonfs_core::test_support::folded_manifest(
+                &loonfs_core::test_support::namespace_store(&self.store, &self.main),
+            )
+            .await
+            .expect("fold the WAL tail"),
         )
         .await
         .expect("the rebase's new fork")
-        .response
     }
 
     fn request(&self, commit_id: &str, through_seq: Option<ChangeSeq>) -> MergeRequest {
