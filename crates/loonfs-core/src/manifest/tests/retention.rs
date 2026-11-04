@@ -2607,10 +2607,7 @@ async fn a_read_anchor_that_goes_stale_on_every_check_stops_at_the_contention_li
         .await
         .expect_err("a check that never confirms its manifest stops");
 
-    let CoreError::ControlObjectLoad(
-        crate::control_object::ControlObjectLoadError::StoreContention { object_key },
-    ) = &error
-    else {
+    let CoreError::StoreContention { object_key } = &error else {
         panic!("expected StoreContention, got {error:?}");
     };
     assert!(

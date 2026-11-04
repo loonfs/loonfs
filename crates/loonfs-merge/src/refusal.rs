@@ -73,8 +73,5 @@ pub(crate) fn refusal(request: &PendingCommit, error: &ErrorResponse) -> Refusal
 /// Returns whether `error` says that the namespace it's about doesn't exist
 /// or was deleted.
 pub(crate) fn is_gone(error: &ClientError) -> bool {
-    matches!(
-        error.code(),
-        Some(ErrorCode::NamespaceNotFound | ErrorCode::NamespaceDeleted)
-    )
+    error.code().is_some_and(ErrorCode::is_namespace_gone)
 }

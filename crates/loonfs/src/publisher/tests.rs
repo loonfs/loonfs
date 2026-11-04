@@ -792,7 +792,7 @@ fn publisher_trace_labels_are_low_cardinality() {
     // make the label set unbounded.
     assert_eq!(result_label(&Ok::<_, CoreError>(())).as_str(), "ok");
     assert_eq!(
-        result_label(&Err::<(), _>(CoreError::Internal(
+        result_label(&Err::<(), _>(CoreError::NamespaceCorrupt(
             "private error".to_owned()
         )))
         .as_str(),
@@ -1023,7 +1023,7 @@ async fn publisher_contender_retries_after_active_request_fails() {
         .remove(&commit_id)
         .expect("in-flight primary");
     for waiter in failed_primary.waiters {
-        let _ = waiter.send(Err(CoreError::Internal("primary failed".to_owned()).into()));
+        let _ = waiter.send(Err(Error::RuntimeTask("primary failed".to_owned())));
     }
 
     let response = contender
@@ -1074,7 +1074,7 @@ async fn publisher_contender_reports_conflict_after_retry_limit() {
             .waiters
             .pop()
             .expect("contender waiter");
-        let _ = waiter.send(Err(CoreError::Internal("primary failed".to_owned()).into()));
+        let _ = waiter.send(Err(Error::RuntimeTask("primary failed".to_owned())));
     }
 
     let error = contender

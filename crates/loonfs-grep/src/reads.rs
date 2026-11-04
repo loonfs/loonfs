@@ -204,10 +204,9 @@ impl NamespaceReads {
             Err(loonfs::Error::Core(
                 CoreError::RebootstrapRequired { .. }
                 | CoreError::SnapshotNotFound { .. }
-                | CoreError::CheckpointUnavailable(_)
-                | CoreError::NamespaceDeleted { .. }
-                | CoreError::NamespaceNotFound { .. },
+                | CoreError::CheckpointUnavailable(_),
             )) => Err(error.into()),
+            Err(other) if other.code().is_namespace_gone() => Err(error.into()),
             Err(other) => Err(other.into()),
         }
     }

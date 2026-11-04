@@ -466,10 +466,7 @@ impl<S: HostState> WriterSessions for Namespaces<S> {
     }
 
     fn forget_if_gone(&self, namespace_id: &NamespaceId, code: ErrorCode) {
-        if matches!(
-            code,
-            ErrorCode::NamespaceNotFound | ErrorCode::NamespaceDeleted
-        ) {
+        if code.is_namespace_gone() {
             self.forget(namespace_id);
         }
     }
