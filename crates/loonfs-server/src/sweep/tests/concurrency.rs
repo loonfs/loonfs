@@ -413,7 +413,7 @@ async fn a_visit_parked_in_one_session_does_not_stop_another_sessions_fold_on_th
     server.clock.advance_ms(config.tick_interval_ms.get());
     loonfs_test_support::clock::bounded(Duration::from_secs(60), async {
         while server.wal_tail_objects(&folded).await > 0 {
-            tokio::time::advance(Duration::from_millis(config.tick_interval_ms.get())).await;
+            tokio::time::advance(Duration::from_millis(1)).await;
         }
     })
     .await
