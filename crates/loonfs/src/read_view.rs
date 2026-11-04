@@ -2,7 +2,6 @@
 //! where a view's state comes from.
 
 use crate::downloads::{DirectDownloadByInodeTarget, DirectDownloadTarget};
-use crate::execution_budget::BudgetPermit;
 use crate::pagers::{
     decode_list_page_request, ChangesPager, InodeChildrenPager, PathEntriesPager,
     RetainedRevisionsPager,
@@ -11,16 +10,14 @@ use crate::pinned_read::PinnedRead;
 use crate::runtime_core::{classify_read_result, RuntimeCore};
 use crate::{
     ChangeSeq, ContentRef, CoreError, CurrentFileState, DownloadOptions, Error, FileBytes,
-    FileContentStream, InodeId, ListChangesResponse, ListInodeChildrenResponse, ListOptions,
-    ListPathEntriesResponse, NamespaceId, PathEntry, PinId, ReadAt, ReadFileStreamOptions, Result,
-    RevisionNo, SharedObjectStore, StatOptions,
+    FileContentStream, InodeId, ListInodeChildrenResponse, ListOptions, ListPathEntriesResponse,
+    NamespaceId, PathEntry, PinId, ReadAt, ReadFileStreamOptions, Result, RevisionNo,
+    SharedObjectStore, StatOptions,
 };
 use loonfs_core::RuntimeReadContext;
 use loonfs_types::format::manifest::ExtensionEntry;
 use loonfs_types::options::CommitSplitting;
-use loonfs_types::{
-    AbsolutePath, ChangeFeedPosition, EffectiveLimit, ExtensionName, ListPageCursor, PageRequest,
-};
+use loonfs_types::{AbsolutePath, ChangeFeedPosition, ExtensionName, ListPageCursor, PageRequest};
 use std::sync::Arc;
 
 /// A captured namespace state that related reads share.
@@ -46,9 +43,19 @@ pub(crate) enum ReadSource {
     Snapshot(PinId),
 }
 
+impl ReadSource {
+    /// Returns the snapshot this source reads, or `None` for the live head.
+    pub(crate) fn snapshot_id(&self) -> Option<&PinId> {
+        match self {
+            Self::Snapshot(snapshot_id) => Some(snapshot_id),
+            Self::Head => None,
+        }
+    }
+}
+
 /// Rejects a directory cursor that another read minted. A snapshot implies
 /// its head, so the head test does work only for a view of the live head.
-fn validate_view_directory_cursor(
+pub(crate) fn validate_view_directory_cursor(
     cursor: Option<&ListPageCursor>,
     captured_seq: ChangeSeq,
     pin_id: Option<&PinId>,
@@ -96,10 +103,7 @@ impl ReadView {
     }
 
     fn snapshot_id(&self) -> Option<&PinId> {
-        match &self.source {
-            ReadSource::Snapshot(snapshot_id) => Some(snapshot_id),
-            ReadSource::Head => None,
-        }
+        self.source.snapshot_id()
     }
 
     /// Returns the namespace this view reads.
@@ -218,12 +222,15 @@ impl ReadView {
         loonfs_types::Pager::with_state(
             (self.clone(), after_seq),
             |(view, after_seq), request: PageRequest<ChangeFeedPosition>| async move {
-                let permit = view.core.read_permit().await;
+                let _permit = view.core.read_permit().await;
                 let position = request
                     .cursor
                     .unwrap_or(ChangeFeedPosition::after(after_seq));
-                view.changes_page(position, request.limit, CommitSplitting::Whole, &permit)
-                    .await
+                view.read(
+                    view.pinned
+                        .changes_page(position, request.limit, CommitSplitting::Whole),
+                )
+                .await
             },
         )
     }
@@ -260,17 +267,6 @@ impl ReadView {
         .await
     }
 
-    pub(crate) async fn changes_page(
-        &self,
-        position: ChangeFeedPosition,
-        limit: EffectiveLimit,
-        splitting: CommitSplitting,
-        _permit: &BudgetPermit<'_>,
-    ) -> Result<ListChangesResponse> {
-        self.read(self.pinned.changes_page(position, limit, splitting))
-            .await
-    }
-
     /// Resolves an absolute path against this view.
     pub async fn stat(&self, absolute_path: &str) -> Result<PathEntry> {
         self.stat_with_options(absolute_path, &StatOptions::default())
@@ -284,16 +280,7 @@ impl ReadView {
         absolute_path: &str,
         options: &StatOptions,
     ) -> Result<PathEntry> {
-        let permit = self.core.read_permit().await;
-        self.stat_with_permit(absolute_path, options, &permit).await
-    }
-
-    pub(crate) async fn stat_with_permit(
-        &self,
-        absolute_path: &str,
-        options: &StatOptions,
-        _permit: &BudgetPermit<'_>,
-    ) -> Result<PathEntry> {
+        let _permit = self.core.read_permit().await;
         self.ensure_read_at(&options.at)?;
         self.read(self.pinned.stat(absolute_path, options)).await
     }
@@ -313,20 +300,19 @@ impl ReadView {
         loonfs_types::Pager::with_state(
             (self.clone(), absolute_path.to_owned(), options.clone()),
             |(view, absolute_path, options), request| async move {
-                let permit = view.core.read_permit().await;
+                let _permit = view.core.read_permit().await;
                 let request = decode_list_page_request(request, &options)?;
-                view.path_entries_page(&absolute_path, request, options, &permit)
+                view.path_entries_page(&absolute_path, request, options)
                     .await
             },
         )
     }
 
-    pub(crate) async fn path_entries_page(
+    async fn path_entries_page(
         &self,
         absolute_path: &str,
         request: PageRequest<ListPageCursor>,
         options: ListOptions,
-        _permit: &BudgetPermit<'_>,
     ) -> Result<ListPathEntriesResponse> {
         self.read(async {
             self.ensure_read_at(&options.at)?;
@@ -356,17 +342,7 @@ impl ReadView {
         inode_id: InodeId,
         options: &StatOptions,
     ) -> Result<PathEntry> {
-        let permit = self.core.read_permit().await;
-        self.stat_by_inode_with_permit(inode_id, options, &permit)
-            .await
-    }
-
-    pub(crate) async fn stat_by_inode_with_permit(
-        &self,
-        inode_id: InodeId,
-        options: &StatOptions,
-        _permit: &BudgetPermit<'_>,
-    ) -> Result<PathEntry> {
+        let _permit = self.core.read_permit().await;
         self.ensure_read_at(&options.at)?;
         self.read(self.pinned.stat_by_inode(inode_id, options))
             .await
@@ -387,20 +363,18 @@ impl ReadView {
         loonfs_types::Pager::with_state(
             (self.clone(), inode_id, options.clone()),
             |(view, inode_id, options), request| async move {
-                let permit = view.core.read_permit().await;
+                let _permit = view.core.read_permit().await;
                 let request = decode_list_page_request(request, &options)?;
-                view.inode_children_page(inode_id, request, options, &permit)
-                    .await
+                view.inode_children_page(inode_id, request, options).await
             },
         )
     }
 
-    pub(crate) async fn inode_children_page(
+    async fn inode_children_page(
         &self,
         inode_id: InodeId,
         request: PageRequest<ListPageCursor>,
         options: ListOptions,
-        _permit: &BudgetPermit<'_>,
     ) -> Result<ListInodeChildrenResponse> {
         self.read(async {
             self.ensure_read_at(&options.at)?;
@@ -467,15 +441,7 @@ impl ReadView {
 
     /// Reads the file selected by this view.
     pub async fn read_file(&self, absolute_path: &str) -> Result<FileBytes> {
-        let permit = self.core.read_permit().await;
-        self.read_file_with_permit(absolute_path, &permit).await
-    }
-
-    pub(crate) async fn read_file_with_permit(
-        &self,
-        absolute_path: &str,
-        _permit: &BudgetPermit<'_>,
-    ) -> Result<FileBytes> {
+        let _permit = self.core.read_permit().await;
         self.read(
             self.pinned
                 .read_file(absolute_path, self.core.max_read_content_bytes()),
@@ -500,17 +466,7 @@ impl ReadView {
         absolute_path: &str,
         options: &ReadFileStreamOptions,
     ) -> Result<FileContentStream<SharedObjectStore>> {
-        let permit = self.core.read_permit().await;
-        self.read_file_stream_with_permit(absolute_path, options, &permit)
-            .await
-    }
-
-    pub(crate) async fn read_file_stream_with_permit(
-        &self,
-        absolute_path: &str,
-        options: &ReadFileStreamOptions,
-        _permit: &BudgetPermit<'_>,
-    ) -> Result<FileContentStream<SharedObjectStore>> {
+        let _permit = self.core.read_permit().await;
         self.ensure_read_at(&options.at)?;
         self.read(self.pinned.read_file_stream(absolute_path, None, options))
             .await
@@ -529,17 +485,7 @@ impl ReadView {
         absolute_path: &str,
         options: &DownloadOptions,
     ) -> Result<DirectDownloadTarget> {
-        let permit = self.core.read_permit().await;
-        self.create_download_with_permit(absolute_path, options, &permit)
-            .await
-    }
-
-    pub(crate) async fn create_download_with_permit(
-        &self,
-        absolute_path: &str,
-        options: &DownloadOptions,
-        _permit: &BudgetPermit<'_>,
-    ) -> Result<DirectDownloadTarget> {
+        let _permit = self.core.read_permit().await;
         self.ensure_read_at(&options.at)?;
         self.read(self.pinned.create_download(absolute_path, None, options))
             .await
@@ -548,15 +494,7 @@ impl ReadView {
     /// Reads the revision of a file inode that this view selects, wherever
     /// the view binds it, plus the entry it came from.
     pub async fn read_file_by_inode(&self, inode_id: InodeId) -> Result<FileBytes> {
-        let permit = self.core.read_permit().await;
-        self.read_file_by_inode_with_permit(inode_id, &permit).await
-    }
-
-    pub(crate) async fn read_file_by_inode_with_permit(
-        &self,
-        inode_id: InodeId,
-        _permit: &BudgetPermit<'_>,
-    ) -> Result<FileBytes> {
+        let _permit = self.core.read_permit().await;
         self.read(
             self.pinned
                 .read_file_by_inode(inode_id, self.core.max_read_content_bytes()),
@@ -583,24 +521,11 @@ impl ReadView {
         inode_id: InodeId,
         options: &ReadFileStreamOptions,
     ) -> Result<FileContentStream<SharedObjectStore>> {
-        let permit = self.core.read_permit().await;
-        self.read_file_stream_by_inode_with_permit(inode_id, None, options, &permit)
-            .await
-    }
-
-    /// Streams the current revision of a file inode that this view selects,
-    /// or its revision `revision_no` in this view.
-    pub(crate) async fn read_file_stream_by_inode_with_permit(
-        &self,
-        inode_id: InodeId,
-        revision_no: Option<RevisionNo>,
-        options: &ReadFileStreamOptions,
-        _permit: &BudgetPermit<'_>,
-    ) -> Result<FileContentStream<SharedObjectStore>> {
+        let _permit = self.core.read_permit().await;
         self.ensure_read_at(&options.at)?;
         self.read(
             self.pinned
-                .read_file_stream_by_inode(inode_id, revision_no, options),
+                .read_file_stream_by_inode(inode_id, None, options),
         )
         .await
     }
@@ -622,17 +547,7 @@ impl ReadView {
         inode_id: InodeId,
         options: &DownloadOptions,
     ) -> Result<DirectDownloadByInodeTarget> {
-        let permit = self.core.read_permit().await;
-        self.create_download_by_inode_with_permit(inode_id, options, &permit)
-            .await
-    }
-
-    pub(crate) async fn create_download_by_inode_with_permit(
-        &self,
-        inode_id: InodeId,
-        options: &DownloadOptions,
-        _permit: &BudgetPermit<'_>,
-    ) -> Result<DirectDownloadByInodeTarget> {
+        let _permit = self.core.read_permit().await;
         self.ensure_read_at(&options.at)?;
         self.read(
             self.pinned
