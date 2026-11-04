@@ -2,12 +2,11 @@
 //! profile's connection, from flags or prompts.
 
 use crate::args::{
-    BucketAddressing, GcsStoreArgs, LocalStoreArgs, R2StoreArgs, RemoteServerArgs, S3StoreArgs,
+    BucketAddressing, CredentialSource, GcsStoreArgs, LocalStoreArgs, R2StoreArgs,
+    RemoteServerArgs, S3StoreArgs,
 };
 use crate::commands::profile_config::FieldSource;
-use crate::commands::profile_update::{
-    prompt_aws_credentials, prompt_r2_credentials, updated_aws_credentials, updated_r2_credentials,
-};
+use crate::commands::profile_update::{prompt_aws_credentials, prompt_r2_credentials};
 use crate::config::{validate_remote_client_config, ProfileConnection, StoreConfig};
 use crate::error::{CliError, Result};
 use crate::prompt;
@@ -50,74 +49,88 @@ const AWS_REGIONS: &[&str] = &[
     "il-central-1",
 ];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CredentialSource {
-    Ambient,
-    Static,
-}
-
-pub(crate) fn selected_credential_source(
-    source: Option<&str>,
+fn selected_credential_source(
+    source: Option<CredentialSource>,
     has_static_flags: bool,
 ) -> Result<CredentialSource> {
     match source {
-        Some("ambient") if has_static_flags => Err(CliError::invalid_request(
+        Some(CredentialSource::Ambient) if has_static_flags => Err(CliError::invalid_request(
             "`--credential-source ambient` cannot be combined with static credential flags",
         )
         .with_param("--credential-source")),
-        Some("ambient") => Ok(CredentialSource::Ambient),
-        Some("static") => Ok(CredentialSource::Static),
-        Some(other) => Err(CliError::invalid_request(format!(
-            "unknown credential source: `{other}` (expected ambient or static)"
-        ))
-        .with_param("--credential-source")),
+        Some(source) => Ok(source),
         None if has_static_flags => Ok(CredentialSource::Static),
         None => Ok(CredentialSource::Ambient),
     }
 }
 
-fn build_aws_credentials(
-    credential_source: Option<&str>,
-    access_key_id: Option<&String>,
-    secret_access_key: Option<&String>,
-    session_token: Option<&String>,
+/// Returns an S3 store's credentials from the flags, or `current` when no
+/// credential flag is given (ambient for a new profile).
+fn aws_credentials(
+    current: Option<AwsS3Credentials>,
+    args: &S3StoreArgs,
     source: FieldSource,
 ) -> Result<AwsS3Credentials> {
-    let has_static_flags =
-        access_key_id.is_some() || secret_access_key.is_some() || session_token.is_some();
-    match selected_credential_source(credential_source, has_static_flags)? {
+    let has_static_flags = args.access_key_id.is_some()
+        || args.secret_access_key.is_some()
+        || args.session_token.is_some();
+    if args.credential_source.is_none() && !has_static_flags {
+        return Ok(current.unwrap_or(AwsS3Credentials::Ambient {}));
+    }
+    match selected_credential_source(args.credential_source, has_static_flags)? {
         CredentialSource::Ambient => Ok(AwsS3Credentials::Ambient {}),
         CredentialSource::Static => Ok(AwsS3Credentials::Static {
-            access_key_id: required_secret(access_key_id, None, "access-key-id", source)?,
-            secret_access_key: required_secret(
-                secret_access_key,
-                None,
+            access_key_id: static_secret(args.access_key_id.as_ref(), "access-key-id", source)?,
+            secret_access_key: static_secret(
+                args.secret_access_key.as_ref(),
                 "secret-access-key",
                 source,
             )?,
-            session_token: non_blank(session_token.cloned()).map(SecretString::from),
+            session_token: non_blank(args.session_token.clone()).map(SecretString::from),
         }),
     }
 }
 
-fn build_r2_credentials(
-    credential_source: Option<&str>,
-    access_key_id: Option<&String>,
-    secret_access_key: Option<&String>,
+/// Returns an R2 store's credentials from the flags, or `current` when no
+/// credential flag is given (ambient for a new profile).
+fn r2_credentials(
+    current: Option<CloudflareR2Credentials>,
+    args: &R2StoreArgs,
     source: FieldSource,
 ) -> Result<CloudflareR2Credentials> {
-    let has_static_flags = access_key_id.is_some() || secret_access_key.is_some();
-    match selected_credential_source(credential_source, has_static_flags)? {
+    let has_static_flags = args.access_key_id.is_some() || args.secret_access_key.is_some();
+    if args.credential_source.is_none() && !has_static_flags {
+        return Ok(current.unwrap_or(CloudflareR2Credentials::Ambient {}));
+    }
+    match selected_credential_source(args.credential_source, has_static_flags)? {
         CredentialSource::Ambient => Ok(CloudflareR2Credentials::Ambient {}),
         CredentialSource::Static => Ok(CloudflareR2Credentials::Static {
-            access_key_id: required_secret(access_key_id, None, "access-key-id", source)?,
-            secret_access_key: required_secret(
-                secret_access_key,
-                None,
+            access_key_id: static_secret(args.access_key_id.as_ref(), "access-key-id", source)?,
+            secret_access_key: static_secret(
+                args.secret_access_key.as_ref(),
                 "secret-access-key",
                 source,
             )?,
         }),
+    }
+}
+
+/// Returns one half of a static key pair from its flag, or from a prompt.
+fn static_secret(
+    value: Option<&String>,
+    field: &'static str,
+    source: FieldSource,
+) -> Result<SecretString> {
+    if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
+        return Ok(value.clone().into());
+    }
+    match source {
+        FieldSource::Prompt => prompt::prompt_secret(field).map(SecretString::from),
+        FieldSource::Fail => Err(CliError::invalid_request(format!(
+            "static credentials require `--access-key-id` and `--secret-access-key`; \
+             missing `--{field}`"
+        ))
+        .with_param(format!("--{field}"))),
     }
 }
 
@@ -152,25 +165,6 @@ fn optional_field(
     match source {
         FieldSource::Fail => Ok(current.cloned()),
         FieldSource::Prompt => prompt::prompt_optional(field, current.map(String::as_str)),
-    }
-}
-
-fn required_secret(
-    value: Option<&String>,
-    current: Option<&SecretString>,
-    field: &str,
-    source: FieldSource,
-) -> Result<SecretString> {
-    if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
-        return Ok(value.clone().into());
-    }
-    match (current, source) {
-        (Some(current), FieldSource::Fail) => Ok(current.clone()),
-        (Some(current), FieldSource::Prompt) => {
-            prompt::prompt_secret_keep_current(field, current.expose()).map(SecretString::from)
-        }
-        (None, FieldSource::Prompt) => prompt::prompt_secret(field).map(SecretString::from),
-        (None, FieldSource::Fail) => Err(CliError::non_interactive_field_required(field)),
     }
 }
 
@@ -228,16 +222,10 @@ pub(crate) fn s3_store(
     args: &S3StoreArgs,
     source: FieldSource,
 ) -> Result<StoreConfig> {
-    let credentials = match (current.map(|value| &value.credentials), source) {
-        (Some(current), FieldSource::Prompt) => prompt_aws_credentials(current.clone())?,
-        (Some(current), FieldSource::Fail) => updated_aws_credentials(current.clone(), args)?,
-        (None, _) => build_aws_credentials(
-            args.credential_source.as_deref(),
-            args.access_key_id.as_ref(),
-            args.secret_access_key.as_ref(),
-            args.session_token.as_ref(),
-            source,
-        )?,
+    let current_credentials = current.map(|value| value.credentials.clone());
+    let credentials = match (current_credentials, source) {
+        (Some(current), FieldSource::Prompt) => prompt_aws_credentials(current)?,
+        (current, source) => aws_credentials(current, args, source)?,
     };
     let region = match (
         args.region.as_ref(),
@@ -292,15 +280,10 @@ pub(crate) fn r2_store(
     args: &R2StoreArgs,
     source: FieldSource,
 ) -> Result<StoreConfig> {
-    let credentials = match (current.map(|value| &value.credentials), source) {
-        (Some(current), FieldSource::Prompt) => prompt_r2_credentials(current.clone())?,
-        (Some(current), FieldSource::Fail) => updated_r2_credentials(current.clone(), args)?,
-        (None, _) => build_r2_credentials(
-            args.credential_source.as_deref(),
-            args.access_key_id.as_ref(),
-            args.secret_access_key.as_ref(),
-            source,
-        )?,
+    let current_credentials = current.map(|value| value.credentials.clone());
+    let credentials = match (current_credentials, source) {
+        (Some(current), FieldSource::Prompt) => prompt_r2_credentials(current)?,
+        (current, source) => r2_credentials(current, args, source)?,
     };
     Ok(StoreConfig::CloudflareR2(CloudflareR2StoreConfig {
         bucket: required_field(

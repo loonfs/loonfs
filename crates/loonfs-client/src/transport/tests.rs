@@ -610,7 +610,10 @@ fn retryable_transport_failure_covers_transport_and_unavailability_only() {
     ));
     assert!(!retryable_transport_failure(
         FailureSource::Response,
-        &ClientError::Http("http status 502 with a non-envelope body".to_owned())
+        &ClientError::HttpStatus {
+            status: 502,
+            detail: "expected value at line 1 column 1".to_owned(),
+        }
     ));
 }
 

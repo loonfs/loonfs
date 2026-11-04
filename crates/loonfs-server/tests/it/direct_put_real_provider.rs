@@ -501,7 +501,7 @@ impl Meddle {
 fn expect_client_rejection<T>(result: Result<T, ClientError>, context: &str) {
     match result {
         Ok(_) => panic!("{context} unexpectedly succeeded"),
-        Err(ClientError::Api { .. } | ClientError::Http(_)) => {}
+        Err(ClientError::Api { .. } | ClientError::HttpStatus { .. } | ClientError::Http(_)) => {}
         Err(error) => {
             panic!("{context} failed with unexpected client-side error: {error}")
         }

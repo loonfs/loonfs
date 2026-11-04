@@ -936,6 +936,69 @@ impl PutFileJournal for FailingJournal {
 }
 
 #[tokio::test]
+async fn a_part_is_signed_again_after_the_provider_refuses_it_and_not_after_a_transport_failure() {
+    let bytes = payload(loonfs_types::usize_from_u64(TEST_PART_BYTES));
+    let source = || {
+        let bytes = Bytes::from(bytes.clone());
+        PayloadSource::stream(futures::stream::once(async move { Ok(bytes) }).boxed())
+    };
+
+    let transport = scripted_transport::script([
+        capabilities(true),
+        begin_multipart(),
+        signed_parts(1, 1),
+        Outcome::ProviderRefused(http::StatusCode::FORBIDDEN),
+        signed_parts(1, 1),
+        Outcome::PartAccepted("\"etag-1\"".to_owned()),
+        completed(content_ref(&bytes)),
+        commit_succeeded(),
+    ]);
+    client_without_retry(&transport)
+        .put_file_stream_resumable(
+            &spec(),
+            source(),
+            &loonfs_test_support::test_actor(),
+            &PutFileOptions::default(),
+            &RecordingJournal::default(),
+            None,
+        )
+        .await
+        .expect("a fresh signature uploads the part");
+    let part_uploads = transport
+        .sent()
+        .iter()
+        .filter(|sent| sent.url.ends_with("/part/1"))
+        .count();
+    assert_eq!(part_uploads, 2);
+
+    let script = vec![
+        capabilities(true),
+        begin_multipart(),
+        signed_parts(1, 1),
+        Outcome::TransportFailure,
+    ];
+    let expected_attempts = script.len();
+    let transport = scripted_transport::script(script);
+    let error = client_without_retry(&transport)
+        .put_file_stream_resumable(
+            &spec(),
+            source(),
+            &loonfs_test_support::test_actor(),
+            &PutFileOptions::default(),
+            &RecordingJournal::default(),
+            None,
+        )
+        .await
+        .expect_err("the part upload failed");
+    assert_matches!(error, ClientError::Http(_));
+    assert_eq!(
+        transport.attempts(),
+        expected_attempts,
+        "a transport failure is not signed again"
+    );
+}
+
+#[tokio::test]
 async fn journal_failures_stop_uploads_without_aborting_the_resumable_session() {
     for fail_at_begin in [true, false] {
         let mut script = vec![capabilities(true), begin_multipart()];

@@ -9,15 +9,13 @@ use crate::commands::profile_config::{
     profile_provider, provider_name, FieldSource, ProfileProvider,
 };
 use crate::commands::store_builders::{
-    gcs_store, local_store, r2_store, remote_connection, s3_store, selected_credential_source,
-    CredentialSource, LocalFsFields, RemoteFields,
+    gcs_store, local_store, r2_store, remote_connection, s3_store, LocalFsFields, RemoteFields,
 };
 use crate::config::{ProfileConfig, ProfileConnection, StoreConfig};
 use crate::error::{CliError, Result};
 use crate::prompt;
 use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
 use loonfs_objectstore::{AwsS3Credentials, CloudflareR2Credentials};
-use loonfs_types::config::non_blank;
 use loonfs_types::SecretString;
 
 /// Applies an update's flags to a stored profile, keeping every field that
@@ -107,72 +105,6 @@ fn provider_mismatch(name: &str, stored: ProfileProvider, requested: ProfileProv
         provider_name(requested),
     ))
     .with_param("provider")
-}
-
-pub(crate) fn updated_aws_credentials(
-    current: AwsS3Credentials,
-    args: &S3StoreArgs,
-) -> Result<AwsS3Credentials> {
-    let has_static_flags = args.access_key_id.is_some()
-        || args.secret_access_key.is_some()
-        || args.session_token.is_some();
-    if args.credential_source.is_none() && !has_static_flags {
-        return Ok(current);
-    }
-    match selected_credential_source(args.credential_source.as_deref(), has_static_flags)? {
-        CredentialSource::Ambient => Ok(AwsS3Credentials::Ambient {}),
-        CredentialSource::Static => Ok(AwsS3Credentials::Static {
-            access_key_id: require_update_static_secret(
-                args.access_key_id.as_ref(),
-                "access-key-id",
-            )?,
-            secret_access_key: require_update_static_secret(
-                args.secret_access_key.as_ref(),
-                "secret-access-key",
-            )?,
-            session_token: non_blank(args.session_token.clone()).map(SecretString::from),
-        }),
-    }
-}
-
-pub(crate) fn updated_r2_credentials(
-    current: CloudflareR2Credentials,
-    args: &R2StoreArgs,
-) -> Result<CloudflareR2Credentials> {
-    let has_static_flags = args.access_key_id.is_some() || args.secret_access_key.is_some();
-    if args.credential_source.is_none() && !has_static_flags {
-        return Ok(current);
-    }
-    match selected_credential_source(args.credential_source.as_deref(), has_static_flags)? {
-        CredentialSource::Ambient => Ok(CloudflareR2Credentials::Ambient {}),
-        CredentialSource::Static => Ok(CloudflareR2Credentials::Static {
-            access_key_id: require_update_static_secret(
-                args.access_key_id.as_ref(),
-                "access-key-id",
-            )?,
-            secret_access_key: require_update_static_secret(
-                args.secret_access_key.as_ref(),
-                "secret-access-key",
-            )?,
-        }),
-    }
-}
-
-fn require_update_static_secret(
-    value: Option<&String>,
-    field: &'static str,
-) -> Result<SecretString> {
-    value
-        .filter(|value| !value.trim().is_empty())
-        .cloned()
-        .map(SecretString::from)
-        .ok_or_else(|| {
-            CliError::invalid_request(format!(
-                "switching to static credentials requires `--access-key-id` and \
-                 `--secret-access-key`; missing `--{field}`"
-            ))
-            .with_param(format!("--{field}"))
-        })
 }
 
 /// Edits a stored profile's connection at prompts, keeping its identity and

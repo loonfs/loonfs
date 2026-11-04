@@ -451,9 +451,10 @@ pub(crate) fn map_status_error(status: u16, body: &[u8]) -> ClientError {
         // A status with a non-envelope body is most commonly an intermediary
         // responding for the server (a load balancer's HTML 502): keep the
         // status — it is the only signal in the response.
-        Err(err) => ClientError::Http(format!(
-            "http status {status} with a non-envelope body: {err}"
-        )),
+        Err(err) => ClientError::HttpStatus {
+            status,
+            detail: err.to_string(),
+        },
     }
 }
 
