@@ -11,6 +11,7 @@ use loonfs_test_support::stores::{
 use loonfs_test_support::test_actor;
 use std::assert_matches;
 use std::sync::Arc;
+use std::time::Duration;
 use tempfile::tempdir;
 
 #[tokio::test]
@@ -349,5 +350,78 @@ async fn a_collection_finishing_after_close_does_not_update_the_replacement_entr
         store.inner().take().is_empty(),
         "the replacement never published and owes no collection"
     );
+    server.runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_visit_parked_in_one_session_does_not_stop_another_sessions_fold_on_the_next_interval() {
+    let directory = tempdir().expect("tempdir");
+    let parked = namespace_id("a-parked");
+    let folded = namespace_id("b-folded");
+    // The runtime raises the hint in the background after each publication,
+    // so the gate doesn't select the hint.
+    let store = Arc::new(BlockingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::prefix(loonfs_objectstore::keys::namespace_prefix(&parked)).except_hints(),
+        OperationSelector::Any,
+    ));
+    let mut config = sweep_config(None);
+    // The tick's metadata step folds a session's tail once the manual clock
+    // moves, so the gate parks the visit to `parked` at the fold.
+    config.idle_fold_after_ms = Some(1);
+    // The ticks before the first commit run the step from the store, and
+    // that step waits the interval, which the manual clock then passes.
+    config.maintenance_interval_ms = 1;
+    let server = SweepServer::start(store.clone(), &config, 0).await;
+    server
+        .runtime
+        .create_namespace(&parked, &test_actor())
+        .await
+        .expect("create");
+    let namespaces = &server.sweep.inner.namespaces;
+    let parked_handle = namespaces.open(&parked).await.expect("open");
+    let running = server.sweep.start();
+    // The daily pass starts with the loop. It finishes before the gate is
+    // armed, so the gate parks a tick's visit and not the pass's.
+    loonfs_test_support::clock::bounded(Duration::from_secs(60), async {
+        while server.counter("loonfs.maintenance.sweep_passes", &[("result", "ok")]) == 0 {
+            tokio::time::advance(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("the first daily pass finishes");
+    parked_handle
+        .put_file("/note", b"data", &test_actor())
+        .await
+        .expect("publish");
+    store.block_next();
+    server.clock.advance_ms(config.tick_interval_ms);
+    loonfs_test_support::clock::bounded(Duration::from_secs(60), store.wait_until_blocked())
+        .await
+        .expect("a tick parks at the fold of the first session");
+
+    server
+        .runtime
+        .create_namespace(&folded, &test_actor())
+        .await
+        .expect("create");
+    let folded_handle = namespaces.open(&folded).await.expect("open");
+    folded_handle
+        .put_file("/note", b"data", &test_actor())
+        .await
+        .expect("publish");
+    server.clock.advance_ms(config.tick_interval_ms);
+    loonfs_test_support::clock::bounded(Duration::from_secs(60), async {
+        while server.wal_tail_objects(&folded).await > 0 {
+            tokio::time::advance(Duration::from_millis(config.tick_interval_ms)).await;
+        }
+    })
+    .await
+    .expect("a later tick folds the other session's tail while the first visit is parked");
+
+    store.release();
+    running.cancel();
+    running.task.await.expect("the sweep stops");
+    drop((parked_handle, folded_handle));
     server.runtime.shutdown().await.expect("shutdown");
 }

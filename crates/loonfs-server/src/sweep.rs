@@ -179,8 +179,10 @@ pub enum GarbageCollection {
 /// failed acknowledgment keeps no retry state either, and the next pass
 /// tries it again.
 ///
-/// The pass and the ticks share `max_concurrent_maintenance` visit slots and
-/// never visit the same namespace concurrently. Listing failures stop new
+/// A tick starts its visits without waiting for the visits of the tick
+/// before it, so a long visit to one session delays no other session's
+/// visit. The pass and the ticks share `max_concurrent_maintenance` visit
+/// slots and never visit the same namespace concurrently. Listing failures stop new
 /// visits; already started visits finish before returning. Hosts can call
 /// [`Self::run_pass`] and [`Self::tick`] directly.
 #[derive(Clone)]

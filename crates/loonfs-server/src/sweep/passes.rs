@@ -4,6 +4,7 @@
 use super::retries::SweepCall;
 use super::visit::Overlap;
 use super::{index_pending, lock, GarbageCollection, RunningSweep, Sweep, SweepState};
+use futures::stream::FuturesUnordered;
 use futures::{FutureExt as _, StreamExt as _};
 use loonfs::{ChangeSeq, MetadataMaintenanceOutcome, NamespaceId, NamespaceSessionStatus};
 use loonfs_http::{panic_message, HeldNamespace};
@@ -32,23 +33,30 @@ enum Close {
 }
 
 impl Sweep {
-    /// Runs the due steps of each held session, without cloning writer
-    /// handles.
+    /// Runs one tick: the due steps of each held session, without cloning
+    /// writer handles. Returns when the tick's last visit ends. The sweep's
+    /// own tick loop doesn't wait for a tick's visits before it starts the
+    /// next tick's.
     pub async fn tick(&self) {
         let inner = &self.inner;
-        let mut after = None;
-        let held = std::iter::from_fn(|| {
-            let namespace_id = inner.namespaces.next_held_id(after.as_ref())?;
-            after = Some(namespace_id.clone());
-            Some(namespace_id)
-        });
-        futures::stream::iter(held)
+        futures::stream::iter(self.held_ids())
             .take_until(inner.stop.cancelled())
             .for_each_concurrent(
                 inner.config.max_concurrent_maintenance.get(),
                 |namespace_id| self.tick_session(namespace_id).boxed(),
             )
             .await;
+    }
+
+    /// Walks the IDs of the held sessions, without cloning writer handles.
+    fn held_ids(&self) -> impl Iterator<Item = NamespaceId> + '_ {
+        let namespaces = &self.inner.namespaces;
+        let mut after = None;
+        std::iter::from_fn(move || {
+            let namespace_id = namespaces.next_held_id(after.as_ref())?;
+            after = Some(namespace_id.clone());
+            Some(namespace_id)
+        })
     }
 
     /// Runs the session's due steps, then the retention advance that a full
@@ -258,14 +266,21 @@ impl Sweep {
         let inner = &self.inner;
         let mut ticks = tokio::time::interval(Duration::from_millis(inner.config.tick_interval_ms));
         ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        // Each interval starts a visit to every held session. The claim skips
+        // a session that an earlier interval's visit still has.
+        let mut visits = FuturesUnordered::new();
         loop {
             tokio::select! {
                 biased;
-                () = inner.stop.cancelled() => return,
-                _ = ticks.tick() => {}
+                () = inner.stop.cancelled() => break,
+                _ = ticks.tick() => visits.extend(
+                    self.held_ids().map(|namespace_id| self.tick_session(namespace_id).boxed()),
+                ),
+                Some(()) = visits.next() => {}
             }
-            self.tick().await;
         }
+        // The running visits see the stop at their next check and return.
+        while visits.next().await.is_some() {}
     }
 }
 
