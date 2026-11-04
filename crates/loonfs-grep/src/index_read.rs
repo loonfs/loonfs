@@ -16,9 +16,9 @@ use std::sync::Arc;
 
 /// Largest index segment object fetched whole on first touch, in stored bytes.
 /// Below this, one GET costs less than separate ranged reads of the filter,
-/// index, and data blocks; 128 KiB covers a segment of one or two 64 KiB data
-/// blocks.
-pub(crate) const MAX_WHOLE_SEGMENT_LOAD_BYTES: u64 = 128 * 1024;
+/// index, and data blocks. Matches core's limit in segment/index_block_load.rs,
+/// which catches a segment of one or two data blocks.
+pub(crate) const MAX_WHOLE_SEGMENT_LOAD_BYTES: u64 = 256 * 1024;
 // Matches the private metadata span limit in segment/data_block_load.rs.
 const MAX_BULK_LOAD_BYTES: u64 = 4 * 1024 * 1024;
 
