@@ -1,5 +1,6 @@
 //! Inline writer preparation, publication, fallback, and maintenance contracts.
 
+use super::super::admission::estimated_admission_bytes;
 use super::*;
 use crate::{InlineContentPolicy, MaintainMetadataOptions, PutFileOptions};
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
@@ -983,6 +984,127 @@ async fn full_queue_refuses_overflow_staging_without_store_writes() {
         0
     );
     drop(permits);
+    writer.shutdown().await.expect("shutdown");
+}
+
+/// Checks that a commit whose inline value is staged is charged, while it
+/// waits in the queue, the admission bytes of the staged candidate's weight,
+/// to its namespace's usage and to the budget's total alike.
+#[tokio::test]
+async fn a_staged_commit_is_charged_the_weight_of_the_staged_candidate() {
+    let (_directory, _store, writer, namespace, namespace_writer) =
+        writer_with_policy(InlineContentPolicy {
+            inline_content_wal_object_budget_bytes: 4,
+            inline_content_threshold_bytes: Some(8),
+            ..policy()
+        })
+        .await;
+    let publisher = namespace_writer.session().publisher.clone();
+    let slots = hold_every_publication_permit(&writer).await;
+    let actor = loonfs_test_support::test_actor();
+    let options = put_options("staged");
+    let (put, ()) = tokio::join!(
+        namespace_writer.put_file_with_options("/file", b"longer", &actor, &options),
+        async {
+            bounded(
+                Duration::from_secs(10),
+                wait_for_queued_candidates(&publisher, 1),
+            )
+            .await
+            .expect("the staged commit is queued");
+            let queued_bytes: usize = publisher_state(&publisher)
+                .queue
+                .iter()
+                .filter_map(|item| match item {
+                    WorkItem::Batch(batch) => Some(&batch.candidates),
+                    WorkItem::Delete(_) => None,
+                })
+                .flatten()
+                .map(|queued| {
+                    estimated_admission_bytes(
+                        &namespace,
+                        queued.candidate.estimated_retained_bytes(),
+                    )
+                })
+                .sum();
+            assert_eq!(
+                publisher.context.admission.namespace_usage(&namespace),
+                (1, queued_bytes, 0)
+            );
+            assert_eq!(
+                writer.execution_budget().stats().admitted_bytes,
+                queued_bytes
+            );
+            drop(slots);
+        }
+    );
+    put.expect("put");
+    writer.shutdown().await.expect("shutdown");
+}
+
+/// Checks that a commit whose estimate before staging fits its namespace's
+/// byte allowance, and whose staged candidate doesn't, is refused with
+/// `commit_queue_full` once its value is staged, and that admission charges
+/// nothing for the refused commit.
+#[tokio::test]
+async fn a_commit_that_outgrows_its_allowance_when_staged_is_refused() {
+    const ALLOWANCE: usize = 8192;
+    let (_directory, store, writer, namespace, namespace_writer) =
+        writer_with_policy_and_byte_limit(
+            InlineContentPolicy {
+                inline_content_wal_object_budget_bytes: 4,
+                inline_content_threshold_bytes: Some(8),
+                ..policy()
+            },
+            ALLOWANCE,
+        )
+        .await;
+    let publisher = namespace_writer.session().publisher.clone();
+    let admission = &publisher.context.admission;
+    let prepared = namespace_writer
+        .prepare_content(b"longer")
+        .await
+        .expect("prepare");
+    let candidate = CommitCandidate::prepared(
+        CommitIntent {
+            commit_id: CommitId::parse("outgrown").expect("commit"),
+            actor_id: loonfs_test_support::test_actor(),
+            subject: None,
+            message: None,
+            preconditions: Vec::new(),
+            operations: vec![put_operation("/file", &prepared)],
+        },
+        vec![prepared],
+    );
+    let estimate = estimated_admission_bytes(
+        &namespace,
+        publisher
+            .plan_inline_candidate(candidate.clone())
+            .expect("plan")
+            .candidate
+            .estimated_retained_bytes,
+    );
+    let filler = admission
+        .acquire(
+            &namespace,
+            ALLOWANCE - estimate - estimated_admission_bytes(&namespace, 0),
+        )
+        .expect("fill the allowance up to the estimate");
+    let filled = (1, ALLOWANCE - estimate);
+    store.reset();
+    let error = namespace_writer
+        .commit_candidate(candidate.clone())
+        .await
+        .expect_err("the staged candidate outgrows the allowance");
+    assert_eq!(error.code(), ErrorCode::CommitQueueFull);
+    assert_ne!(family_requests(&store, DurableObjectFamily::ContentBlob), 0);
+    assert_eq!(
+        admission.namespace_usage(&namespace),
+        (filled.0, filled.1, 0)
+    );
+    let stats = writer.execution_budget().stats();
+    assert_eq!((stats.admitted_requests, stats.admitted_bytes), filled);
+    drop(filler);
     writer.shutdown().await.expect("shutdown");
 }
 

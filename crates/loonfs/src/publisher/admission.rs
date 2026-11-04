@@ -26,8 +26,8 @@ const MERGE_PEAK_PER_PLANNED_BYTE: usize = 3;
 ///
 /// The per-namespace usage stays in the runtime because a namespace id names
 /// a namespace only within one store, and runtimes over other stores may
-/// share the budget. Lock order: this runtime's usage, then the budget's
-/// totals. Neither lock stays locked across an await.
+/// share the budget. Lock order: this runtime's usage, a permit's charge,
+/// then the budget's totals. No lock stays locked across an await.
 pub(super) struct PublicationAdmission {
     limits: PublicationPolicy,
     namespaces: Mutex<HashMap<NamespaceId, RequestWeight>>,
@@ -199,7 +199,7 @@ impl PublicationAdmission {
         Ok(Arc::new(AdmissionPermit {
             admission: Arc::clone(self),
             namespace_id: namespace_id.clone(),
-            charge,
+            charge: Mutex::new(charge),
             inline_bytes: AtomicUsize::new(0),
         }))
     }
@@ -207,7 +207,10 @@ impl PublicationAdmission {
 
 /// Returns the bytes that admission charges for a request whose own
 /// estimate is `estimated_request_bytes`.
-fn estimated_admission_bytes(namespace_id: &NamespaceId, estimated_request_bytes: usize) -> usize {
+pub(super) fn estimated_admission_bytes(
+    namespace_id: &NamespaceId,
+    estimated_request_bytes: usize,
+) -> usize {
     // Include the channel, ID copies, fingerprint and queue bookkeeping.
     // Deletes include only fixed-size options. Candidate bytes include any
     // proof or rejection data retained while waiting to publish.
@@ -220,12 +223,65 @@ pub(super) struct AdmissionPermit {
     admission: Arc<PublicationAdmission>,
     namespace_id: NamespaceId,
     /// What the request is charged, to its namespace's limits and to the
-    /// budget's totals alike.
-    charge: AdmissionCharge,
+    /// budget's totals alike. Only [`Self::reweigh`] changes the charge, under
+    /// the admission's namespace lock.
+    charge: Mutex<AdmissionCharge>,
     inline_bytes: AtomicUsize,
 }
 
 impl AdmissionPermit {
+    /// Moves a request's charge to the admission bytes of
+    /// `estimated_request_bytes`, the weight of the candidate that the queue
+    /// retains once its inline values are staged. A growth past the
+    /// namespace's byte limit or the budget's byte total fails with
+    /// `commit_queue_full` and leaves the charge as it was, for the permit's
+    /// drop to refund. A merge's charge has no bytes and stays as it is.
+    pub(super) fn reweigh(&self, estimated_request_bytes: usize) -> Result<(), CoreError> {
+        let estimated_bytes =
+            estimated_admission_bytes(&self.namespace_id, estimated_request_bytes);
+        let change = {
+            let mut namespaces = self.admission.lock_namespaces();
+            let mut charge = self
+                .charge
+                .lock()
+                .expect("the admission charge lock should not be poisoned");
+            let AdmissionCharge::Request {
+                estimated_bytes: charged_bytes,
+            } = *charge
+            else {
+                return Ok(());
+            };
+            let namespace = namespaces
+                .get_mut(&self.namespace_id)
+                .expect("admitted namespace should have usage");
+            let others = namespace.estimated_bytes - charged_bytes;
+            if estimated_bytes
+                > self
+                    .admission
+                    .limits
+                    .max_estimated_bytes_per_namespace
+                    .get()
+                    .saturating_sub(others)
+            {
+                return Err(CoreError::CommitQueueFull);
+            }
+            let change = self
+                .admission
+                .budget
+                .reweigh_admission(charged_bytes, estimated_bytes);
+            if matches!(change, AdmissionChange::Admitted(_)) {
+                namespace.estimated_bytes = others + estimated_bytes;
+                *charge = AdmissionCharge::Request { estimated_bytes };
+            }
+            change
+        };
+        self.admission.budget.report_admission(change);
+        if !matches!(change, AdmissionChange::Admitted(_)) {
+            return Err(CoreError::CommitQueueFull);
+        }
+        Ok(())
+    }
+
     pub(super) fn reserve_inline(
         &self,
         sizes: impl Iterator<Item = usize>,
@@ -265,6 +321,10 @@ impl AdmissionPermit {
 
 impl Drop for AdmissionPermit {
     fn drop(&mut self) {
+        let charge = *self
+            .charge
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner);
         let change = {
             // A drop can run while a panic unwinds, and a second panic then
             // aborts the process, so this recovers a poisoned lock instead of
@@ -276,7 +336,7 @@ impl Drop for AdmissionPermit {
                 .unwrap_or_else(PoisonError::into_inner);
             if let Some(namespace) = namespaces.get_mut(&self.namespace_id) {
                 namespace.requests -= 1;
-                namespace.estimated_bytes -= self.charge.estimated_bytes();
+                namespace.estimated_bytes -= charge.estimated_bytes();
                 namespace.inline_bytes -= self.inline_bytes.load(Ordering::Relaxed);
                 if namespace.requests == 0 {
                     namespaces.remove(&self.namespace_id);
@@ -284,7 +344,7 @@ impl Drop for AdmissionPermit {
             }
             // Refunded under this runtime's lock, as it was charged, so this
             // runtime never sees its namespace refunded while the total is not.
-            self.admission.budget.refund_admission(self.charge)
+            self.admission.budget.refund_admission(charge)
         };
         self.admission.budget.report_admission(change);
     }

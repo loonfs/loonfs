@@ -447,7 +447,10 @@ impl CommitCandidate {
     /// Weighs the candidate as [`Self::estimated_retained_bytes`] does once
     /// the publisher keeps `retained_inline_content` inline and stages
     /// `staged_inline_content`. Staging a value replaces the value with a
-    /// prepared proof and records the value's identity.
+    /// prepared proof and records the value's identity. This is the weight
+    /// that admission guesses before staging; once the values are staged, the
+    /// charge moves to the staged candidate's
+    /// [`Self::estimated_retained_bytes`].
     pub fn estimated_retained_bytes_after_inline_staging(
         &self,
         retained_inline_content: &[InlineContent],
