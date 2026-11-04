@@ -142,17 +142,12 @@ pub async fn start_server(shape: StoreShape) -> Result<ConformanceServer, Confor
     let config_path = temp_dir.path().join("loonfs-server.toml");
     write_server_config(&config_path, &store_root).map_err(config_error)?;
     let config = loonfs_server::load_server_config(&config_path).map_err(config_error)?;
-    let (api_router, _state) = loonfs_server::app(
-        config,
-        loonfs_server::AppConfig {
-            store: Some(shared_store),
-            direct_transfers: Some(transfers),
-        },
-    )
-    .await
-    .map_err(config_error)?;
+    let options = loonfs_server::AppConfig {
+        store: Some(shared_store),
+        direct_transfers: Some(transfers),
+    };
     let server_task = tokio::spawn(async move {
-        axum::serve(api_listener, api_router)
+        loonfs_server::serve_with_shutdown(config, options, api_listener, std::future::pending())
             .await
             .expect("the conformance API server should serve until it is aborted");
     });

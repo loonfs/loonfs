@@ -3,8 +3,8 @@
 mod admission;
 mod composition;
 
-use super::serve::{build_handles, serve_on, RuntimeHandles, Settlement};
-use super::{app, AppConfig};
+use super::serve::{build_handles, RuntimeHandles, Settlement};
+use super::{app, serve_with_shutdown, AppConfig};
 use crate::{AuthConfig, ServerConfig, StoreConfig};
 use axum::http::StatusCode;
 use loonfs::metrics::MetricValue;
@@ -215,9 +215,10 @@ async fn graceful_shutdown_drains_requests_and_settles_the_writer() {
         .expect("bind listener");
     let addr = listener.local_addr().expect("listener addr");
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    let server = tokio::spawn(serve_on(
-        listener,
+    let server = tokio::spawn(serve_with_shutdown(
         config.validate().expect("validate the test config"),
+        AppConfig::default(),
+        listener,
         async move {
             let _ = shutdown_rx.await;
         },
