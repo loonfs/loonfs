@@ -1560,7 +1560,7 @@
           },
           "source_namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
-            "description": "The fork whose merge didn't continue the previous merge from that fork."
+            "description": "The fork of a refused merge: the fork whose range conflicts, or whose range starts below\nits own retention floor."
           },
           "split_at_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
