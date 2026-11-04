@@ -59,9 +59,9 @@ pub(crate) async fn load_pin_at_key<S: ObjectStore + ?Sized>(
         store,
         object_key.to_owned(),
         ControlObjectKind::Pin,
-        |state: &PinPayload| {
-            expect_namespace(&namespace_id, &state.namespace_id)?;
-            expect_identity_field("pin id", pin_id.as_str(), state.pin_id.as_str())
+        |object_key, state: &PinPayload| {
+            expect_namespace(object_key, &namespace_id, &state.namespace_id)?;
+            expect_identity_field(object_key, "pin id", pin_id.as_str(), state.pin_id.as_str())
         },
     )
     .await

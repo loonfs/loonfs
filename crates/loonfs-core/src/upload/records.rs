@@ -79,8 +79,13 @@ impl<S: ObjectStore> NamespaceStore<S> {
             &self.store,
             upload_session(family_root_id, upload_id),
             ControlObjectKind::UploadSession,
-            |session: &UploadSessionPayload| {
-                expect_identity_field("upload id", upload_id.as_str(), session.upload_id.as_str())
+            |object_key, session: &UploadSessionPayload| {
+                expect_identity_field(
+                    object_key,
+                    "upload id",
+                    upload_id.as_str(),
+                    session.upload_id.as_str(),
+                )
             },
         )
         .await;
@@ -98,8 +103,13 @@ impl<S: ObjectStore> NamespaceStore<S> {
             &self.store,
             upload_outcome(family_root_id, upload_id),
             ControlObjectKind::UploadOutcome,
-            |record: &UploadOutcomePayload| {
-                expect_identity_field("upload id", upload_id.as_str(), record.upload_id.as_str())
+            |object_key, record: &UploadOutcomePayload| {
+                expect_identity_field(
+                    object_key,
+                    "upload id",
+                    upload_id.as_str(),
+                    record.upload_id.as_str(),
+                )
             },
         )
         .await;
