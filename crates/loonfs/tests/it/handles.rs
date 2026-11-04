@@ -255,7 +255,6 @@ fn maintenance_invalidates_the_runtimes_shared_read_caches() {
                 &namespace_id,
                 &MaintainMetadataOptions {
                     max_wal_tail_objects: std::num::NonZeroU64::MIN,
-                    ..MaintainMetadataOptions::default()
                 },
             )
             .await

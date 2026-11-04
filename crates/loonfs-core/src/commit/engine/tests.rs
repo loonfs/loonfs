@@ -1056,7 +1056,6 @@ async fn writer_after_own_compaction<'a>(
     .compact_metadata_unit(
         None,
         MetadataCompactionPolicy::CompactImmediately,
-        crate::compaction::CompactionAdmission::AnySize,
         current.compactor_epoch(),
         &crate::compaction::MetadataCompactionCancellation::default(),
     )

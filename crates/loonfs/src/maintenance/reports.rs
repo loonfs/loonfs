@@ -58,14 +58,6 @@ pub enum MetadataCompactionOutcome {
         /// The output segments that the compaction wrote.
         output_segments: u64,
     },
-    /// The selected window lists more rows than a metadata pass compacts, so
-    /// nothing was published.
-    ///
-    /// [`Maintenance::compact_metadata`](crate::Maintenance::compact_metadata)
-    /// compacts a window of any size, and
-    /// [`Maintenance::maintain_metadata_while_due`](crate::Maintenance::maintain_metadata_while_due)
-    /// runs it whenever a pass reports this outcome.
-    MetadataCompactionRequired,
     /// The run was cancelled, so the current manifest didn't change.
     Cancelled,
     /// The unit stopped because its inputs changed, time ran out, or every

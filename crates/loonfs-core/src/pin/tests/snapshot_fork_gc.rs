@@ -79,7 +79,6 @@ impl Fixture {
         .compact_metadata_unit(
             None,
             MetadataCompactionPolicy::CompactImmediately,
-            crate::compaction::CompactionAdmission::AnySize,
             selected.compactor_epoch(),
             &crate::compaction::MetadataCompactionCancellation::default(),
         )

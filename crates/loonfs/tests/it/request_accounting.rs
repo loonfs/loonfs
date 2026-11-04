@@ -207,7 +207,6 @@ async fn warm_phase_request_accounting() {
                     &namespace_id,
                     &MaintainMetadataOptions {
                         max_wal_tail_objects: std::num::NonZeroU64::MIN,
-                        ..Default::default()
                     },
                 )
                 .await

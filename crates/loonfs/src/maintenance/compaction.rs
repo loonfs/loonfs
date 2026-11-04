@@ -2,7 +2,7 @@
 //! a namespace: compaction units under the namespace's compaction lock, and
 //! the runtime's compactor epochs.
 
-use super::{Maintenance, MetadataCompactionOutcome, MetadataCompactionReport};
+use super::{Maintenance, MetadataCompactionOutcome};
 use crate::publisher::NamespaceChange;
 use crate::{Error, Result};
 use crate::{
@@ -28,9 +28,6 @@ pub(super) const MAX_COMPACTION_UNITS_PER_CALL: usize = 16;
 fn compaction_outcome(outcome: loonfs_core::CompactionUnitOutcome) -> MetadataCompactionOutcome {
     match outcome {
         loonfs_core::CompactionUnitOutcome::NotNeeded => MetadataCompactionOutcome::NotNeeded,
-        loonfs_core::CompactionUnitOutcome::TooLarge { .. } => {
-            MetadataCompactionOutcome::MetadataCompactionRequired
-        }
         loonfs_core::CompactionUnitOutcome::Published {
             manifest,
             rows_read,
@@ -60,11 +57,6 @@ impl Maintenance {
         namespace_id: &NamespaceId,
     ) -> loonfs_core::NamespaceWriterEngine<SharedObjectStore> {
         let engine = self.core.writer_engine(&self.writer_id, namespace_id);
-        #[cfg(test)]
-        let engine = match self.compaction_row_budget {
-            Some(rows) => engine.narrow_compaction_input_rows(rows),
-            None => engine,
-        };
         #[cfg(test)]
         let engine = match self.segment_row_budget {
             Some(rows) => engine.narrow_segment_row_budget(rows),
@@ -113,15 +105,15 @@ impl Maintenance {
         )
     }
 
-    /// Runs compaction units on `namespace_id` while a unit is due under
-    /// `compaction_policy`, and reports how many units the call published.
+    /// Runs size-tiered compaction units on `namespace_id` while a unit is
+    /// due, and reports how many units the call published.
     ///
     /// This is the namespace's one compaction loop, which a writer session
     /// runs after its folds and a host's metadata calls run after their
-    /// folds. The first unit plans from `observed`, the current manifest
-    /// that the caller loaded from the store, when it's given. A unit whose
-    /// window is too large for a metadata pass runs as
-    /// [`Self::run_compaction_unit`] does. The call stops when nothing is
+    /// folds. Each unit compacts the whole window that
+    /// [`MetadataCompactionPolicy::SizeTiered`](loonfs_core::MetadataCompactionPolicy::SizeTiered)
+    /// selects. The first unit plans from `observed`, the current manifest
+    /// that the caller loaded from the store, when it's given. The call stops when nothing is
     /// due, when another process has the compactor epoch, when
     /// `cancellation` is set, when the namespace's writer session in this
     /// runtime is closed or its namespace deleted, after
@@ -134,7 +126,6 @@ impl Maintenance {
     pub(crate) async fn compact_namespace(
         &self,
         namespace_id: &NamespaceId,
-        compaction_policy: loonfs_core::MetadataCompactionPolicy,
         mut observed: Option<PublicationBasis>,
         cancellation: &MetadataCompactionCancellation,
     ) -> Result<MetadataMaintenanceResponse> {
@@ -157,8 +148,7 @@ impl Maintenance {
             let compaction = self
                 .compact_once(
                     namespace_id,
-                    compaction_policy,
-                    loonfs_core::CompactionAdmission::WithinRowBudget,
+                    loonfs_core::MetadataCompactionPolicy::SizeTiered,
                     observed.take(),
                     cancellation,
                 )
@@ -166,22 +156,6 @@ impl Maintenance {
             let won = match compaction {
                 MetadataCompactionOutcome::Published { .. } => true,
                 MetadataCompactionOutcome::Abandoned => false,
-                MetadataCompactionOutcome::MetadataCompactionRequired => {
-                    match self
-                        .run_compaction_unit(namespace_id, cancellation)
-                        .await?
-                        .compaction
-                    {
-                        MetadataCompactionOutcome::Published { .. } => true,
-                        MetadataCompactionOutcome::Abandoned => false,
-                        MetadataCompactionOutcome::NotNeeded
-                        | MetadataCompactionOutcome::MetadataCompactionRequired
-                        | MetadataCompactionOutcome::Cancelled
-                        | MetadataCompactionOutcome::Fenced => {
-                            break MetadataMaintenanceOutcome::Due
-                        }
-                    }
-                }
                 MetadataCompactionOutcome::NotNeeded if cancellation.is_cancelled() => {
                     break MetadataMaintenanceOutcome::Due
                 }
@@ -352,7 +326,6 @@ impl Maintenance {
         &self,
         namespace_id: &NamespaceId,
         compaction_policy: loonfs_core::MetadataCompactionPolicy,
-        admission: loonfs_core::CompactionAdmission,
         observed: Option<PublicationBasis>,
         cancellation: &MetadataCompactionCancellation,
     ) -> Result<MetadataCompactionOutcome> {
@@ -401,13 +374,7 @@ impl Maintenance {
         let started_at_ms = self.core.timer().monotonic_now_ms();
         let outcome = self
             .engine(namespace_id)
-            .compact_metadata_unit(
-                basis,
-                compaction_policy,
-                admission,
-                compactor_epoch,
-                cancellation,
-            )
+            .compact_metadata_unit(basis, compaction_policy, compactor_epoch, cancellation)
             .await
             .map_err(Error::from);
         let elapsed_ms = self
@@ -435,28 +402,5 @@ impl Maintenance {
             Ok(_) | Err(_) => {}
         }
         outcome.map(compaction_outcome)
-    }
-
-    /// Runs one compaction unit of any size for
-    /// [`Maintenance::compact_metadata`](crate::Maintenance::compact_metadata)
-    /// and [`Self::compact_namespace`].
-    pub(super) async fn run_compaction_unit(
-        &self,
-        namespace_id: &NamespaceId,
-        cancellation: &MetadataCompactionCancellation,
-    ) -> Result<MetadataCompactionReport> {
-        let compaction = self
-            .compact_once(
-                namespace_id,
-                loonfs_core::MetadataCompactionPolicy::CompactImmediately,
-                loonfs_core::CompactionAdmission::AnySize,
-                None,
-                cancellation,
-            )
-            .await?;
-        Ok(MetadataCompactionReport {
-            namespace_id: namespace_id.clone(),
-            compaction,
-        })
     }
 }

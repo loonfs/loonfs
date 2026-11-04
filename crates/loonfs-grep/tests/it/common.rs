@@ -333,7 +333,6 @@ pub(crate) async fn fold_wal_and_advance_retention(
             namespace_id,
             &MaintainMetadataOptions {
                 max_wal_tail_objects: std::num::NonZeroU64::MIN,
-                ..Default::default()
             },
         )
         .await

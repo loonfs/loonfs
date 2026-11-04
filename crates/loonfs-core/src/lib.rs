@@ -198,9 +198,8 @@ pub mod publish {
 
 // Crate-root re-exports used by `loonfs` or required by public return types.
 pub use compaction::{
-    refill_iterators, select_next_iterator, CompactionAdmission, CompactionUnitOutcome,
-    MetadataCompactionCancellation, MetadataCompactionPolicy, SegmentBlockLoader,
-    SegmentRowIterator,
+    refill_iterators, select_next_iterator, CompactionUnitOutcome, MetadataCompactionCancellation,
+    MetadataCompactionPolicy, SegmentBlockLoader, SegmentRowIterator,
 };
 pub use diff::DiffPage;
 pub use engine::RuntimeReadContext;

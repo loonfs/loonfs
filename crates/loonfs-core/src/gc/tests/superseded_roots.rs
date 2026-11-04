@@ -42,7 +42,6 @@ async fn compact_bindings<S: ObjectStore>(store: &S, namespace_id: &NamespaceId)
     .compact_metadata_unit(
         None,
         MetadataCompactionPolicy::CompactImmediately,
-        crate::compaction::CompactionAdmission::AnySize,
         loonfs_types::CompactorEpoch(0),
         &crate::compaction::MetadataCompactionCancellation::default(),
     )

@@ -53,7 +53,6 @@ impl Rival {
                     .compact_metadata_unit(
                         None,
                         MetadataCompactionPolicy::CompactImmediately,
-                        crate::compaction::CompactionAdmission::AnySize,
                         CompactorEpoch(0),
                         &crate::compaction::MetadataCompactionCancellation::default(),
                     )

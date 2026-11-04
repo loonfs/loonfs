@@ -402,7 +402,6 @@ async fn drain_compaction<S: ObjectStore + ?Sized>(
         .compact_metadata_unit(
             None,
             MetadataCompactionPolicy::default(),
-            crate::compaction::CompactionAdmission::AnySize,
             loonfs_types::CompactorEpoch(0),
             &crate::compaction::MetadataCompactionCancellation::default(),
         )

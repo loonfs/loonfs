@@ -10,9 +10,8 @@ use serde::{Deserialize, Serialize};
 use std::num::NonZeroUsize;
 
 pub(crate) use loonfs_types::format::segment_blocks::{
-    DEFAULT_MAX_COMPACTION_INPUT_BYTES, DEFAULT_MAX_COMPACTION_INPUT_ROWS,
-    DEFAULT_MAX_COMPACTION_INPUT_RUNS, DEFAULT_MAX_DELTA_RUNS, DEFAULT_MAX_ROWS_PER_SEGMENT,
-    DEFAULT_MIN_COMPACTION_RUNS,
+    DEFAULT_MAX_COMPACTION_INPUT_BYTES, DEFAULT_MAX_COMPACTION_INPUT_RUNS, DEFAULT_MAX_DELTA_RUNS,
+    DEFAULT_MAX_ROWS_PER_SEGMENT, DEFAULT_MIN_COMPACTION_RUNS,
 };
 pub use loonfs_types::MetadataFamilyGroup;
 
@@ -49,10 +48,6 @@ pub struct MetadataRunPolicy {
     pub target_segment_bytes: NonZeroUsize,
     /// Complete logical runs one compaction unit may compact.
     pub max_input_runs_per_step: NonZeroUsize,
-    /// Rows, by its runs' descriptor counts, that a window may list when the
-    /// call admits only windows within this budget (a `metadata` pass). A
-    /// larger window waits for a unit that admits any size.
-    pub max_decoded_input_rows_per_step: NonZeroUsize,
     /// Decoded data-block bytes one compaction keeps in memory across its open
     /// inputs, though each input always keeps one whole block.
     pub max_decoded_input_bytes_per_step: NonZeroUsize,
@@ -71,7 +66,6 @@ impl Default for MetadataRunPolicy {
                 .unwrap()
             },
             max_input_runs_per_step: DEFAULT_MAX_COMPACTION_INPUT_RUNS,
-            max_decoded_input_rows_per_step: DEFAULT_MAX_COMPACTION_INPUT_ROWS,
             max_decoded_input_bytes_per_step: DEFAULT_MAX_COMPACTION_INPUT_BYTES,
         }
     }

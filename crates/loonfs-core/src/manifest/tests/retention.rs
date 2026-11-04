@@ -1944,7 +1944,6 @@ async fn checkpoints_append_past_the_threshold_and_compaction_drains() {
         .compact_metadata_unit(
             None,
             MetadataCompactionPolicy::default(),
-            crate::compaction::CompactionAdmission::AnySize,
             loonfs_types::CompactorEpoch(0),
             &crate::compaction::MetadataCompactionCancellation::default(),
         )
@@ -1989,12 +1988,10 @@ async fn checkpoints_append_past_the_threshold_and_compaction_drains() {
     ));
 }
 
-/// Checks that a unit compacts at most its run budget, that a unit within the
-/// row budget plans from descriptors and reads no segment when its window is
-/// too large, and that it reads only the selected runs' segments when it
-/// compacts.
+/// Checks that a unit compacts at most its run budget, and that it reads only
+/// the selected runs' segments.
 #[tokio::test]
-async fn a_unit_honors_its_run_budget_and_admits_rows_by_descriptor() {
+async fn a_unit_honors_its_run_budget_and_reads_only_the_selected_runs() {
     let temp_dir = tempdir().expect("tempdir");
     let store =
         RecordingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
@@ -2013,58 +2010,9 @@ async fn a_unit_honors_its_run_budget_and_admits_rows_by_descriptor() {
             .expect("create checkpoint");
     }
 
-    let manifest_before = current_manifest_no(&store, &namespace_id).await;
-    let tiny_row_policy = MetadataRunPolicy {
-        max_delta_runs: NonZeroUsize::MIN,
-        max_input_runs_per_step: NonZeroUsize::new(2).expect("test run budget should be nonzero"),
-        max_decoded_input_rows_per_step: NonZeroUsize::MIN,
-        ..MetadataRunPolicy::default()
-    };
-    store.reset();
-    let blocked = {
-        let mut fixture = crate::test_support::NamespaceFixture::new(
-            &store,
-            &namespace_id,
-            &crate::test_support::writer_at("test-writer", 0),
-        );
-        fixture.namespace.run_policy = tiny_row_policy;
-        fixture
-    }
-    .engine()
-    .compact_metadata_unit(
-        None,
-        MetadataCompactionPolicy::default(),
-        crate::compaction::CompactionAdmission::WithinRowBudget,
-        loonfs_types::CompactorEpoch(0),
-        &crate::compaction::MetadataCompactionCancellation::default(),
-    )
-    .await
-    .expect("budgeted unit");
-    assert_matches!(
-        blocked,
-        super::CompactionUnitOutcome::TooLarge { .. },
-        "one row must not admit a window"
-    );
-    assert_eq!(
-        current_manifest_no(&store, &namespace_id).await,
-        manifest_before,
-        "a unit whose window is too large must not publish"
-    );
-    assert_eq!(store.count(OperationSelector::Put), 0);
-    assert_eq!(
-        store.count(OperationSelector::Read),
-        0,
-        "planning reads only descriptors"
-    );
-
     let policy = MetadataRunPolicy {
         max_delta_runs: NonZeroUsize::MIN,
         max_input_runs_per_step: NonZeroUsize::new(2).expect("test run budget should be nonzero"),
-        // The bindings rows of the two oldest runs: the directory's bind
-        // and the first file's bind in both indexes, and two files' summary
-        // rows and the second file's bind in both indexes.
-        max_decoded_input_rows_per_step: NonZeroUsize::new(8)
-            .expect("test row budget should be nonzero"),
         ..MetadataRunPolicy::default()
     };
     store.reset();
@@ -2081,24 +2029,19 @@ async fn a_unit_honors_its_run_budget_and_admits_rows_by_descriptor() {
     .compact_metadata_unit(
         None,
         MetadataCompactionPolicy::default(),
-        crate::compaction::CompactionAdmission::WithinRowBudget,
         loonfs_types::CompactorEpoch(0),
         &crate::compaction::MetadataCompactionCancellation::default(),
     )
     .await
     .expect("admitted unit");
     let super::CompactionUnitOutcome::Published {
-        group,
-        input_runs,
-        rows_read,
-        ..
+        group, input_runs, ..
     } = published
     else {
         panic!("two oldest runs should fit the test budgets");
     };
     assert_eq!(input_runs, 2);
     assert!(input_runs <= policy.max_input_runs_per_step.get());
-    assert!(rows_read <= policy.max_decoded_input_rows_per_step.get() as u64);
     // The basis manifest's acknowledged floor is 0, so the unit builds no
     // kept inode filter and reads none of the basis's slot index for one.
     let reads = store.count(OperationSelector::Read);
@@ -2147,7 +2090,6 @@ async fn bounded_compaction_reaches_the_unbounded_state_and_preserves_intermedia
     let bounded_policy = MetadataRunPolicy {
         max_delta_runs: NonZeroUsize::new(4).expect("test trigger should be nonzero"),
         max_input_runs_per_step: NonZeroUsize::new(2).expect("test run budget should be nonzero"),
-        max_decoded_input_rows_per_step: unlimited,
         max_decoded_input_bytes_per_step: unlimited,
         ..MetadataRunPolicy::default()
     };
@@ -2164,7 +2106,6 @@ async fn bounded_compaction_reaches_the_unbounded_state_and_preserves_intermedia
     .compact_metadata_unit(
         None,
         MetadataCompactionPolicy::default(),
-        crate::compaction::CompactionAdmission::AnySize,
         loonfs_types::CompactorEpoch(0),
         &crate::compaction::MetadataCompactionCancellation::default(),
     )
@@ -2187,7 +2128,6 @@ async fn bounded_compaction_reaches_the_unbounded_state_and_preserves_intermedia
     let unbounded_policy = MetadataRunPolicy {
         max_delta_runs: NonZeroUsize::new(4).expect("test trigger should be nonzero"),
         max_input_runs_per_step: unlimited,
-        max_decoded_input_rows_per_step: unlimited,
         max_decoded_input_bytes_per_step: unlimited,
         ..MetadataRunPolicy::default()
     };
@@ -2251,7 +2191,6 @@ async fn bounded_compaction_reaches_the_unbounded_state_and_preserves_intermedia
     .compact_metadata_unit(
         None,
         MetadataCompactionPolicy::default(),
-        crate::compaction::CompactionAdmission::AnySize,
         loonfs_types::CompactorEpoch(0),
         &crate::compaction::MetadataCompactionCancellation::default(),
     )
@@ -2467,7 +2406,6 @@ async fn compaction_resumes_from_the_manifest_after_interruption() {
     .compact_metadata_unit(
         None,
         MetadataCompactionPolicy::default(),
-        crate::compaction::CompactionAdmission::AnySize,
         loonfs_types::CompactorEpoch(0),
         &crate::compaction::MetadataCompactionCancellation::default(),
     )
@@ -2500,7 +2438,6 @@ async fn compaction_resumes_from_the_manifest_after_interruption() {
         .compact_metadata_unit(
             None,
             MetadataCompactionPolicy::default(),
-            crate::compaction::CompactionAdmission::AnySize,
             loonfs_types::CompactorEpoch(0),
             &crate::compaction::MetadataCompactionCancellation::default(),
         )
@@ -2682,7 +2619,6 @@ async fn over_budget_compaction_aborts_without_publishing() {
     .compact_metadata_unit(
         None,
         MetadataCompactionPolicy::default(),
-        crate::compaction::CompactionAdmission::AnySize,
         loonfs_types::CompactorEpoch(0),
         &crate::compaction::MetadataCompactionCancellation::default(),
     )
@@ -2713,7 +2649,6 @@ async fn over_budget_compaction_aborts_without_publishing() {
     .compact_metadata_unit(
         None,
         MetadataCompactionPolicy::default(),
-        crate::compaction::CompactionAdmission::AnySize,
         loonfs_types::CompactorEpoch(0),
         &crate::compaction::MetadataCompactionCancellation::default(),
     )
@@ -2755,12 +2690,11 @@ async fn plan_window<S: ObjectStore + ?Sized>(
     (group, spec)
 }
 
-/// Runs one compaction unit with compactor epoch 0 and the given admission.
+/// Runs one size-tiered compaction unit with compactor epoch 0.
 async fn compact_with<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     policy: MetadataRunPolicy,
-    admission: crate::compaction::CompactionAdmission,
 ) -> super::CompactionUnitOutcome {
     {
         let mut fixture = crate::test_support::NamespaceFixture::new(
@@ -2775,23 +2709,11 @@ async fn compact_with<S: ObjectStore + ?Sized>(
     .compact_metadata_unit(
         None,
         MetadataCompactionPolicy::default(),
-        admission,
         loonfs_types::CompactorEpoch(0),
         &crate::compaction::MetadataCompactionCancellation::default(),
     )
     .await
     .expect("run a compaction unit")
-}
-
-/// Rows one run holds in one family group: the quantity the per-step row
-/// budget is measured against.
-fn group_run_rows(segments: &[MetadataFamilySegments], group: &[ApiMetadataRowFamily]) -> u64 {
-    segments
-        .iter()
-        .filter(|family_segments| group.contains(&family_segments.family))
-        .flat_map(|family_segments| &family_segments.segments)
-        .map(|descriptor| descriptor.row_count)
-        .sum()
 }
 
 fn group_segment_object_keys(
@@ -2806,23 +2728,10 @@ fn group_segment_object_keys(
         .collect()
 }
 
-/// A per-step row budget one row short of what the group's base run needs,
-/// with the trigger forced so a single delta run is still compacted.
-fn policy_that_cannot_compact_the_base(base_rows: u64) -> MetadataRunPolicy {
-    let row_budget = usize::try_from(base_rows).expect("test row counts are small") - 1;
-    MetadataRunPolicy {
-        max_delta_runs: NonZeroUsize::MIN,
-        max_decoded_input_rows_per_step: NonZeroUsize::new(row_budget)
-            .expect("test row budget should be nonzero"),
-        ..MetadataRunPolicy::default()
-    }
-}
-
-/// Checks that a group whose base is over the row budget is too large for a
-/// unit within the row budget, and that a unit that admits any size rebuilds
-/// the whole group, base included, into one base run.
+/// Checks that a size-tiered unit rebuilds a group whose base is comparable
+/// in size to its delta runs whole, base included, into one base run.
 #[tokio::test]
-async fn a_base_over_the_row_budget_is_rebuilt_whole_by_a_unit_of_any_size() {
+async fn a_base_comparable_to_its_deltas_is_rebuilt_whole_with_them() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -2857,10 +2766,15 @@ async fn a_base_over_the_row_budget_is_rebuilt_whole_by_a_unit_of_any_size() {
     .expect("load the parked manifest");
     let (group, _) = plan_window(&store, &namespace_id, MetadataRunPolicy::default(), None).await;
     let base = base_tier(&before.manifest);
-    let base_rows = group_run_rows(&base, group.families());
     let base_segments = group_segment_object_keys(&base, group.families());
-    assert!(base_rows > 1, "the base run must hold rows in this group");
-    let policy = policy_that_cannot_compact_the_base(base_rows);
+    assert!(
+        !base_segments.is_empty(),
+        "the base run must hold segments in this group"
+    );
+    let policy = MetadataRunPolicy {
+        max_delta_runs: NonZeroUsize::MIN,
+        ..MetadataRunPolicy::default()
+    };
 
     let (_, spec) = plan_window(&store, &namespace_id, policy, None).await;
     assert_eq!(
@@ -2868,24 +2782,8 @@ async fn a_base_over_the_row_budget_is_rebuilt_whole_by_a_unit_of_any_size() {
         group_runs(&before.manifest, group.families()).len(),
         "comparable input sizes warrant a base rewrite"
     );
-    assert_eq!(
-        compact_with(
-            &store,
-            &namespace_id,
-            policy,
-            crate::compaction::CompactionAdmission::WithinRowBudget
-        )
-        .await,
-        super::CompactionUnitOutcome::TooLarge { group }
-    );
     assert_matches!(
-        compact_with(
-            &store,
-            &namespace_id,
-            policy,
-            crate::compaction::CompactionAdmission::AnySize
-        )
-        .await,
+        compact_with(&store, &namespace_id, policy).await,
         super::CompactionUnitOutcome::Published { group: compacted, .. } if compacted == group
     );
 
@@ -3096,17 +2994,14 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    // Small segments so the compacted base is many segments rather than one, and
-    // a row budget the groups outgrow within a couple of cycles.
+    // Small segments so the compacted base is many segments rather than one.
     let policy = MetadataRunPolicy {
         max_delta_runs: NonZeroUsize::MIN,
-        max_decoded_input_rows_per_step: NonZeroUsize::new(24).expect("nonzero"),
         max_rows_per_segment: NonZeroUsize::new(4).expect("nonzero"),
         ..MetadataRunPolicy::default()
     };
 
     let group = group_containing(ApiMetadataRowFamily::DirentryBinds);
-    let mut compacted_groups = 0usize;
     for cycle in 0..4u64 {
         for file in 0..4u64 {
             crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
@@ -3146,13 +3041,7 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
 
         let mut settled = false;
         for _step in 0..512 {
-            let report = compact_with(
-                &store,
-                &namespace_id,
-                policy,
-                crate::compaction::CompactionAdmission::WithinRowBudget,
-            )
-            .await;
+            let report = compact_with(&store, &namespace_id, policy).await;
             let current = load_manifest_materialization_for_inspection(
                 &store,
                 &namespace_id,
@@ -3176,22 +3065,6 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
                     settled = true;
                     break;
                 }
-                // The group's window no longer fits the row budget, so a
-                // unit that admits any size compacts it, as a metadata run's
-                // caller does after a window that's too large.
-                super::CompactionUnitOutcome::TooLarge { .. } => {
-                    assert_matches!(
-                        compact_with(
-                            &store,
-                            &namespace_id,
-                            policy,
-                            crate::compaction::CompactionAdmission::AnySize,
-                        )
-                        .await,
-                        super::CompactionUnitOutcome::Published { .. }
-                    );
-                    compacted_groups += 1;
-                }
                 super::CompactionUnitOutcome::Published { .. } => {}
                 other => panic!("no concurrent publisher exists in this test, got {other:?}"),
             }
@@ -3202,10 +3075,6 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
         );
     }
 
-    assert!(
-        compacted_groups > 0,
-        "a group must have outgrown the row budget and been rebuilt by a unit of any size"
-    );
     let final_manifest = load_manifest_materialization_for_inspection(
         &store,
         &namespace_id,

@@ -182,7 +182,6 @@ impl Family {
             Operation::Metadata => {
                 let options = MaintainMetadataOptions {
                     max_wal_tail_objects: NonZeroU64::MIN,
-                    ..MaintainMetadataOptions::default()
                 };
                 self.maintenance()
                     .maintain_metadata_while_due_with_options(

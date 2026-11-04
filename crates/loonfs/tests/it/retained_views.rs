@@ -6,9 +6,8 @@ use loonfs::AccessState;
 use loonfs::AttributeChanges;
 use loonfs::{
     CreateDirectoryOptions, CreateNamespaceOptions, DestinationBehavior, FoldWalOutcome,
-    FoldWalResponse, GcOptions, InlineContentPolicy, LoonFs, MaintainMetadataOptions,
-    MetadataCompactionOutcome, MetadataCompactionPolicy, PutFileOptions,
-    GC_DEFAULT_GRACE_WINDOW_MS,
+    FoldWalResponse, GcOptions, InlineContentPolicy, LoonFs, MetadataCompactionOutcome,
+    PutFileOptions, GC_DEFAULT_GRACE_WINDOW_MS,
 };
 use loonfs_core::test_support::WriterAt;
 use loonfs_objectstore::keys::metadata_segment_object_key;
@@ -246,13 +245,7 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                 for _ in 0..32 {
                     let step = runtime
                         .maintenance
-                        .maintain_metadata_with_options(
-                            &source,
-                            &MaintainMetadataOptions {
-                                compaction_policy: MetadataCompactionPolicy::CompactImmediately,
-                                ..Default::default()
-                            },
-                        )
+                        .compact_metadata(&source, &loonfs::MaintenanceCancellation::new())
                         .await
                         .expect("rebuild metadata after retention");
                     if step.compaction == MetadataCompactionOutcome::NotNeeded {

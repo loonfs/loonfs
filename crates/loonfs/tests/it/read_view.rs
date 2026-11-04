@@ -1,7 +1,8 @@
 //! Read views that keep related reads on one captured namespace state.
 
 use crate::common::{
-    assert_core_error_kind, metadata_options, open_runtime_async, open_runtime_with_async, store,
+    assert_core_error_kind, compact_until_done, metadata_options, open_runtime_async,
+    open_runtime_with_async, store,
 };
 use loonfs::{
     ChangeSeq, CreateSnapshotOptions, CurrentFile, DestinationBehavior, ErrorCode, ListOptions,
@@ -64,15 +65,10 @@ async fn read_during_compaction_and_collection(
             .expect("file");
         runtime
             .maintenance
-            .maintain_metadata_with_options(
-                &namespace,
-                &loonfs::MaintainMetadataOptions {
-                    compaction_policy: loonfs::MetadataCompactionPolicy::CompactImmediately,
-                    ..metadata_options(1)
-                },
-            )
+            .maintain_metadata_with_options(&namespace, &metadata_options(1))
             .await
-            .expect("fold and compact");
+            .expect("fold");
+        compact_until_done(&runtime.maintenance, &namespace).await;
     }
     let segment_keys = store
         .list_prefix(&loonfs_objectstore::keys::metadata_segment_prefix(

@@ -6,7 +6,7 @@
 //! Results are the `loonfs-types` wire shapes themselves, the same way handles
 //! already return `Commit` and `FoldWalResponse`.
 
-use crate::{Error, MetadataCompactionPolicy, Result, RetentionTarget};
+use crate::{Error, Result, RetentionTarget};
 use loonfs_core::limits::{FOLD_AT_WAL_OBJECTS, MAX_UNFOLDED_WAL_OBJECTS};
 use loonfs_core::StreamRange;
 use loonfs_types::{AdvanceRetentionRequest, MetadataMaintenanceRequest};
@@ -32,15 +32,12 @@ pub use loonfs_types::options::{
 pub struct MaintainMetadataOptions {
     /// Fold the visible WAL tail once it reaches this many WAL objects.
     pub max_wal_tail_objects: NonZeroU64,
-    /// Whether run sizes must justify the rewrite before maintenance compacts them.
-    pub compaction_policy: MetadataCompactionPolicy,
 }
 
 impl Default for MaintainMetadataOptions {
     fn default() -> Self {
         Self {
             max_wal_tail_objects: FOLD_AT_WAL_OBJECTS,
-            compaction_policy: MetadataCompactionPolicy::SizeTiered,
         }
     }
 }
@@ -63,7 +60,6 @@ impl MaintainMetadataOptions {
         }
         Ok(Self {
             max_wal_tail_objects,
-            ..Self::default()
         })
     }
 }

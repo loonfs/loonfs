@@ -56,11 +56,6 @@ pub struct Maintenance {
     pub(crate) publisher: PublisherRegistry,
     pub(crate) writer: Arc<WriterState>,
     pub(crate) writer_id: WriterId,
-    /// A narrowed row budget for the tests that need a family group whose
-    /// window is too large for a `metadata` pass. See
-    /// [`Self::starve_compaction_row_budget`].
-    #[cfg(test)]
-    compaction_row_budget: Option<std::num::NonZeroUsize>,
     /// A narrowed per-segment row budget for the tests that need many
     /// compacted segments. See [`Self::narrow_segment_row_budget`].
     #[cfg(test)]
@@ -82,27 +77,8 @@ impl Maintenance {
             writer,
             writer_id,
             #[cfg(test)]
-            compaction_row_budget: None,
-            #[cfg(test)]
             segment_row_budget: None,
         }
-    }
-
-    /// Narrows the rows that a `metadata` pass this value drives admits in
-    /// one compaction unit, so a namespace a test can build in seconds has a
-    /// window too large for one pass.
-    ///
-    /// Test-only, and the one shipped number that has to move to reach that
-    /// state: planning, running, and publishing the unit are the shipped path
-    /// either way.
-    #[cfg(test)]
-    #[must_use]
-    pub(crate) fn starve_compaction_row_budget(
-        mut self,
-        max_decoded_input_rows_per_step: std::num::NonZeroUsize,
-    ) -> Self {
-        self.compaction_row_budget = Some(max_decoded_input_rows_per_step);
-        self
     }
 
     /// Narrows the rows one segment this value's compaction writes may contain,
@@ -205,10 +181,8 @@ impl Maintenance {
     /// The check reads the position of this runtime's writer session when
     /// the session has one, and otherwise the store's object count and the
     /// tail's idle age.
-    /// Then runs one compaction unit whose window lists at most the run
-    /// policy's `max_decoded_input_rows_per_step` rows, and reports a larger
-    /// window as [`MetadataCompactionOutcome::MetadataCompactionRequired`]. A
-    /// fold waits for a fold permit from the runtime's execution budget, and a
+    /// Then runs one size-tiered compaction unit when one is due, whatever
+    /// the number of rows its window lists. A fold waits for a fold permit from the runtime's execution budget, and a
     /// unit that finds work waits for a compaction permit from it.
     pub async fn maintain_metadata_with_options(
         &self,
@@ -225,8 +199,7 @@ impl Maintenance {
                 let compaction = self
                     .compact_once(
                         namespace_id,
-                        options.compaction_policy,
-                        loonfs_core::CompactionAdmission::WithinRowBudget,
+                        loonfs_core::MetadataCompactionPolicy::SizeTiered,
                         observed,
                         &MetadataCompactionCancellation::default(),
                     )
@@ -276,8 +249,7 @@ impl Maintenance {
 
     /// Folds the WAL tail when a fold is due, as
     /// [`Self::maintain_metadata_with_options`] does, and then runs
-    /// compaction units while a unit is due. When a unit reports a window too
-    /// large for a metadata pass, runs [`Self::compact_metadata`]. The fold
+    /// size-tiered compaction units while a unit is due. The fold
     /// waits for a fold of the namespace in progress, such as its writer
     /// session's, and each unit waits for a unit in progress, so the call
     /// never repeats that work.
@@ -336,12 +308,7 @@ impl Maintenance {
                 NamespaceFold::Folded(_) => (None, None),
             };
             let mut response = self
-                .compact_namespace(
-                    namespace_id,
-                    options.compaction_policy,
-                    observed,
-                    cancellation,
-                )
+                .compact_namespace(namespace_id, observed, cancellation)
                 .await?;
             let next_due_at_ms = idle_fold_due_at_ms
                 .filter(|_| response.outcome == MetadataMaintenanceOutcome::CaughtUp);
@@ -363,13 +330,13 @@ impl Maintenance {
         .await
     }
 
-    /// Runs one metadata compaction unit in the caller's task, whatever the
-    /// size of its window.
+    /// Runs one metadata compaction unit in the caller's task. The unit
+    /// compacts a family group's runs whatever their sizes, one window per
+    /// call.
     ///
-    /// Use this when [`MetadataCompactionOutcome::MetadataCompactionRequired`]
-    /// is reported, and repeat it while it publishes to compact every
-    /// eligible group. The unit waits for a compaction permit from the
-    /// runtime's execution budget.
+    /// Repeat the call while it publishes to compact every eligible group.
+    /// The unit waits for a compaction permit from the runtime's execution
+    /// budget.
     ///
     /// Cancelling `cancellation` ends the wait for a permit and reports the
     /// unit cancelled. A running unit stops at its next block.
@@ -380,7 +347,20 @@ impl Maintenance {
     ) -> Result<MetadataCompactionReport> {
         trace::in_operation(
             operation_span!(self.core, "compact_metadata", namespace_id),
-            self.run_compaction_unit(namespace_id, cancellation.metadata_compaction()),
+            async {
+                let compaction = self
+                    .compact_once(
+                        namespace_id,
+                        loonfs_core::MetadataCompactionPolicy::CompactImmediately,
+                        None,
+                        cancellation.metadata_compaction(),
+                    )
+                    .await?;
+                Ok(MetadataCompactionReport {
+                    namespace_id: namespace_id.clone(),
+                    compaction,
+                })
+            },
         )
         .await
     }
