@@ -78,7 +78,7 @@ This section describes how grants on an item and its ancestors combine into a su
 
 A grant on a directory applies to the directory and every descendant, until a directory marked as a "boundary" stops inheritance. The boundary is the only subtractive concept in the model. There are no deny entries, so the union of grants along a chain of ancestors doesn't depend on order.
 
-To find the effective rights, LoonFS walks the item's ancestors. Every read already performs this walk to find a covering subtree tombstone, and the path depth limit bounds it. A listing computes the directory's effective rights once, and each child inherits them in constant time. Only a child whose own row is a boundary has different rights.
+To find the effective rights, LoonFS walks the item's ancestors. Every read already performs this walk to find a covering subtree tombstone, and the path depth limit bounds it. A read keeps the rights it finds for each inode, and a walk stops at the first ancestor whose rights it already has. So a listing walks the directory's ancestors once, and each child adds its own row to the directory's rights. Only a child whose own row is a boundary doesn't add the directory's rights.
 
 For a deleted item, LoonFS evaluates the item's own row and boundary first. Only then does the walk follow the parent saved in the tombstone into that parent's current ancestors. The tombstone fills in one missing link to the parent, and it never replaces or bypasses the item's own row. So deletion doesn't need to scan descendants.
 

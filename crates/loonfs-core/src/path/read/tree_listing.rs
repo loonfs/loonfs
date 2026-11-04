@@ -80,7 +80,7 @@ impl<S: ObjectStore + ?Sized> LoadedMetadataView<'_, S> {
         root: &ResolvedVisiblePath,
         request: PageRequest<DirectoryTreePageCursor>,
         attributes: AttributeInclusion,
-        access: &ReadAccess<'_, S>,
+        access: &mut ReadAccess<'_, S>,
     ) -> Result<Page<PathEntry, DirectoryTreePageCursor>> {
         let limit = request.limit.as_usize();
         let mut stack = resume_stack(session, root, request.cursor, access).await?;
@@ -155,7 +155,7 @@ async fn resume_stack<S: ObjectStore + ?Sized>(
     session: &mut MetadataViewSession<'_, '_, S>,
     root: &ResolvedVisiblePath,
     cursor: Option<DirectoryTreePageCursor>,
-    access: &ReadAccess<'_, S>,
+    access: &mut ReadAccess<'_, S>,
 ) -> Result<Vec<TreeFrame>> {
     let Some(cursor) = cursor else {
         return Ok(vec![TreeFrame::new(root.clone(), None)]);
@@ -282,7 +282,7 @@ mod tests {
                     cursor: None,
                 },
                 AttributeInclusion::Omit,
-                &ReadAccess::live(Authorizer::Unrestricted),
+                &mut ReadAccess::live(Authorizer::Unrestricted),
             )
             .await
             .expect("recursive page");
@@ -297,5 +297,55 @@ mod tests {
             read_children <= bound as u64,
             "a page of {limit} read {read_children} children, more than {bound}"
         );
+    }
+
+    /// Checks that a subject's listing of a deep directory walks the
+    /// ancestors that the children share once: one access row lookup for
+    /// each child, one for each ancestor, and one for the administrator
+    /// check, where a walk per child would look up every ancestor again for
+    /// each child.
+    #[tokio::test]
+    async fn a_listing_walks_the_ancestors_its_children_share_once() {
+        let (_temp_dir, store, namespace_id) = namespace_with_deep_wide_tree().await;
+        let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+        let view = namespace
+            .load_current_metadata_view()
+            .await
+            .expect("load view");
+        let mut session = view.metadata_view().session();
+        let deepest = format!("/deep{}", "/a".repeat(DEPTH - 1));
+        let directory = session
+            .resolve_visible_path(
+                &AbsolutePath::parse(deepest).expect("path"),
+                LeafRevisionPreload::Skip,
+            )
+            .await
+            .expect("resolve the deepest directory");
+        let children = view
+            .select_children(&mut session, directory.inode_id, None, WIDTH)
+            .await
+            .expect("select children");
+        assert_eq!(children.len(), WIDTH);
+        let principals = loonfs_types::PrincipalSet::new(
+            [loonfs_types::PrincipalId::parse("ada").expect("principal")].into(),
+        )
+        .expect("principals");
+        let before = session.counters().access_row_calls;
+        let scanned = view
+            .readable_children(
+                &mut session,
+                children,
+                &mut ReadAccess::live(Authorizer::Subject {
+                    principals: &principals,
+                }),
+            )
+            .await
+            .expect("readable children");
+        let access_row_calls = session.counters().access_row_calls - before;
+
+        assert!(scanned.iter().all(|scanned| !scanned.readable));
+        // The root is one more ancestor than the `DEPTH` directories on the
+        // chain.
+        assert_eq!(access_row_calls, (1 + WIDTH + DEPTH + 1) as u64);
     }
 }

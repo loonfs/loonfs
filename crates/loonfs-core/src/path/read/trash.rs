@@ -28,7 +28,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     pub(crate) async fn list_trash_page(
         &self,
         request: PageRequest<TrashPageCursor>,
-        access: &ReadAccess<'_, S>,
+        access: &mut ReadAccess<'_, S>,
     ) -> Result<Page<TrashEntry, TrashPageCursor>> {
         validate_cursor_head(
             self.visible_seq,

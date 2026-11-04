@@ -323,7 +323,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     ) -> Result<Page<PathEntry, ListPageCursor>> {
         let read = self.authorized_read(context).await?;
         read.view
-            .list_path_page(path.as_ref(), request, &options, &read.access())
+            .list_path_page(path.as_ref(), request, &options, &mut read.access())
             .await
     }
 
@@ -339,7 +339,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     ) -> Result<Page<PathEntry, ListPageCursor>> {
         let read = self.authorized_read(context).await?;
         read.view
-            .list_inode_children_page(inode_id, request, &options, &read.access())
+            .list_inode_children_page(inode_id, request, &options, &mut read.access())
             .await
     }
 
@@ -526,7 +526,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         context: &RuntimeReadContext,
     ) -> Result<Page<TrashEntry, TrashPageCursor>> {
         let read = self.authorized_read(context).await?;
-        read.view.list_trash_page(request, &read.access()).await
+        read.view.list_trash_page(request, &mut read.access()).await
     }
 
     /// Resolves the current visibility, revision, and path for each inode ID.

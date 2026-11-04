@@ -6,8 +6,16 @@ use super::visibility::{AncestorWalk, MetadataVisibilityReads};
 use crate::error::{CoreError, Result};
 use loonfs_types::format::manifest::{AccessRevisionRecord, TombstoneRowAction};
 use loonfs_types::{AccessRight, AccessRights, InodeId, PrincipalSet, ROOT_INODE_ID};
+use std::collections::HashMap;
 
-/// The access rows the inheritance walk visits, nearest first.
+/// The inodes an inheritance walk visited, nearest first, each with its own
+/// access row, and the known ancestor the walk stopped before, if any.
+struct AccessWalk {
+    visited: Vec<(InodeId, Option<AccessRevisionRecord>)>,
+    known_ancestor: Option<InodeId>,
+}
+
+/// Walks the inheritance chain up from `inode_id`.
 ///
 /// The walk starts at the inode, follows current parent bindings, and
 /// stops after a row whose boundary is set or at the root. A deletion root
@@ -15,41 +23,17 @@ use loonfs_types::{AccessRight, AccessRights, InodeId, PrincipalSet, ROOT_INODE_
 /// view's retention floor), its `set` event's saved parent repairs that one
 /// edge, so a deleted item's own row and boundary are evaluated before the
 /// walk continues. The walk stops at the root of an expired deletion, so an
-/// expired subtree inherits no grant from above it. Inodes without a row
-/// contribute nothing and are not recorded.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub(crate) struct AccessChain {
-    rows: Vec<AccessRevisionRecord>,
-}
-
-impl AccessChain {
-    pub(crate) fn rows(&self) -> &[AccessRevisionRecord] {
-        &self.rows
-    }
-
-    /// Rights the principals have through this chain. `admin` never
-    /// inherits, so it is left out; see [`is_administrator`].
-    pub(crate) fn rights_for(&self, principals: &PrincipalSet) -> AccessRights {
-        self.rows
-            .iter()
-            .flat_map(|row| {
-                principals
-                    .iter()
-                    .map(move |principal| row.grants.get(principal))
-            })
-            .fold(AccessRights::EMPTY, AccessRights::union)
-            .difference(AccessRights::ADMIN)
-    }
-}
-
-pub(crate) async fn access_chain<R: MetadataVisibilityReads>(
+/// expired subtree inherits no grant from above it. The walk also stops
+/// before the first inode for which `known` returns true.
+async fn walk_access_rows<R: MetadataVisibilityReads>(
     reads: &mut R,
     inode_id: InodeId,
-) -> Result<AccessChain>
+    known: impl Fn(InodeId) -> bool,
+) -> Result<AccessWalk>
 where
     CoreError: From<R::Error>,
 {
-    let mut rows = Vec::new();
+    let mut visited = Vec::new();
     let mut walk = AncestorWalk::new(inode_id);
     let mut last = inode_id;
     loop {
@@ -71,17 +55,117 @@ where
                 Some(_) | None => break,
             }
         };
-        last = current;
-        let mut boundary = false;
-        if let Some(row) = reads.find_access_row(current).await? {
-            boundary = row.boundary;
-            rows.push(row);
+        if known(current) {
+            return Ok(AccessWalk {
+                visited,
+                known_ancestor: Some(current),
+            });
         }
+        last = current;
+        let row = reads.find_access_row(current).await?;
+        let boundary = row.as_ref().is_some_and(|row| row.boundary);
+        visited.push((current, row));
         if boundary || current == ROOT_INODE_ID {
             break;
         }
     }
-    Ok(AccessChain { rows })
+    Ok(AccessWalk {
+        visited,
+        known_ancestor: None,
+    })
+}
+
+/// Returns the access rows on the inheritance chain of `inode_id`, nearest
+/// first. Inodes without a row contribute nothing and are left out.
+pub(crate) async fn access_chain<R: MetadataVisibilityReads>(
+    reads: &mut R,
+    inode_id: InodeId,
+) -> Result<Vec<AccessRevisionRecord>>
+where
+    CoreError: From<R::Error>,
+{
+    let walk = walk_access_rows(reads, inode_id, |_| false).await?;
+    Ok(walk
+        .visited
+        .into_iter()
+        .filter_map(|(_, row)| row)
+        .collect())
+}
+
+/// Effective rights that one subject's checks have found on one view,
+/// memoized per inode.
+///
+/// The rights on an inode are the rights its own row grants, united with
+/// the rights on its parent unless that row is a boundary, so a walk from an
+/// inode stops at the first ancestor whose rights are memoized, and it
+/// memoizes every inode it visited. The children of one directory then share
+/// one walk above the directory.
+#[derive(Debug, Default)]
+pub(crate) struct EffectiveRightsMemo {
+    administrator: Option<bool>,
+    inherited: HashMap<InodeId, AccessRights>,
+}
+
+impl EffectiveRightsMemo {
+    /// Returns the rights `principals` have on `inode_id`: every right for
+    /// an administrator, otherwise the union over the inheritance chain.
+    pub(crate) async fn effective_rights<R: MetadataVisibilityReads>(
+        &mut self,
+        reads: &mut R,
+        principals: &PrincipalSet,
+        inode_id: InodeId,
+    ) -> Result<AccessRights>
+    where
+        CoreError: From<R::Error>,
+    {
+        let administrator = match self.administrator {
+            Some(administrator) => administrator,
+            None => *self
+                .administrator
+                .insert(is_administrator(reads, principals).await?),
+        };
+        if administrator {
+            return Ok(AccessRights::ALL);
+        }
+        self.inherited_rights(reads, principals, inode_id).await
+    }
+
+    /// Returns the union of the grants to `principals` over the inheritance
+    /// chain of `inode_id`. `admin` never inherits, so it is left out; see
+    /// [`is_administrator`].
+    async fn inherited_rights<R: MetadataVisibilityReads>(
+        &mut self,
+        reads: &mut R,
+        principals: &PrincipalSet,
+        inode_id: InodeId,
+    ) -> Result<AccessRights>
+    where
+        CoreError: From<R::Error>,
+    {
+        let walk = walk_access_rows(reads, inode_id, |inode_id| {
+            self.inherited.contains_key(&inode_id)
+        })
+        .await?;
+        let mut rights = walk.known_ancestor.map_or(AccessRights::EMPTY, |inode_id| {
+            self.inherited
+                .get(&inode_id)
+                .copied()
+                .expect("the walk stops only at a memoized ancestor")
+        });
+        // The walk stops after a boundary row, so a boundary is the last
+        // inode visited, and nothing above the boundary reaches its rights.
+        for (visited, row) in walk.visited.into_iter().rev() {
+            if let Some(row) = row {
+                rights = principals
+                    .iter()
+                    .map(|principal| row.grants.get(principal))
+                    .fold(rights, AccessRights::union)
+                    .difference(AccessRights::ADMIN);
+            }
+            self.inherited.insert(visited, rights);
+        }
+        Ok(rights)
+    }
 }
 
 /// Whether any of the principals has `admin` on the root row.
@@ -99,8 +183,8 @@ pub(crate) async fn is_administrator<R: MetadataVisibilityReads>(
         }))
 }
 
-/// The rights `principals` have on `inode_id`: every right for an
-/// administrator, otherwise the union over the inheritance chain.
+/// The rights `principals` have on `inode_id`, through a memo of its own;
+/// see [`EffectiveRightsMemo::effective_rights`].
 pub(crate) async fn effective_rights<R: MetadataVisibilityReads>(
     reads: &mut R,
     principals: &PrincipalSet,
@@ -109,10 +193,9 @@ pub(crate) async fn effective_rights<R: MetadataVisibilityReads>(
 where
     CoreError: From<R::Error>,
 {
-    if is_administrator(reads, principals).await? {
-        return Ok(AccessRights::ALL);
-    }
-    Ok(access_chain(reads, inode_id).await?.rights_for(principals))
+    EffectiveRightsMemo::default()
+        .effective_rights(reads, principals, inode_id)
+        .await
 }
 
 #[cfg(test)]
@@ -294,11 +377,44 @@ mod tests {
         assert!(!is_administrator(&mut reads, &eve)
             .await
             .expect("administrator"));
-        assert!(access_chain(&mut reads, InodeId(4))
+        assert!(EffectiveRightsMemo::default()
+            .inherited_rights(&mut reads, &ops, InodeId(4))
             .await
-            .expect("access chain")
-            .rights_for(&ops)
+            .expect("inherited rights")
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_memo_resolves_the_same_rights_in_any_order() {
+        let state = access_fixture_state();
+        let mut reads = state.reads_at_seq(ChangeSeq(10));
+        let inode_ids: Vec<_> = [0, 2, 3, 4, 5, 6, 7, 8].into_iter().map(InodeId).collect();
+        for (principals, _, _) in access_fixture_cases() {
+            let mut expected = Vec::new();
+            for &inode_id in &inode_ids {
+                expected.push(
+                    effective_rights(&mut reads, &principals, inode_id)
+                        .await
+                        .expect("effective rights"),
+                );
+            }
+            for reversed in [false, true] {
+                let mut memo = EffectiveRightsMemo::default();
+                let mut order: Vec<_> = inode_ids.iter().copied().zip(&expected).collect();
+                if reversed {
+                    order.reverse();
+                }
+                for (inode_id, expected) in order {
+                    assert_eq!(
+                        memo.effective_rights(&mut reads, &principals, inode_id)
+                            .await
+                            .expect("memoized rights"),
+                        *expected,
+                        "principals {principals:?}, inode {inode_id}, reversed {reversed}"
+                    );
+                }
+            }
+        }
     }
 
     #[tokio::test]

@@ -158,7 +158,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         absolute_path: &str,
         request: PageRequest<ListPageCursor>,
         options: &ListOptions,
-        access: &ReadAccess<'_, S>,
+        access: &mut ReadAccess<'_, S>,
     ) -> Result<Page<PathEntry, ListPageCursor>> {
         validate_cursor_head(
             self.visible_seq,
@@ -234,7 +234,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         inode_id: InodeId,
         request: PageRequest<ListPageCursor>,
         options: &ListOptions,
-        access: &ReadAccess<'_, S>,
+        access: &mut ReadAccess<'_, S>,
     ) -> Result<Page<PathEntry, ListPageCursor>> {
         validate_cursor_head(
             self.visible_seq,
@@ -279,7 +279,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         resolved: &ResolvedVisiblePath,
         request: DirectoryListingRequest,
         attributes: AttributeInclusion,
-        access: &ReadAccess<'_, S>,
+        access: &mut ReadAccess<'_, S>,
     ) -> Result<Page<PathEntry, ListPageCursor>> {
         match request {
             DirectoryListingRequest::Directory(request) => {
@@ -312,7 +312,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         resolved: &ResolvedVisiblePath,
         request: PageRequest<DirectoryPageCursor>,
         attributes: AttributeInclusion,
-        access: &ReadAccess<'_, S>,
+        access: &mut ReadAccess<'_, S>,
     ) -> Result<Page<PathEntry, DirectoryPageCursor>> {
         let start_after = request.cursor.as_ref().map(|cursor| &cursor.last_name_key);
         let mut children = self
@@ -379,7 +379,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         &self,
         session: &mut MetadataViewSession<'_, '_, S>,
         children: Vec<VisibleChildEntry>,
-        access: &ReadAccess<'_, S>,
+        access: &mut ReadAccess<'_, S>,
     ) -> Result<Vec<ScannedChild>> {
         let mut readable = vec![true; children.len()];
         async {

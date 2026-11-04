@@ -89,8 +89,8 @@ impl<S: ObjectStore + ?Sized> PlanningView<'_, S> {
         }
         let before_chain = access_chain(&mut reads, source_parent).await?;
         let after_chain = access_chain(&mut reads, destination_parent).await?;
-        let before_rows: Vec<_> = own.iter().chain(before_chain.rows()).collect();
-        let after_rows: Vec<_> = own.iter().chain(after_chain.rows()).collect();
+        let before_rows: Vec<_> = own.iter().chain(&before_chain).collect();
+        let after_rows: Vec<_> = own.iter().chain(&after_chain).collect();
         let root = reads.find_access_row(ROOT_INODE_ID).await?;
         let named: BTreeSet<&PrincipalId> = before_rows
             .iter()
