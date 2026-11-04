@@ -62,8 +62,8 @@ pub struct PublicationPolicy {
     #[serde(skip)]
     pub write_stop_wait_budget_ms: u64,
     /// The time from a merge's start after which the merge skips the fold
-    /// of the WAL tail through its commit, and the next maintenance pass
-    /// folds the tail. Defaults to 30,000 ms.
+    /// of the WAL tail through its commit, and the tail waits for the fold
+    /// trigger like any other tail. Defaults to 30,000 ms.
     ///
     /// It isn't a key of the serde form. A host sets it from its own request
     /// deadline, so a merge returns before the request's deadline passes.

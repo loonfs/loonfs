@@ -126,7 +126,8 @@ impl Namespace<Writable> {
     /// commit, the merge folds this namespace's WAL tail through it, unless
     /// the merge has already run for the runtime's
     /// [`merge_fold_budget_ms`](crate::PublicationPolicy::merge_fold_budget_ms),
-    /// in which case the next maintenance pass folds the tail. The subject of
+    /// in which case the tail waits for the fold trigger like any other
+    /// tail. The subject of
     /// this handle has to be able to read each inode whose change the merge
     /// applies in the fork, and needs the rights in this namespace that each
     /// planned operation needs. A runtime whose merge allowance
@@ -302,8 +303,8 @@ impl Namespace<Writable> {
 
     /// Folds this namespace's WAL tail through the merge's commit, within
     /// what is left of the merge's fold budget. A failed fold doesn't fail
-    /// the merge, which is committed, and the next maintenance pass folds
-    /// the tail.
+    /// the merge, which is committed, and the tail waits for the fold
+    /// trigger like any other tail.
     async fn fold_after_merge(&self, started_at_ms: u64) {
         let elapsed_ms = self
             .core
@@ -329,7 +330,7 @@ impl Namespace<Writable> {
                     tracing::warn!(
                         namespace_id = %self.namespace_id,
                         %error,
-                        "the fold after a merge failed, and the next maintenance pass folds the tail"
+                        "the fold after a merge failed, and the tail waits for the fold trigger"
                     );
                 }
             }
