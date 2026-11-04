@@ -1075,6 +1075,49 @@ async fn a_first_commit_over_the_allowance_has_no_split_hint() {
     );
 }
 
+/// Checks that a merge that fits the allowance until ordering adds a
+/// temporary move returns `merge_too_large` with a split hint. The fork
+/// swaps `a.txt` and `b.txt` and then creates a file, and the allowance is
+/// one byte less than the ordered commit's planned bytes, so the hint is the
+/// swap's last commit.
+#[tokio::test]
+async fn a_merge_over_the_allowance_by_its_temporary_move_has_a_split_hint() {
+    let mut family = Family::new().await;
+    let fork = family.fork();
+    fork.move_path("/docs/a.txt", "/docs/t.txt", None)
+        .await
+        .expect("move a");
+    fork.move_path("/docs/b.txt", "/docs/a.txt", None)
+        .await
+        .expect("move b");
+    let swapped_seq = fork
+        .move_path("/docs/t.txt", "/docs/b.txt", None)
+        .await
+        .expect("move t")
+        .committed_seq;
+    fork.write_file_bytes("/z.txt", b"z", None)
+        .await
+        .expect("create");
+
+    family.allowance.peak_per_planned_byte = 1;
+    let planned_bytes = family
+        .plan(None)
+        .await
+        .and_then(MergePlan::into_candidate)
+        .expect("the merge")
+        .wal_record_bytes_upper_bound();
+    family.allowance.max_bytes = planned_bytes - 1;
+    let error = family.plan(None).await.expect_err("too large");
+    assert_matches!(
+        error,
+        CoreError::MergeTooLarge {
+            bound: MergeBound::MergeAllowance,
+            split_at_seq: Some(split_at_seq),
+            ..
+        } if split_at_seq == swapped_seq
+    );
+}
+
 /// Checks that the split hint measures a range as the planner plans a merge
 /// of it, when `main`'s rows are the fork's own at the range's start. After
 /// a first merge, three commits of the fork undelete, move, and delete a

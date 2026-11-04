@@ -280,6 +280,15 @@ pub enum Error {
         /// Header, query parameter, or JSON Pointer identifying the field.
         param: &'static str,
     },
+    /// The runtime doesn't serve a feature, such as merges when its merge
+    /// allowance is zero.
+    #[error("not supported: {message}")]
+    NotSupported {
+        /// The capability-document key of the feature.
+        feature: &'static str,
+        /// Public reason the feature isn't served.
+        message: String,
+    },
     /// The runtime configuration is invalid.
     #[error("invalid runtime config: {0}")]
     Config(String),
@@ -295,7 +304,10 @@ impl Error {
             code: self.code().as_str().to_owned(),
             message: self.public_message().into_owned(),
             param: self.invalid_request_param(),
-            feature: None,
+            feature: match self {
+                Self::NotSupported { feature, .. } => Some((*feature).to_owned()),
+                _ => None,
+            },
             request_id: None,
             details: self.details().map(Box::new),
         }
@@ -307,6 +319,7 @@ impl Error {
             Self::Core(error) => error.code(),
             Self::StaleHead { .. } => ErrorCode::StaleHead,
             Self::Config(_) | Self::InvalidRequest { .. } => ErrorCode::InvalidRequest,
+            Self::NotSupported { .. } => ErrorCode::NotSupported,
             Self::RuntimeTask(_) => ErrorCode::ServerError,
         }
     }
@@ -323,6 +336,7 @@ impl Error {
             Self::Config(_)
             | Self::RuntimeTask(_)
             | Self::InvalidRequest { .. }
+            | Self::NotSupported { .. }
             | Self::StaleHead { .. } => None,
         }
     }
@@ -373,6 +387,7 @@ impl Error {
             Self::Config(_)
             | Self::RuntimeTask(_)
             | Self::InvalidRequest { .. }
+            | Self::NotSupported { .. }
             | Self::StaleHead { .. } => None,
         };
         if let Some(message) = store_message {
@@ -382,7 +397,8 @@ impl Error {
         match self {
             Self::Config(message)
             | Self::RuntimeTask(message)
-            | Self::InvalidRequest { message, .. } => std::borrow::Cow::Owned(message.clone()),
+            | Self::InvalidRequest { message, .. }
+            | Self::NotSupported { message, .. } => std::borrow::Cow::Owned(message.clone()),
             Self::Core(error) => std::borrow::Cow::Owned(error.to_string()),
             Self::StaleHead { .. } => std::borrow::Cow::Owned(self.to_string()),
         }

@@ -338,7 +338,8 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
     /// memory, and a merge that admission would refuse isn't planned in
     /// full. It adds operations up as the merge commit's own bound does. The
     /// commit's bound also includes the temporary moves that ordering the
-    /// operations can add, and admission checks that bound.
+    /// operations can add, and the planner checks the ordered commit against
+    /// the same bounds.
     async fn add_plan(&mut self, plan: InodePlan) -> Result<()> {
         let operations = plan.operations();
         if operations.is_empty() {

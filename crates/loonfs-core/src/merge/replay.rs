@@ -32,12 +32,6 @@ pub struct ReplayPlan {
 }
 
 impl ReplayPlan {
-    /// Returns the replay commit, which its caller checks against the
-    /// publisher's merge allowance.
-    pub fn candidate(&self) -> &CommitCandidate {
-        &self.candidate
-    }
-
     /// Returns the replay commit's merge record, with the range of the
     /// fork's commits that the replay commit examines.
     pub fn record(&self) -> &MergeRecord {

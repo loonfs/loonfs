@@ -24,7 +24,9 @@ impl LoonFs<Writable> {
     /// retention floor. Creating the new fork needs the right to fork
     /// `namespace_id`, as [`Self::fork_namespace`] does. A namespace that
     /// already exists and isn't a rebase's new fork of `namespace_id` for
-    /// `source_namespace_id` returns `invalid_request`.
+    /// `source_namespace_id` returns `invalid_request`. A runtime whose merge
+    /// allowance is zero returns `not_supported` for `filesystem.merges`
+    /// before it reads or creates a namespace.
     pub async fn fork_namespace_for_rebase(
         &self,
         namespace_id: &NamespaceId,
@@ -35,6 +37,7 @@ impl LoonFs<Writable> {
         trace::in_operation(
             operation_span!(self.core, "fork_namespace_for_rebase", namespace_id),
             async {
+                self.core.ensure_merges_enabled()?;
                 if let Some(existing) = self.find_fork_target(new_namespace_id).await? {
                     return ensure_rebase(
                         existing,
@@ -139,7 +142,9 @@ impl Namespace<Writable> {
     /// plan reports a changed row that isn't the fork's own. The subject of
     /// this handle has to be able to read each inode whose change the replay
     /// commit applies in the fork, and needs the rights in this namespace
-    /// that each planned operation needs.
+    /// that each planned operation needs. A runtime whose merge allowance is
+    /// zero returns `not_supported` for `filesystem.merges` before it reads
+    /// either namespace.
     pub async fn replay_fork_with_options(
         &self,
         source_namespace_id: &NamespaceId,
@@ -149,6 +154,7 @@ impl Namespace<Writable> {
         trace::in_operation(
             operation_span!(self.core, "replay_fork", self.namespace_id),
             async {
+                self.core.ensure_merges_enabled()?;
                 let request = MergeRequest {
                     source_namespace_id: source_namespace_id.clone(),
                     through_seq: options.through_seq,
@@ -237,7 +243,6 @@ impl Namespace<Writable> {
         }
         .await
         .map_err(|error| missing_fork(source_namespace_id, error))?;
-        self.session().validate_merge(plan.candidate())?;
         let record = plan.record().clone();
         let report = plan.conflicts().to_vec();
         Ok(PlannedMerge::Candidate(Box::new(PlannedCommit {

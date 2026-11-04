@@ -64,7 +64,9 @@ impl<M: Mode> Namespace<M> {
     /// instead of returning the error. A handle with a subject needs an
     /// administrator in both namespaces, as the change feed does. A source
     /// that doesn't exist, was deleted, or isn't a fork of this namespace
-    /// returns `invalid_request`.
+    /// returns `invalid_request`. A runtime whose merge allowance is zero
+    /// returns `not_supported` for `filesystem.merges` before it reads a
+    /// namespace.
     pub async fn next_merge_range(
         &self,
         source_namespace_id: &NamespaceId,
@@ -72,6 +74,7 @@ impl<M: Mode> Namespace<M> {
         trace::in_operation(
             operation_span!(self.core, "next_merge_range", self.namespace_id),
             async {
+                self.core.ensure_merges_enabled()?;
                 let _permit = self.core.read_permit().await;
                 let main = self
                     .core
@@ -128,8 +131,8 @@ impl Namespace<Writable> {
     /// applies in the fork, and needs the rights in this namespace that each
     /// planned operation needs. A runtime whose merge allowance
     /// ([`ExecutionBudgetBuilder::max_merge_bytes`](crate::ExecutionBudgetBuilder::max_merge_bytes))
-    /// is zero has merges turned off, and a merge returns `merge_too_large`
-    /// with `max_bytes` 0 before it takes the merge slot or folds the fork.
+    /// is zero has merges turned off, and a merge returns `not_supported` for
+    /// `filesystem.merges` before it reads either namespace.
     pub async fn merge_fork_with_options(
         &self,
         source_namespace_id: &NamespaceId,
@@ -139,6 +142,7 @@ impl Namespace<Writable> {
         trace::in_operation(
             operation_span!(self.core, "merge_fork", self.namespace_id),
             async {
+                self.core.ensure_merges_enabled()?;
                 let started_at_ms = self.core.timer().monotonic_now_ms();
                 let request = MergeRequest {
                     source_namespace_id: source_namespace_id.clone(),
@@ -217,7 +221,6 @@ impl Namespace<Writable> {
         }
         .await
         .map_err(|error| missing_fork(source_namespace_id, error))?;
-        self.session().validate_merge(plan.candidate())?;
         let record = plan.record().clone();
         Ok(PlannedMerge::Candidate(Box::new(PlannedCommit {
             candidate: plan.into_candidate()?,
