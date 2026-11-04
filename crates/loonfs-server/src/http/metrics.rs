@@ -3,7 +3,9 @@
 mod caches;
 mod prometheus;
 
-use self::caches::{render_grep_block_cache, render_metadata_cache};
+use self::caches::{
+    render_grep_block_cache, render_grep_worker_block_cache, render_metadata_cache,
+};
 use self::prometheus::{render_snapshot, write_counter, write_gauge};
 use super::AppState;
 use loonfs::engine::PoolCounts;
@@ -22,6 +24,9 @@ pub(super) fn render(state: &AppState) -> String {
         render_grep_block_cache(&mut rendered, &service.block_cache_stats());
     }
     let grep_worker = binding.grep.worker();
+    if let Some(worker) = grep_worker {
+        render_grep_worker_block_cache(&mut rendered, &worker.block_cache_stats());
+    }
     render_scrape_gauges(
         &mut rendered,
         grep_worker.map(|worker| worker.step_budget().stats()),

@@ -8,7 +8,6 @@ use super::{
     rebootstrap_required, GramIndexBuildPolicy, GrepBuildOutcome, GrepSteps,
     GREP_WORKER_REQUESTS_IN_FLIGHT,
 };
-use crate::cache::GrepBlockCache;
 use crate::codec::{
     extract_grams, is_indexable_text_content, ContentValue, Gram, IndexRow,
     MAX_INDEX_GRAMS_FILE_BYTES,
@@ -19,21 +18,11 @@ use crate::segments::GrepSegments;
 use crate::value_table::ValueTable;
 use crate::{GrepError, Result};
 use futures::{stream, StreamExt, TryFutureExt, TryStreamExt};
-use loonfs::engine::DecodedBlockCacheConfig;
 use loonfs::{CheckpointFilesPageCursor, CoreError};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{ExtensionRunRef, ExtensionSegmentRef};
-use loonfs_types::format::segment_blocks::DEFAULT_TARGET_BLOCK_BYTES;
 use loonfs_types::{ChangeSeq, ContentRef, InodeId, PinId, RevisionNo, MAX_PAGE_LIMIT};
 use std::collections::{BTreeMap, BTreeSet};
-
-/// Decoded bytes of the block cache that one build step reads index segments
-/// through, and of the cache that a worker's reorganize steps share. It fits
-/// 256 data blocks, enough for the blocks that a build step's lookups of 256
-/// values read, and it keeps the blocks of a small segment that a lookup
-/// loads whole until the lookup reads them.
-pub(super) const GREP_STEP_BLOCK_CACHE_DECODED_BYTES: usize =
-    256 * DEFAULT_TARGET_BLOCK_BYTES.get();
 
 impl<S: ObjectStore + Clone> GrepSteps<'_, S> {
     /// Runs one bounded checkpoint-backfill or incremental build unit, from
@@ -102,13 +91,10 @@ impl<S: ObjectStore + Clone> GrepSteps<'_, S> {
             Err(error) => return Err(error),
         };
         let _permit = self.worker.step_budget.permit().await;
-        let block_cache = GrepBlockCache::new(DecodedBlockCacheConfig::new(
-            GREP_STEP_BLOCK_CACHE_DECODED_BYTES,
-        ));
         let index = GrepSegments {
             store: &self.worker.store,
             namespace_id: &self.namespace_id,
-            block_cache: Some(&block_cache),
+            block_cache: Some(&self.worker.blocks),
         };
         let examined: Vec<ExtensionSegmentRef> = entry.segments().cloned().collect();
         let unit = index_planned_unit(&reads, &index, &examined, planned).await?;
