@@ -371,7 +371,7 @@ async fn a_visit_parked_in_one_session_does_not_stop_another_sessions_fold_on_th
     config.idle_fold_after_ms = Some(1);
     // The ticks before the first commit run the step from the store, and
     // that step waits the interval, which the manual clock then passes.
-    config.maintenance_interval_ms = 1;
+    config.maintenance_interval_ms = std::num::NonZeroU64::MIN;
     let server = SweepServer::start(store.clone(), &config, 0).await;
     server
         .runtime
@@ -395,7 +395,7 @@ async fn a_visit_parked_in_one_session_does_not_stop_another_sessions_fold_on_th
         .await
         .expect("publish");
     store.block_next();
-    server.clock.advance_ms(config.tick_interval_ms);
+    server.clock.advance_ms(config.tick_interval_ms.get());
     loonfs_test_support::clock::bounded(Duration::from_secs(60), store.wait_until_blocked())
         .await
         .expect("a tick parks at the fold of the first session");
@@ -410,10 +410,10 @@ async fn a_visit_parked_in_one_session_does_not_stop_another_sessions_fold_on_th
         .put_file("/note", b"data", &test_actor())
         .await
         .expect("publish");
-    server.clock.advance_ms(config.tick_interval_ms);
+    server.clock.advance_ms(config.tick_interval_ms.get());
     loonfs_test_support::clock::bounded(Duration::from_secs(60), async {
         while server.wal_tail_objects(&folded).await > 0 {
-            tokio::time::advance(Duration::from_millis(config.tick_interval_ms)).await;
+            tokio::time::advance(Duration::from_millis(config.tick_interval_ms.get())).await;
         }
     })
     .await
