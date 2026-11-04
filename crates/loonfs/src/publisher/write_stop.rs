@@ -5,7 +5,6 @@ use super::session_tasks::wait_for_exit;
 use super::worker::{elapsed_ms_from, sleep_ms};
 use super::NamespacePublisher;
 use crate::{CoreError, Error};
-use loonfs_core::limits::MAX_UNFOLDED_WAL_OBJECTS;
 use loonfs_types::u64_from_usize;
 use tokio::sync::watch;
 
@@ -59,6 +58,7 @@ impl NamespacePublisher {
         let now_ms = self.context.runtime_core.timer().monotonic_now_ms();
         let mut first_waits = 0;
         let mut refused = Vec::new();
+        let mut reasons = Vec::new();
         {
             let mut state = self.lock_state();
             for item in &mut state.queue {
@@ -68,12 +68,15 @@ impl NamespacePublisher {
                             candidate.write_stop_wait_recorded = true;
                             first_waits += 1;
                         }
-                        let past = candidate.refused_by_write_stop
-                            && elapsed_ms_from(candidate.enqueued_at, now_ms) >= budget_ms;
-                        if past {
-                            refused.push(candidate.commit_id.clone());
+                        let past = elapsed_ms_from(candidate.enqueued_at, now_ms) >= budget_ms;
+                        match &candidate.write_stop_reason {
+                            Some(reason) if past => {
+                                refused.push(candidate.commit_id.clone());
+                                reasons.push(reason.clone());
+                                false
+                            }
+                            _ => true,
                         }
-                        !past
                     });
                 }
             }
@@ -91,13 +94,15 @@ impl NamespacePublisher {
         instruments
             .publisher
             .write_stop_refusal(u64_from_usize(refused.len()));
-        let error = Error::Core(CoreError::MaintenanceRequired {
-            namespace_id: self.namespace_id.clone(),
-            reason: format!(
-                "WAL tail stayed at {MAX_UNFOLDED_WAL_OBJECTS} objects through the write-stop wait of {budget_ms} ms, and publishes resume once a fold brings it back under {MAX_UNFOLDED_WAL_OBJECTS}"
-            ),
-        });
-        let results = refused.iter().map(|_| Err(error.clone())).collect();
+        let results = reasons
+            .into_iter()
+            .map(|reason| {
+                Err(Error::Core(CoreError::MaintenanceRequired {
+                    namespace_id: self.namespace_id.clone(),
+                    reason: format!("the write-stop wait of {budget_ms} ms passed: {reason}"),
+                }))
+            })
+            .collect();
         self.deliver_batch_results(refused, results, now_ms);
     }
 }

@@ -24,6 +24,7 @@ use loonfs_types::{
     MAX_SUBJECT_PRINCIPALS, PROTOCOL_VERSION,
 };
 use std::collections::BTreeMap;
+use std::num::NonZeroU64;
 use std::sync::{Arc, OnceLock, Weak};
 
 mod read_heads;
@@ -45,6 +46,10 @@ pub(crate) struct RuntimeCore {
 struct RuntimeCoreInner {
     store: SharedObjectStore,
     config: RuntimeConfig,
+    /// The WAL objects that make a writer session's own fold due:
+    /// `FOLD_AT_WAL_OBJECTS`, unless a test lowered it through
+    /// [`LoonFsBuilder::session_fold_at_wal_objects`](crate::LoonFsBuilder::session_fold_at_wal_objects).
+    session_fold_at_wal_objects: NonZeroU64,
     execution_budget: ExecutionBudget,
     /// Layout and input limits for metadata compactions, whose compaction
     /// input size comes from the execution budget.
@@ -82,6 +87,7 @@ impl RuntimeCore {
     pub(crate) fn open(
         store: SharedObjectStore,
         config: RuntimeConfig,
+        session_fold_at_wal_objects: NonZeroU64,
         execution_budget: ExecutionBudget,
         run_policy: MetadataRunPolicy,
         store_kind: Option<ConfiguredObjectStoreKind>,
@@ -95,6 +101,7 @@ impl RuntimeCore {
             inner: Arc::new(RuntimeCoreInner {
                 store,
                 config,
+                session_fold_at_wal_objects,
                 execution_budget,
                 run_policy,
                 store_kind,
@@ -127,6 +134,11 @@ impl RuntimeCore {
     /// Returns the settings this core was built with.
     pub(crate) fn config(&self) -> &RuntimeConfig {
         &self.inner.config
+    }
+
+    /// Returns the WAL objects that make a writer session's own fold due.
+    pub(crate) fn session_fold_at_wal_objects(&self) -> NonZeroU64 {
+        self.inner.session_fold_at_wal_objects
     }
 
     /// Returns the execution budget that this core's work draws from.

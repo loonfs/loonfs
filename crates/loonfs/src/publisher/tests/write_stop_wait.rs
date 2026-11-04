@@ -241,8 +241,8 @@ async fn a_commit_at_the_write_stop_waits_for_the_fold_and_commits() {
 }
 
 /// Checks that a commit that waits at the write stop past the write-stop
-/// wait returns `maintenance_required`, isn't committed, and that
-/// `write_stop_refusals` records it.
+/// wait returns `maintenance_required` with a reason that names the WAL
+/// object stop, isn't committed, and that `write_stop_refusals` records it.
 #[tokio::test]
 async fn a_commit_past_the_write_stop_wait_returns_maintenance_required() {
     let fixture = fixture(|builder| {
@@ -258,6 +258,13 @@ async fn a_commit_past_the_write_stop_wait_returns_maintenance_required() {
         .await
         .expect_err("the parked fold outlasts the write-stop wait");
     assert_eq!(error.code(), ErrorCode::MaintenanceRequired);
+    assert_matches!(
+        &error,
+        Error::Core(CoreError::MaintenanceRequired { reason, .. })
+            if reason.starts_with("the write-stop wait of ")
+                && reason.contains(&format!("at the write stop of {MAX_UNFOLDED_WAL_OBJECTS} objects")),
+        "{error}"
+    );
 
     fixture.store.release();
     fixture
@@ -282,7 +289,10 @@ async fn a_commit_past_the_write_stop_wait_returns_maintenance_required() {
 /// and the rest wait for the next fold.
 #[tokio::test]
 async fn commits_waiting_at_the_write_stop_are_committed_in_arrival_order() {
-    const WAITING_COMMITS: usize = 40;
+    // The first fold frees the tail that it began with, the fold trigger's
+    // length, so some of these commits wait for the next fold.
+    let waiting_commits =
+        usize::try_from(FOLD_AT_WAL_OBJECTS.get()).expect("a WAL object count") + 8;
     let fixture = fixture(|builder| {
         builder
             .execution_budget(one_fold_at_a_time())
@@ -332,7 +342,7 @@ async fn commits_waiting_at_the_write_stop_are_committed_in_arrival_order() {
     wait_for_fold_waiters(&fixture.writer, 1).await;
 
     let mut commits = Vec::new();
-    for index in 0..WAITING_COMMITS {
+    for index in 0..waiting_commits {
         let namespace = namespace.clone();
         commits.push(tokio::spawn(async move {
             namespace
@@ -362,7 +372,7 @@ async fn commits_waiting_at_the_write_stop_are_committed_in_arrival_order() {
     .expect("the commits after the first fold refill the tail to the write stop");
     let still_waiting = queued_candidates(&publisher_state(&publisher));
     assert!(
-        (1..WAITING_COMMITS).contains(&still_waiting),
+        (1..waiting_commits).contains(&still_waiting),
         "the first fold frees room for some of the commits: {still_waiting} still wait"
     );
 
@@ -379,7 +389,7 @@ async fn commits_waiting_at_the_write_stop_are_committed_in_arrival_order() {
     let recorder = &fixture.recorder;
     assert_eq!(
         counter(recorder, "loonfs.publisher.write_stop_waits"),
-        loonfs_types::u64_from_usize(WAITING_COMMITS)
+        loonfs_types::u64_from_usize(waiting_commits)
     );
     assert_eq!(counter(recorder, "loonfs.publisher.write_stop_refusals"), 0);
     assert_eq!(counter(recorder, "loonfs.publisher.wal_folds"), 2);
@@ -642,4 +652,106 @@ async fn a_commit_queued_behind_an_expired_wait_is_refused_after_the_engine_exam
     );
     fixture.store.release();
     fixture.writer.shutdown().await.expect("shut down writer");
+}
+
+/// Checks that a commit waits at the byte write stop, `MAX_UNFOLDED_WAL_BYTES`
+/// of unfolded WAL bytes, while the session's fold of a tail of few large
+/// commits runs, long before the WAL object stop, and is committed once the
+/// fold publishes.
+#[tokio::test]
+async fn a_commit_at_the_byte_write_stop_waits_for_the_fold_and_commits() {
+    use loonfs_core::limits::MAX_UNFOLDED_WAL_BYTES;
+    use loonfs_types::format::wal::{
+        MAX_WAL_INLINE_CONTENT_BYTES, MAX_WAL_OBJECT_INLINE_CONTENT_BYTES,
+    };
+
+    let values_per_commit = MAX_WAL_OBJECT_INLINE_CONTENT_BYTES / MAX_WAL_INLINE_CONTENT_BYTES;
+    // Each commit fills one WAL object with incompressible inline values, and
+    // the inline tail limit stays above the byte write stop.
+    let fixture = fixture(|builder| {
+        builder.config(crate::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            inline_content: crate::InlineContentPolicy {
+                inline_content_threshold_bytes: Some(MAX_WAL_INLINE_CONTENT_BYTES),
+                inline_content_wal_object_budget_bytes: MAX_WAL_OBJECT_INLINE_CONTENT_BYTES,
+                inline_content_tail_limit_bytes: 2 * MAX_UNFOLDED_WAL_BYTES,
+            },
+            publication: crate::PublicationPolicy {
+                max_estimated_bytes_per_namespace: NonZeroUsize::new(
+                    2 * MAX_WAL_OBJECT_INLINE_CONTENT_BYTES,
+                )
+                .expect("a namespace byte limit"),
+                ..crate::PublicationPolicy::default()
+            },
+            ..crate::RuntimeConfig::default()
+        })
+    })
+    .await;
+    let (namespace, publisher) = (
+        &fixture.namespace,
+        fixture.namespace.session().publisher.clone(),
+    );
+    // The first fold that the large commits start parks at its manifest put.
+    fixture.store.block_next();
+    let mut commits = 0;
+    while engine_wal_tail_bytes(&publisher).await < MAX_UNFOLDED_WAL_BYTES {
+        let mut prepared = Vec::new();
+        for value in 0..values_per_commit {
+            let seed = u64::try_from(commits * values_per_commit + value).expect("a seed");
+            let bytes = loonfs_test_support::bytes::incompressible_bytes(
+                seed,
+                MAX_WAL_INLINE_CONTENT_BYTES,
+            );
+            prepared.push(namespace.prepare_content(&bytes).await.expect("prepare"));
+        }
+        let request = CommitIntent {
+            commit_id: CommitId::generate(),
+            actor_id: loonfs_test_support::test_actor(),
+            subject: None,
+            message: None,
+            preconditions: Vec::new(),
+            operations: prepared
+                .iter()
+                .enumerate()
+                .map(|(value, content)| {
+                    put_operation(&format!("/large-{commits}-{value}"), content)
+                })
+                .collect(),
+        };
+        namespace
+            .commit_candidate(CommitCandidate::prepared(request, prepared))
+            .await
+            .expect("a large commit below the write stop");
+        commits += 1;
+    }
+    assert!(engine_wal_tail_objects(&publisher).await < MAX_UNFOLDED_WAL_OBJECTS);
+    let commit = spawn_commit(
+        namespace,
+        CommitCandidate::new(create_directory_request("at-the-stop", "at-the-stop")),
+    );
+    wait_until(
+        || {
+            let state = publisher_state(&publisher);
+            state.fold.is_some() && queued_candidates(&state) == 1
+        },
+        "the commit waits at the byte write stop",
+    )
+    .await;
+    assert!(!commit.is_finished(), "the commit waits for the fold");
+    fixture.store.release();
+    settle_commit(commit)
+        .await
+        .expect("the commit is committed after the fold");
+    fixture.writer.shutdown().await.expect("shut down writer");
+}
+
+async fn engine_wal_tail_bytes(publisher: &NamespacePublisher) -> usize {
+    publisher
+        .engine
+        .lock()
+        .await
+        .engine
+        .as_ref()
+        .and_then(NamespaceCommitEngine::wal_tail_bytes)
+        .unwrap_or(0)
 }

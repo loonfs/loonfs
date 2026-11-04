@@ -25,9 +25,10 @@ pub use loonfs_types::options::{
 
 /// Overrides for the metadata-upkeep action.
 ///
-/// The inline fold size and the idle fold age are settings of the runtime
-/// (see [`RuntimeConfig::inline_content`](crate::RuntimeConfig::inline_content)
-/// and [`RuntimeConfig::idle_fold_after_ms`](crate::RuntimeConfig::idle_fold_after_ms)).
+/// The fold trigger in unfolded WAL bytes is
+/// [`FOLD_AT_WAL_BYTES`](loonfs_core::limits::FOLD_AT_WAL_BYTES), and the
+/// idle fold age is a setting of the runtime (see
+/// [`RuntimeConfig::idle_fold_after_ms`](crate::RuntimeConfig::idle_fold_after_ms)).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MaintainMetadataOptions {
     /// Fold the visible WAL tail once it reaches this many WAL objects.

@@ -138,18 +138,39 @@ pub const MANIFEST_PROBE_WINDOW: usize = 8;
 /// the publications of the last interval.
 pub const HINT_RAISE_INTERVAL_MS: u64 = 1_000;
 
-/// Longest visible WAL tail, in WAL objects, a namespace may have unfolded.
+/// Unfolded WAL bytes that make a WAL fold due.
 ///
-/// The commit engine refuses new commits at this length, so a published WAL
-/// object never leaves more than this behind. A writer session keeps those
-/// commits queued until its fold frees room, and returns
-/// `maintenance_required` to a commit that's still waiting when the
-/// write-stop wait passes.
-pub const MAX_UNFOLDED_WAL_OBJECTS: u64 = 128;
+/// Unfolded WAL bytes are the stored sizes of the WAL objects above the
+/// folded boundary, which a reader downloads to replay the tail and a writer
+/// session keeps in memory. Inline content pieces travel in WAL objects, so
+/// this trigger also bounds the unfolded inline bytes.
+pub const FOLD_AT_WAL_BYTES: usize = 8 * 1024 * 1024;
 
-/// Visible WAL-tail length, in WAL objects, that starts an automatic WAL fold.
-pub const FOLD_AT_WAL_OBJECTS: NonZeroU64 = NonZeroU64::new(32).unwrap();
+/// Unfolded WAL objects that make a WAL fold due.
+///
+/// Each unfolded WAL object costs a reader one GET to replay the tail.
+pub const FOLD_AT_WAL_OBJECTS: NonZeroU64 = NonZeroU64::new(256).unwrap();
 
+/// Unfolded WAL bytes at which the commit engine refuses new commits.
+///
+/// This write stop bounds the bytes that a reader downloads to replay the
+/// tail and that a writer session keeps in memory while folds fall behind.
+/// One commit can still pass it, because the stop applies to the commits
+/// after the tail reaches it. A writer session keeps those commits queued
+/// until its fold frees room, and returns `maintenance_required` to a commit
+/// that's still waiting when the write-stop wait passes.
+pub const MAX_UNFOLDED_WAL_BYTES: usize = 64 * 1024 * 1024;
+
+/// Unfolded WAL objects at which the commit engine refuses new commits.
+///
+/// This write stop bounds the GETs that a replay of the tail sends, because a
+/// published WAL object never leaves more than this many objects behind. A
+/// writer session keeps the refused commits queued until its fold frees
+/// room, and returns `maintenance_required` to a commit that's still waiting
+/// when the write-stop wait passes.
+pub const MAX_UNFOLDED_WAL_OBJECTS: u64 = 1_024;
+
+const _: () = assert!(FOLD_AT_WAL_BYTES < MAX_UNFOLDED_WAL_BYTES);
 const _: () = assert!(FOLD_AT_WAL_OBJECTS.get() < MAX_UNFOLDED_WAL_OBJECTS);
 
 /// Provider retry-admission deadline, in milliseconds. This alone does not

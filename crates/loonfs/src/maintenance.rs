@@ -174,13 +174,14 @@ impl Maintenance {
             .await
     }
 
-    /// Folds the WAL tail at `max_wal_tail_objects` WAL objects, at the
-    /// runtime's inline fold size, or once the tail's newest commit reaches
-    /// the runtime's idle fold age (see
+    /// Folds the WAL tail at `max_wal_tail_objects` WAL objects, at
+    /// [`FOLD_AT_WAL_BYTES`](loonfs_core::limits::FOLD_AT_WAL_BYTES) of
+    /// unfolded WAL bytes, or once the tail's newest commit reaches the
+    /// runtime's idle fold age (see
     /// [`RuntimeConfig::idle_fold_after_ms`](crate::RuntimeConfig::idle_fold_after_ms)).
     /// The check reads the position of this runtime's writer session when
-    /// the session has one, and otherwise the store's object count and the
-    /// tail's idle age.
+    /// the session has one, and otherwise the tail that it loads from the
+    /// store.
     /// Then runs one size-tiered compaction unit when one is due, whatever
     /// the number of rows its window lists. A fold waits for a fold permit from the runtime's execution budget, and a
     /// unit that finds work waits for a compaction permit from it.

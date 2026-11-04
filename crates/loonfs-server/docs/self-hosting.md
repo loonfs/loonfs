@@ -521,14 +521,13 @@ The `[inline_content]` table is the runtime's `InlineContentPolicy`, which an em
 | --- | --- | --- |
 | `inline_content_threshold_bytes` | 64 KiB | Content at or under this size is prepared inline. `None` in the embedded policy, or `false` in the server TOML, disables inline writes. |
 | `inline_content_wal_object_budget_bytes` | 1 MiB | Limits the inline bytes in one WAL object. The overflow is staged, in operation order. |
-| `inline_content_fold_at_bytes` | 2 MiB | Makes an automatic fold due when unfolded inline bytes reach this size. |
 | `inline_content_tail_limit_bytes` | 32 MiB | New content is staged when unfolded and admitted inline bytes would exceed this size. |
 
-The threshold can't exceed 256 KiB, and the WAL object budget can't exceed 4 MiB. The WAL object budget, the fold trigger, and the tail limit must be positive, and the fold trigger can't exceed the tail limit. Inline payloads count toward the existing publication byte limits.
+The threshold can't exceed 256 KiB, and the WAL object budget can't exceed 4 MiB. The WAL object budget and the tail limit must be positive. Inline payloads count toward the existing publication byte limits.
 
-The tail limit uses the tail size from the session's position. A session has no position before its first publish, and after its position is dropped (for example, after a put whose outcome is unknown). Without a position, the session admits at most the WAL object budget of inline content until its next publish reads the tail from the store, so the tail can exceed the limit by the WAL object budget each time the position is dropped before a fold. At the `MAX_UNFOLDED_WAL_OBJECTS` write stop, new commits wait for a fold regardless of the inline tail limit.
+The tail limit uses the tail size from the session's position. A session has no position before its first publish, and after its position is dropped (for example, after a put whose outcome is unknown). Without a position, the session admits at most the WAL object budget of inline content until its next publish reads the tail from the store, so the tail can exceed the limit by the WAL object budget each time the position is dropped before a fold. At the write stop (64 MiB of unfolded WAL bytes or 1,024 unfolded WAL objects), new commits wait for a fold regardless of the inline tail limit.
 
-Explicit metadata maintenance and the maintenance sweep fold at the same `inline_content_fold_at_bytes` as the writer session, when the server's session for the namespace knows the tail's inline bytes. Maintenance probes use the WAL object threshold, the time of the tail's newest commit, and manifest descriptors, and they don't replay the tail.
+Inline pieces are WAL bytes, so the fold trigger of 8 MiB of unfolded WAL bytes or 256 unfolded WAL objects covers them, and it isn't a setting. Explicit metadata maintenance and the maintenance sweep fold at the same trigger as the writer session. Without the server's session for the namespace, they count the WAL bytes of the tail that they load. Maintenance probes use the WAL object threshold, the time of the tail's newest commit, and manifest descriptors, and they don't replay the tail.
 
 If a commit already succeeded, retrying the same request returns the original result without uploading the file again, as long as the commit receipt is still available. This also works after a restart, or on another server. A retry with changed bytes or a different subject returns `commit_id_reuse_conflict`.
 

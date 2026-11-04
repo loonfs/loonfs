@@ -129,6 +129,13 @@ impl EngineSlot {
             .as_ref()
             .and_then(NamespaceCommitEngine::wal_tail_inline_bytes)
     }
+
+    #[cfg(test)]
+    fn wal_tail_bytes(&self) -> Option<usize> {
+        self.engine
+            .as_ref()
+            .and_then(NamespaceCommitEngine::wal_tail_bytes)
+    }
 }
 
 /// The engine of one publisher, locked through

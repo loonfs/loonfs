@@ -111,7 +111,9 @@ impl<S: ObjectStore> NamespaceStore<S> {
             match publish_wal_object(&self.store, &fence, &tip).await {
                 Ok(()) => {
                     anchor.read_state = head.after_wal_object(fence.envelope().payload());
-                    anchor.tail.push_published(fence.envelope().clone());
+                    anchor
+                        .tail
+                        .push_published(fence.envelope().clone(), fence.as_bytes().len());
                     return Ok(WriterAcquisition {
                         writer: acquired,
                         claim,

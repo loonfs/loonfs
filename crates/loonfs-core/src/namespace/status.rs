@@ -22,6 +22,7 @@ pub struct NamespaceWalTailUsage {
     pub head_seq: ChangeSeq,
     pub wal_tail_objects: u64,
     pub wal_tail_inline_bytes: usize,
+    pub wal_tail_bytes: usize,
 }
 
 impl<S: ObjectStore> NamespaceStore<S> {
@@ -41,6 +42,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             head_seq: loaded.read_state.seq,
             wal_tail_objects: loaded.read_state.unfolded_wal_objects(),
             wal_tail_inline_bytes: tail.inline_bytes(),
+            wal_tail_bytes: tail.wal_bytes(),
         })
     }
 

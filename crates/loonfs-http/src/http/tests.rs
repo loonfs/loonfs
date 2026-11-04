@@ -46,6 +46,7 @@ use std::path::Path;
 
 fn options_with_store(store: SharedObjectStore) -> TestAppOptions {
     TestAppOptions {
+        session_fold_at_wal_objects: None,
         max_staleness_ms: None,
         consistency: None,
         execution_budget: None,
@@ -3020,6 +3021,7 @@ mod direct_download {
         let (router, state) = test_app(
             test_options(directory.path(), "download-server"),
             TestAppOptions {
+                session_fold_at_wal_objects: None,
                 max_staleness_ms: None,
                 consistency: None,
                 monotonic_timer: None,
@@ -3306,6 +3308,7 @@ mod direct_download {
         let (router, state) = test_app(
             test_options(directory.path(), "inode-download-bodies"),
             TestAppOptions {
+                session_fold_at_wal_objects: None,
                 max_staleness_ms: None,
                 consistency: None,
                 monotonic_timer: None,
@@ -3577,6 +3580,7 @@ mod direct_download {
         let (router, _state) = test_app(
             config,
             TestAppOptions {
+                session_fold_at_wal_objects: None,
                 max_staleness_ms: None,
                 consistency: None,
                 monotonic_timer: None,
@@ -3824,6 +3828,7 @@ mod direct_download {
         let (router, state) = test_app(
             config,
             TestAppOptions {
+                session_fold_at_wal_objects: None,
                 max_staleness_ms: None,
                 consistency: None,
                 monotonic_timer: None,

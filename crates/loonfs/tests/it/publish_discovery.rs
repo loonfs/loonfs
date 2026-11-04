@@ -1,6 +1,7 @@
 //! Store requests made by writer acquisition and the first publish after a fold.
 
 use loonfs::{CreateNamespaceOptions, LoonFs, NamespaceId};
+use loonfs_core::limits::FOLD_AT_WAL_OBJECTS;
 use loonfs_objectstore::keys::{
     hint, metadata_manifest_object, metadata_manifest_prefix, wal_prefix,
 };
@@ -174,7 +175,9 @@ async fn a_directory_created_during_a_fold_is_seen_after_the_projection_is_dropp
         .await
         .expect("first publish");
     store.inner().block_next();
-    for number in 1..31 {
+    // The claim's fence and the first directory are two of the tail's WAL
+    // objects, so the last of these directories reaches the fold trigger.
+    for number in 1..FOLD_AT_WAL_OBJECTS.get() - 1 {
         namespace_writer
             .create_directory(&format!("/entry-{number}"), &test_actor())
             .await

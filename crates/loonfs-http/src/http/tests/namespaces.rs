@@ -9,6 +9,7 @@ use axum::response::IntoResponse;
 use loonfs::NamespaceSessionStatus;
 use loonfs_test_support::stores::BlockingStore;
 use std::assert_matches;
+use std::num::NonZeroU64;
 use tower::ServiceExt;
 
 async fn send(
@@ -365,12 +366,17 @@ async fn a_fenced_session_with_a_running_fold_refuses_open_until_its_work_ends()
         KeyPredicate::manifest(&namespace_id),
         OperationSelector::PutCreateIfAbsent,
     ));
-    let mut options = test_options(directory.path(), "ending-host");
-    options.inline_content.inline_content_fold_at_bytes = 1;
-    let (router, state, namespaces) =
-        test_app_with_sessions(options, options_with_store(blocking.clone()))
-            .await
-            .expect("host");
+    // The claim's fence and the first directory leave two WAL objects, so
+    // the third, the put's, starts the session's fold.
+    let (router, state, namespaces) = test_app_with_sessions(
+        test_options(directory.path(), "ending-host"),
+        TestAppOptions {
+            session_fold_at_wal_objects: NonZeroU64::new(3),
+            ..options_with_store(blocking.clone())
+        },
+    )
+    .await
+    .expect("host");
     let (_, other) = test_app(
         test_options(directory.path(), "winning-host"),
         options_with_store(Arc::new(
@@ -518,13 +524,14 @@ async fn a_close_only_delays_opens_of_its_namespace_even_if_cancelled() {
             KeyPredicate::manifest(&namespace_id),
             OperationSelector::PutCreateIfAbsent,
         ));
-        let mut options = test_options(directory.path(), "closing-host");
-        options.inline_content.inline_content_fold_at_bytes = 1;
         let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
+        // The claim's fence and the first directory leave two WAL objects,
+        // so the third, the put's, starts the session's fold.
         let (_, state, namespaces) = test_app_with_sessions(
-            options,
+            test_options(directory.path(), "closing-host"),
             TestAppOptions {
                 monotonic_timer: Some(timer.clone()),
+                session_fold_at_wal_objects: NonZeroU64::new(3),
                 ..options_with_store(store.clone())
             },
         )

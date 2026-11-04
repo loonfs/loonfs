@@ -87,13 +87,14 @@ pub(super) struct BatchCandidate {
     /// Whether this commit was queued when a wait at the write stop ended, so
     /// `write_stop_waits` records it once.
     pub(super) write_stop_wait_recorded: bool,
-    /// Whether the engine refused this commit at the write stop when the
-    /// worker last published it.
+    /// The engine's reason when it refused this commit at the write stop the
+    /// last time the worker published it, which names the write stop that
+    /// the tail reached.
     ///
     /// Only such a commit can reach the end of the write-stop wait without
     /// another publish, because the engine returns a retry's result from its
     /// receipt.
-    pub(super) refused_by_write_stop: bool,
+    pub(super) write_stop_reason: Option<String>,
 }
 
 pub(super) struct InFlightRequest {
@@ -286,7 +287,7 @@ impl NamespacePublisher {
             candidate: candidate.candidate,
             enqueued_at,
             write_stop_wait_recorded: false,
-            refused_by_write_stop: false,
+            write_stop_reason: None,
         };
         match state.queue.back_mut() {
             // Coalesce with the tail batch while its bound stays under the

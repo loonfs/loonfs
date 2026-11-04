@@ -65,13 +65,20 @@ pub(super) struct WalTailLoadRequest<'a> {
 pub(crate) struct ValidatedWalObject {
     object_key: String,
     envelope: Arc<WalObjectEnvelope>,
+    /// The object's size in the store.
+    stored_bytes: usize,
 }
 
 impl ValidatedWalObject {
-    pub(super) fn new(object_key: String, envelope: Arc<WalObjectEnvelope>) -> Self {
+    pub(super) fn new(
+        object_key: String,
+        envelope: Arc<WalObjectEnvelope>,
+        stored_bytes: usize,
+    ) -> Self {
         Self {
             object_key,
             envelope,
+            stored_bytes,
         }
     }
 
@@ -81,6 +88,10 @@ impl ValidatedWalObject {
 
     pub(crate) fn envelope(&self) -> &WalObjectEnvelope {
         &self.envelope
+    }
+
+    pub(crate) fn stored_bytes(&self) -> usize {
+        self.stored_bytes
     }
 }
 
@@ -108,11 +119,25 @@ impl ValidatedWalTail {
             .map(|commit| commit.committed_at_ms)
     }
 
-    pub(crate) fn push_published(&mut self, envelope: WalObjectEnvelope) {
+    /// Returns the unfolded WAL bytes of the tail: the stored sizes of its
+    /// objects with commits. A fence adds no bytes, the same way it adds no
+    /// chunk to a projected tail.
+    pub(crate) fn wal_bytes(&self) -> usize {
+        self.objects
+            .iter()
+            .filter(|object| !object.envelope().payload().records.is_empty())
+            .map(ValidatedWalObject::stored_bytes)
+            .sum()
+    }
+
+    pub(crate) fn push_published(&mut self, envelope: WalObjectEnvelope, stored_bytes: usize) {
         let payload = envelope.payload();
         let object_key = super::wal_object_key(&payload.namespace_id, &payload.wal_no);
-        self.objects
-            .push(ValidatedWalObject::new(object_key, Arc::new(envelope)));
+        self.objects.push(ValidatedWalObject::new(
+            object_key,
+            Arc::new(envelope),
+            stored_bytes,
+        ));
     }
 }
 

@@ -39,6 +39,9 @@ pub(super) struct TestAppOptions {
     pub(super) monotonic_timer: Option<Arc<dyn MonotonicTimer>>,
     /// The runtime's execution budget, or the default when `None`.
     pub(super) execution_budget: Option<loonfs::ExecutionBudget>,
+    /// The WAL objects that make a writer session's own fold due, or the
+    /// default when `None`.
+    pub(super) session_fold_at_wal_objects: Option<std::num::NonZeroU64>,
     /// The binding's usage recorder, or no recorder when `None`.
     pub(super) usage_recorder: Option<Arc<dyn UsageRecorder>>,
 }
@@ -95,6 +98,10 @@ pub(super) async fn test_app_with_sessions(
     );
     let builder = match inputs.monotonic_timer {
         Some(timer) => builder.monotonic_timer(timer),
+        None => builder,
+    };
+    let builder = match inputs.session_fold_at_wal_objects {
+        Some(objects) => builder.session_fold_at_wal_objects(objects),
         None => builder,
     };
     let builder = match inputs.execution_budget {

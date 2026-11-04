@@ -2,20 +2,20 @@
 //! creating a snapshot, reading at it, and deleting it.
 
 use loonfs::{
-    CreateSnapshotOptions, FoldWalOutcome, InlineContentPolicy, LoonFs, Namespace,
-    SharedObjectStore, Writable,
+    CreateSnapshotOptions, FoldWalOutcome, LoonFs, Namespace, SharedObjectStore, Writable,
 };
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::{namespace_id, writer_id};
 use loonfs_test_support::stores::{KeyPredicate, MemoryStore, RecordingStore};
 use loonfs_types::{ChecksumAlgorithm, NamespaceId};
+use std::num::NonZeroU64;
 use std::sync::Arc;
 
 /// Which fold leaves the namespace's WAL tail folded before the calls.
 #[derive(Debug, Clone, Copy)]
 enum Fold {
     /// The session's own fold, which runs after every commit because the
-    /// runtime folds at one unfolded inline byte.
+    /// session folds at one unfolded WAL object.
     Session,
     /// An explicit fold through the maintenance handle.
     Explicit,
@@ -39,24 +39,18 @@ async fn fixture(fold: Fold) -> Fixture {
         KeyPredicate::any(),
     ));
     let store: SharedObjectStore = recording.clone();
-    let inline_content = match fold {
-        Fold::Session => InlineContentPolicy {
-            inline_content_fold_at_bytes: 1,
-            ..InlineContentPolicy::default()
-        },
-        Fold::Explicit => InlineContentPolicy::default(),
-    };
-    let writer = LoonFs::builder_with_store(store)
+    let builder = LoonFs::builder_with_store(store)
         .writer_id(writer_id(&name))
         .config(loonfs::RuntimeConfig {
             min_publish_interval_ms: 0,
-            inline_content,
             ..loonfs::RuntimeConfig::default()
         })
-        .monotonic_timer(Arc::new(ManualClock::new(1_000_000)))
-        .build()
-        .await
-        .expect("writer");
+        .monotonic_timer(Arc::new(ManualClock::new(1_000_000)));
+    let builder = match fold {
+        Fold::Session => builder.session_fold_at_wal_objects(NonZeroU64::MIN),
+        Fold::Explicit => builder,
+    };
+    let writer = builder.build().await.expect("writer");
     let actor = loonfs_test_support::test_actor();
     writer
         .create_namespace(&namespace_id, &actor)

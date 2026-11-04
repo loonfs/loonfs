@@ -402,6 +402,13 @@ async fn write_a_large_attribute_base(
         .put_file("/file", b"content", &loonfs_test_support::test_actor())
         .await
         .expect("file");
+    // The base's WAL bytes pass the fold trigger, so the session's own fold
+    // waits for a fold permit until every batch is published, and the whole
+    // tail folds as one run.
+    let mut permits = Vec::new();
+    for _ in 0..crate::DEFAULT_MAX_CONCURRENT_FOLDS.get() {
+        permits.push(writer.execution_budget().fold_permit().await);
+    }
     for batch in 0..10 {
         let operations = (batch * 32..(batch + 1) * 32)
             .map(|revision| FilesystemOperation::UpdateAttributes {
@@ -437,6 +444,7 @@ async fn write_a_large_attribute_base(
             .await
             .expect("write the base attribute history");
     }
+    drop(permits);
     maintenance.fold_wal(namespace_id).await.expect("fold base");
     keys
 }

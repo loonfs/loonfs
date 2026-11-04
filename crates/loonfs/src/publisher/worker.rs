@@ -14,7 +14,7 @@ use crate::publish::CommitCandidate;
 use crate::trace::{phase_event, phase_span};
 use crate::{CoreError, Error, Result, SharedObjectStore};
 use futures::FutureExt;
-use loonfs_core::limits::{FOLD_AT_WAL_OBJECTS, MAX_CONTENTION_ATTEMPTS};
+use loonfs_core::limits::MAX_CONTENTION_ATTEMPTS;
 use loonfs_core::publish::{
     is_retryable_wal_publish, settle_publish_attempt, NamespaceCommitEngine, TailSource,
     WalPublishError,
@@ -295,11 +295,12 @@ impl NamespacePublisher {
             .results
             .iter()
             .any(|result| result.as_ref().err().is_some_and(is_maintenance_required));
+        let core = &self.context.runtime_core;
         let fold_start = if publish.wal_tail.is_some_and(|tail| {
-            FoldTrigger::new(self.context.runtime_core.config()).fold_is_due(
-                FOLD_AT_WAL_OBJECTS.get(),
+            FoldTrigger::new(core.config()).fold_is_due(
+                core.session_fold_at_wal_objects().get(),
                 tail.objects,
-                tail.inline_bytes,
+                tail.wal_bytes,
             )
         }) || write_stopped
         {
@@ -508,9 +509,12 @@ fn split_write_stop_waiters(
     let mut waiting = Vec::new();
     let (mut delivered_ids, mut delivered) = (Vec::new(), Vec::new());
     for (index, (commit_id, result)) in commit_ids.into_iter().zip(results).enumerate() {
-        let refused = matches!(&result, Err(Error::Core(error)) if is_maintenance_required(error));
-        match stopped[index].take() {
-            Some(candidate) if refused => {
+        let refused = match &result {
+            Err(Error::Core(CoreError::MaintenanceRequired { reason, .. })) => Some(reason.clone()),
+            _ => None,
+        };
+        match (stopped[index].take(), refused) {
+            (Some(candidate), Some(reason)) => {
                 let (enqueued_at, write_stop_wait_recorded) = queued[index];
                 waiting.push(BatchCandidate {
                     permit: Arc::clone(&permits[index]),
@@ -518,7 +522,7 @@ fn split_write_stop_waiters(
                     candidate,
                     enqueued_at,
                     write_stop_wait_recorded,
-                    refused_by_write_stop: true,
+                    write_stop_reason: Some(reason),
                 });
             }
             _ => {

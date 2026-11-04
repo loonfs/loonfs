@@ -3,8 +3,8 @@
 //! neither the hint nor a WAL object.
 
 use super::*;
-use crate::InlineContentPolicy;
 use loonfs_test_support::stores::RecordedOperation;
+use std::num::NonZeroU64;
 
 /// A store that records every request that reaches it, under a gate that
 /// parks every request for the namespace's hint once a test arms it, so a
@@ -282,16 +282,14 @@ async fn write_until_compaction_waits<'a>(
 /// successor without a request first and without reading the hint.
 #[tokio::test]
 async fn a_session_compaction_unit_puts_on_its_basis_and_reads_no_hint() {
-    // The fold threshold is one inline byte, so each write is folded.
+    // The fold threshold is one WAL object, so each write is folded.
     let fixture = Fixture::new(|builder| {
-        builder.config(crate::RuntimeConfig {
-            min_publish_interval_ms: 0,
-            inline_content: InlineContentPolicy {
-                inline_content_fold_at_bytes: 1,
-                ..InlineContentPolicy::default()
-            },
-            ..crate::RuntimeConfig::default()
-        })
+        builder
+            .session_fold_at_wal_objects(NonZeroU64::MIN)
+            .config(crate::RuntimeConfig {
+                min_publish_interval_ms: 0,
+                ..crate::RuntimeConfig::default()
+            })
     })
     .await;
     let mut files = 0;

@@ -23,6 +23,7 @@ pub struct ProjectedWalTail {
     chunks: Vec<Arc<TailChunk>>,
     activity: ManifestActivity,
     inline_bytes: usize,
+    wal_bytes: usize,
 }
 
 /// One WAL object's commits: its rows, its content pieces, and its activity.
@@ -34,6 +35,8 @@ pub(crate) struct TailChunk {
     contents: Vec<ProjectedContent>,
     content_positions: HashMap<ContentId, usize>,
     inline_bytes: usize,
+    /// The WAL object's size in the store.
+    wal_bytes: usize,
     /// What the content entries own besides their bytes: content ids,
     /// references, checksums, and piece slots.
     inline_entry_heap_bytes: usize,
@@ -106,16 +109,18 @@ impl ProjectedWalTail {
         }
     }
 
-    /// Appends one WAL object as a chunk. An object with no records, such as
-    /// a fence, adds no chunk.
+    /// Appends one WAL object, whose size in the store is `wal_bytes`, as a
+    /// chunk. An object with no records, such as a fence, adds no chunk and no
+    /// bytes.
     pub(crate) fn push_object(
         &mut self,
         records: &[WalCommitPayload],
+        wal_bytes: usize,
     ) -> Result<(), WalObjectError> {
         if records.is_empty() {
             return Ok(());
         }
-        self.push_chunk(Arc::new(TailChunk::from_records(records)?))
+        self.push_chunk(Arc::new(TailChunk::from_records(records, wal_bytes)?))
     }
 
     fn push_chunk(&mut self, chunk: Arc<TailChunk>) -> Result<(), WalObjectError> {
@@ -124,6 +129,7 @@ impl ProjectedWalTail {
             .checked_add(chunk.activity)
             .ok_or(WalObjectError::ActivityOverflow)?;
         self.inline_bytes += chunk.inline_bytes;
+        self.wal_bytes += chunk.wal_bytes;
         self.chunks.push(chunk);
         Ok(())
     }
@@ -254,6 +260,11 @@ impl ProjectedWalTail {
         self.inline_bytes
     }
 
+    /// Returns the stored sizes of the tail's WAL objects with commits.
+    pub(crate) fn wal_bytes(&self) -> usize {
+        self.wal_bytes
+    }
+
     /// The heap the projection keeps behind the `Arc` that every owner shares.
     /// Each tail counts every chunk it contains, including chunks another tail
     /// shares.
@@ -277,17 +288,25 @@ impl TailChunk {
             contents: Vec::new(),
             content_positions: HashMap::new(),
             inline_bytes: 0,
+            wal_bytes: 0,
             inline_entry_heap_bytes: 0,
         }
     }
 
-    /// Applies each commit of one WAL object: its pieces, then its rows.
-    fn from_records(records: &[WalCommitPayload]) -> Result<Self, WalObjectError> {
+    /// Applies each commit of one WAL object, whose size in the store is
+    /// `wal_bytes`: its pieces, then its rows.
+    fn from_records(
+        records: &[WalCommitPayload],
+        wal_bytes: usize,
+    ) -> Result<Self, WalObjectError> {
         let first_seq = records
             .first()
             .expect("push_object should skip a WAL object with no records")
             .committed_seq;
-        let mut chunk = Self::new(first_seq, MetadataState::default());
+        let mut chunk = Self {
+            wal_bytes,
+            ..Self::new(first_seq, MetadataState::default())
+        };
         for record in records {
             let activity = committed_activity(record)
                 .and_then(|activity| chunk.activity.checked_add(activity))
@@ -435,10 +454,10 @@ mod tests {
             .collect();
         let mut tail = ProjectedWalTail::default();
         for (seq, content_id) in (1..).zip(&ids) {
-            tail.push_object(&[commit(seq, content_id, b"value", 0)])
+            tail.push_object(&[commit(seq, content_id, b"value", 0)], 100)
                 .expect("value");
         }
-        tail.push_object(&[commit(65, &ids[17], b"value appended", 5)])
+        tail.push_object(&[commit(65, &ids[17], b"value appended", 5)], 100)
             .expect("append");
 
         let contents = tail.contents();
@@ -460,6 +479,7 @@ mod tests {
             [(0, 5), (5, 14)]
         );
         assert_eq!(tail.inline_bytes(), 64 * 5 + 9);
+        assert_eq!(tail.wal_bytes(), 65 * 100);
     }
 
     #[test]
@@ -471,7 +491,7 @@ mod tests {
             (2, b"value appended", 5),
             (3, b"value appended twice", 14),
         ] {
-            tail.push_object(&[commit(seq, &content_id, whole, offset)])
+            tail.push_object(&[commit(seq, &content_id, whole, offset)], 100)
                 .expect("chunk");
         }
         let newest = ContentRef::blob_v1(

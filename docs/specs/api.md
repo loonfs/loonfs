@@ -840,7 +840,7 @@ The result's `outcome` has two values:
 
 A compaction unit can take minutes, so a `metadata` run can too. The reference server exempts maintenance runs from its request deadline. A client sends the request once, because `run_maintenance` isn't idempotent. After a `due` outcome, the client runs the job again later, as the reference server's sweep does for a namespace that's still due.
 
-In a `metadata` run, `max_wal_tail_objects` overrides the fold threshold. A value of zero, or a value above the write-rejection threshold, returns `invalid_request`. A WAL tail below the threshold is still folded once it goes idle, which means that its newest commit is as old as the server's configured idle period (15 minutes by default), measured on the server's clock (see [Recovery material and maintenance policy](format.md#73-recovery-material-and-maintenance-policy)). A server can turn this rule off. Replay history is kept unless the request uses `kind: "retention"`.
+In a `metadata` run, `max_wal_tail_objects` overrides the fold threshold in WAL objects, and the fold threshold in WAL bytes and the idle fold still apply. A value of zero, or a value above the write-rejection threshold, returns `invalid_request`. A WAL tail below the threshold is still folded once it goes idle, which means that its newest commit is as old as the server's configured idle period (15 minutes by default), measured on the server's clock (see [Recovery material and maintenance policy](format.md#73-recovery-material-and-maintenance-policy)). A server can turn this rule off. Replay history is kept unless the request uses `kind: "retention"`.
 
 #### Retention runs
 

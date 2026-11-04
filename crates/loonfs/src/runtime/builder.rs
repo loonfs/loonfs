@@ -9,11 +9,13 @@ use crate::runtime_core::RuntimeCore;
 use crate::{
     Error, ExecutionBudget, MetadataCache, Result, RuntimeConfig, SharedObjectStore, StoreConfig,
 };
+use loonfs_core::limits::FOLD_AT_WAL_OBJECTS;
 use loonfs_core::MetadataRunPolicy;
 use loonfs_objectstore::metrics::InstrumentedObjectStore;
 use loonfs_objectstore::ConfiguredObjectStoreKind;
 use loonfs_types::WriterId;
 use std::marker::PhantomData;
+use std::num::NonZeroU64;
 use std::sync::Arc;
 
 /// Builder for a [`LoonFs`] runtime in mode `M`.
@@ -50,6 +52,7 @@ enum StoreSource {
 struct CoreConfig {
     source: StoreSource,
     config: RuntimeConfig,
+    session_fold_at_wal_objects: NonZeroU64,
     store_kind: Option<ConfiguredObjectStoreKind>,
     /// `None` builds a private cache when the core opens.
     metadata_cache: Option<MetadataCache>,
@@ -74,6 +77,7 @@ impl<M> LoonFsBuilder<M> {
             core: CoreConfig {
                 source,
                 config: RuntimeConfig::default(),
+                session_fold_at_wal_objects: FOLD_AT_WAL_OBJECTS,
                 store_kind: None,
                 metadata_cache: None,
                 execution_budget: None,
@@ -93,6 +97,19 @@ impl<M> LoonFsBuilder<M> {
     /// [`Error::Config`] when [`RuntimeConfig::validate`] does.
     pub fn config(mut self, config: RuntimeConfig) -> Self {
         self.core.config = config;
+        self
+    }
+
+    /// Sets the WAL objects that make a writer session's own fold due, in
+    /// place of [`FOLD_AT_WAL_OBJECTS`], so that a test can fold after a few
+    /// commits.
+    ///
+    /// A test hook, available through the `test-support` feature. Explicit
+    /// metadata maintenance keeps its own threshold (see
+    /// [`MaintainMetadataOptions`](crate::MaintainMetadataOptions)).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn session_fold_at_wal_objects(mut self, objects: NonZeroU64) -> Self {
+        self.core.session_fold_at_wal_objects = objects;
         self
     }
 
@@ -306,6 +323,7 @@ impl CoreConfig {
         Ok(RuntimeCore::open(
             store,
             self.config,
+            self.session_fold_at_wal_objects,
             execution_budget,
             run_policy,
             store_kind,

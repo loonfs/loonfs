@@ -480,6 +480,13 @@ impl PublisherRegistry {
         slot.wal_tail_inline_bytes()
     }
 
+    #[cfg(test)]
+    pub(crate) async fn wal_tail_bytes(&self, namespace_id: &NamespaceId) -> Option<usize> {
+        let publisher = self.live_publisher(namespace_id)?;
+        let slot = publisher.lock_engine().await;
+        slot.wal_tail_bytes()
+    }
+
     /// Returns the namespace's writer position while its last check is
     /// within the revalidation bound (see
     /// [`NamespacePublisher::current_position`]), or `None` when this runtime

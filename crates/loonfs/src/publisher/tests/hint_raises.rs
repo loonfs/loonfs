@@ -2,10 +2,10 @@
 //! publications raise the hint, and how often.
 
 use super::*;
-use crate::InlineContentPolicy;
 use loonfs_core::limits::HINT_RAISE_INTERVAL_MS;
 use loonfs_test_support::clock::TokioClock;
 use loonfs_types::MonotonicTimer;
+use std::num::NonZeroU64;
 
 /// The store under a raise fixture: it parks the requests for the hint once
 /// a test arms it, records the requests for the hint, and fails the
@@ -237,16 +237,13 @@ async fn every_publication_raises_the_hint_to_its_manifest() {
     let store: SharedStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
     let clock = Arc::new(ManualClock::at_system_time());
     let timer = Arc::new(ManualClock::new(0));
-    // A commit with file bytes is over the inline fold trigger, and a
-    // directory commit isn't.
+    // The claim's fence and the seed commit leave two WAL objects, so the
+    // third object, the put's, starts the session's own fold.
     let writer = crate::LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
+        .session_fold_at_wal_objects(NonZeroU64::new(3).expect("three WAL objects"))
         .config(crate::RuntimeConfig {
             min_publish_interval_ms: 0,
-            inline_content: InlineContentPolicy {
-                inline_content_fold_at_bytes: 1,
-                ..InlineContentPolicy::default()
-            },
             ..crate::RuntimeConfig::default()
         })
         .wall_clock(clock.clone())

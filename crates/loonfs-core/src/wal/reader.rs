@@ -21,7 +21,13 @@ use std::sync::Arc;
 // Missing and malformed objects still need their numbered key in caller diagnostics.
 pub(super) struct LoadedWalObject {
     pub(super) object_key: String,
-    pub(super) envelope: Result<Option<Arc<WalObjectEnvelope>>, WalTailLoadError>,
+    pub(super) envelope: Result<Option<StoredWalEnvelope>, WalTailLoadError>,
+}
+
+/// A decoded WAL object with its size in the store.
+pub(super) struct StoredWalEnvelope {
+    pub(super) envelope: Arc<WalObjectEnvelope>,
+    pub(super) stored_bytes: usize,
 }
 
 /// Loads the WAL object at `wal_no`, if it exists, and checks that it
@@ -67,7 +73,10 @@ pub(super) async fn load_wal_object<S: ObjectStore + ?Sized>(
                 },
             });
         }
-        Ok(Some(Arc::new(envelope)))
+        Ok(Some(StoredWalEnvelope {
+            envelope: Arc::new(envelope),
+            stored_bytes: bytes.len(),
+        }))
     }
     .await;
     LoadedWalObject {
@@ -118,8 +127,12 @@ impl<'a> WalWalk<'a> {
     pub(super) fn validate(
         &mut self,
         object_key: String,
-        envelope: Arc<WalObjectEnvelope>,
+        stored: StoredWalEnvelope,
     ) -> Result<ValidatedWalObject, WalTailLoadError> {
+        let StoredWalEnvelope {
+            envelope,
+            stored_bytes,
+        } = stored;
         let payload = envelope.payload();
         if payload.writer_epoch < self.epoch || payload.writer_epoch > self.epoch_bound {
             return Err(WalTailLoadError::Replay {
@@ -140,7 +153,7 @@ impl<'a> WalWalk<'a> {
         self.seq = payload.head_seq;
         self.epoch = payload.writer_epoch;
         self.basis_floor_seq = payload.basis_floor_seq;
-        Ok(ValidatedWalObject::new(object_key, envelope))
+        Ok(ValidatedWalObject::new(object_key, envelope, stored_bytes))
     }
 }
 
