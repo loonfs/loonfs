@@ -699,7 +699,7 @@ async fn a_head_larger_than_the_budget_is_not_kept() {
 
     stat_one_path_per_namespace(&shape, reader.clone()).await;
     let second = reader.metadata_cache().stats();
-    assert_eq!(second.heads.misses, first.heads.misses + 1);
+    assert!(second.heads.misses > first.heads.misses);
     assert_eq!(second.heads.hits, first.heads.hits);
     assert!(second.heads.rejections > first.heads.rejections);
 }

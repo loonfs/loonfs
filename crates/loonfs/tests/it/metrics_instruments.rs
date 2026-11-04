@@ -1,6 +1,6 @@
 //! What a writer built with a metrics recorder actually reports (the
-//! object-store bridge and the publication instruments), and the head cache
-//! lookups that reads record in the metadata cache's stats.
+//! object-store bridge and the publication instruments), and where reads
+//! take their namespace heads from.
 
 use crate::common::*;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue, MetricsSnapshot};
@@ -148,11 +148,13 @@ fn a_writer_with_a_recorder_reports_stores_and_publications() {
     );
 }
 
-/// Checks that reads record their namespace head lookups, and the head
-/// state and manifests they cached, in the metadata cache's stats.
+/// Checks that reads record where they took their namespace heads from,
+/// and that the metadata cache's stats record the head state and manifests
+/// they cached.
 #[test]
-fn reads_record_head_cache_lookups_and_retained_bytes_in_the_cache_stats() {
+fn reads_record_their_head_sources_and_the_cache_stats_record_retained_bytes() {
     let temp_dir = tempdir().expect("tempdir");
+    let recorder = Arc::new(DefaultMetricsRecorder::new());
     let (first, second) = (namespace_id("first"), namespace_id("second"));
     let stats = block_on(async {
         let setup = writer(store(temp_dir.path()), "head-cache-setup").await;
@@ -164,6 +166,7 @@ fn reads_record_head_cache_lookups_and_retained_bytes_in_the_cache_stats() {
         }
         let reader = LoonFs::builder_with_store(store(temp_dir.path()))
             .read_only()
+            .metrics_recorder(recorder.clone())
             .build()
             .await
             .expect("build reader");
@@ -174,7 +177,17 @@ fn reads_record_head_cache_lookups_and_retained_bytes_in_the_cache_stats() {
         reader.metadata_cache().stats()
     });
 
-    assert_eq!((stats.heads.misses, stats.heads.hits), (2, 1));
+    let snapshot = recorder.snapshot();
+    let reads_from = |source| counter(&snapshot, "loonfs.read_head.source", &[("source", source)]);
+    assert_eq!(
+        (
+            reads_from("loaded"),
+            reads_from("eventual") + reads_from("refreshed")
+        ),
+        (2, 1),
+        "the first read of each namespace loads its head, and the second read of `first` \
+         starts from the cached head"
+    );
     assert!(
         stats.wal_tails.cached_decoded_bytes > 0,
         "the head loads cached both namespaces' WAL tails"

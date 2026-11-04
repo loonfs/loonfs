@@ -17,20 +17,29 @@ mod tests;
 pub(crate) enum ReadHeadSource {
     /// The position of the namespace's writer session in this runtime.
     Position,
-    /// The namespace's cached head, confirmed or loaded for the read.
-    Anchor,
+    /// The namespace's cached head, refreshed for the read.
+    Refreshed,
+    /// The namespace's head loaded from the store, because the read cache
+    /// had none.
+    Loaded,
     /// The namespace's cached head as it was, for an eventual read within
     /// its maximum staleness, with no request to confirm the head.
     Eventual,
 }
 
 impl MetricLabel for ReadHeadSource {
-    const VALUES: &'static [Self] = &[Self::Position, Self::Anchor, Self::Eventual];
+    const VALUES: &'static [Self] = &[
+        Self::Position,
+        Self::Refreshed,
+        Self::Loaded,
+        Self::Eventual,
+    ];
 
     fn as_str(self) -> &'static str {
         match self {
             Self::Position => "position",
-            Self::Anchor => "anchor",
+            Self::Refreshed => "refreshed",
+            Self::Loaded => "loaded",
             Self::Eventual => "eventual",
         }
     }

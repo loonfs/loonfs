@@ -40,8 +40,8 @@ async fn test_writer_with_recorder(
         .expect("build writer")
 }
 
-/// Returns how many reads started from `source`: `position`, `anchor`, or
-/// `eventual`.
+/// Returns how many reads started from `source`: `position`, `refreshed`,
+/// `loaded`, or `eventual`.
 fn reads_from(recorder: &DefaultMetricsRecorder, source: &str) -> u64 {
     let labels: &[(&str, &str)] = &[("source", source)];
     let snapshot = recorder.snapshot();

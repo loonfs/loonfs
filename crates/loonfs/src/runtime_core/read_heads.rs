@@ -8,7 +8,6 @@
 //! ago.
 
 use super::RuntimeCore;
-use crate::metadata_cache::CacheLookup;
 use crate::metrics::ReadHeadSource;
 use crate::pinned_read::PinnedRead;
 use crate::trace::phase_span;
@@ -58,15 +57,6 @@ impl From<Consistency> for HeadConfirmation {
 }
 
 impl RuntimeCore {
-    /// Records whether a load found the namespace's head in the read cache.
-    fn record_head_lookup(&self, found: bool) {
-        self.inner.metadata_cache.record_head_lookup(if found {
-            CacheLookup::Hit
-        } else {
-            CacheLookup::Miss
-        });
-    }
-
     /// Returns the namespace's head, confirmed or loaded for a read with
     /// `consistency`.
     ///
@@ -135,7 +125,6 @@ impl RuntimeCore {
         namespace_id: &NamespaceId,
         cached: Option<CachedHead>,
     ) -> std::result::Result<CachedHead, CoreError> {
-        self.record_head_lookup(cached.is_some());
         let namespace = self.namespace_store(namespace_id);
         if let Some(mut head) = cached {
             // Measure every response against the previous check, not against the probe
@@ -240,11 +229,17 @@ impl RuntimeCore {
             None => {
                 let (head, source) = match self.eventual_head(namespace_id, consistency) {
                     Some(head) => (head, ReadHeadSource::Eventual),
-                    None => (
-                        self.load_namespace_head_cached(namespace_id, consistency)
-                            .await?,
-                        ReadHeadSource::Anchor,
-                    ),
+                    None => {
+                        let cache = &self.inner.head_and_wal_tail_cache;
+                        let source = match cache.get_head(namespace_id) {
+                            Some(_) => ReadHeadSource::Refreshed,
+                            None => ReadHeadSource::Loaded,
+                        };
+                        let head = self
+                            .load_namespace_head_cached(namespace_id, consistency)
+                            .await?;
+                        (head, source)
+                    }
                 };
                 (self.read_context(head.read_basis.clone(), None), source)
             }
@@ -275,7 +270,6 @@ impl RuntimeCore {
         if !confirmed {
             return None;
         }
-        self.record_head_lookup(true);
         Some(cached)
     }
 

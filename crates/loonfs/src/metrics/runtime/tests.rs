@@ -58,11 +58,17 @@ fn read_head_sources_reach_the_registered_instruments() {
     let recorder = Arc::new(DefaultMetricsRecorder::new());
     let instruments = RuntimeInstruments::new(Some(recorder.clone()));
     instruments.read_head(ReadHeadSource::Position);
+    instruments.read_head(ReadHeadSource::Loaded);
     instruments.read_head(ReadHeadSource::Eventual);
     instruments.read_head(ReadHeadSource::Eventual);
 
     let snapshot = recorder.snapshot();
-    for (source, value) in [("position", 1), ("anchor", 0), ("eventual", 2)] {
+    for (source, value) in [
+        ("position", 1),
+        ("refreshed", 0),
+        ("loaded", 1),
+        ("eventual", 2),
+    ] {
         assert_eq!(
             counter(&snapshot, "loonfs.read_head.source", &[("source", source)]),
             value,
