@@ -567,7 +567,7 @@ async fn a_false_positive_in_a_newer_run_falls_through_to_the_run_with_the_row()
     let (docs, head) = (fixture.docs, fixture.head());
 
     let view = MetadataView::over_manifest_segments(&verified, head);
-    let false_positives = cache.stats().filter_false_positives;
+    let false_positives = cache.filter_stats().false_positives;
     let binding = view
         .bound_child(docs, &keys.binding)
         .await
@@ -584,9 +584,9 @@ async fn a_false_positive_in_a_newer_run_falls_through_to_the_run_with_the_row()
     assert!(revision.is_some());
     assert_eq!(revision, newest_revision(&merged, keys.revision, head));
     assert!(
-        cache.stats().filter_false_positives >= false_positives + 2,
+        cache.filter_stats().false_positives >= false_positives + 2,
         "both lookups open a delta segment that has no row for the key: {:?}",
-        cache.stats()
+        cache.filter_stats()
     );
 
     let plain = cold_lookup_gets(&fixture, &keys.plain_binding, keys.plain_revision).await;

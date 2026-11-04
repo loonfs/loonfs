@@ -4,7 +4,8 @@ use crate::{ObjectStore, SharedObjectStore, READAHEAD_WINDOW_BYTES};
 use loonfs_core::cache::{
     CacheScope, CompletedUploadSessionCache, DecodedBlockCacheStats, HeadAndWalTailCache,
     MemorySegmentBlocks, MetadataSegmentCache, ObjectCache, ObjectStoreScope, ReadWorkingMemory,
-    SharedCompletedUploadSessions, SharedHeadsAndWalTails, SharedObjects, SharedSegmentBlocks,
+    SegmentFilterStats, SharedCompletedUploadSessions, SharedHeadsAndWalTails, SharedObjects,
+    SharedSegmentBlocks,
 };
 use std::fmt;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -122,22 +123,9 @@ impl MetadataCache {
     /// Snapshots the cache's counters and occupancy, summed over every
     /// runtime that reads through it.
     pub fn stats(&self) -> MetadataCacheStats {
-        let segments = self.inner.segment_blocks.stats();
         MetadataCacheStats {
-            segment_blocks: DecodedBlockCacheStats {
-                hits: segments.hits,
-                misses: segments.misses,
-                inserts: segments.inserts,
-                evictions: segments.evictions,
-                evicted_decoded_bytes: segments.evicted_decoded_bytes,
-                rejections: segments.rejections,
-                rejected_decoded_bytes: segments.rejected_decoded_bytes,
-                cached_decoded_bytes: segments.cached_decoded_bytes,
-            },
-            segment_filter: SegmentFilterStats {
-                skips: segments.filter_skips,
-                false_positives: segments.filter_false_positives,
-            },
+            segment_blocks: self.inner.segment_blocks.stats(),
+            segment_filter: self.inner.segment_blocks.filter_stats(),
             segment_ssd: self
                 .inner
                 .ssd_segment_blocks
@@ -467,14 +455,4 @@ pub struct MetadataCacheStats {
     /// The completed upload sessions that garbage collection keeps between
     /// passes. A lookup misses when the pass reads the session's record.
     pub completed_upload_sessions: DecodedBlockCacheStats,
-}
-
-/// The lookups that the bloom filters of segments settled.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct SegmentFilterStats {
-    /// Segments skipped because their bloom filter ruled out a lookup before
-    /// any index or data read.
-    pub skips: usize,
-    /// Segments whose filter admitted a lookup that matched no rows.
-    pub false_positives: usize,
 }

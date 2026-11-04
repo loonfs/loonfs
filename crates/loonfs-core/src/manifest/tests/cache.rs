@@ -548,7 +548,7 @@ async fn lookup_skips_segments_whose_filter_rules_the_name_out() {
         2,
         "beta's bind and its revision's summary row should still be found"
     );
-    let stats = cache.stats();
+    let stats = cache.filter_stats();
     // The probe contains `/docs`'s inode ID, whose low bits are random, so the
     // delta segment's filter rejects it in most runs of the test and admits it
     // by a false positive in the others. The lookup records a skip in the
@@ -570,12 +570,12 @@ async fn lookup_skips_segments_whose_filter_rules_the_name_out() {
         .expect("load the delta filter");
     if filter.may_contain(&filter_probe) {
         assert!(
-            stats.filter_false_positives >= 1,
+            stats.false_positives >= 1,
             "the delta filter admits the probe, stats: {stats:?}"
         );
     } else {
         assert!(
-            stats.filter_skips >= 1,
+            stats.skips >= 1,
             "the delta bind segment should be skipped by its filter, stats: {stats:?}"
         );
     }
@@ -650,24 +650,24 @@ async fn a_listing_skips_a_run_without_the_directorys_rows_by_its_parent_probe()
         "the young run's key range covers `/docs`"
     );
 
-    let before = cache.stats();
+    let before = cache.filter_stats();
     let rows =
         crate::metadata::manifest_index::direntry_binds_page(&segments, docs, &docs_prefix, 64)
             .await
             .expect("list `/docs`");
     assert_eq!(rows.len(), 2, "the file's bind and its summary row");
-    let after = cache.stats();
+    let after = cache.filter_stats();
     // The probe contains `/docs`'s inode ID, whose low bits are random, so
     // the young filter rejects it in most runs of the test and admits it by
     // a false positive in the others.
     if young_filter.may_contain(&lookup_keys::direntry_parent_probe(docs)) {
-        assert!(after.filter_false_positives > before.filter_false_positives);
+        assert!(after.false_positives > before.false_positives);
     } else {
-        assert_eq!(after.filter_skips, before.filter_skips + 1, "{after:?}");
+        assert_eq!(after.skips, before.skips + 1, "{after:?}");
     }
 
     assert!(young_filter.may_contain(&lookup_keys::direntry_parent_probe(later)));
-    let before = cache.stats();
+    let before = cache.filter_stats();
     let rows = crate::metadata::manifest_index::direntry_binds_page(
         &segments,
         later,
@@ -677,7 +677,7 @@ async fn a_listing_skips_a_run_without_the_directorys_rows_by_its_parent_probe()
     .await
     .expect("list `/later`");
     assert_eq!(rows.len(), 4, "two files' binds and summary rows");
-    assert_eq!(cache.stats().filter_skips, before.filter_skips);
+    assert_eq!(cache.filter_stats().skips, before.skips);
 }
 
 #[tokio::test]

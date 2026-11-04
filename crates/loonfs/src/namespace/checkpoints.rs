@@ -14,7 +14,8 @@ impl<M: crate::Mode> Namespace<M> {
     ///
     /// The pinned manifest is read without replaying later WAL entries.
     /// Directories are omitted. A missing or expired snapshot returns
-    /// `snapshot_not_found` rather than falling back to current state.
+    /// `snapshot_not_found` rather than falling back to current state. A
+    /// subject that isn't an administrator gets `forbidden`.
     pub fn list_checkpoint_files(&self, checkpoint_id: &PinId) -> CheckpointFilesPager {
         self.list_checkpoint_files_with_options(
             checkpoint_id,
@@ -54,6 +55,7 @@ impl<M: crate::Mode> Namespace<M> {
                     .core
                     .pinned_read(&self.namespace_id, Consistency::Strong)
                     .await?;
+                pinned.engine.ensure_administrator(&pinned.context).await?;
                 Ok(pinned
                     .engine
                     .list_checkpoint_files_page(checkpoint_id, request, options, &pinned.context)

@@ -83,6 +83,7 @@ mod runtime_core;
 pub mod test_support;
 mod trace;
 
+pub use loonfs_core::cache::SegmentFilterStats;
 pub use loonfs_core::limits::{
     DIRECT_TRANSFER_URL_TTL_MS, GC_DEFAULT_GRACE_WINDOW_MS, GC_MIN_GRACE_WINDOW_MS,
     MAX_MULTIPART_PARTS, MAX_PENDING_SEGMENT_BYTES, MAX_SIGNED_PARTS_PER_REQUEST,
@@ -225,11 +226,11 @@ pub use maintenance::{
     MetadataPassReport, RetentionFloors, WalFoldStepOutcome,
 };
 pub use metadata_cache::{
-    MetadataCache, MetadataCacheBuilder, MetadataCacheStats, SegmentFilterStats, SsdBlockWriter,
-    SsdSegmentBlocks, SsdSegmentBlocksStats, ASSUMED_STORED_BLOCK_BYTES,
-    DEFAULT_MAX_CACHED_OBJECT_BYTES, DEFAULT_MAX_COMPLETED_UPLOAD_SESSION_BYTES,
-    DEFAULT_MAX_CONTENT_OBJECT_BYTES, DEFAULT_MAX_HEAD_BYTES, DEFAULT_MAX_MANIFEST_BYTES,
-    DEFAULT_MAX_SEGMENT_BYTES, DEFAULT_MAX_WAL_TAIL_BYTES, SSD_INDEX_ENTRY_BYTES,
+    MetadataCache, MetadataCacheBuilder, MetadataCacheStats, SsdBlockWriter, SsdSegmentBlocks,
+    SsdSegmentBlocksStats, ASSUMED_STORED_BLOCK_BYTES, DEFAULT_MAX_CACHED_OBJECT_BYTES,
+    DEFAULT_MAX_COMPLETED_UPLOAD_SESSION_BYTES, DEFAULT_MAX_CONTENT_OBJECT_BYTES,
+    DEFAULT_MAX_HEAD_BYTES, DEFAULT_MAX_MANIFEST_BYTES, DEFAULT_MAX_SEGMENT_BYTES,
+    DEFAULT_MAX_WAL_TAIL_BYTES, SSD_INDEX_ENTRY_BYTES,
 };
 pub use namespace::Namespace;
 pub use options::{
