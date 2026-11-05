@@ -66,7 +66,7 @@ Direct transfers are limited to endpoints that live provider tests cover:
 - Cloudflare R2, with an HTTPS endpoint under `r2.cloudflarestorage.com`.
 - Google Cloud Storage, through the native API at `storage.googleapis.com`.
 
-LoonFS doesn't issue direct-transfer capabilities for other S3-compatible endpoints, and no configuration setting overrides this. The service-proxied upload path is still available for them.
+LoonFS doesn't issue presigned URLs for other S3-compatible endpoints, and no configuration setting overrides this. The service-proxied upload path is still available for them.
 
 LoonFS represents a checksum as an algorithm and a lowercase hexadecimal value. The direct-PUT begin response returns the required algorithm. The client calculates that checksum while it uploads, and it sends the checksum at completion. AWS S3 and R2 use CRC-64/NVME, and GCS uses CRC-32C.
 
@@ -89,7 +89,7 @@ Browser clients send direct transfers to the provider. The bucket's CORS configu
 
 - allow the application origin,
 - allow the `PUT` and `GET` methods,
-- allow the `range` request header, which every download grant signs,
+- allow the `range` request header, which every presigned download URL signs,
 - for the S3 family, also allow the `if-none-match` and `x-amz-checksum-crc64nvme` request headers,
 - for GCS, also allow the `x-goog-if-generation-match` request header, and
 - expose the `ETag` response header.

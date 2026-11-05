@@ -97,7 +97,7 @@ Why fail instead of reading an older version of the files? A fallback would retu
 
 ## Forks and retained views
 
-A "fork" is a new namespace that starts as a copy of another namespace at one point in its history. To create one, LoonFS writes and verifies a [pin](glossary.md#pin) on the source's manifest, and then writes the fork's manifest 1, which lists the source's metadata runs. The fork shares the source's content and metadata objects, so nothing is copied (and the cost of a fork doesn't depend on how much data the source stores). Forking the source's current head may first fold the source's WAL tail, which writes its inline content to content objects. After the fork, commits to one namespace appear in the other only when a [merge](glossary.md#merge) applies them.
+A "fork" is a new namespace that starts as a copy of another namespace at one point in its history. To create one, LoonFS writes and verifies a [pin](glossary.md#snapshot) on the source's manifest, and then writes the fork's manifest 1, which lists the source's metadata runs. The fork shares the source's content and metadata objects, so nothing is copied (and the cost of a fork doesn't depend on how much data the source stores). Forking the source's current head may first fold the source's WAL tail, which writes its inline content to content objects. After the fork, commits to one namespace appear in the other only when a [merge](glossary.md#merge) applies them.
 
 A fork and its source belong to one [fork family](glossary.md#fork-family), and every member of the family stores its content objects under the family root's prefix. So the fork reads inherited content and its own content with the same kind of key. When the fork publishes its own manifests, the inherited objects stay where they are. The source keeps its pin for the fork until the fork is deleted and retired.
 
@@ -117,10 +117,10 @@ An expired snapshot still protects its manifest until garbage collection deletes
 | Fold | Moves committed records from the WAL into new metadata segments, and publishes the next manifest. |
 | Compaction | Rewrites metadata runs into fewer runs and drops rows that are no longer needed, without changing any retained view. |
 | Retention advance | Moves the [retention floor](glossary.md#retention-floor) forward, after checking that the current manifest's segments exist. Compaction can then remove history at or below the floor. |
-| Garbage collection | Deletes objects that nothing references anymore, once they're old enough. Each pass starts from a fresh list of what's still referenced. |
+| Garbage collection | Deletes objects that nothing references anymore, once they're old enough. Each collection starts from a fresh list of what's still referenced. |
 
 Deleting a file records a subtree tombstone, which can be undone. Deleting a namespace publishes a final manifest with a deleted status. Neither one deletes shared content right away.
 
-A namespace is retired once a grace period has passed and no pins on the namespace remain (see [Retirement](format.md#95-retirement)). Retiring a fork deletes its pin on its source. Retiring a family root, which can happen only after every fork of it is retired, deletes the family's content (see [Sweeping a retired owner's content](format.md#118-sweeping-a-retired-owners-content)).
+A namespace is retired once a grace period has passed and no pins on the namespace remain (see [Retirement](format.md#95-retirement)). Retiring a fork deletes its pin on its source. Retiring a family root, which can happen only after every fork of it is retired, deletes the family's content (see [Deleting a retired owner's content](format.md#118-deleting-a-retired-owners-content)).
 
-Hosts decide when maintenance runs and which namespaces it covers. The format defines what each operation can publish or delete. Extensions such as grep have their own manifests and garbage collection rules, and core garbage collection never deletes their objects.
+Hosts decide when to run maintenance and which namespaces to maintain. The format defines what each operation can publish or delete. Extensions such as grep have their own manifests and garbage collection rules, and core garbage collection never deletes their objects.

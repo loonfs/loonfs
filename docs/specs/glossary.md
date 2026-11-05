@@ -42,11 +42,15 @@ The position of one object in a numbered series, such as a manifest number (`man
 
 ### Garbage collection (`gc`)
 
-The process that deletes stored objects that nothing references anymore, such as superseded manifests, folded WAL objects, and unused content objects. Code uses the short form `gc` in names, as in `gc_namespace`. Each call runs one [garbage collection pass](#garbage-collection-pass).
+The process that deletes stored objects that nothing references anymore, such as superseded manifests, folded WAL objects, and unused content objects. Code uses the short form `gc` in names, as in `gc_namespace`. Each call runs one [collection](#collection).
 
 ### Head
 
-The namespace's latest committed state, identified by the sequence number of its newest commit (`head_seq`). The head isn't a stored object. A reader finds it by reading the current manifest and replaying the WAL tail. For example, if the current manifest includes commits through sequence 40 and the WAL tail contains commits 41 to 43, the head is at sequence 43.
+The namespace's latest committed state, identified by the sequence number of its newest commit (`head_seq`). The head isn't a stored object. A reader finds it by reading the current manifest and replaying the WAL tail. For example, if the current manifest includes commits through sequence 40 and the WAL tail contains commits 41 to 43, the head is at sequence 43. A manifest's own `head_seq` is its [folded head](#folded-head), which can be earlier than the namespace's head.
+
+### Folded head
+
+The sequence of the newest commit that a manifest's runs include, recorded as the manifest's `head_seq`. A snapshot's folded head is the folded head of its manifest. The namespace's [head](#head) can be later, because the commits after the folded head are in the WAL tail. For example, if a manifest's runs include commits through sequence 40 and the WAL tail contains commits 41 to 43, the manifest's folded head is 40 and the namespace's head is 43. See [Manifests, runs, and segments](format.md#71-manifests-runs-and-segments).
 
 ### Commit ID
 
@@ -80,7 +84,7 @@ The link between a parent directory, a name, and a child inode, which places an 
 
 ### Binding version
 
-An opaque token that identifies an item's current directory binding. It encodes the position of the bind that established the binding (the binding rows' `bind_position`), so moving, renaming, or undeleting an item produces a new binding version, and writing the item's content or attributes doesn't. Clients pass it as a precondition on moves and deletes, so the change fails if the item was moved or renamed after the client read it.
+An opaque token that identifies an item's current directory binding. It encodes the position of the bind that established the binding (the binding rows' `bind_position`), so moving, renaming, or restoring an item produces a new binding version, and writing the item's content or attributes doesn't. Clients pass it as a precondition on moves and deletes, so the change fails if the item was moved or renamed after the client read it.
 
 ### Path
 
@@ -104,7 +108,15 @@ The fields of a file's current revision that a directory listing reports: the re
 
 ### Tombstone
 
-A committed deletion record. Deleting an item removes its name from its parent directory and records a tombstone. The item's revisions, and everything below it, stay in place, and the tombstone hides them like a filter applied on top of the metadata. An undelete revokes the tombstone and restores the item's name, so the whole subtree reappears unchanged. Once the [retention floor](#retention-floor) reaches the deletion, the deletion has expired. An expired deletion can't be undeleted, its tombstone keeps hiding the subtree, and a base compaction removes the subtree's rows once the writer's log has acknowledged the floor (see [Acknowledged floor](#acknowledged-floor)). See [File and subtree deletion](format.md#16-file-and-subtree-deletion). (A deleted namespace's final manifest is a different record, the namespace tombstone.)
+A committed deletion record. Deleting an item removes its name from its parent directory and records a tombstone. The item's revisions, and everything below it, stay in place, and the tombstone hides them like a filter applied on top of the metadata. A [restore](#restore) revokes the tombstone and binds the item's name again, so the whole subtree reappears unchanged. Once the [retention floor](#retention-floor) reaches the deletion, the deletion has expired. An expired deletion can't be restored, and its tombstone keeps hiding the subtree. Once the writer's log has acknowledged the floor, the deletion is [removable](#removable-deletion), and a base compaction removes the subtree's rows. See [File and subtree deletion](format.md#16-file-and-subtree-deletion). (A deleted namespace's final manifest is a different record, the namespace tombstone.)
+
+### Restore
+
+Bringing a deleted file or directory back, or making a prior revision's content current again. Restoring a deletion revokes its [tombstone](#tombstone) and binds the deleted root again, under its saved parent and name or at a new destination, so the whole subtree reappears with its revision history. Only a recoverable deletion can be restored. The API spells this operation `undelete`, and the change feed reports it as an `undeleted` event. Restoring a revision (`restore_revision`) makes that revision's content the file's current content. See [File and subtree deletion](format.md#16-file-and-subtree-deletion).
+
+### Removable deletion
+
+An expired deletion whose deletion sequence is at or below the basis manifest's [acknowledged floor](#acknowledged-floor), so that no restore of the deletion can still be committed. A base compaction removes the rows that a removable deletion hides. A deletion expires as soon as the [retention floor](#retention-floor) reaches it, but it becomes removable only once the writer's log has acknowledged that floor. For example, if the floor is 20 and the acknowledged floor is 5, a deletion at sequence 10 has expired, but it isn't removable yet, so its rows stay. See [Row retention during a base compaction](format.md#103-row-retention-during-a-base-compaction).
 
 ### Namespace tombstone
 
@@ -156,11 +168,15 @@ An object-store operation that creates one new immutable object from ranges of e
 
 ### Temporary object
 
-An object that an assembly writes for intermediate results (for example, when GCS composes more than 32 sources) and deletes when it finishes. Temporary objects are stored under `namespaces/{namespace_id}/temporary/`. Nothing references them, so garbage collection deletes any that are older than the reclamation grace (for example, after a crash).
+An object that an assembly writes for intermediate results (for example, when GCS composes more than 32 sources) and deletes when it finishes. Temporary objects are stored under `namespaces/{namespace_id}/temporary/`. Nothing references them, so garbage collection deletes any that are older than the [grace window](#grace-window) (for example, after a crash).
 
 ### Upload session
 
 The stored state of one upload, kept as two records that are each written once. The session record is written when the upload starts, and it includes the content ID that's assigned to the upload, the transfer mode, and when the session expires. The outcome record is written when the upload completes or is aborted. Both records are stored under the family root's prefix, and each one records the namespace that created the session. The session's status (`open`, `completed`, or `aborted`) follows from which records exist. For example, a session record without an outcome record is an open session. Completing an upload doesn't automatically update a file in a LoonFS namespace. A file changes only when a later commit references the uploaded content. See [Upload sessions](format.md#51-upload-sessions).
+
+### Presigned URL
+
+A short-lived URL, signed by the deployment, that lets a client upload or download one object directly with object storage, without sending the bytes through the LoonFS server. The API returns it in an `access` object of kind `presigned_url`, with the headers that the client has to send unchanged. A direct upload returns one presigned URL (or one for each part of a multipart upload), and a download request returns one for each range of the file revision. A presigned URL lasts long enough for one transfer (15 minutes in the reference implementation), and anyone who has it can use it. See [Download transport](api.md#610-download-transport).
 
 ### Admission evidence
 
@@ -202,7 +218,7 @@ A set of related metadata row families that compaction always processes together
 
 ### Fold
 
-The process that moves committed records from the WAL tail into new metadata segments and publishes a manifest that lists them, so later readers replay less of the WAL. A fold doesn't change the namespace's visible history, and any process can run one. See [Materializing metadata](format.md#7-materializing-metadata).
+The process that moves committed records from the WAL tail into new metadata segments and publishes a manifest that lists them, so later readers replay less of the WAL. A fold doesn't change the namespace's visible history, and any process can run one. See [Folding the WAL](format.md#7-folding-the-wal).
 
 ### Compaction
 
@@ -210,15 +226,15 @@ The process that rewrites a namespace's metadata runs into fewer runs, and drops
 
 ### Retention floor
 
-The sequence number below which a namespace's history is no longer guaranteed. Above the floor, every file's history is complete. At or below it, each visible file keeps at least its newest revision, and so does a deleted file while its deletion is recoverable. Compaction can remove the older rows at or below the floor (superseded bindings, old revisions, and commit receipts). A deletion at or below the floor has expired, so it can't be undeleted, and a base compaction removes the rows that it hides once the writer's log has acknowledged the floor (see [Acknowledged floor](#acknowledged-floor)). A retention advance moves the floor forward, and the floor never moves back. A pin below the floor still protects its manifest. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
+The sequence number below which a namespace's history is no longer guaranteed. Above the floor, every file's history is complete. At or below it, each visible file keeps at least its newest revision, and so does a deleted file while its deletion is recoverable. Compaction can remove the older rows at or below the floor (superseded bindings, old revisions, and commit receipts). A deletion at or below the floor has expired, so it can't be restored, and once the writer's log has acknowledged the floor, the deletion is [removable](#removable-deletion) and a base compaction removes the rows that the deletion hides. A retention advance moves the floor forward, and the floor never moves back. A pin below the floor still protects its manifest. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
 
 ### Retention window
 
-A namespace setting, in milliseconds, for how much recent history a scheduled retention advance keeps. The reference server's maintenance sweep advances each namespace's [retention floor](#retention-floor) to the last commit made at or before the current time minus the window. It uses the namespace's own window if the namespace's manifest sets `retention_window_ms`, and the server's `retention_window_ms` setting otherwise. For example, a namespace with a 7-day window keeps at least 7 days of revisions and recoverable deletions. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
+A namespace setting, in milliseconds, for how much recent history a scheduled retention advance keeps. The reference server's [sweep](#sweep) advances each namespace's [retention floor](#retention-floor) to the last commit made at or before the current time minus the window. It uses the namespace's own window if the namespace's manifest sets `retention_window_ms`, and the server's `retention_window_ms` setting otherwise. For example, a namespace with a 7-day window keeps at least 7 days of revisions and recoverable deletions. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
 
 ### Acknowledged floor
 
-A manifest field (`acknowledged_floor_seq`) that records the highest [retention floor](#retention-floor) that any WAL object folded into the manifest was validated against. Each WAL object records the floor of the manifest that its writer validated it against (`basis_floor_seq`), and a fold copies the highest one into the manifest. A base compaction removes the rows that a deletion hides only when the deletion is at or below the acknowledged floor, because every undelete validated against a lower floor is folded by then. For example, if the floor is 20 and the acknowledged floor is 5, a deletion at sequence 10 has expired, but its rows stay until a WAL object validated against the floor of 20 is folded. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
+A manifest field (`acknowledged_floor_seq`) that records the highest [retention floor](#retention-floor) that any WAL object folded into the manifest was validated against. Each WAL object records the floor of the manifest that its writer validated it against (`basis_floor_seq`), and a fold copies the highest one into the manifest. A base compaction removes the rows that a deletion hides only when the deletion is at or below the acknowledged floor, because every restore validated against a lower floor is folded by then. For example, if the floor is 20 and the acknowledged floor is 5, a deletion at sequence 10 has expired, but it isn't [removable](#removable-deletion), and its rows stay until a WAL object validated against the floor of 20 is folded. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
 
 ### Control object
 
@@ -234,12 +250,12 @@ The namespace state that one read sees (or a group of related reads in one reque
 
 The verified set of metadata runs, from the current manifest, that a read starts from. A fork's manifest lists the runs it inherited from its source. See [Resolving the metadata basis](format.md#41-resolving-the-metadata-basis).
 
-### Pin
+### Snapshot
 
-A stored record that keeps one manifest, and every segment it lists, from being deleted after newer manifests are published, so the namespace stays readable as it was at that point in its history. A pin has one of two owners:
+A stored record that keeps one manifest, and every segment it lists, from being deleted after newer manifests are published, so the namespace stays readable as it was at that point in its history. The format calls the record a "pin". Every pin is a snapshot with one of two owners:
 
-- A "user pin" is a pin that a caller creates and deletes. The API calls it a "snapshot", and its ID is the `snapshot_id` that the read routes and forks accept. A snapshot can have an expiry time, or none. An expired snapshot can't be read or forked, and it stays listed until garbage collection deletes it. For example, a sandbox can create a snapshot before an agent edits it, and then read or fork the snapshot after the edits.
-- A "fork pin" keeps the source manifest that a fork reads through, until the fork is retired. A read of the source accepts a fork pin's ID as `snapshot_id`, so a client can read the source as it was at the fork point.
+- A "user pin" is a snapshot whose owner is `user`. A caller creates it and can delete it, and it may expire. Its ID is the `snapshot_id` that the read routes and forks accept, and the snapshot routes manage only user pins. A snapshot can have an expiry time, or none. An expired snapshot can't be read or forked, and it stays listed until garbage collection deletes it. For example, a sandbox can create a snapshot before an agent edits it, and then read or fork the snapshot after the edits.
+- A "fork pin" is a snapshot whose owner is `fork`. It keeps the source manifest that a fork reads through, until the fork is retired. A read of the source accepts a fork pin's ID as `snapshot_id`, so a client can read the source as it was at the fork point.
 
 The maintenance API's "checkpoint" inventory lists every pin of a namespace, so an operator can see what keeps old manifests, and the API calls any pin's ID a `checkpoint_id`. See [Pins](format.md#8-pins).
 
@@ -247,13 +263,21 @@ The maintenance API's "checkpoint" inventory lists every pin of a namespace, so 
 
 A new namespace that starts as a copy of another namespace at one point in its history. The fork shares the source's stored objects, and the source keeps a pin for the fork until the fork is retired. The fork is a member of its source's [fork family](#fork-family), so it reads inherited content and writes new content under the family root's prefix. After the fork, commits to one namespace appear in the other only when a [merge](#merge) applies them. See [Forking a namespace](format.md#92-forking-a-namespace).
 
+### Source
+
+The namespace that an operation reads from. For a fork, the source is the namespace that the fork was taken from (its parent), and the fork basis records it. For a [merge](#merge) or a [rebase](#rebase), the source is the fork whose commits are applied. For example, if `sandbox` is a fork of `main`, `main` is the source namespace in `sandbox`'s fork basis, and `sandbox` is the source of a merge of `sandbox` into `main`.
+
+### Fork point
+
+The source namespace's sequence at which a fork was taken. The fork basis records it (`fork_basis.source_head_seq`), the fork's retention floor starts at it, and the fork's first merge or rebase starts from it. For example, if `sandbox` was forked from `main` at sequence 100, the fork point is 100, and the first merge of `sandbox` into `main` applies `sandbox`'s commits after 100.
+
 ### Fork family
 
-A set of namespaces: one namespace that was created without a source (the [family root](#family-root)), and every namespace forked from it, directly or through other forks. Each namespace in the set is a "member" of the family, and a member leaves the fork family when it's retired. The members store their content objects and upload records under the family root's prefix, so a content reference identifies the same object in every member. The family root's garbage collection pass collects the family's content, with roots from every member. The pass finds the members through fork pins, because each fork pins the namespace it was forked from. For example, if `sandbox` is a fork of `main`, and `trial` is a fork of `sandbox`, all three are members of `main`'s family, and their content objects are stored under `namespaces/main/content/`. See [Namespaces and identity](format.md#11-namespaces-and-identity).
+A set of namespaces: one namespace that was created without a source (the [family root](#family-root)), and every namespace forked from it, directly or through other forks. Each namespace in the set is a "member" of the family, and a member leaves the fork family when it's retired. The members store their content objects and upload records under the family root's prefix, so a content reference identifies the same object in every member. The family root's [collection](#collection) deletes the family's unreferenced content, with roots from every member. The collection finds the members through fork pins, because each fork pins the namespace it was forked from. For example, if `sandbox` is a fork of `main`, and `trial` is a fork of `sandbox`, all three are members of `main`'s family, and their content objects are stored under `namespaces/main/content/`. See [Namespaces and identity](format.md#11-namespaces-and-identity).
 
 ### Family root
 
-The member of a [fork family](#fork-family) that was created without a source. Every member's manifest records the family root (`family_root_id`), and the family root's prefix stores the family's content objects and upload records. A family root is the last member of its family to be retired, because each fork pins its source. Its garbage collection pass keeps collecting the family's content after the family root is deleted, until the family root itself is retired. See [File contents and ownership](format.md#15-file-contents-and-ownership) and [Retirement](format.md#95-retirement).
+The member of a [fork family](#fork-family) that was created without a source. Every member's manifest records the family root (`family_root_id`), and the family root's prefix stores the family's content objects and upload records. A family root is the last member of its family to be retired, because each fork pins its source. Its collections keep deleting the family's unreferenced content after the family root is deleted, until the family root itself is retired. See [File contents and ownership](format.md#15-file-contents-and-ownership) and [Retirement](format.md#95-retirement).
 
 ### Merge
 
@@ -281,7 +305,7 @@ A live read with the `eventual` [consistency](#consistency), which is the defaul
 
 ### Revalidation bound
 
-The longest time a reader can trust that no newer manifest exists after it last checked (`READ_REVALIDATION_BOUND_MS`). The bound applies to a cached view, to a [writer position](#writer-position), and to the manifest that a manifest publication builds on. After that, the reader loads the current manifest again before it serves a read, and the publication loads the current manifest through the hint before its put. Garbage collection's minimum grace includes this bound, so it doesn't delete a superseded manifest that a reader might still be using. See [Replaying the visible WAL](format.md#42-replaying-the-visible-wal).
+The longest time a reader can trust that no newer manifest exists after it last checked (`READ_REVALIDATION_BOUND_MS`). The bound applies to a cached view, to a [writer position](#writer-position), and to the manifest that a manifest publication builds on. After that, the reader loads the current manifest again before it serves a read, and the publication loads the current manifest through the hint before its put. The minimum [grace window](#grace-window) includes this bound, so it doesn't delete a superseded manifest that a reader might still be using. See [Replaying the visible WAL](format.md#42-replaying-the-visible-wal).
 
 ### Cursor
 
@@ -315,7 +339,19 @@ A counter in the manifest, like the writer epoch, that stops a compaction from p
 
 ### Maintainer
 
-The role that folds a namespace's WAL, compacts its metadata, advances its retention floor, publishes an extension's entry, and collects its garbage. The namespace's writer session commits and deletes the namespace, and any process can be its maintainer, with or without the writer session. A compaction claims the compactor epoch first, and a fold, a retention advance, or an extension's publication publishes under the current compactor epoch without a claim. A maintainer that acknowledges the retention floor of a namespace that nobody writes to claims the writer epoch and writes a fence (see [Acknowledged floor](#acknowledged-floor)). See [Publishing a materialized file set](format.md#72-publishing-a-materialized-file-set).
+The role that folds a namespace's WAL, compacts its metadata, advances its retention floor, publishes an extension's entry, and collects its garbage. The namespace's writer session commits and deletes the namespace, and any process can be its maintainer, with or without the writer session. A compaction claims the compactor epoch first, and a fold, a retention advance, or an extension's publication publishes under the current compactor epoch without a claim. A maintainer that acknowledges the retention floor of a namespace that nobody writes to claims the writer epoch and writes a fence (see [Acknowledged floor](#acknowledged-floor)). See [Publishing a manifest](format.md#72-publishing-a-manifest).
+
+### Job
+
+One maintenance API request (`POST .../runs`) and the work it does. The request body's `kind` selects the job: a `metadata` job folds the WAL tail and compacts metadata, the retention jobs (`retention` and `retention_window`) advance the retention floor and set the namespace's retention window, a `gc` job runs one [collection](#collection), and a `recover_administrator` job grants a principal `admin` on the root again. A job runs to completion and returns its report in the response. A job never creates a snapshot. See [Maintenance jobs](api.md#maintenance-jobs).
+
+### Step
+
+One bounded unit of maintenance work on one namespace. A metadata step folds the WAL tail or compacts metadata within a budget, a collection step runs one [collection](#collection), and an index step builds or reorganizes part of a grep index. Every maintenance interval (five seconds by default), the reference server's scheduler runs the due steps of each namespace session that the server keeps open, and a [sweep](#sweep) runs the due steps of every namespace in the store.
+
+### Sweep
+
+The reference server's scheduler listing every namespace in the store, including deleted ones, and running each listed namespace's due steps, including a collection and a retention advance under the namespace's [retention window](#retention-window). A sweep runs when the server starts, and then on the sweep interval (24 hours by default). A namespace that nobody writes to through the server is maintained only by sweeps. See [Deleting, retaining, and reclaiming](api.md#deleting-retaining-and-reclaiming).
 
 ### Compare-and-swap (CAS)
 
@@ -323,21 +359,21 @@ A conditional update that replaces an object only if it hasn't changed since the
 
 ### Publication budget
 
-The longest time allowed between the state a publisher planned against and the start of its numbered put. A put that returns after its budget has an unknown outcome. Garbage collection relies on these budgets to choose a safe reclamation grace. See [Publication and collection timing](format.md#c1-publication-and-collection-timing).
+The longest time allowed between the state a publisher planned against and the start of its numbered put. A put that returns after its budget has an unknown outcome. Garbage collection relies on these budgets to choose a safe [grace window](#grace-window). See [Publication and collection timing](format.md#c1-publication-and-collection-timing).
 
 ## Deletion and garbage collection
 
-### Garbage collection pass
+### Collection
 
-One complete garbage collection call. A pass loads fresh roots (everything that's still referenced), builds the set of live objects in memory, and deletes the candidates that are old enough. It stores no progress, so after a failure the next pass starts over.
+One garbage collection call over a namespace. A collection reads the current manifest and the other roots (everything that's still referenced), lists each object family, and deletes the unreferenced objects that are older than the [grace window](#grace-window). It's complete and stateless: it stores no progress, so after a failure the next collection starts over. On a [family root](#family-root), a collection also reads the roots of every member of the fork family and deletes the family's unreferenced content. See [One complete collection](format.md#111-one-complete-collection).
 
-### Reclamation grace
+### Grace window
 
-How old an unreferenced manifest, WAL object, content object, or temporary object has to be before garbage collection deletes it. The grace is configurable (one hour by default), but it can't be lower than `GC_MIN_GRACE_WINDOW_MS`. That minimum makes sure every write planned against an older state has finished or failed before garbage collection deletes an object the write might reference. See [Candidate and age rules](format.md#113-candidate-and-age-rules).
+How old an unreferenced manifest, WAL object, content object, or temporary object has to be before garbage collection deletes it (`grace_window_ms`). The grace window is configurable (one hour by default), but it can't be lower than `GC_MIN_GRACE_WINDOW_MS`. That minimum makes sure every write planned against an older state has finished or failed before garbage collection deletes an object the write might reference. Two other windows have names of their own: the "retirement grace", which a deleted namespace waits before it can be retired, and the "completed-content grace", which keeps a completed upload's records. See [Candidate and age rules](format.md#113-candidate-and-age-rules).
 
 ### Namespace retirement
 
-The point at which garbage collection deletes a deleted fork's pin on its source, or sweeps a deleted family root's content prefix. A deleted namespace is retired once its retirement grace has passed and no pins on it remain. See [Retirement](format.md#95-retirement).
+The point at which garbage collection deletes a deleted fork's pin on its source, or deletes the objects under a deleted family root's content prefix. A deleted namespace is retired once its retirement grace has passed and no pins on it remain. See [Retirement](format.md#95-retirement).
 
 ## API
 
