@@ -2,7 +2,7 @@
 
 [Grep across a fork family](grep-fork-family.md) describes the index's postings, its row families, pruning, and the order of a query's results. The index records content values instead of file revisions, a posting refers to a value by its position in the value table of the posting's run, and matches are ordered by content value. This note describes the approach, the index's lifecycle, and collection.
 
-LoonFS supports grep-style regular-expression queries through a derived content index. The index narrows down the files that a query needs to read, and then the query checks those files against the original pattern. Index maintenance runs separately from metadata maintenance, so a file's metadata commit doesn't wait until its content has been indexed.
+LoonFS supports grep-style regular-expression queries through a derived content index. The index narrows down the files that a query needs to read, and then the query checks those files against the original pattern. LoonFS maintains the index separately from metadata, so a file's metadata commit doesn't wait until its content has been indexed.
 
 The index is stored under the namespace's grep extension prefix. It can be rebuilt from filesystem state, and core readers don't need to decode it to read the namespace. This note explains what the index contains, how it's built, how queries use it, and how its objects are collected. [Grep extension format](../specs/format.md#appendix-d-grep-extension-format) defines the durable encodings.
 
@@ -72,7 +72,7 @@ A run of index steps changes a copy of the entry in memory (the "pending entry")
 
 1. The run loads the current manifest.
 2. Each step writes its segments and records its change in the pending entry.
-3. Once the change is a tick interval old, or when the run ends, the run creates the next manifest with put-if-absent, and the change's new runs are numbered from the `next_run_no` of the manifest that it's published over.
+3. Once the change is one maintenance interval old, or when the run ends, the run creates the next manifest with put-if-absent, and the change's new runs are numbered from the `next_run_no` of the manifest that it's published over.
 4. If the run loses the race to a manifest that copied grep's entry, such as a fold, the run publishes the change over that manifest. If another process changed the entry, the run publishes nothing, and its next step loads the winning manifest and plans again.
 
 A query reads grep's entry from the manifest of its read view, so the index is as current as the view, and the query sends no request to find the index. [Grep extension format](../specs/format.md#appendix-d-grep-extension-format) defines the entry and its publication.
@@ -106,7 +106,7 @@ Disabling the index publishes a `disabled` entry that lists no segments. The ope
 
 ## Building the index
 
-A worker builds the index in two phases, first with a backfill from a [snapshot](../specs/glossary.md#pin), and then incrementally from the change feed.
+A worker builds the index in two phases, first with a backfill from a [snapshot](../specs/glossary.md#snapshot), and then incrementally from the change feed.
 
 ### Initial backfill
 
@@ -128,7 +128,7 @@ If the snapshot is deleted or expires, or the change history that the worker nee
 
 An active worker resumes the change feed from its cursor (a sequence and an event index). It indexes the eligible revisions that those events publish, and it advances the cursor in the same publication that lists their segments.
 
-Moves, deletes, and undeletes don't publish new content revisions in those events, so they don't need new postings. Queries check their effect on visibility and paths against metadata. Operations that append a new revision are processed as revision events, even when the underlying bytes were already stored.
+Moves, deletes, and restores don't publish new content revisions in those events, so they don't need new postings. Queries check their effect on visibility and paths against metadata. Operations that append a new revision are processed as revision events, even when the underlying bytes were already stored.
 
 By default, the build budget is 256 files or 64 MiB per step. Each batch is bounded, but the total cost of backfilling a namespace still depends on how much eligible content it has. Failed attempts, or a restarted backfill, can read content again.
 
@@ -138,13 +138,13 @@ The index doesn't stop the namespace's retention floor from advancing. If the ch
 
 This section describes when the reference server and the CLI run index work.
 
-The reference server runs `GrepWorker` from its maintenance sweep, alongside core metadata maintenance. Each visit runs up to 16 steps, for as long as each step does some work. A step is a reorganization step when a reorganization is due (see [Reorganization](#reorganization)), and a build step otherwise. Core garbage collection in the sweep also collects the index's unreferenced segments (see [Grep garbage collection](#grep-garbage-collection)). A failure for one namespace is logged, and it doesn't delay unrelated namespaces. For a namespace with a writer session open on the server, the ticks retry a failed index call after the call's failure backoff.
+The reference server runs `GrepWorker` from its maintenance scheduler, alongside core metadata maintenance. Each time the scheduler runs a namespace's index work, it runs up to 16 steps, for as long as each step does some work. A step is a reorganization step when a reorganization is due (see [Reorganization](#reorganization)), and a build step otherwise. Core garbage collection in the scheduler also collects the index's unreferenced segments (see [Grep garbage collection](#grep-garbage-collection)). A failure for one namespace is logged, and it doesn't delay unrelated namespaces. For a namespace with a writer session open on the server, the scheduler retries a failed index call after the call's failure backoff.
 
-The index step is one of the steps that a tick runs for each open writer session, as [Tick and daily pass](maintenance-hosting.md#tick-and-daily-pass) describes. A tick runs the step when the session's entry is marked dirty or the index is behind the session's last published sequence, so a commit through that server is indexed within seconds. Enabling the index marks the entry dirty, so the next tick starts the backfill. Queries don't schedule any work.
+The index step is one of the steps that the scheduler runs for each open writer session every maintenance interval, as [Maintenance hosting](maintenance-hosting.md) describes. The scheduler runs the step when the session's entry is marked dirty or the index is behind the session's last published sequence, so a commit through that server is indexed within seconds. Enabling the index marks the entry dirty, so the scheduler starts the backfill within one maintenance interval. Queries don't schedule any work.
 
-A query-only server doesn't build indexes, and it rejects index mutations. No grep operation lists namespaces. The sweep lists them from the store.
+A query-only server doesn't build indexes, and it rejects index mutations. No grep operation lists namespaces. A sweep lists them from the store.
 
-Embedded CLI profiles don't run any index work after a write. `loonfs maintenance index enable` captures a target sequence and runs bounded steps, chosen the same way as the sweep's, until the index reaches it. Later writes to the namespace don't extend that target. The command has these options:
+Embedded CLI profiles don't run any index work after a write. `loonfs maintenance index enable` captures a target sequence and runs bounded steps, chosen the same way as the scheduler's, until the index reaches it. Later writes to the namespace don't extend that target. The command has these options:
 
 - `--no-wait` returns after the index is enabled.
 - `--max-steps` and `--deadline-ms` limit the wait. When either one runs out, the command prints its progress and exits with a nonzero status.
@@ -155,9 +155,9 @@ Building and reorganizing the index don't collect garbage. Grep garbage collecti
 
 ## Reorganization
 
-Reorganization merges the index's runs across three tiers: delta, mid, and base. Delta runs are merged into mid runs, and accumulated mid runs are merged with the base into a new base.
+Reorganization rewrites the index's runs across three tiers: delta, mid, and base. Delta runs are rewritten into mid runs, and accumulated mid runs are rewritten with the base into a new base.
 
-A reorganization starts when a tier reaches its run limit, eight delta runs or eight mid runs by default. The sweep and the CLI run a reorganization step instead of a build step whenever a reorganization is in progress or a tier is at its limit, so the delta tier has at most eight runs while the index is behind a writer. Every build step looks up its content values' `texts` rows in the index's segments, so a build step's cost grows with the number of runs. A reorganization that waited for a build step to find the index up to date might never run while a writer keeps committing, and the build steps would keep getting slower.
+A reorganization starts when a tier reaches its run limit, eight delta runs or eight mid runs by default. The scheduler and the CLI run a reorganization step instead of a build step whenever a reorganization is in progress or a tier is at its limit, so the delta tier has at most eight runs while the index is behind a writer. Every build step looks up its content values' `texts` rows in the index's segments, so a build step's cost grows with the number of runs. A reorganization that waited for a build step to find the index up to date might never run while a writer keeps committing, and the build steps would keep getting slower.
 
 The thresholds count logical runs, not physical segments. Every build step that writes rows adds one run for its batch, whose `run_no` is allocated from `next_run_no` when the step's change is published. A run can contain several segments, and it still counts as one run toward reorganization. Separate backfill batches stay separate runs, even though they share the same captured target sequence.
 
@@ -165,7 +165,7 @@ With eight delta runs per mid run, and eight mid runs per base rewrite, a simpli
 
 ### Processing a reorganization in steps
 
-A reorganization first records the exact set of input segments that it will merge. It then scans the gram key space in steps that each process a bounded number of rows. Each step writes output segments at the selected tier and records its progress in the pending entry.
+A reorganization first records the exact set of input segments that it will rewrite. It then scans the gram key space in steps that each process a bounded number of rows. Each step writes output segments at the selected tier and records its progress in the pending entry.
 
 Until the scan completes, both the inputs and the completed outputs stay referenced and visible to queries. Segments published after the reorganization selected its inputs aren't part of that reorganization, and they stay referenced when it completes. The final step removes the selected inputs, and keeps the completed outputs and the unrelated segments.
 
@@ -241,7 +241,7 @@ Index maintenance reduces this gap when it runs. Core backpressure on the WAL ta
 
 ## Grep garbage collection
 
-Core garbage collection collects grep segments under the segment rule that it applies to metadata segments. A segment stays while a current, pinned, or recently superseded manifest lists it in grep's entry, including the inputs and outputs of an in-progress reorganization, and an unlisted segment is deleted once it's more than 24 hours old. The `gc` result counts the deleted segments in `deleted.extension_segments`. A run that lost its publication, or that stopped before it published, leaves its segments unlisted, and a later pass collects them. Disabling the index and deleting the namespace empty the entry's runs, so the index's segments become unlisted too.
+Core garbage collection collects grep segments under the segment rule that it applies to metadata segments. A segment stays while a current, pinned, or recently superseded manifest lists it in grep's entry, including the inputs and outputs of an in-progress reorganization, and an unlisted segment is deleted once it's more than 24 hours old. The `gc` result counts the deleted segments in `deleted.extension_segments`. A run that lost its publication, or that stopped before it published, leaves its segments unlisted, and a later collection deletes them. Disabling the index and deleting the namespace empty the entry's runs, so the index's segments become unlisted too.
 
 ## Costs and defaults
 

@@ -220,7 +220,7 @@ Use each name with exactly one meaning, so that a search for a name finds every 
   | `materialize` | Write pending pieces into an extent |
   | `advance` | Move a monotonic floor forward |
   | `fold` | Move the WAL tail into segments |
-  | `step` | Run one bounded maintenance pass |
+  | `step` | Run one bounded maintenance step |
   | `read` | Read bytes out of a file, at every Rust layer |
   | `get` | Call `ObjectStore`, or read one control object by ID |
   | `find_*` | Return an `Option` |
@@ -228,7 +228,7 @@ Use each name with exactly one meaning, so that a search for a name finds every 
   | `verify` | Check bytes or durable state against stored evidence |
   | `ensure` | Check a precondition on state, returning `Result<()>` |
   | `resolve` | Turn a reference into the referenced object |
-  | `effective_*` | Merge defaults |
+  | `effective_*` | Combine defaults with overrides |
 
 - **Order the parts of a handle method's name** as the verb, the object, the form (`_stream` or `_prepared`), the address (`_by_inode`), the time (`_at_snapshot`), and `_with_options`, and leave out any part that doesn't apply, as in `read_file_stream_by_inode_with_options`. A method doesn't repeat its receiver's noun, and an accessor doesn't start with `get_`.
 
@@ -254,7 +254,7 @@ Use each name with exactly one meaning, so that a search for a name finds every 
   | `State` | A struct of current values |
   | `Kind` | Which shape a value has |
   | `Outcome` | An enum of how one step ended |
-  | `Report` | A struct of what one pass did |
+  | `Report` | A struct of what one call did |
   | `Error` | An error enum |
   | `Id` | An identifier newtype |
 

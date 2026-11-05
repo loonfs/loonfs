@@ -12,7 +12,7 @@ The CLI uses recovery records for embedded and remote PUTs that read from a loca
 
 A record's key includes the profile, the target identity, the namespace, the remote path, the canonical local path, and the explicit commit ID, if there is one. The local path's bytes are encoded without a lossy Unicode conversion. So commands against different destinations don't accidentally reuse the same recovery record.
 
-Embedded profiles run the HTTP binding in memory, and they use the same recovery records. An upload from standard input has no record, because the input can't be read again.
+Embedded profiles run the HTTP API in memory, and they use the same recovery records. An upload from standard input has no record, because the input can't be read again.
 
 ## What the record contains
 

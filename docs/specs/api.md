@@ -1,6 +1,6 @@
 # LoonFS API Specification
 
-This document is the normative specification of the LoonFS client-facing API. It covers API groups, capability discovery, the standard error contract, and the representative v0 HTTP binding.
+This document is the normative specification of the LoonFS client-facing API. It covers API groups, capability discovery, the standard error contract, and the v0 HTTP API.
 
 The specification is normative for the parts of the API that a deployment implements. A deployment chooses which optional API groups to expose, but every operation it does expose MUST have the shape specified here.
 
@@ -106,7 +106,7 @@ Registered limit keys:
 | `upload.service_proxied.max_content_bytes` | The largest request body that one service-proxied upload content request (`PUT .../uploads/{upload_id}/content`) accepts. It isn't a maximum file size. Clients can use `direct_put` for larger content only when `filesystem.uploads.direct_put` is advertised. Otherwise, they MUST stay within this limit. |
 | `upload.direct_put.max_content_bytes` | The largest object that this deployment's provider accepts in one presigned `direct_put` request. It's unrelated to `upload.service_proxied.max_content_bytes`, which limits service-proxied uploads. A size hint above this limit returns `content_too_large` when the upload begins, and completing the upload checks the actual stored size. This limit is advertised only with `filesystem.uploads.direct_put`. |
 | `upload.complete.max_request_body_bytes` | The largest JSON body that `POST .../uploads/{upload_id}/complete` accepts. A larger request returns `content_too_large`. |
-| `download.service_proxied.max_content_bytes` | The most bytes that a service-proxied read (`GET .../filesystem/content`, `GET .../inodes/{inode_id}/content`, or `GET .../inodes/{inode_id}/revisions/{revision_no}/content`) streams and returns in one response. A read over the limit returns `content_too_large`. The limit is checked against the whole file for a read without a `Range` header, and against the bytes that the range returns for a ranged read (see [Ranged reads](#ranged-reads)). A file over this limit can be read in ranges, or through the matching path or inode download grant when `filesystem.downloads.direct_get` is advertised. (That feature is advertised on exactly the deployments that could have let a client create such a file.) |
+| `download.service_proxied.max_content_bytes` | The most bytes that a service-proxied read (`GET .../filesystem/content`, `GET .../inodes/{inode_id}/content`, or `GET .../inodes/{inode_id}/revisions/{revision_no}/content`) streams and returns in one response. A read over the limit returns `content_too_large`. The limit is checked against the whole file for a read without a `Range` header, and against the bytes that the range returns for a ranged read (see [Ranged reads](#ranged-reads)). A file over this limit can be read in ranges, or through a presigned URL from the matching path or inode download request when `filesystem.downloads.direct_get` is advertised. (That feature is advertised on exactly the deployments that could have let a client create such a file.) |
 | `upload.service_proxied.max_concurrent_requests` | The number of service-proxied upload requests that a serving process streams at once. All callers share this cap (it isn't a per-caller allowance). A request over the cap returns `server_busy`. |
 | `download.service_proxied.max_concurrent_requests` | The number of service-proxied content reads that a serving process streams at once. All callers share this cap (it isn't a per-caller allowance). A request over the cap returns `server_busy`. A read counts against the cap until its body finishes or is dropped. |
 | `access.max_principals_per_request` | The largest number of principal IDs that one request can act as. Headers over the limit return `invalid_request`. |
@@ -117,7 +117,7 @@ Registered limit keys:
 | `commit.max_content_tokens` | The largest number of content tokens that one commit can include. A request over the limit returns `invalid_request` before planning. |
 | `commit.max_external_content_refs` | The largest number of distinct external content references that one commit's operations can refer to. A request over the limit returns `invalid_request` before planning. |
 | `commit.max_message_bytes` | The largest commit `message` accepted, in bytes. A longer message returns `invalid_request` before planning. |
-| `maintenance.gc.min_grace_window_ms` | The smallest `grace_window_ms` accepted on a `gc` request. A smaller value returns `invalid_request`. The value is derived from the publication budgets and the direct transfer capability lifetime, rather than tuned. |
+| `maintenance.gc.min_grace_window_ms` | The smallest `grace_window_ms` accepted on a `gc` request. A smaller value returns `invalid_request`. The value is derived from the publication budgets and the presigned URL lifetime, rather than tuned. |
 | `query.grep.scan_budget_files` | The number of files that an `allow_scan` grep without a plan scans before the request fails with `query_unindexable`. |
 | `query.grep.tail_budget_files` | The number of revisions in the unindexed tail that one grep scans exhaustively before it fails with `index_lagging`. |
 
@@ -127,13 +127,13 @@ This section defines every feature key and the operations it gates. The registry
 
 | Feature key | Gates | Notes |
 | --- | --- | --- |
-| `maintenance.grep.index` | Maintaining a namespace's grep index: `GET /v0/maintenance/namespaces/{ns}/grep/index` and its `enable` and `disable` routes. | The maintenance half of the grep capability. It's independent of `query.grep`. Searching an index and keeping one built can be deployed separately, so a deployment can advertise either key alone. A deployment that doesn't maintain an index returns `not_supported`, with this key in its `feature` field, for these routes. Every deployment's `gc` runs collect the index's unreferenced segments. |
+| `maintenance.grep.index` | Maintaining a namespace's grep index: `GET /v0/maintenance/namespaces/{ns}/grep/index` and its `enable` and `disable` routes. | The maintenance half of the grep capability. It's independent of `query.grep`. Searching an index and keeping one built can be deployed separately, so a deployment can advertise either key alone. A deployment that doesn't maintain an index returns `not_supported`, with this key in its `feature` field, for these routes. Every deployment's `gc` jobs collect the index's unreferenced segments. |
 | `filesystem.changes.split_commits` | The `split_commits` and `event_index` query parameters of `GET /v0/namespaces/{ns}/changes` and `GET /v0/namespaces/{ns}/diff`, and the `next_event_index` field of their responses. | A page with `split_commits=true` can end inside a commit that alone exceeds the page budget, and the next request resumes the commit at an event (see [`GET /changes`](#611-get-changes)). Without the parameter, both routes return each commit whole. |
 | `filesystem.commits.inline_content` | Sending file content in a `put_file`, `create_file_by_inode`, or `put_file_revision_by_inode` commit operation. | A deployment advertises this key when inline writes are enabled. The per-file limit is `commit.max_inline_content_bytes_per_operation`. Without this feature, a client uploads the content before committing. |
 | `filesystem.merges` | Merging a fork into a namespace (`POST /v0/namespaces/{ns}/merges`), reading where a fork's next merge starts (`GET /v0/namespaces/{ns}/merges`), and rebasing a fork (`POST /v0/namespaces/{ns}/rebases`). | The server plans the fork's net change since its previous merge and commits it as one commit, or refuses it with `merge_conflict` (see [`POST /merges`](#614-post-merges)). A rebase replays the fork's unmerged commits into a new fork and reports the changes that conflict (see [`POST /rebases`](#616-post-rebases)). A deployment advertises this key only when merges are enabled (in the reference server, when `max_merge_bytes` isn't zero). A deployment with merges disabled returns `not_supported`, with this key in its `feature` field, for these three routes. |
-| `filesystem.uploads.direct_put` | Starting presigned `direct_put` upload sessions (`POST /v0/namespaces/{ns}/uploads`). | The server returns a short-lived, create-only presigned PUT capability for the exact content object. The provider MUST report a durable whole-object checksum after the write. A deployment advertises the key only on an endpoint that the live conformance suite has run against. The key is independent of `filesystem.uploads.direct_multipart`, so a provider can offer this feature and no multipart API at all. Raw object keys and caller-managed object-store writes aren't part of this feature. |
-| `filesystem.uploads.direct_multipart` | Starting presigned `direct_multipart` upload sessions (`POST /v0/namespaces/{ns}/uploads`) and signing their parts (`POST /v0/namespaces/{ns}/uploads/{upload_id}/parts`). | The server opens the provider's multipart upload and returns one short-lived, checksum-bound capability for each part. This feature needs an S3-style multipart API in addition to the signing that the other keys need, so a deployment whose provider has no multipart API leaves out this key and can still advertise the others. |
-| `filesystem.downloads.direct_get` | Requesting path or inode download grants (`POST /v0/namespaces/{ns}/filesystem/downloads`, `POST /v0/namespaces/{ns}/inodes/{inode_id}/downloads`, and `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads`). | The server returns a short-lived presigned GET capability for the selected content object. Any deployment that offers a direct write also advertises this key, because a deployment that lets a client create an object larger than `download.service_proxied.max_content_bytes` has to be able to return that object. Raw object keys aren't part of this feature. |
+| `filesystem.uploads.direct_put` | Starting presigned `direct_put` upload sessions (`POST /v0/namespaces/{ns}/uploads`). | The server returns a short-lived, create-only presigned PUT URL for the exact content object. The provider MUST report a durable whole-object checksum after the write. A deployment advertises the key only on an endpoint that the live conformance suite has run against. The key is independent of `filesystem.uploads.direct_multipart`, so a provider can offer this feature and no multipart API at all. Raw object keys and caller-managed object-store writes aren't part of this feature. |
+| `filesystem.uploads.direct_multipart` | Starting presigned `direct_multipart` upload sessions (`POST /v0/namespaces/{ns}/uploads`) and signing their parts (`POST /v0/namespaces/{ns}/uploads/{upload_id}/parts`). | The server opens the provider's multipart upload and returns one short-lived, checksum-bound presigned URL for each part. This feature needs an S3-style multipart API in addition to the signing that the other keys need, so a deployment whose provider has no multipart API leaves out this key and can still advertise the others. |
+| `filesystem.downloads.direct_get` | Requesting presigned download URLs by path or inode (`POST /v0/namespaces/{ns}/filesystem/downloads`, `POST /v0/namespaces/{ns}/inodes/{inode_id}/downloads`, and `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/downloads`). | The server returns a short-lived presigned GET URL for the selected content object. Any deployment that offers a direct write also advertises this key, because a deployment that lets a client create an object larger than `download.service_proxied.max_content_bytes` has to be able to return that object. Raw object keys aren't part of this feature. |
 | `query.grep` | Content search (`GET /v0/namespaces/{ns}/grep`). | A data-dependent capability (see [Data-dependent features](#23-data-dependent-features)). A grep request also requires an active grep index in the namespace's manifest, and a namespace without one returns `not_supported` whatever this key's value is. |
 
 `maintenance.grep.index` is the only feature key in `maintenance/v0`, and splitting commits across pages, inline commit content, merges, and the three direct transfers are the only features in `filesystem/v0`. Every other operation in those two API groups is required, including creating, forking, and deleting namespaces and the snapshot routes.
@@ -142,12 +142,12 @@ Listing namespaces isn't supported in v0, so callers MUST address namespaces by 
 
 ### 2.3 Data-dependent features
 
-The capability document describes a deployment. Whether something is materialized for a namespace's data (for example, whether a derived index is ready for a namespace) is recorded in the owning extension's entry in the namespace manifest (see [Extensions](format.md#124-extensions)), not in the capability document.
+The capability document describes a deployment. Whether an extension's index is built for a namespace's data (for example, whether the grep index is ready for a namespace) is recorded in the owning extension's entry in the namespace manifest (see [Extensions](format.md#124-extensions)), not in the capability document.
 
 A data-dependent operation succeeds only when both of these are true:
 
 - The deployment advertises the serving capability in its capability document.
-- The namespace's metadata shows that the capability is materialized, through the extension's own verified readiness marker.
+- The namespace's metadata shows that the extension's index is built, through the extension's own verified readiness marker.
 
 ## 3. Standard error contract
 
@@ -225,7 +225,7 @@ The full registry (`ErrorCode` in `loonfs-types`) lists every error code and its
 | `invalid_request` | 400 | The request is malformed. A path, ID, cursor, parameter, staged content reference, configuration value, or commit request limit fails validation. The message identifies the offending field or limit. |
 | `unauthorized` | 401 | The credentials are missing or wrong. |
 | `forbidden` | 403 | The subject lacks authority that the operation needs: some but not all of the required rights on a checked inode, the authority that a move or access update requires, administrator rights on an administrator-only operation, or the namespace's principal scope. If the subject has no rights on a checked inode, the request returns `path_not_found` or `inode_not_found` instead (see [Authorization in ACL namespaces](#authorization-in-acl-namespaces)). |
-| `content_too_large` | 413 | A request or proxied response exceeds its size limit. Every JSON request body MUST fit within 2 MiB, except on the upload operations, which have their own limits. One append contains at most 256 KiB. Send smaller proxied uploads, or use `direct_put` when it's available. Multipart completions MUST fit within `upload.complete.max_request_body_bytes`. For large proxied reads, read the file in ranges, or request a download grant when `filesystem.downloads.direct_get` is available. |
+| `content_too_large` | 413 | A request or proxied response exceeds its size limit, a commit doesn't fit in one WAL object, or an append is over its limit. Every JSON request body MUST fit within 2 MiB, except on the upload operations, which have their own limits. One append contains at most 256 KiB. Send smaller proxied uploads, or use `direct_put` when it's available. Multipart completions MUST fit within `upload.complete.max_request_body_bytes`. For large proxied reads, read the file in ranges, or request a presigned download URL when `filesystem.downloads.direct_get` is available. |
 | `merge_too_large` | 413 | A [merge](glossary.md#merge) is larger than one of the two bounds that apply to a merge in place of the request limits: the size of one WAL object (512 MiB), or the server's merge allowance, which limits the estimated peak memory of publishing the one merge that the server admits at a time (`max_merge_bytes` in the reference server, 512 MiB by default). The server estimates that peak as three times the merge's planned WAL bytes. A merge whose range touched more inodes than one WAL object could contain an operation for returns this code too, before the server reads those inodes. The details' `merge_bound` says which bound refused the merge: `wal_object`, `merge_allowance`, or `touched_inodes` for a range that touched too many inodes. Clients MUST tolerate other values. The details also include `split_at_seq`, a fork sequence such that a merge of the fork's commits through it fits, unless no shorter range fits (see [`POST /merges`](#614-post-merges)). Merge the fork's commits in smaller ranges: a merge of the commits after `P` through `T2` that's too large becomes a merge of the commits after `P` through `T1`, where `T1` is `split_at_seq`, followed by a merge of the commits after `T1` through `T2`. Each piece is a complete merge of its range. A single fork commit whose changes exceed the size of one WAL object can't be split, and it can't be merged. One that exceeds only the merge allowance can be merged on a server with a higher allowance. In the reference implementation, the upper bound on a created file's WAL bytes, which LoonFS computes before planning, is about 4,850 bytes, so one WAL object fits about 110,000 file creates. The allowance is charged three times that bound for each created file, so the default allowance admits a merge of about 36,000 file creates. With the defaults, a fork commit that creates more inodes than that (for example, many deep paths whose parent directories the commit creates) has to be made as several smaller commits so that they can be merged, or the server needs a higher allowance. |
 | `range_not_satisfiable` | 416 | A ranged read's range starts at or past the end of the file. The error's details include the file's size, so the client can choose a range that the file can satisfy. |
 | `route_not_found` | 404 | No route matches the request path. |
@@ -239,7 +239,7 @@ The full registry (`ErrorCode` in `loonfs-types`) lists every error code and its
 | `upload_not_found` | 404 | No upload session exists with this ID. The server also returns this code for an aborted session, and for an open session asked to stage, sign parts, or complete at or after its `expires_at_ms`. Neither session will ever select content, so the server reports each one as missing, as it will once the session is deleted. |
 | `namespace_exists` | 409 | The create or fork target already exists (another namespace has the ID). |
 | `content_not_prepared` | 409 | A path put or an explicit create or replace operation references external content without a matching admission, or it includes a relevant token that was rejected. Prepare the content and retry with its proof. |
-| `path_conflict` | 409 | The destination path is already bound. |
+| `path_conflict` | 409 | The path names a directory where a file was expected, the path names a file where a directory was expected, or the destination already exists. A failed `path_binding`, `path_absence`, or `name_absence` precondition also returns this code. |
 | `directory_not_empty` | 409 | The directory has children, and the operation isn't recursive. |
 | `stale_head` | 409 | The write raced a head advance, or a caller-supplied `expected_head_seq` doesn't match the head. Retry against fresh state. A read also returns this code when its manifest's segments were garbage collected and a newer manifest exists. Read again against current state. A read at a snapshot that finds a segment missing returns what a new read of the snapshot would return: `snapshot_not_found` when the snapshot was deleted or expired during the read, and `namespace_corrupt` when it can still be read. |
 | `stale_revision` | 409 | A caller-supplied base revision is no longer current. |
@@ -247,7 +247,7 @@ The full registry (`ErrorCode` in `loonfs-types`) lists every error code and its
 | `stale_access` | 409 | The inode's access revision changed while the update was being decided. Re-read the access row and retry. |
 | `namespace_unrestricted` | 409 | The namespace's access mode is unrestricted, so it has no access rows. |
 | `binding_version_mismatch` | 409 | The binding version supplied for an inode move or delete, or by a binding precondition, isn't the entry's current binding version. Re-read the entry before retrying. |
-| `not_deleted` | 409 | The undelete target isn't the root of a recoverable deletion (a deletion above the retention floor that no undelete has revoked), so there's nothing to recover. |
+| `not_deleted` | 409 | The restore target isn't the root of a recoverable deletion (a deletion above the retention floor that no restore has revoked), so there's nothing to restore. |
 | `writer_fenced` | 409 | Another writer superseded this session. The session is dead, and this request fails. The host drops the session, and a later request opens a new session whose first publication takes the namespace back. Repeated fencing of one namespace means that two writers are receiving its traffic. |
 | `would_cycle` | 409 | The rename would create a directory cycle. |
 | `commit_id_reuse_conflict` | 409 | The commit ID was reused with different content. |
@@ -256,7 +256,7 @@ The full registry (`ErrorCode` in `loonfs-types`) lists every error code and its
 | `upload_already_completed` | 409 | The upload session is already completed, so it can't select other content and can't be aborted. |
 | `upload_content_conflict` | 409 | Different bytes were already staged under this upload ID. Open a new session. (Staging the same bytes again succeeds.) |
 | `query_unindexable` | 400 | The pattern has no run of at least 3 literal bytes, so the trigram index can't narrow the candidates. Rewrite the pattern, or set `allow_scan` (capped by `query.grep.scan_budget_files`). |
-| `rebootstrap_required` | 409 | The sequence that the request starts from is below the retention floor, so the namespace no longer has the history after it. The sequence is a change feed's `after_seq` or a diff's `from_seq`. Rebuild state from a fresh listing or snapshot. A [merge](glossary.md#merge) returns this code when the fork point (the sequence of this namespace that the fork was made at) is below the retention floor. Once the floor is above the fork point, a compaction might have removed the fork's previous merge from the [merge index](glossary.md#merge-index), and then the writer can't check that the new merge continues the previous one. A merge also returns this code when the start of its range is below the fork's own retention floor, because the fork's change over the range can't be computed from history that the fork no longer keeps. The details say which floor. Such a fork can't be merged, so the caller makes a new fork of the current head and replays the changes it wants to keep through ordinary reads and writes. |
+| `rebootstrap_required` | 409 | A position in history that the request needs is below a retention floor, so the namespace no longer has the history after it. The position is a change feed's `after_seq`, a diff's `from_seq`, the sequence of an earlier read (such as a later page of a grep search), a merge's fork point, or the start of a merge's range. Rebuild state from a fresh listing or snapshot. A [merge](glossary.md#merge) returns this code when the fork point (the sequence of this namespace that the fork was made at) is below the retention floor. Once the floor is above the fork point, a compaction might have removed the fork's previous merge from the [merge index](glossary.md#merge-index), and then the writer can't check that the new merge continues the previous one. A merge also returns this code when the start of its range is below the fork's own retention floor, because the fork's change over the range can't be computed from history that the fork no longer keeps. The details say which floor. Such a fork can't be merged, so the caller makes a new fork of the current head and replays the changes it wants to keep through ordinary reads and writes. |
 | `not_supported` | 501 | The deployment doesn't implement the requested operation or feature. |
 | `commit_outcome_unknown` | 503 | The outcome of the publication wasn't observed, so the commit might or might not be visible. Retry with the same commit ID, or reconcile. |
 | `outcome_unknown` | 503 | The outcome of a write other than a commit wasn't observed, so the operation might or might not have taken effect. Read the resource before retrying. |
@@ -431,14 +431,14 @@ Callers add their own cross-request preconditions to the operations where stalen
 
 - A put can check the current inode and revision.
 - A move or copy can check the destination inode and revision.
-- Deletes, undeletes, inode-addressed writes, and namespace deletion have preconditions for their corresponding state.
+- Deletes, restores of deleted entries, inode-addressed writes, and namespace deletion have preconditions for their corresponding state.
 
 Each precondition checks the state visible to its operation, including changes made by earlier operations in the same request.
 
 Fields follow these naming conventions:
 
 - Move and copy operations use `source_*` and `destination_*` for their endpoint fields. Their preconditions and the `moved` event use the same words.
-- Undelete's optional restore location is `destination_path`.
+- A restore of a deleted entry (`undelete`) takes its optional location as `destination_path`.
 - A field that identifies the addressed resource uses the resource's own name, such as `inode_id`, `namespace_id`, or `path`. No directional prefix is added for symmetry.
 - A creation request can use `new_*` for the resource it creates.
 - `target` describes an action subject, a persisted relationship, or a goal. It isn't an endpoint field in the move and copy family.
@@ -446,7 +446,7 @@ Fields follow these naming conventions:
 
 The server rejects unknown fields in a commit body, so a misspelled precondition can't be ignored. For example, a request that drops a letter from `expected_revision_no` returns `invalid_request` instead of applying the write without that precondition.
 
-Every entry with a name includes a `binding_version`, an opaque token that identifies its current parent/name binding. Creating, moving, or undeleting an entry produces a new token, but content and attribute writes don't. Clients MUST NOT parse or order these tokens. A token is valid only for the namespace that issued it.
+Every entry with a name includes a `binding_version`, an opaque token that identifies its current parent/name binding. Creating, moving, or restoring an entry produces a new token, but content and attribute writes don't. Clients MUST NOT parse or order these tokens. A token is valid only for the namespace that issued it.
 
 Inode-addressed moves and deletes require the token as `expected_binding_version`. A valid token that doesn't match the entry's current binding returns `binding_version_mismatch`. A malformed token, or a token from another namespace, returns `invalid_request`. The precondition is part of the commit's identity, and it's evaluated after any earlier operations in the same request. The `inode_binding` request precondition checks the same token for any operation.
 
@@ -579,7 +579,7 @@ When the commit is a [merge](glossary.md#merge), which applies a fork's commits 
 | Field | Meaning |
 | --- | --- |
 | `source_namespace_id` | The fork whose commits the merge applied. |
-| `source_after_seq` | The fork's commits above this sequence were applied. For a fork's first merge, this is the fork's `fork_basis.source_head_seq`. |
+| `source_after_seq` | The fork's commits above this sequence were applied. For a fork's first merge, this is the fork point, the fork's `fork_basis.source_head_seq`. |
 | `source_through_seq` | The fork's commits at or below this sequence were applied. |
 
 The range follows the change feed's cursor convention, so reading the fork's change feed from `after_seq={source_after_seq}` through `source_through_seq` returns the commits that the merge applied.
@@ -646,14 +646,14 @@ The host controls the lifetime of each writer session. A session opens when the 
 
 A node closes a session to hand a namespace off. Closing refuses new work at once, lets admitted work publish, and writes nothing durable. The next node's first publish acquires the next writer epoch. A request that reaches a session after its close began fails with `writer_session_closed`.
 
-The reference server opens a namespace's session on the first request that writes to the namespace. Its maintenance sweep closes a session when all of these conditions are true:
+The reference server opens a namespace's session on the first request that writes to the namespace. Its maintenance scheduler closes a session when all of these conditions are true:
 
 - The session's last open is older than `idle_session_close_after_ms`, which is 1800000 ms (30 minutes) by default.
 - No request has a clone of the session's handle.
 - The session is caught up. Metadata, and the grep index where it's maintained, are caught up with the session's published sequence. A session that never published through this process closes under the same idle rule. It has no published sequence to catch up with, but an enabled index has to finish building first.
 - Collection isn't due.
 
-While the sweep closes a session:
+While the scheduler closes a session:
 
 - An open of the same namespace waits for the drain, and then opens a fresh session. The new session's first publish acquires a new writer epoch.
 - An open that's waiting doesn't fail with `writer_session_closed` from this path.
@@ -671,9 +671,9 @@ Sustained fencing of one namespace means that two writers are being sent its tra
 
 [Operations and WAL deltas](format.md#66-operations-and-wal-deltas) defines the standard mutation operations, and [`POST /commits`](#68-post-commits) exposes those operations over HTTP. The same identity, durability, and visibility rules apply to every API that implements them.
 
-## 6. Representative HTTP binding
+## 6. The HTTP API
 
-This section describes the representative v0 HTTP binding: the naming conventions for routes and operation IDs, how requests are authenticated and decoded, how each operation can be retried, and the shape of each operation's requests and responses. HTTP is one transport binding for the abstract operations defined earlier in this document, and it doesn't define their semantics.
+This section describes the v0 HTTP API: the naming conventions for routes and operation IDs, how requests are authenticated and decoded, how each operation can be retried, and the shape of each operation's requests and responses. HTTP is one transport for the abstract operations defined earlier in this document, and the HTTP API doesn't define their semantics.
 
 GET routes identify resources, so their paths use nouns such as `entry`, `entries`, `content`, `revisions`, and `trash`. A POST route ends in a verb when it invokes an action instead of creating a resource, as in `enable`, `disable`, `abort`, `complete`, and `probe`.
 
@@ -709,7 +709,7 @@ The exceptions are `ContentRef`, `Checksum`, and `ContentToken`, which are close
 
 The server also rejects unknown query parameters. For example, `DELETE /v0/namespaces/{ns}?expected_head_sq=418` (a misspelling of `expected_head_seq`) returns 400 `invalid_request`, instead of deleting the namespace without the intended precondition. A route that declares no query parameters rejects every query parameter. `GET /health`, `GET /readiness`, and `GET /metrics` are exceptions, because probes and scrapers might append their own parameters.
 
-The token is a bearer credential, and so is everything the upload routes return. For example, a presigned direct-upload URL is a capability to write to the deployment's bucket, and it's returned in an ordinary response body. Anyone who can read the connection can read both. So a deployment that's reachable beyond localhost needs to serve `https`, terminated either by the server itself or by a proxy in front of it.
+The token is a bearer credential, and so is everything the upload routes return. For example, anyone who has a presigned direct-upload URL can write to the deployment's bucket, and the URL is returned in an ordinary response body. Anyone who can read the connection can read both. So a deployment that's reachable beyond localhost needs to serve `https`, terminated either by the server itself or by a proxy in front of it.
 
 ### Operations and retry classes
 
@@ -771,13 +771,13 @@ The following table lists v0 operations, with their retry classes and representa
 | Disable the grep index | `disable_grep_index` | `idempotent` | `POST /v0/maintenance/namespaces/{ns}/grep/index/disable` (idempotent) |
 | Scrape metrics | `get_metrics` | `idempotent` | `GET /metrics` (Prometheus text exposition. Unlike the liveness routes, it requires the token, as described in [`GET /metrics`](#618-get-metrics).) |
 
-### Maintenance runs
+### Maintenance jobs
 
 This section describes the grep index routes, and the jobs that `run_maintenance` runs.
 
 #### Grep index
 
-A `gc` run also collects the grep index's unreferenced segments, as described in [Garbage collection runs](#garbage-collection-runs).
+A `gc` job also collects the grep index's unreferenced segments, as described in [Garbage collection jobs](#garbage-collection-jobs).
 
 If an index's grep entry is corrupt, the disable route replaces that entry with a disabled entry, so the index can be enabled again. If the entry has another version of the grep format, the route returns `index_corrupt` and leaves the entry unchanged.
 
@@ -799,11 +799,11 @@ For example:
 {"namespace_id":"demo","status":"backfilling","captured_seq":12,"cursor_inode_id":"ino_000000j000000tz7yc2z8ypbmf","checkpoint_id":"pin_00000000000000000009-0000000000000009","reorganize_pending":false}
 ```
 
-So a backfilling index never reports a `built_through_seq`, and an active index never reports a `captured_seq`. `reorganize_pending` reports whether a partitioned segment reorganization is in progress. The routes read the index from the namespace's current manifest, so the status reports the index's last publication. (The maintenance sweep publishes an index's progress about once per tick interval, five seconds by default, and when a visit ends.) A client that waits for the index to catch up captures one sequence before it starts waiting, and it stops waiting when the index reaches that sequence, instead of waiting for a head that keeps moving.
+So a backfilling index never reports a `built_through_seq`, and an active index never reports a `captured_seq`. `reorganize_pending` reports whether a partitioned segment reorganization is in progress. The routes read the index from the namespace's current manifest, so the status reports the index's last publication. (The server publishes an index's progress about once per maintenance interval, five seconds by default, and when a step ends.) A client that waits for the index to catch up captures one sequence before it starts waiting, and it stops waiting when the index reaches that sequence, instead of waiting for a head that keeps moving.
 
 #### Jobs and outcomes
 
-A maintenance run request body identifies exactly one job with `kind`:
+A maintenance request body identifies exactly one job with `kind`:
 
 | `kind` | Fields | Result |
 | --- | --- | --- |
@@ -815,110 +815,110 @@ A maintenance run request body identifies exactly one job with `kind`:
 
 The `metadata`, `retention`, `retention_window`, and `gc` jobs run as the namespace's [maintainer](glossary.md#maintainer), so they don't need its writer session. The `recover_administrator` job commits, so it runs in the writer session.
 
-The response includes the same `kind`, the addressed `namespace_id`, and the job's result. None of the jobs creates a pin. For example, this request body runs one GC pass:
+The response includes the same `kind`, the addressed `namespace_id`, and the job's result. None of the jobs creates a snapshot. For example, this request body runs one collection:
 
 ```json
 {"kind":"gc"}
 ```
 
-A run that loses a race with another process, or whose work is superseded, reports that as an outcome in its result, not as an error.
+A job that loses a race with another process, or whose work is superseded, reports that as an outcome in its result, not as an error.
 
-A deleted namespace accepts only `gc` runs, and other jobs return `namespace_deleted`. [Retirement](format.md#95-retirement) defines how a deleted namespace is retired.
+A deleted namespace accepts only `gc` jobs, and other jobs return `namespace_deleted`. [Retirement](format.md#95-retirement) defines how a deleted namespace is retired.
 
-A `metadata` run [folds](glossary.md#fold) the WAL tail when a fold is due, and then [compacts](glossary.md#compaction) the namespace's metadata until nothing is due. It compacts in units. A unit compacts a window of at most eight runs of one [family group](glossary.md#family-group), chosen by size tier (see [Compaction windows](format.md#102-compaction-windows)), and publishes the next manifest. If its manifest put loses to another publication, the unit tries again over the manifest that won, as long as its input runs are unchanged. The run stops early after it publishes 16 units, after three units in a row are abandoned, or when a newer runtime claims the namespace's [compactor epoch](glossary.md#compactor-epoch). A unit is abandoned when an input run changed, the elapsed-time bound was exceeded, or every publication attempt lost. An abandoned unit leaves the segments it wrote unreferenced, and a later GC pass can delete them. The server runs at most one fold of a namespace at a time, and at most one compaction unit of it at a time. If a fold or a unit of the namespace is already running (for example, one that the namespace's writer session started), the run waits for it to finish instead of doing the same work again.
+A `metadata` job [folds](glossary.md#fold) the WAL tail when a fold is due, and then [compacts](glossary.md#compaction) the namespace's metadata until nothing is due. It compacts in units. A unit compacts a window of at most eight runs of one [family group](glossary.md#family-group), chosen by size tier (see [Compaction windows](format.md#102-compaction-windows)), and publishes the next manifest. If its manifest put loses to another publication, the unit tries again over the manifest that won, as long as its input runs are unchanged. The job stops early after it publishes 16 units, after three units in a row are abandoned, or when a newer runtime claims the namespace's [compactor epoch](glossary.md#compactor-epoch). A unit is abandoned when an input run changed, the elapsed-time bound was exceeded, or every publication attempt lost. An abandoned unit leaves the segments it wrote unreferenced, and a later collection can delete them. The server runs at most one fold of a namespace at a time, and at most one compaction unit of it at a time. If a fold or a unit of the namespace is already running (for example, one that the namespace's writer session started), the job waits for the running fold or unit to finish instead of doing the same work again.
 
 The result's `outcome` has two values:
 
 - `caught_up`: nothing is due, and nothing can become due without a new commit.
-- `due`: work is still due, or the run couldn't tell. For example, the run stopped early, or the WAL tail is below the fold threshold and hasn't gone idle yet. A later `metadata` run continues the work.
+- `due`: work is still due, or the job couldn't tell. For example, the job stopped early, or the WAL tail is below the fold threshold and hasn't gone idle yet. A later `metadata` job continues the work.
 
-`compaction_units` counts the units that the run published. For example, a run that compacts two family groups and then finds nothing else due returns this result:
+`compaction_units` counts the units that the job published. For example, a job that compacts two family groups and then finds nothing else due returns this result:
 
 ```json
 {"kind":"metadata","namespace_id":"demo","outcome":"caught_up","compaction_units":2}
 ```
 
-A compaction unit can take minutes, so a `metadata` run can too. The reference server exempts maintenance runs from its request deadline. A client sends the request once, because `run_maintenance` isn't idempotent. After a `due` outcome, the client runs the job again later, as the reference server's sweep does for a namespace that's still due.
+A compaction unit can take minutes, so a `metadata` job can too. The reference server exempts maintenance jobs from its request deadline. A client sends the request once, because `run_maintenance` isn't idempotent. After a `due` outcome, the client runs the job again later, as the reference server's scheduler does for a namespace that's still due.
 
-In a `metadata` run, `max_wal_tail_objects` overrides the fold threshold in WAL objects, and the fold threshold in WAL bytes and the idle fold still apply. A value of zero, or a value above the write-rejection threshold, returns `invalid_request`. A WAL tail below the threshold is still folded once it goes idle, which means that its newest commit is as old as the server's configured idle period (15 minutes by default), measured on the server's clock (see [Recovery material and maintenance policy](format.md#73-recovery-material-and-maintenance-policy)). A server can turn this rule off. Replay history is kept unless the request uses `kind: "retention"`.
+In a `metadata` job, `max_wal_tail_objects` overrides the fold threshold in WAL objects, and the fold threshold in WAL bytes and the idle fold still apply. A value of zero, or a value above the write-rejection threshold, returns `invalid_request`. A WAL tail below the threshold is still folded once it goes idle, which means that its newest commit is as old as the server's configured idle period (15 minutes by default), measured on the server's clock (see [Recovery material and maintenance policy](format.md#73-recovery-material-and-maintenance-policy)). A server can turn this rule off. Replay history is kept unless the request uses `kind: "retention"`.
 
-#### Retention runs
+#### Retention jobs
 
-In a `retention` run, the floor moves to the folded manifest head, unless the request includes one target:
+In a `retention` job, the floor moves to the manifest's folded head, unless the request includes one target:
 
-- `to_seq` moves the floor to that sequence, or to the folded manifest head if the sequence is above it.
+- `to_seq` moves the floor to that sequence, or to the manifest's folded head if the sequence is above it.
 - `cutoff_at_ms` is a Unix time in milliseconds, and it moves the floor to the last commit committed at or before that time. The server reads commits upward from the current floor, and it stops at the first commit whose `committed_at_ms` is later than the cutoff, because commit times come from writers' clocks and aren't guaranteed to increase with sequence.
 
-Whatever the target, the floor doesn't pass a commit that's less than one hour old on the server's clock (the default garbage collection grace window). The server applies this rule as a cutoff one hour before its clock, and it reads commits upward from the floor once, as for `cutoff_at_ms` (with `cutoff_at_ms`, it uses the earlier of the two cutoffs). So the first commit dated less than an hour ago ends the advance, even if a later commit is older. A commit dated later than the server's clock counts as less than an hour old. If the first commit above the current floor is less than an hour old, the floor stays where it is. The response's `retention_floor_seq` is the floor that the run reached, so a caller can compare it with the target to see whether the run stopped short. For example, if the head is at sequence 40 and commits 38 to 40 were made in the last hour, a run with no target moves the floor to 37, and a run an hour later can move it to 40.
+Whatever the target, the floor doesn't pass a commit that's less than one hour old on the server's clock (the default grace window). The server applies this rule as a cutoff one hour before its clock, and it reads commits upward from the floor once, as for `cutoff_at_ms` (with `cutoff_at_ms`, it uses the earlier of the two cutoffs). So the first commit dated less than an hour ago ends the advance, even if a later commit is older. A commit dated later than the server's clock counts as less than an hour old. If the first commit above the current floor is less than an hour old, the floor stays where it is. The response's `retention_floor_seq` is the floor that the job reached, so a caller can compare it with the target to see whether the job stopped short. For example, if the head is at sequence 40 and commits 38 to 40 were made in the last hour, a job with no target moves the floor to 37, and a job an hour later can move it to 40.
 
 A request that includes both targets returns `invalid_request`. A target at or below the current floor changes nothing, and the response reports the current floor (see [Advancing the retention floor](format.md#101-advancing-the-retention-floor)).
 
-The retention floor limits incremental replay and file revision history. Above the floor, a file's revision history is complete. At or below the floor, each file keeps its newest revision. Once the floor advances, a base compaction removes the older revisions, so a revision listing ends at that newest revision, and reading or restoring a removed revision returns `revision_not_found`. A deleted file keeps its newest revision while its deletion is recoverable, so an undelete still restores its content. GC reclaims the content object of a removed revision once no retained view references it and it's older than the grace window (see [Content roots](format.md#119-content-roots)).
+The retention floor limits incremental replay and file revision history. Above the floor, a file's revision history is complete. At or below the floor, each file keeps its newest revision. Once the floor advances, a base compaction removes the older revisions, so a revision listing ends at that newest revision, and reading or restoring a removed revision returns `revision_not_found`. A deleted file keeps its newest revision while its deletion is recoverable, so a restore still returns its content. GC reclaims the content object of a removed revision once no retained view references it and it's older than the grace window (see [Content roots](format.md#119-content-roots)).
 
-The floor also bounds the trash. Once the floor is at or above a deletion's `deletion_seq`, the deletion has expired, so it leaves the trash, and an undelete of it returns `not_deleted` (see [Advancing the retention floor](format.md#101-advancing-the-retention-floor)). The run commits nothing for the deletions that expire, and the change feed has no event for them. A base compaction removes the revisions and other rows that an expired deletion hides once the writer's log has acknowledged the new floor, which happens when a fold includes a WAL object that was validated against that floor, such as the writer's next commit or the fence of a new writer session. For a namespace that nobody writes to, the reference server's next full pass writes that fence itself (see [Deleting, retaining, and reclaiming](#deleting-retaining-and-reclaiming)). The namespace diagnostics report the floor that the writer's log has acknowledged as `acknowledged_floor_seq`. GC then reclaims the content of the removed revisions in the same way.
+The floor also bounds the trash. Once the floor is at or above a deletion's `deletion_seq`, the deletion has expired, so it leaves the trash, and a restore of it returns `not_deleted` (see [Advancing the retention floor](format.md#101-advancing-the-retention-floor)). The job commits nothing for the deletions that expire, and the change feed has no event for them. An expired deletion becomes removable once the writer's log has acknowledged the new floor, which happens when a fold includes a WAL object that was validated against that floor, such as the writer's next commit or the fence of a new writer session. A base compaction then removes the revisions and other rows that the removable deletion hides. For a namespace that nobody writes to, the reference server's next sweep writes that fence itself (see [Deleting, retaining, and reclaiming](#deleting-retaining-and-reclaiming)). The namespace diagnostics report the floor that the writer's log has acknowledged as `acknowledged_floor_seq`. GC then reclaims the content of the removed revisions in the same way.
 
-Why does the floor stay an hour behind new commits? A client that's reading a file revision can keep reading that revision after a newer revision of the file is committed. Once the floor reaches the replacing commit, a base compaction can remove the replaced revision, and the client's next read of that revision, or its next request for a download grant, returns `revision_not_found`. The floor reaches the replacing commit only once that commit is an hour old, so the client has at least that long to finish.
+Why does the floor stay an hour behind new commits? A client that's reading a file revision can keep reading that revision after a newer revision of the file is committed. Once the floor reaches the replacing commit, a base compaction can remove the replaced revision, and the client's next read of that revision, or its next request for a presigned URL, returns `revision_not_found`. The floor reaches the replacing commit only once that commit is an hour old, so the client has at least that long to finish.
 
-A `retention_window` run sets the namespace's [retention window](glossary.md#retention-window) to `retention_window_ms`, or clears the window when the request doesn't include that field. The reference server's maintenance sweep then uses this window for the namespace instead of the server's `retention_window_ms` setting (see [Deleting, retaining, and reclaiming](#deleting-retaining-and-reclaiming)). A `retention_window_ms` of zero returns `invalid_request`. The run publishes a manifest that changes only the window, and when the namespace already has the requested window, it publishes nothing. The run doesn't move the floor itself, so the new window takes effect at the sweep's next full pass. For example, this request body sets a 7-day window:
+A `retention_window` job sets the namespace's [retention window](glossary.md#retention-window) to `retention_window_ms`, or clears the window when the request doesn't include that field. The reference server's sweep then uses this window for the namespace instead of the server's `retention_window_ms` setting (see [Deleting, retaining, and reclaiming](#deleting-retaining-and-reclaiming)). A `retention_window_ms` of zero returns `invalid_request`. The job publishes a manifest that changes only the window, and when the namespace already has the requested window, the job publishes nothing. The job doesn't move the floor itself, so the new window takes effect at the next sweep. For example, this request body sets a 7-day window:
 
 ```json
 {"kind":"retention_window","retention_window_ms":604800000}
 ```
 
-The response includes the namespace's window after the run. It leaves out `retention_window_ms` when the namespace has no window:
+The response includes the namespace's window after the job. It leaves out `retention_window_ms` when the namespace has no window:
 
 ```json
 {"kind":"retention_window","namespace_id":"demo","retention_window_ms":604800000}
 ```
 
-#### Garbage collection runs
+#### Garbage collection jobs
 
-In a `gc` run, `grace_window_ms` overrides the grace window. A grace window below the derived safety floor returns `invalid_request`. Upload sessions still keep their leases, and completed content still keeps its derived reclamation grace (see [Upload-session cleanup](format.md#116-upload-session-cleanup)).
+In a `gc` job, `grace_window_ms` overrides the grace window. A grace window below the derived minimum grace window returns `invalid_request`. Upload sessions still keep their leases, and completed content still keeps its derived completed-content grace (see [Upload-session cleanup](format.md#116-upload-session-cleanup)).
 
 A GC response contains counts for that call. Concurrent calls can overlap their deletion attempts, so these counts are operational summaries. No collection state is saved between calls.
 
-Each GC request runs one complete, stateless pass. `GcRequest` accepts `grace_window_ms`, and it has no cursor. No sweep runs unless `gc` is present.
+Each GC request runs one complete, stateless collection. `GcRequest` accepts `grace_window_ms`, and it has no cursor. No collection runs unless `gc` is present.
 
-Every GC call reads the current manifest and uses one clock reading for the whole call. It keeps its live set in memory, and it doesn't write any collection progress. For each object family it sweeps, the call lists the family from the beginning and sweeps it to the end. On a [family root](glossary.md#family-root), the call protects content through the extent filters of the rooted layout segments, and it skips the content sweep if it couldn't read the roots of every member of the fork family within the time that [Content roots](format.md#119-content-roots) allows. [Reference roots](format.md#112-reference-roots) defines the collection roots, and [Content roots](format.md#119-content-roots) defines the content roots. If a manifest read fails, the call fails before it sweeps anything.
+Every GC call reads the current manifest and uses one clock reading for the whole call. It keeps its live set in memory, and it doesn't write any collection progress. For each object family it lists, the call reads the listing from the beginning to the end. On a [family root](glossary.md#family-root), the call protects content through the extent filters of the rooted layout segments, and it skips the content objects if it couldn't read the roots of every member of the fork family within the time that [Content roots](format.md#119-content-roots) allows. [Reference roots](format.md#112-reference-roots) defines the collection roots, and [Content roots](format.md#119-content-roots) defines the content roots. If a manifest read fails, the call fails before it lists or deletes anything.
 
-A GC response includes `next_reclamation_at_ms` when the pass finds any of these future times:
+A GC response includes `next_reclamation_at_ms` when the collection finds any of these future times:
 
 - a deleted namespace that's still inside its retirement grace,
 - a retained snapshot with a future deletion time, or
 - an upload session with a future cleanup time.
 
-Upload cleanup times include the lease plus grace, the abort grace, and the completed-content grace. The value is the earliest of those future times that the pass examined. Fork pins have no cleanup time, and candidates that age out by provider timestamps don't contribute a time. If the field is absent, that doesn't mean nothing remains to collect.
+Upload cleanup times include the lease plus grace, the abort grace, and the completed-content grace. The value is the earliest of those future times that the collection examined. Fork pins have no cleanup time, and candidates that age out by provider timestamps don't contribute a time. If the field is absent, that doesn't mean nothing remains to collect.
 
-A GC response also includes `reclaimable_at_ms` when the current manifest is deleted. It's the deadline defined in [Retirement](format.md#95-retirement), and it's included even when pins still block reclamation. It's absent for an active namespace.
+A GC response also includes `reclaimable_at_ms` when the current manifest is deleted. It's the retirement deadline defined in [Retirement](format.md#95-retirement), and it's included even when pins still block retirement. It's absent for an active namespace.
 
-A GC response includes `listed_bytes`: the bytes of every object that the pass listed under the namespace, each object once, as the provider reported them, before the pass's deletes. The core collector lists every object family that it sweeps. A fork's prefix stores no content objects or upload records, so a fork's pass lists neither. The pass on the fork's [family root](glossary.md#family-root) lists the content objects and upload records of the whole fork family. When a family root's pass doesn't sweep the content (because the pass couldn't read every member's roots), it lists the content prefix once to measure the content. So the value is the storage under the namespace's prefix at the time of the pass, except the hint and any extension object that isn't a segment. An application that meters storage samples it on each pass.
+A GC response includes `listed_bytes`: the bytes of every object that the collection listed under the namespace, each object once, as the provider reported them, before the collection's deletes. The core collector lists every object family that it collects. A fork's prefix stores no content objects or upload records, so a fork's collection lists neither. The collection on the fork's [family root](glossary.md#family-root) lists the content objects and upload records of the whole fork family. When a family root's collection skips the content objects (because the collection couldn't read every member's roots), the collection lists the content prefix once to measure the content. So the value is the storage under the namespace's prefix at the time of the collection, except the hint and any extension object that isn't a segment. An application that meters storage samples the value on each collection.
 
 A GC response groups related counts:
 
 - `deleted` contains `wal_objects`, `metadata_segments`, `extension_segments`, `manifests`, `upload_sessions`, `content_objects`, `retired_content_objects`, and `temporary_objects`. `extension_segments` counts the extension segments (such as the grep index's segments) that no retained manifest lists (see [Extensions](format.md#124-extensions)).
-- `deleted_checkpoints_by_owner` contains `user` and `fork` counts for the pins deleted in the pass. `user` counts snapshots. Their sum is the total number of pins deleted.
+- `deleted_checkpoints_by_owner` contains `user` and `fork` counts for the pins deleted in the collection. `user` counts snapshots. Their sum is the total number of pins deleted.
 
 Each deletion is counted once. When a fork's target namespace deletes its source pin, the deletion counts toward `fork` if the pin was present before the deletion, and repeating that deletion on an absent pin adds nothing. Every count field is present, including fields whose value is zero.
 
-`content_objects` counts the content objects that no retained view references (on a family root, the views of every member of its fork family), which the pass deleted once they were older than the grace window. `retired_content_objects` counts the keys that the pass listed under a retired family root's content prefix and successfully deleted. That prefix stores the content of the family root's whole fork family. A fork's retirement deletes no content, so `retired_content_objects` is zero for a fork. If there are no new objects, a repeated content sweep makes one empty LIST request and no DELETE requests, and it reports zero. The `retired_content_objects` count contributes to maintenance progress. `temporary_objects` counts the store's temporary objects that the pass deleted once they were older than the grace window.
+`content_objects` counts the content objects that no retained view references (on a family root, the views of every member of its fork family), which the collection deleted once they were older than the grace window. `retired_content_objects` counts the keys that the collection listed under a retired family root's content prefix and successfully deleted. That prefix stores the content of the family root's whole fork family. A fork's retirement deletes no content, so `retired_content_objects` is zero for a fork. If there are no new objects, a repeated collection of that prefix makes one empty LIST request and no DELETE requests, and it reports zero. The `retired_content_objects` count contributes to maintenance progress. `temporary_objects` counts the store's temporary objects that the collection deleted once they were older than the grace window.
 
-Every core GC response also includes `retained`, which counts the candidates the pass kept, grouped by the reason each one was kept. The reasons are a closed set, so every field is always present, a zero means nothing was kept for that reason, and the fields sum to the total:
+Every core GC response also includes `retained`, which counts the candidates the collection kept, grouped by the reason each one was kept. The reasons are a closed set, so every field is always present, a zero means nothing was kept for that reason, and the fields sum to the total:
 
 | Reason | Means |
 | --- | --- |
 | `referenced` | Protected by current roots, including an extent filter of a rooted layout segment that matches the object (a false match keeps the object until no rooted view lists that segment), or needed for forward manifest discovery. |
 | `within_grace_window` | Unreferenced, but younger than `grace_window_ms` by the object's own provider timestamp. |
 | `no_provider_timestamp` | Unreferenced, and the provider reported no last-modified time, so the object's age is unknown and it's treated as young. |
-| `unrecognized_key` | A key under a swept family that the collector doesn't recognize as one of its own. The collector never deletes it, whatever its age. |
+| `unrecognized_key` | A key under a listed family that the collector doesn't recognize as one of its own. The collector never deletes it, whatever its age. |
 | `checkpoint_not_deletable` | A pin that's kept by its owner or by its grace window. |
 | `upload_session_window` | An upload session that's waiting for a window that ends at a known time. These are the same waits that `next_reclamation_at_ms` reports. |
-| `upload_session_undecided` | An upload session that's kept for a reason that doesn't end at a known time: a lost compare-and-swap, a record that disappeared during the pass, or a content cleanup failure. |
+| `upload_session_undecided` | An upload session that's kept for a reason that doesn't end at a known time: a lost compare-and-swap, a record that disappeared during the collection, or a content cleanup failure. |
 
-Each pass counts the candidates that it examined and kept, not the objects in the namespace, so an object that two passes both examine is counted by each pass.
+Each collection counts the candidates that it examined and kept, not the objects in the namespace, so an object that two collections both examine is counted by each collection.
 
 [Candidate and age rules](format.md#113-candidate-and-age-rules) defines which objects are candidates for deletion, and when each one is old enough to delete.
 
-For example, a run that deletes three WAL objects and two grep segments returns this result:
+For example, a job that deletes three WAL objects and two grep segments returns this result:
 
 ```json
 {"kind":"gc","namespace_id":"demo","deleted":{"wal_objects":3,"metadata_segments":0,"extension_segments":2,"manifests":0,"upload_sessions":0,"content_objects":0,"retired_content_objects":0,"temporary_objects":0},"deleted_checkpoints_by_owner":{"user":0,"fork":0},"retained":{"referenced":12,"within_grace_window":4,"no_provider_timestamp":0,"unrecognized_key":0,"checkpoint_not_deletable":0,"upload_session_window":0,"upload_session_undecided":0},"listed_bytes":1048576}
@@ -990,7 +990,7 @@ An expired snapshot stays listed until GC deletes it, after its expiry plus the 
 
 An ordinary operation that finds that its namespace was deleted returns `namespace_deleted`. Cached readers follow the rules in [Deleting a namespace](format.md#94-deleting-a-namespace). Collection is asynchronous. It has no set completion time, and it doesn't guarantee physical erasure.
 
-[Retirement](format.md#95-retirement) defines when a deleted namespace is eligible for retirement, and [Sweeping a retired owner's content](format.md#118-sweeping-a-retired-owners-content) defines how its content is reclaimed. Purging the namespace's tombstone and hint is outside the scope of this API.
+[Retirement](format.md#95-retirement) defines when a deleted namespace is eligible for retirement, and [Deleting a retired owner's content](format.md#118-deleting-a-retired-owners-content) defines how its content is deleted. Purging the namespace's tombstone and hint is outside the scope of this API.
 
 A deleted ancestor namespace keeps every object it published while a live descendant still depends on it.
 
@@ -999,34 +999,34 @@ In an active namespace, GC reclaims a content object once it's older than the gr
 - a revision in the current manifest, in a pinned manifest, in a manifest whose successor is younger than the grace window, or in the unfolded WAL tail, or
 - an upload session record, which references its own content.
 
-[Content roots](format.md#119-content-roots) defines these rules. Deleting a file or a tree doesn't reclaim anything while the deletion is recoverable, because a deleted file keeps its newest revision. A compaction that removes old revisions at or below the retention floor makes their content collectable, and so does a base compaction that removes the revisions that an expired deletion hides (see [Retention runs](#retention-runs)). So a deleted tree's content is reclaimed once the floor reaches the deletion and the writer's log acknowledges that floor.
+[Content roots](format.md#119-content-roots) defines these rules. Deleting a file or a tree doesn't reclaim anything while the deletion is recoverable, because a deleted file keeps its newest revision. A compaction that removes old revisions at or below the retention floor makes their content collectable, and so does a base compaction that removes the revisions that a removable deletion hides (see [Retention jobs](#retention-jobs)). So a deleted tree's content is reclaimed once the floor reaches the deletion and the writer's log acknowledges that floor.
 
 The metadata retention floor is a separate mechanism. It limits WAL replay history and file revision history, and it makes older WAL objects eligible for GC. A caller advances it explicitly, with `POST .../runs` and the body `{"kind":"retention"}`, or with `loonfs maintenance retention advance`, and the reference server advances it on a schedule under each namespace's [retention window](glossary.md#retention-window), as described below. After the floor advances, a base compaction keeps every revision above the floor, and each file's newest revision at or below it.
 
-Completed upload sessions in active namespaces keep their records for the derived content reclamation grace, which is slightly longer than seven days. A session record protects its content from collection, so GC reclaims staged content that no commit published on a pass after the record is removed.
+Completed upload sessions in active namespaces keep their records for the derived completed-content grace, which is slightly longer than seven days. A session record protects its content from collection, so GC reclaims staged content that no commit published on a collection after the record is removed.
 
-GC needs to run repeatedly, including after a pass finds nothing left to delete. An upload capability that was issued before the deletion can still write an object after it, and a late write that one listing misses is found by the next run. Complete reclamation can be delayed by continued late writes, grace windows, dependent forks, pin cleanup, or maintenance that isn't running.
+GC needs to run repeatedly, including after a collection finds nothing left to delete. A presigned upload URL that was issued before the deletion can still write an object after the deletion, and a late write that one listing misses is found by the next collection. Complete reclamation can be delayed by continued late writes, grace windows, dependent forks, pin cleanup, or maintenance that isn't running.
 
-Once the current manifest is deleted, LoonFS refuses commits, requests for new upload capabilities, and upload completion, but it doesn't revoke capabilities that were already issued. The retirement grace is longer than the presigned URL lifetime.
+Once the current manifest is deleted, LoonFS refuses commits, requests for new presigned upload URLs, and upload completion, but it doesn't revoke presigned URLs that were already issued. The retirement grace is longer than the presigned URL lifetime.
 
-The reference server runs a maintenance sweep with two parts:
+The reference server's scheduler runs maintenance on two schedules:
 
-- On the collection interval, the sweep visits the namespace sessions that the server keeps open and whose published sequence has moved, and it collects their garbage.
-- A full pass lists every namespace in the store, including deleted ones, and runs GC for each one. The full pass runs when the sweep starts, and then on the full sweep interval (24 hours by default).
+- Every maintenance interval (five seconds by default), the scheduler runs the due steps of each namespace session that the server keeps open. A collection step is due on the collection interval (one hour by default), once the session's published sequence has moved.
+- A "sweep" lists every namespace in the store, including deleted ones, and runs each listed namespace's due steps, including a collection. A sweep runs when the server starts, and then on the sweep interval (24 hours by default).
 
-The full pass also advances the retention floor of each namespace that isn't deleted, to the last commit at or before the current time minus the namespace's retention window. A namespace's own window is set with `retention_window_ms` when the namespace is created, or with a `retention_window` run (see [Retention runs](#retention-runs)), and a namespace that has no window of its own uses the server's `retention_window_ms` setting. The pass uses the same advance as a `retention` run with `cutoff_at_ms`, so the cutoff rule in [Advancing the retention floor](format.md#101-advancing-the-retention-floor) applies. If the selected window is shorter than an hour, the pass uses a cutoff one hour before the current time instead. The visits on the collection interval don't advance the floor on their own schedule. A visit that's in progress when the full pass reaches its namespace makes the pass's advance after its own work, so the pass doesn't wait for it. A namespace with neither window keeps its floor, so a server without the setting advances only the floors of namespaces that have their own window.
+The sweep also advances the retention floor of each namespace that isn't deleted, to the last commit at or before the current time minus the namespace's retention window. A namespace's own window is set with `retention_window_ms` when the namespace is created, or with a `retention_window` job (see [Retention jobs](#retention-jobs)), and a namespace that has no window of its own uses the server's `retention_window_ms` setting. The sweep uses the same advance as a `retention` job with `cutoff_at_ms`, so the cutoff rule in [Advancing the retention floor](format.md#101-advancing-the-retention-floor) applies. If the selected window is shorter than an hour, the sweep uses a cutoff one hour before the current time instead. The steps that the scheduler runs between sweeps don't advance the floor. If a step of a namespace is running when the sweep reaches that namespace, the step makes the sweep's advance after its own work, so the sweep doesn't wait for the step. A namespace with neither window keeps its floor, so a server without the setting advances only the floors of namespaces that have their own window.
 
-The deletions that an advance reaches expire at once. A base compaction removes the rows that they hide once a WAL object that records the new floor is folded, such as the writer's next commit. For a namespace that nobody writes to, the sweep's next full pass acknowledges the floor itself: it folds the tail, and if the acknowledged floor still lags, it acquires the writer epoch and writes a fence before it folds again, so the rows become removable about a day after the floor moved. A writer session that the fence fences returns `writer_fenced` to its next request, as after any takeover.
+The deletions that an advance reaches expire at once. They become removable once a WAL object that records the new floor is folded, such as the writer's next commit, and a base compaction then removes the rows that those deletions hide. For a namespace that nobody writes to, the next sweep acknowledges the floor itself: it folds the tail, and if the acknowledged floor still lags, it acquires the writer epoch and writes a fence before it folds again, so the deletions become removable about a day after the floor moved. A writer session that the fence fences returns `writer_fenced` to its next request, as after any takeover.
 
-A namespace that nobody writes to through this server process (including forks and deleted namespaces) waits for the full pass. The full pass also covers objects left behind by a crashed process, and garbage that's still inside a grace window. An idle namespace costs no requests between full passes.
+A namespace that nobody writes to through this server process (including forks and deleted namespaces) waits for the next sweep. The sweep also covers objects left behind by a crashed process, and garbage that's still inside a grace window. An idle namespace costs no requests between sweeps.
 
-LoonFS doesn't schedule GC when a namespace is deleted, when an upload expires, or when a fork retires and its source has more to collect. A host that doesn't run the sweep runs GC itself, with `POST .../runs` and the body `{"kind":"gc"}`, with `loonfs maintenance gc`, or with `Maintenance::gc`. It can use `next_reclamation_at_ms` to decide when to run GC again.
+LoonFS doesn't schedule GC when a namespace is deleted, when an upload expires, or when a fork retires and its source has more to collect. A host that doesn't run this scheduler runs GC itself, with `POST .../runs` and the body `{"kind":"gc"}`, with `loonfs maintenance gc`, or with `Maintenance::gc`. It can use `next_reclamation_at_ms` to decide when to run GC again.
 
-When the server shuts down, its sweep doesn't start any new visits, and a compaction in a visit stops at its next block. A writer session's metadata compaction stops the same way. Shutdown waits for the folds and compactions that already started.
+When the server shuts down, its scheduler doesn't start any new steps, and a compaction in a running step stops at its next block. A writer session's metadata compaction stops the same way. Shutdown waits for the folds and compactions that already started.
 
 A deployment needs to keep the provider's lifecycle rule for incomplete multipart uploads. Provider upload state can exist outside object listings, so deleting a namespace's content objects doesn't replace session abort and provider cleanup. Deleting a key also doesn't erase physical versions that bucket versioning or retention locks keep.
 
-The `retained` counts in a GC response show what a pass kept. To find the checkpoints that block reclamation, an operator lists them with `GET /v0/maintenance/namespaces/{ns}/checkpoints`.
+The `retained` counts in a GC response show what a collection kept. To find the checkpoints that block reclamation, an operator lists them with `GET /v0/maintenance/namespaces/{ns}/checkpoints`.
 
 ### Uploads
 
@@ -1042,7 +1042,7 @@ A client can retry the `PUT` with the same bytes, for example after a response i
 
 #### Direct single-PUT upload
 
-In `direct_put` mode, the server chooses the object identity and returns a presigned upload capability, along with the provider's stored checksum algorithm. The client counts and hashes the bytes while it sends them, and then supplies the size and checksum when it completes the upload. The begin request looks like this:
+In `direct_put` mode, the server chooses the object identity and returns a presigned upload URL, along with the provider's stored checksum algorithm. The client counts and hashes the bytes while it sends them, and then supplies the size and checksum when it completes the upload. The begin request looks like this:
 
 ```json
 {
@@ -1051,9 +1051,9 @@ In `direct_put` mode, the server chooses the object identity and returns a presi
 }
 ```
 
-`size_bytes` is optional and advisory. If it's present, the server compares it with `upload.direct_put.max_content_bytes` (the provider's single-request ceiling), and if it's too large, the server returns `content_too_large` before it issues a capability. The provider enforces the same limit when it accepts the PUT. Larger content uses `direct_multipart`, when it's available.
+`size_bytes` is optional and advisory. If it's present, the server compares it with `upload.direct_put.max_content_bytes` (the provider's single-request ceiling), and if it's too large, the server returns `content_too_large` before it issues a presigned URL. The provider enforces the same limit when it accepts the PUT. Larger content uses `direct_multipart`, when it's available.
 
-The response includes a short-lived transfer capability, and never raw object-store credentials or a caller-managed object key. The provider issues the required headers, and the client MUST send them unchanged. For example, an S3-compatible deployment might return:
+The response includes a short-lived presigned URL and its headers, and never raw object-store credentials or a caller-managed object key. The provider issues the required headers, and the client MUST send them unchanged. For example, an S3-compatible deployment might return:
 
 ```json
 {
@@ -1073,7 +1073,7 @@ The response includes a short-lived transfer capability, and never raw object-st
 }
 ```
 
-The signed headers are part of the transfer capability. In the S3-compatible example, `if-none-match: *` keeps the write to the immutable object create-only. A client can't drop or change that requirement without invalidating the capability.
+The signed headers are part of the presigned URL. In the S3-compatible example, `if-none-match: *` keeps the write to the immutable object create-only. A client can't drop or change that requirement without invalidating the presigned URL.
 
 Arbitrary S3-compatible gateways are unproven, because HMAC interoperability doesn't show that a gateway enforces create-only requests or reports the stored checksum. On an unproven endpoint, the feature key is absent, and a request to begin a `direct_put` upload returns `not_supported` with `feature = "filesystem.uploads.direct_put"`. The service-proxied upload path is still available, and it's the default.
 
@@ -1087,7 +1087,7 @@ Other implementations might use different headers, or not support `direct_put` a
 
 The response identifies the provider's stored checksum algorithm. S3-family issuers return `crc64nvme`, and the GCS issuer returns `crc32c`. The client calculates that checksum while it sends the bytes.
 
-`direct_put` and `direct_multipart` are separate offers, and a deployment can advertise the first without the second. (The reference server's Google Cloud Storage adapter works this way. It signs whole-object writes and reads, and it doesn't implement multipart signing.) A client falls back from a multipart upload to one whole-object write before it falls back to the service-proxied path. A source whose length is unknown can use the whole-object write, and report its exact size after the one-pass transfer.
+`direct_put` and `direct_multipart` are separate offers, and a deployment can advertise the first without the second. (The reference server's Google Cloud Storage adapter works this way. It signs whole-object writes and reads, and it doesn't implement multipart signing.) A client falls back from a multipart upload to one whole-object write before it falls back to the service-proxied path. A source whose length is unknown can use the whole-object write, and report its exact size after the transfer.
 
 A browser that calls a presigned URL is talking to the provider, not to LoonFS, so the bucket's or container's own CORS configuration controls cross-origin access, not anything this API sets.
 
@@ -1127,7 +1127,7 @@ A begin request sets the part size, and it doesn't include the total size or the
 
 `part_size_bytes` defaults to 8 MiB, and it MUST be between 5 MiB and 5 GiB. A session supports at most 10,000 parts, so larger objects need larger parts. A client that doesn't know the total size can request parts until its stream ends.
 
-Both direct PUT and multipart uploads provide the complete checksum at completion, and multipart also provides one checksum for each part before the part is signed. Both transports support one-pass uploads and streams whose total size isn't known at the start.
+Both direct PUT and multipart uploads provide the complete checksum at completion, and multipart also provides one checksum for each part before the part is signed. Both transports support uploads that read their source once, and streams whose total size isn't known at the start.
 
 The response records the part size and checksum algorithm for the session:
 
@@ -1143,7 +1143,7 @@ The response records the part size and checksum algorithm for the session:
 
 The response has no content reference, because the complete size and checksum aren't known yet. A client that knows its size can calculate the part count from `part_size_bytes`.
 
-To upload parts, the client sends `POST /uploads/{upload_id}/parts` with a list of `{part_number, checksum}` values, and the server returns one presigned capability for each part. Every checksum MUST use the session's `checksum_algorithm`. Parts can be uploaded in parallel. To retry a part, the client requests another capability and uploads that part again, and the provider keeps the latest upload.
+To upload parts, the client sends `POST /uploads/{upload_id}/parts` with a list of `{part_number, checksum}` values, and the server returns one presigned URL for each part. Every checksum MUST use the session's `checksum_algorithm`. Parts can be uploaded in parallel. To retry a part, the client requests another presigned URL and uploads that part again, and the provider keeps the latest upload.
 
 The server doesn't store part progress, so the client MUST keep each part's number, etag, and checksum until completion.
 
@@ -1260,7 +1260,7 @@ Create and fork install the hint and then manifest 1. The conditional put of the
 
 [Namespaces and identity](format.md#11-namespaces-and-identity) defines a namespace's lifetime. An application that reuses a human-readable name MUST keep its own map from names to namespace IDs, and generate a new namespace ID for each lifetime.
 
-If a creation acknowledgement is lost, a new request returns `namespace_exists`, unless the request explicitly allows an existing namespace. Within the original attempt, after an unknown transport outcome, an exact read-back of the manifest confirms a fork, because the fork's source pin is unique. For a plain create, matching bytes don't prove which caller created the namespace, so the result is `namespace_exists`, or the existing summary if the caller allows an existing namespace.
+If a creation acknowledgement is lost, a new request returns `namespace_exists`, unless the request explicitly allows an existing namespace. Within the original attempt, after an unknown transport outcome, an exact read-back of the manifest confirms a fork, because the fork's fork pin is unique. For a plain create, matching bytes don't prove which caller created the namespace, so the result is `namespace_exists`, or the existing summary if the caller allows an existing namespace.
 
 ### 6.1 `GET /v0/capabilities`
 
@@ -1290,13 +1290,13 @@ The `NamespaceMetadata` object has exactly these fields:
 | `access` | The access mode, either `{"kind": "unrestricted"}` or `{"kind": "acl", "principal_scope": "..."}`. |
 | `created_at_ms` | The time the namespace was created, in Unix milliseconds. |
 | `created_by` | The actor that created or forked the namespace, as supplied by the application. |
-| `fork_basis` | The namespace and sequence this namespace was forked from, as `source_namespace_id` and the captured `source_head_seq`. It also includes the fork pin that keeps the source's state at that sequence readable (`source_pin_id`) and, for a namespace that a rebase created, `rebased_from` (see [`POST /forks`](#613-post-forks)). Only a forked namespace has this field. |
+| `fork_basis` | The namespace and sequence this namespace was forked from, as `source_namespace_id` and `source_head_seq`, which records the fork point (the source namespace's sequence at which the fork was taken). It also includes the fork pin that keeps the source's state at that sequence readable (`source_pin_id`) and, for a namespace that a rebase created, `rebased_from` (see [`POST /forks`](#613-post-forks)). Only a forked namespace has this field. |
 | `family_root_id` | The namespace's [family root](glossary.md#family-root), whose prefix stores the content objects and upload records of the namespace's [fork family](glossary.md#fork-family) (see [File contents and ownership](format.md#15-file-contents-and-ownership)). A namespace that wasn't created by a fork is its own family root, and a fork has the same family root as its source. |
 | `head_seq` | The namespace's current visible sequence. |
-| `retention_floor_seq` | The namespace's retention floor. A change feed request can set `after_seq` to this sequence or any later one, and the feed returns the changes committed after it. |
+| `retention_floor_seq` | The namespace's retention floor. A change feed request can set `after_seq` to this sequence or any later one, and the feed returns the commits after it. |
 | `retention_window_ms` | The namespace's [retention window](glossary.md#retention-window), in milliseconds. Only a namespace with its own window has this field. |
 
-The create request includes `access`, in the same shape, plus `root_grants` for the `acl` kind. `access` defaults to unrestricted, and an ACL namespace needs at least one administrator in `root_grants`. The access mode is set when the namespace is created and can't be changed, and a fork uses its source's access mode. The create request can also include `retention_window_ms`, a positive number of milliseconds that sets the namespace's retention window, and zero returns `invalid_request`. Unlike the access mode, the window can be changed later with a `retention_window` run (see [Retention runs](#retention-runs)), and a fork copies its source's window.
+The create request includes `access`, in the same shape, plus `root_grants` for the `acl` kind. `access` defaults to unrestricted, and an ACL namespace needs at least one administrator in `root_grants`. The access mode is set when the namespace is created and can't be changed, and a fork uses its source's access mode. The create request can also include `retention_window_ms`, a positive number of milliseconds that sets the namespace's retention window, and zero returns `invalid_request`. Unlike the access mode, the window can be changed later with a `retention_window` job (see [Retention jobs](#retention-jobs)), and a fork copies its source's window.
 
 LoonFS derives the namespace's live sequence from the manifest and the numbered WAL tip. A cold read starts at the hint, and if the hint lags, the read probes forward. If the hint is missing, the read treats the namespace as absent. In a runtime without the namespace's writer session, a `strong` read (see [Read consistency](#read-consistency)) from a cached view probes the next WAL number with GET, applies any new WAL objects, and continues until it gets a 404. Commits are visible on the next `strong` read even when the hint hasn't been raised.
 
@@ -1311,9 +1311,9 @@ The maintenance endpoint `GET /v0/maintenance/namespaces/{ns}/diagnostics` retur
 | `namespace_id` | The durable namespace ID. |
 | `created_at_ms` | The time the namespace was created, in Unix milliseconds. |
 | `created_by` | The actor that created or forked the namespace, as supplied by the application. |
-| `fork_basis` | The namespace and sequence this namespace was forked from, as `source_namespace_id` and the captured `source_head_seq`. It also includes the source's fork pin (`source_pin_id`) and, for a namespace that a rebase created, `rebased_from`. Only a forked namespace has this field. |
+| `fork_basis` | The namespace and sequence this namespace was forked from, as `source_namespace_id` and `source_head_seq`, which records the fork point (the source namespace's sequence at which the fork was taken). It also includes the source's fork pin (`source_pin_id`) and, for a namespace that a rebase created, `rebased_from`. Only a forked namespace has this field. |
 | `head_seq` | The namespace's current visible sequence. |
-| `retention_floor_seq` | The namespace's retention floor. A change feed request can set `after_seq` to this sequence or any later one, and the feed returns the changes committed after it. |
+| `retention_floor_seq` | The namespace's retention floor. A change feed request can set `after_seq` to this sequence or any later one, and the feed returns the commits after it. |
 | `acknowledged_floor_seq` | The highest retention floor that a WAL object folded into the current manifest was validated against (see [Advancing the retention floor](format.md#101-advancing-the-retention-floor)). It's at most `retention_floor_seq`, and after a floor advance it stays below the new floor until a WAL object validated against that floor is folded. |
 | `current_manifest_no` | The current manifest number, present from namespace creation. |
 | `wal_tail_objects` | The WAL tip minus the current manifest's folded WAL number, including fences. |
@@ -1352,7 +1352,7 @@ A read passes `strong` when it has to see a commit that another runtime acknowle
 - A change feed poller that learned its `after_seq` from a fresher read, which retries the request as `strong` (see below).
 - A client that changes a permission through one server and reads through another, which passes `strong` on that read.
 
-`RuntimeConfig::consistency` sets the runtime's default consistency (`ReadConsistency::Eventual` or `ReadConsistency::Strong`), which is `eventual` unless the host sets `strong`. In the Rust runtime, a read's options leave the consistency unset by default (`None`, or `ReadAt::Live(None)` in the options that can also read a snapshot), and a read that takes no options, such as `Namespace::read_file_revision`, always takes the runtime's default. The reference server has the same setting, `consistency`, which a request without the `consistency` parameter takes, and a deployment whose readers always follow writes made through other servers sets it to `strong`. `RuntimeConfig::max_staleness_ms` sets the runtime's default maximum staleness. It defaults to 1000 milliseconds, and a value of `0` confirms the head on every read. The reference server has the same setting, `max_staleness_ms`. A read can also set its own maximum staleness, with `Consistency::Eventual { max_staleness_ms }` in the Rust runtime, or with `max_staleness_ms` on the HTTP binding, which is accepted only together with `consistency=eventual`.
+`RuntimeConfig::consistency` sets the runtime's default consistency (`ReadConsistency::Eventual` or `ReadConsistency::Strong`), which is `eventual` unless the host sets `strong`. In the Rust runtime, a read's options leave the consistency unset by default (`None`, or `ReadAt::Live(None)` in the options that can also read a snapshot), and a read that takes no options, such as `Namespace::read_file_revision`, always takes the runtime's default. The reference server has the same setting, `consistency`, which a request without the `consistency` parameter takes, and a deployment whose readers always follow writes made through other servers sets it to `strong`. `RuntimeConfig::max_staleness_ms` sets the runtime's default maximum staleness. It defaults to 1000 milliseconds, and a value of `0` confirms the head on every read. The reference server has the same setting, `max_staleness_ms`. A read can also set its own maximum staleness, with `Consistency::Eventual { max_staleness_ms }` in the Rust runtime, or with `max_staleness_ms` in the HTTP API, which is accepted only together with `consistency=eventual`.
 
 Neither the maximum staleness nor the manifest check interval can exceed `READ_REVALIDATION_BOUND_MS` (1,155,000 milliseconds). A runtime build with a larger `max_staleness_ms` or `manifest_revalidation_interval_ms` fails with a config error, a server whose config sets one fails at startup, and a read that sets a larger maximum staleness returns `invalid_request` with `param` set to `max_staleness_ms`. A cached head whose last manifest check is older than the bound is confirmed before a read with either setting.
 
@@ -1378,7 +1378,7 @@ Deletion runs in the namespace's writer session, and it's a fenced manifest publ
 
 The checkpoint inventory and snapshot deletion are explicit exceptions, and they stay available after deletion. Deleting a fork pin's ID through the snapshot route still returns `snapshot_not_found`.
 
-Deletion itself doesn't reclaim anything. [Retirement](format.md#95-retirement) defines when a deleted namespace is eligible for retirement, [Reference roots](format.md#112-reference-roots) defines the roots that garbage collection keeps, and [Sweeping a retired owner's content](format.md#118-sweeping-a-retired-owners-content) defines the content sweep.
+Deletion itself doesn't reclaim anything. [Retirement](format.md#95-retirement) defines when a deleted namespace is eligible for retirement, [Reference roots](format.md#112-reference-roots) defines the roots that garbage collection keeps, and [Deleting a retired owner's content](format.md#118-deleting-a-retired-owners-content) defines how the namespace's content is deleted.
 
 A deployment should run garbage collection repeatedly to catch late writes, and it should keep the provider's lifecycle rule for incomplete multipart uploads. Deleting an object key doesn't erase the physical versions kept by bucket versioning or retention locks.
 
@@ -1533,11 +1533,11 @@ Lists the namespace's recoverable deletions, oldest deletion first (in ascending
 
 The listing accepts `consistency` and `max_staleness_ms`, which work as they do on the entry route (see [Read consistency](#read-consistency)). Each page applies them to the head that the page reads.
 
-The listing is a range scan over the derived active-deletions family (see [File and subtree deletion](format.md#16-file-and-subtree-deletion)), so the cost of a page depends on the page, not on the namespace's deletion history. The scan starts above the retention floor, so a deletion at or below the floor, which has expired, never appears in the listing (see [Retention runs](#retention-runs)). The family's keys begin with the deletion sequence, so the floor is where the scan starts, not a filter on its results, and a page costs the same whatever the floor is. A cursor from a page read before a floor advance resumes above the new floor.
+The listing is a range scan over the derived active-deletions family (see [File and subtree deletion](format.md#16-file-and-subtree-deletion)), so the cost of a page depends on the page, not on the namespace's deletion history. The scan starts above the retention floor, so a deletion at or below the floor, which has expired, never appears in the listing (see [Retention jobs](#retention-jobs)). The family's keys begin with the deletion sequence, so the floor is where the scan starts, not a filter on its results, and a page costs the same whatever the floor is. A cursor from a page read before a floor advance resumes above the new floor.
 
 A fork's retention floor starts at its fork point, which is the sequence of the source state that the fork copied (see [Advancing the retention floor](format.md#101-advancing-the-retention-floor)). So every deletion that a fork inherits from its source has expired in the fork, and it never appears in the fork's listing. For example, if a namespace's trash lists a deletion at sequence 80 and the namespace is forked at sequence 100, the fork's listing starts above sequence 100 and leaves the deletion out, and the source's listing still includes it while the source's floor is below sequence 80.
 
-Each entry includes the inode ID and the deletion sequence that `undelete` requires, plus `inode_kind`, `deleted_by`, `deleted_at_ms`, and the removed binding (`deleted_binding`). As with path entries, a client MUST tolerate an `inode_kind` it doesn't know. Nested deletions stay separate entries, and recovering an outer deletion doesn't remove an inner deletion from the list.
+Each entry includes the inode ID and the deletion sequence that `undelete` requires, plus `inode_kind`, `deleted_by`, `deleted_at_ms`, and the removed binding (`deleted_binding`). As with path entries, a client MUST tolerate an `inode_kind` it doesn't know. Nested deletions stay separate entries, and restoring an outer deletion doesn't remove an inner deletion from the list.
 
 ```json
 {
@@ -1566,7 +1566,7 @@ Why does a fork's listing start above the fork point? A fork's history starts at
 
 Returns a file's content, addressed by path or by inode ID. The response body is the authoritative file bytes. Metadata can be exposed in headers, but the body itself is raw content, not JSON.
 
-The server streams and verifies content in bounded chunks. For a file larger than `download.service_proxied.max_content_bytes`, the server returns `content_too_large` before it fetches any content bytes, and clients can read the file in ranges (see [Ranged reads](#ranged-reads)) or use a download grant when direct GET is advertised. The limit is a transfer policy, not an allocation size.
+The server streams and verifies content in bounded chunks. For a file larger than `download.service_proxied.max_content_bytes`, the server returns `content_too_large` before it fetches any content bytes, and clients can read the file in ranges (see [Ranged reads](#ranged-reads)) or request a presigned download URL when direct GET is advertised. The limit is a transfer policy, not an allocation size.
 
 If the response body of a read without a `Range` header ends successfully, length and checksum verification completed. The server omits `Content-Length` from that response, so receiving the expected number of bytes can't signal success before verification. An I/O or verification failure after the headers are sent aborts the body instead of returning a JSON error. Consumers MUST require successful stream completion, and a file download should publish its temporary output only after the stream completes. Streaming to stdout can expose a partial or unverified prefix before a later error.
 
@@ -1631,11 +1631,11 @@ A ranged read finds its bytes where a read of the whole file finds them (see [Co
 
 Why does a ranged read include `Content-Length` when a read of the whole file doesn't? The server leaves `Content-Length` out of a whole-file response so that only a complete body means the file was verified. A ranged read isn't verified, so its length is the check a client can make, and `Content-Length` lets the client's HTTP library check the length.
 
-Why doesn't the server write pending pieces to a content object for a ranged read, as it does for a download grant? A download grant returns signed URLs for content objects, so every byte that the grant covers has to be stored in a content object first. The server sends the bytes of a ranged read itself, and it already has the pending pieces in memory, so writing them would add an object-store write that the read doesn't need.
+Why doesn't the server write pending pieces to a content object for a ranged read, as it does for a download request? A download request returns presigned URLs for content objects, so every byte that the presigned URLs cover has to be stored in a content object first. The server sends the bytes of a ranged read itself, and it already has the pending pieces in memory, so writing them would add an object-store write that the read doesn't need.
 
 ### 6.8 `POST /commits`
 
-Commits an ordered list of operations to a namespace. This endpoint is the HTTP binding for the commit model in [Commit identity and preconditions](#51-commit-identity-and-preconditions). The `Loonfs-Actor` header is required. The body contains one `commit_id`, an optional `message`, optional `preconditions`, and `operations`, which is an ordered, non-empty array of path operations. An empty array returns `invalid_request`.
+Commits an ordered list of operations to a namespace. This endpoint is the HTTP API for the commit model in [Commit identity and preconditions](#51-commit-identity-and-preconditions). The `Loonfs-Actor` header is required. The body contains one `commit_id`, an optional `message`, optional `preconditions`, and `operations`, which is an ordered, non-empty array of path operations. An empty array returns `invalid_request`.
 
 The root path `/` is readable, but with one exception it can't be the target of a mutation. The exception is `update_access`, which replaces the root's access row. Any other operation that refers to `/` (as its own path, or as either end of a move or copy) returns `invalid_request`. The rejection belongs to the operation, not to the request, so it's reported like every other operation failure. Inside a batch, the error identifies the operation's position. The check runs against a namespace that exists, so a root mutation sent to an unknown namespace returns `namespace_not_found` first.
 
@@ -1899,7 +1899,7 @@ It also accepts a revision restore by path:
 }
 ```
 
-It also accepts `undelete`, which recovers a deleted file or subtree by binding the deletion's root inode again. The inode's identity and its retained revision history come back with it. The request identifies both parts of the recovery handle that the delete reported (and that the change feed includes): the inode ID and the deletion's committed sequence.
+It also accepts `undelete`, which restores a deleted file or subtree by binding the deletion's root inode again. The inode's identity and its retained revision history come back with the inode. The request identifies both parts of the restore handle that the delete reported (and that the change feed includes): the inode ID and the deletion's committed sequence.
 
 `Loonfs-Actor: usr_8f3c`
 
@@ -1919,11 +1919,11 @@ It also accepts `undelete`, which recovers a deleted file or subtree by binding 
 
 `destination_path` is optional. When it's present, it's the destination. Its parent MUST exist and be visible, and its name MUST be free.
 
-When `destination_path` is absent, the entry is restored in place. It's bound again under the parent inode and name that its deletion recorded. The parent is identified by its inode, not by a remembered spelling of its path, so recovery restores the entry under the right parent even when the enclosing directories were renamed after the delete. The in-place parent and name follow the same rules that a path would. The parent MUST NOT be deleted, and the name MUST be free. If either rule is broken, the request returns that rule's usual error code.
+When `destination_path` is absent, the entry is restored in place. It's bound again under the parent inode and name that its deletion recorded. The parent is identified by its inode, not by a remembered spelling of its path, so a restore binds the entry under the right parent even when the enclosing directories were renamed after the delete. The in-place parent and name follow the same rules that a path would. The parent MUST NOT be deleted, and the name MUST be free. If either rule is broken, the request returns that rule's usual error code.
 
 The destination can instead be identified by a parent inode, with `destination_parent_inode_id` and `destination_display_name`, which are required together. The parent MUST be a visible directory, and the name MUST be free. A request that supplies `destination_path` together with either of them, or only one of them, returns `invalid_request`, with `param` identifying the field at fault.
 
-Only the root of a deletion can be undeleted, and `deletion_seq` MUST match the active deletion sequence. A mismatch returns `not_deleted` with the expected and actual sequences, so a stale recovery request can't cancel a later deletion. A deletion at or below the retention floor has expired, and an undelete of it returns `not_deleted` (see [Retention runs](#retention-runs)).
+Only the root of a deletion can be restored, and `deletion_seq` MUST match the active deletion sequence. A mismatch returns `not_deleted` with the expected and actual sequences, so a stale restore request can't cancel a later deletion. A deletion at or below the retention floor has expired, and a restore of it returns `not_deleted` (see [Retention jobs](#retention-jobs)).
 
 The endpoint also accepts `update_attributes`, which writes and removes attributes on the inode that a path resolves to:
 
@@ -1973,7 +1973,7 @@ The resulting map is checked against every limit in [Attributes and attribution]
 The target can be any visible file or directory, because attributes belong to the resource. Attributes stay with the inode's identity:
 
 - A move, a rename, a new file revision, and a revision restore leave them unchanged.
-- A delete keeps them while it hides the inode, and an undelete restores the same map at the same revision.
+- A delete keeps them while it hides the inode, and a restore of the deletion brings back the same map at the same revision.
 - A copy to a vacant destination is the one operation that copies them. The new inode starts with the source's map at attribute revision 1, as its own event in the change feed.
 - A copy over an existing file changes that file's content and nothing else.
 
@@ -2030,10 +2030,10 @@ Before an operation's conflict checks, LoonFS checks the subject's effective rig
 | copy_path, copy_by_inode | `read` on the source file, plus either `create` on the destination parent (for a vacant name or a name conflict) or `write` on the occupied file being replaced. |
 | restore_revision, restore_revision_by_inode | `write` and `history` on the file. |
 | update_attributes, update_attributes_by_inode | `write` on the target inode. |
-| undelete | `remove` on the saved parent and `create` on the recovery parent, including when recovering in place. |
+| undelete | `remove` on the saved parent and `create` on the destination parent, including when restoring in place. |
 | update_access, update_access_by_inode | Authority for the changes, as described below. |
 
-A move that changes any principal's effective rights on the moved inode is authorized as if the mover had granted the rights that are gained. The mover MUST have `share` and every gained right, or have `manage`, or be an administrator. Only gains count, so removing access needs no extra authority. Entry rights are enough when the move confers nothing. A boundary directory can move anywhere with entry rights, because its inherited rights don't change. Root administrator principals don't contribute gains. An undelete that relocates the entry follows the same rule.
+A move that changes any principal's effective rights on the moved inode is authorized as if the mover had granted the rights that are gained. The mover MUST have `share` and every gained right, or have `manage`, or be an administrator. Only gains count, so removing access needs no extra authority. Entry rights are enough when the move confers nothing. A boundary directory can move anywhere with entry rights, because its inherited rights don't change. Root administrator principals don't contribute gains. A restore that relocates the entry follows the same rule.
 
 For `update_access`, changing the root's set of administrator principals requires an administrator. Otherwise, `manage` permits any update. A subject without `manage` MUST have `share`, leave the boundary unchanged, and have every right that it adds to or removes from any principal's direct grant.
 
@@ -2102,7 +2102,7 @@ The request's mode MUST match the upload session. A direct PUT completion requir
 Every upload step (`create_upload`, `put_upload_content`, `get_upload`, `complete_upload`, and `abort_upload`) returns the session object. An open session includes `mode`, `status`, `expires_at_ms`, and `checksum_algorithm`, and its mode's fields are siblings of those:
 
 - A `direct_multipart` session also includes `part_size_bytes`.
-- A `direct_put` session includes `access`, a write capability. The server issues a new one when it creates the session and on every read of the open session.
+- A `direct_put` session includes `access`, a presigned upload URL. The server issues a new presigned URL when it creates the session and on every read of the open session.
 - A `service_proxied` session includes `content_ref` after bytes have been staged. `PUT .../content` returns the open session with the staged `content_ref`.
 
 Fields that don't apply are omitted. Response readers accept unknown fields.
@@ -2139,13 +2139,13 @@ Each state also has these rules:
 - An open session accepts `PUT /content`, part signing, and `complete` while the server clock reads before its `expires_at_ms`. From that instant on, each of them returns `upload_not_found`, as for an aborted session, and upload collection aborts the session later. `GET` still reports the session as `open`, and `abort` still ends it.
 - An aborted session returns `upload_not_found` from `PUT /content`, from part signing, and from `complete`. That's the same response the server returns after the session is later physically removed, so the response doesn't change when cleanup runs. It's also what a completion receives when server-side cleanup aborted the session first. If the completion is recorded first instead, the cleanup's conditional write fails, and the completed session is kept.
 
-A client uploads a large payload in one pass. It reads its source once, in order, and never keeps the whole payload in memory. To upload in one pass, a client:
+A client can upload a large payload while it reads its source once, in order, without keeping the whole payload in memory. To upload this way, a client:
 
 1. Begins a `direct_multipart` session. The begin request declares no length and no digest, so a source that can't report its length can start uploading immediately. The response sets the part size.
-2. Reads the source one part at a time. For each part, it computes the part's `crc64nvme` for the URL the server signs, and it adds the same bytes to a running `crc64nvme` of the whole object, so one pass produces both checksums.
+2. Reads the source one part at a time. For each part, it computes the part's `crc64nvme` for the URL the server signs, and it adds the same bytes to a running `crc64nvme` of the whole object, so one read of the source produces both checksums.
 3. Asks for part URLs in waves instead of all at once (a signing request can list at most 1,000 parts), uploads each wave's parts, and records each part's `{part_number, etag, crc64nvme}`. The client keeps track of its own parts, exactly as it would with the provider's own multipart API.
 4. Keeps no more than a bounded window of parts in memory at a time. That window is all the memory the upload uses, and its size doesn't depend on the payload's length. To retry a failed part, the client asks for its URL again. If a part is uploaded more than once, the provider keeps the last upload.
-5. Completes the upload with the part list and the `{size_bytes, crc64nvme}` that the pass measured. The size and checksum are sent at completion because that's the first point at which a one-pass uploader knows them.
+5. Completes the upload with the part list and the `{size_bytes, crc64nvme}` that it measured. The size and checksum are sent at completion because that's the first point at which a client that reads its source once knows them.
 
 A session whose upload fails partway is aborted, so that its incomplete object can be deleted.
 
@@ -2234,11 +2234,11 @@ Why are content tokens short-lived? A commit is expected to follow its upload pr
 
 ### 6.10 Download transport
 
-The download routes return short-lived signed URLs that let a client read a file revision's bytes directly from object storage.
+The download routes return short-lived presigned URLs that let a client read a file revision's bytes directly from object storage.
 
 A deployment MUST be able to serve back any file it let a client create. So every deployment that offers any direct write advertises `filesystem.downloads.direct_get`, and direct reads aren't a separate choice for the deployment. Direct reads also keep object traffic off the server.
 
-A direct download grants one signed range for each immutable extent. If some of the revision's bytes are still pending WAL pieces, they're written as the chain's next extent, with the same writer that a fold uses. Existing objects are never rewritten. `content_not_materialized` means only that the deployment can't write the pending pieces. A chain that starts in the WAL tail reuses its whole object when that object covers the reference. For a zero-byte reference, the empty whole object is written if it doesn't exist.
+A direct download returns one presigned range for each immutable extent. If some of the revision's bytes are still pending WAL pieces, they're written as the chain's next extent, with the same writer that a fold uses. Existing objects are never rewritten. `content_not_materialized` means only that the deployment can't write the pending pieces. A chain that starts in the WAL tail reuses its whole object when that object covers the reference. For a zero-byte reference, the empty whole object is written if it doesn't exist.
 
 `POST /v0/namespaces/{ns}/filesystem/downloads` takes a JSON body with a path and, optionally, the revision to read and the first byte to read:
 
@@ -2250,7 +2250,7 @@ Instead of `revision_no`, the body can include `snapshot_id` to read a snapshot,
 
 The body can also include `consistency` and `max_staleness_ms`, which take the same values as the query parameters of the read routes (see [Read consistency](#read-consistency)). LoonFS finds the revision at the live head, so these fields select how recently the server confirms that head. Neither field can be combined with `snapshot_id`, and an invalid value returns `invalid_request` with `param` set to the field's JSON Pointer, such as `/consistency`.
 
-The response contains a short-lived read capability, plus everything the reader needs to check the bytes it receives:
+The response contains short-lived presigned URLs, plus everything the reader needs to check the bytes it receives:
 
 ```json
 {
@@ -2304,19 +2304,19 @@ The inode revision form is `POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions
 }
 ```
 
-`POST /v0/namespaces/{ns}/inodes/{inode_id}/downloads` grants the current revision of a visible file inode, and it returns the same response. It takes an optional JSON body with four fields. `snapshot_id` grants the revision that the snapshot captured instead, `start_offset` is the first byte to read, and `consistency` and `max_staleness_ms` work as they do on the path route.
+`POST /v0/namespaces/{ns}/inodes/{inode_id}/downloads` returns presigned URLs for the current revision of a visible file inode, in the same response. It takes an optional JSON body with four fields. `snapshot_id` selects the revision that the snapshot captured instead, `start_offset` is the first byte to read, and `consistency` and `max_staleness_ms` work as they do on the path route.
 
 The download routes use the same provider support check and the same access format. The inode revision route stays available after a rename, and after a deletion while the deletion is recoverable and the revision is retained. Once the retention floor reaches the deletion, the route returns `inode_not_found`, as it does for an unknown inode (see [Paths, listings, and revision reads](format.md#44-paths-listings-and-revision-reads)). The current inode route follows the inode across renames, and it returns `inode_not_found` once the inode is deleted.
 
 These five properties follow from the response's shape, and clients can rely on all of them:
 
-- **Ordered ranges.** The grant covers exactly `[start_offset, size_bytes)`, as ordered ranges. The ranges are contiguous and ascending, and their lengths add up to `size_bytes - start_offset`. Each range refers to bytes in an immutable object, so later commits and appends don't change those bytes.
+- **Ordered ranges.** The ranges cover exactly `[start_offset, size_bytes)`, as ordered ranges. The ranges are contiguous and ascending, and their lengths add up to `size_bytes - start_offset`. Each range refers to bytes in an immutable object, so later commits and appends don't change those bytes.
 - **Signed headers.** A client sends each range's headers as given. Each range's `access.headers` includes the signed `Range` for its object. The object offset can differ from `start_offset`, which is an offset in the revision. The client sends the headers unchanged and adds no range of its own, and it checks each response's length against that range's `length`. A zero-byte revision has one range, at offset 0 with length 0, whose access signs no `Range` header, and it needs no object request.
-- **Resuming.** To resume, a client asks for a new grant. A client that has the first `n` bytes asks for a grant with `start_offset` set to `n`. An offset at or past `size_bytes` returns `invalid_request` with `param` set to `/start_offset`, except offset 0 for a zero-byte revision. A client that already has every byte doesn't ask for a grant.
+- **Resuming.** To resume, a client asks for new presigned URLs. A client that has the first `n` bytes sends a download request with `start_offset` set to `n`. An offset at or past `size_bytes` returns `invalid_request` with `param` set to `/start_offset`, except offset 0 for a zero-byte revision. A client that already has every byte doesn't send a download request.
 - **Verification.** The client verifies the complete file across ranges. It reads the ranges in order, and it checks the complete byte length and `content_ref.checksum`. This applies to CRC-64/NVME and CRC-32C. A resumed download includes the prefix the client already has in the same checksum. A mismatch fails the download.
 - **No object keys.** The raw object keys are never exposed. Each range includes a URL that expires, as a direct upload does.
 
-The capability is short-lived. It lasts long enough for one transfer, not for a session. A reader that runs out of time asks for another grant starting at the byte it reached, which costs one small request and doesn't transfer any bytes again. A deployment that can't presign reads returns 501 `not_supported` with `feature = "filesystem.downloads.direct_get"`, and its proxied read stays available under its own limit. Such a deployment can't presign writes either, so no file it stores can be larger than it will proxy.
+A presigned URL is short-lived. It lasts long enough for one transfer, not for a session. A reader that runs out of time asks for new presigned URLs starting at the byte it reached, which costs one small request and doesn't transfer any bytes again. A deployment that can't presign reads returns 501 `not_supported` with `feature = "filesystem.downloads.direct_get"`, and its proxied read stays available under its own limit. Such a deployment can't presign writes either, so no file it stores can be larger than it will proxy.
 
 Why does every deployment with a direct write offer direct reads? `direct_put` and `direct_multipart` let a client write an object of any size, but a proxied read enforces the transfer limit `download.service_proxied.max_content_bytes`. Direct reads bypass that limit, so the deployment can serve back every file it let a client create. A deployment that offers no direct write can't have created such a file in the first place.
 
@@ -2328,7 +2328,7 @@ In an ACL namespace, the change feed requires an administrator when the request 
 
 The feed accepts `consistency` and `max_staleness_ms`, which work as they do on the read routes (see [Read consistency](#read-consistency)), and neither can be combined with `snapshot_id`. An `eventual` poll within its maximum staleness reads at the head that the server confirmed last, so it can miss commits from that time, and a later poll returns them. An `after_seq` above the head that an `eventual` poll reads returns `invalid_request`, so a poller that learned its `after_seq` from a fresher read retries the request as `strong`.
 
-Each change is one commit, represented as a `Commit` (the same object `POST /commits` returns). A change includes the commit's identity (`committed_seq`, `commit_id`, `committed_by`, the observational `committed_at_ms`, and the optional `message`) and its `events`, which are the semantic filesystem operations the commit applied, in the order it applied them. A change that's a [merge](glossary.md#merge) also includes `merge`, which identifies the fork and the range of the fork's commits that the merge applied (see [Commit responses and safe retry](#52-commit-responses-and-safe-retry)). A merge's events are the same kinds of events as any other commit's, and no event kind marks a merge, so a consumer that needs to know which fork a change came from reads the commit's `merge`.
+Each item is one commit, represented as a `Commit` (the same object `POST /commits` returns). An item includes the commit's identity (`committed_seq`, `commit_id`, `committed_by`, the observational `committed_at_ms`, and the optional `message`) and its `events`, which are the semantic filesystem operations the commit applied, in the order it applied them. An item that's a [merge](glossary.md#merge) also includes `merge`, which identifies the fork and the range of the fork's commits that the merge applied (see [Commit responses and safe retry](#52-commit-responses-and-safe-retry)). A merge's events are the same kinds of events as any other commit's, and no event kind marks a merge, so a consumer that needs to know which fork a commit came from reads the commit's `merge`.
 
 One request operation can apply several semantic operations. For example, a put creates each missing parent directory, a replacing move deletes the file it moves over, and a copy applies the source's attributes to the inode it just created. So a request with three operations can report more than three events. The events stay in request order.
 
@@ -2372,7 +2372,7 @@ Event kinds:
 | `content_changed` | A file received a new current revision, from a replacing put, a replacing copy, an append, or a revision restore. | `inode_id`, `revision_no`, `content_ref`, and `append_offset` when an append published the revision. |
 | `moved` | An entry moved to a new parent directory or name. | `inode_id`, `source_parent_inode_id`, `source_display_name`, `destination_parent_inode_id`, `destination_display_name`, `binding_version`. |
 | `deleted` | A file or directory subtree was deleted. To restore it, use the enclosing `committed_seq` as `deletion_seq`. | `inode_id`, plus `deleted_binding` containing `parent_inode_id`, `name_key`, and `display_name`. |
-| `undeleted` | A deleted inode was recovered and bound to a name again. | `inode_id`, `parent_inode_id`, `display_name`, `binding_version`. |
+| `undeleted` | A deleted inode was restored and bound to a name again. | `inode_id`, `parent_inode_id`, `display_name`, `binding_version`. |
 | `attributes_changed` | An inode's attributes changed. `attributes` is the complete flat string map after the update, so a consumer can update its own copy without reading anything back. An empty map means the attributes were cleared. | `inode_id`, `attributes_revision_no`, `attributes`. |
 | `access_changed` | An inode's access row was replaced. `grants` is the complete direct grant map after the update. | `inode_id`, `access_revision_no`, `boundary`, `grants`. |
 
@@ -2422,7 +2422,7 @@ A `content_changed` event for an append includes `append_offset`, the offset whe
 }
 ```
 
-A consumer that keeps a copy of the file can extend its copy with the range from `append_offset` to `size_bytes` (for example, with a [download grant](#610-download-transport) whose `start_offset` is `append_offset`) instead of reading the whole file again. The field is present for every append, including an append to an empty file (where it's 0) and an append that starts a new content ID, such as an append in a fork to a file that the fork inherited (see the `append_file` rules in [`POST /commits`](#68-post-commits)). The field is absent when a put, a copy, or a revision restore published the revision. If one commit contains two appends to the same file, the change feed reports a separate event for each append, with that append's offset.
+A consumer that keeps a copy of the file can extend its copy with the range from `append_offset` to `size_bytes` (for example, with a [download request](#610-download-transport) whose `start_offset` is `append_offset`) instead of reading the whole file again. The field is present for every append, including an append to an empty file (where it's 0) and an append that starts a new content ID, such as an append in a fork to a file that the fork inherited (see the `append_file` rules in [`POST /commits`](#68-post-commits)). The field is absent when a put, a copy, or a revision restore published the revision. If one commit contains two appends to the same file, the change feed reports a separate event for each append, with that append's offset.
 
 Events identify inodes and their parent-directory bindings, not full paths. A consumer that needs paths can stat the inode, or maintain its own projection of the bindings from this feed. Clients MUST ignore unknown event kinds and unknown fields.
 
@@ -2432,7 +2432,7 @@ In a `moved` event, the source fields describe the removed binding, and the dest
 
 The commit `limit` is an upper bound, and a page can contain fewer commits when their events are large. The reference implementation budgets 4 MiB of event heap per page (the "page budget"), including vector capacity and owned event data. Without `split_commits=true` (see below), a page doesn't split a commit, and a single commit larger than the budget is returned whole on a page by itself.
 
-If either bound ends the page before the namespace head, the response includes `next_after_seq`, set to the last returned change's `committed_seq`. The client resumes with `after_seq={next_after_seq}`. Clients MUST follow `next_after_seq`, instead of counting commits, to decide whether another page remains.
+If either bound ends the page before the namespace head, the response includes `next_after_seq`, set to the last returned commit's `committed_seq`. The client resumes with `after_seq={next_after_seq}`. Clients MUST follow `next_after_seq`, instead of counting commits, to decide whether another page remains.
 
 `after_seq` can equal the current namespace head, which returns an empty page. An `after_seq` above the head that the request reads returns `invalid_request`. The lowest `after_seq` the feed accepts is `retention_floor_seq`, and a lower `after_seq` returns `rebootstrap_required`. The client then rebuilds its state from a fresh listing or snapshot, and follows the feed from that state's head.
 
@@ -2572,9 +2572,9 @@ A kind applies to the entry's whole subtree, and the diff doesn't list the desce
 - A `deleted` directory deletes everything below it.
 - A `moved` directory moves everything below it, and its descendants aren't entries for the move.
 - An `undeleted` directory brings back its visible descendants, which aren't entries. A client that keeps a copy of the namespace lists the directory to find them.
-- A `created` directory needs no listing, because each child it has at `to_seq` was created, moved in, or undeleted in the range, and is an entry of its own.
+- A `created` directory needs no listing, because each child it has at `to_seq` was created, moved in, or restored in the range, and is an entry of its own.
 
-A descendant that a commit in the range touched is still an entry of its own. For example, a file that was rewritten before its directory was deleted is a `deleted` entry next to the directory's. An inode whose state is the same at the two sequences isn't an entry, even when commits in the range touched it. For example, a file created and deleted in the range has no entry, and neither does a file deleted and undeleted in place with no other change.
+A descendant that a commit in the range touched is still an entry of its own. For example, a file that was rewritten before its directory was deleted is a `deleted` entry next to the directory's. An inode whose state is the same at the two sequences isn't an entry, even when commits in the range touched it. For example, a file created and deleted in the range has no entry, and neither does a file deleted and restored in place with no other change.
 
 An entry is under `path` when its path at `from_seq` or its path at `to_seq` is `path` or below it. So a subtree moved into `path` from outside appears once, as `moved`, and a subtree moved out of `path` appears too. An entry is also under `path` when it's a `deleted`, `moved`, or `undeleted` directory whose path at `from_seq` or at `to_seq` is above `path`, because the kind applies to everything below the directory, and the diff doesn't list those descendants. For example, if `/a` moves to `/x`, a diff with `path` set to `/a/b` or to `/x/b` has one entry, the move of `/a`, and a client applies that entry to its copy as it would apply the same entry from a diff of the root. A directory above `path` that changed only its attributes or access isn't an entry, even when the inodes below the directory inherit that access, because an inode's state includes its own attribute and access revisions, not its ancestors'. Names compare as they do in path lookups (see [Names and paths](format.md#14-names-and-paths)).
 
@@ -2584,7 +2584,7 @@ A page reads the commits after `after_seq` in sequence order, at most `limit` of
 
 With `split_commits=true`, a commit that touches more inodes than the bound starts a page of its own, and the page reads the commit's events in order until the inodes it has examined reach the bound. The page then ends inside the commit, and it reports `next_after_seq` and `next_event_index` with the same meaning as on the change feed. The client passes them back as `after_seq` and `event_index`, with the same `from_seq` and `to_seq`. A commit that touches no more inodes than the bound isn't split. This changes one rule of the route, and only under the parameter: an inode that the events of a split commit touch on two pages is an entry on both pages. Both entries compare the same two sequences, so they're equal, and a client that reconciles its copy by inode ID and keeps the later entry gets the same result as from the unsplit diff.
 
-A fork's diff against its source is this route on the fork, with `from_seq` set to the fork's `fork_basis.source_head_seq` (see [`POST /forks`](#613-post-forks)). It compares the fork's head with the source state that the fork captured, not with the source's current head.
+A fork's diff against its source is this route on the fork, with `from_seq` set to the fork point, the fork's `fork_basis.source_head_seq` (see [`POST /forks`](#613-post-forks)). It compares the fork's head with the source state that the fork captured, not with the source's current head.
 
 To find out whether anything under a directory changed since a sequence, a client reads pages until one has an entry or a page has no `next_after_seq`.
 
@@ -2634,7 +2634,7 @@ The `fork_basis` object identifies the captured source:
 | Field | Meaning |
 | --- | --- |
 | `source_namespace_id` | The namespace that the fork captured. |
-| `source_head_seq` | The source sequence that the fork captured. |
+| `source_head_seq` | The fork point: the source namespace's sequence at which the fork was taken. |
 | `source_pin_id` | The fork pin in the source that keeps the source's state at `source_head_seq`. A read of the source accepts it as `snapshot_id` (see [Snapshots](#snapshots)). |
 | `rebased_from` | The fork whose unmerged commits a rebase replays into this namespace (`source_namespace_id`), and the fork sequence that the fork's next merge would have started after when the rebase created this namespace (`resume_after_seq`). Only a namespace that a rebase created has this field, and a fork that this route creates never does. |
 
@@ -2742,13 +2742,13 @@ The commit returns these codes when this namespace changed after the plan:
 | `stale_attributes` | Another writer changed the attributes of an inode that the merge changes. |
 | `stale_access` | Another writer changed the access of an inode that the merge changes. |
 | `binding_version_mismatch` | Another writer moved an inode that the merge moves or deletes. |
-| `path_conflict` | Another inode took a name that the merge's create, move, or undelete needs. |
+| `path_conflict` | Another inode took a name that the merge's create, move, or restore needs. |
 | `inode_not_found` | A deletion hid an inode that the merge changes, or the directory that an inode goes into. |
-| `not_deleted` | Another writer undeleted an inode that the merge undeletes. |
+| `not_deleted` | Another writer restored an inode that the merge restores. |
 
 The commit orders its changes so that each change runs after the changes that it depends on. A delete or a move that frees a name runs before the create or the move that takes the name. A directory's create runs before the creates and moves into the directory, and a move out of a directory runs before the directory's delete, and before a move that puts the directory below that item. When moves wait on each other in a cycle, such as two files that swap names, one of the inodes first moves to a temporary name, its inode ID, with a numeric suffix when an inode already has that name. The temporary name goes in the parent of a directory that the merge deletes, when the inode has to leave that directory, and otherwise in the directory that the inode moves to, or in its current directory. The change feed shows both of the inode's moves, the first to the temporary name, but no read sees the temporary name, because the commit applies at once. The revision, attribute, and access updates follow the binding changes. The recursive delete of a directory deletes the items below the directory, so the commit doesn't delete those items separately, unless the merge first moves one of their ancestors out. If no order works, the merge returns `invalid_request`. If the net change is empty, because the fork undid its changes within the range or adopted this namespace's version of everything it changed, the commit has the merge record and no operations, so the merge index still advances.
 
-The conflict rule compares each inode in the net change with this namespace's head. A row in this namespace is "the fork's own" when it was committed at or below the fork point, or by an earlier merge from this fork. The change to an inode conflicts when the row that the change would replace isn't the fork's own (`content`, `binding`, `attributes`, or `access`), when a deletion hides the inode or the parent of an inode that the fork created or moved (`visibility`), when another inode has the name that the fork's create or move needs (`name`), or when something below a directory that the fork deleted or moved changed after the fork point (`subtree`). A name is free when no inode has the name, or when the inode that has the name is one that the merge deletes or moves away. A deletion that an earlier merge of this fork made, and that the fork has since undone, isn't a conflict while the deletion is still recoverable in this namespace, because the merge undeletes the inode, and the items below it come back with it. An expired deletion comes back only as a new inode, so the fork's undo of it is a `visibility` conflict.
+The conflict rule compares each inode in the net change with this namespace's head. A row in this namespace is "the fork's own" when it was committed at or below the fork point, or by an earlier merge from this fork. The change to an inode conflicts when the row that the change would replace isn't the fork's own (`content`, `binding`, `attributes`, or `access`), when a deletion hides the inode or the parent of an inode that the fork created or moved (`visibility`), when another inode has the name that the fork's create or move needs (`name`), or when something below a directory that the fork deleted or moved changed after the fork point (`subtree`). A name is free when no inode has the name, or when the inode that has the name is one that the merge deletes or moves away. A deletion that an earlier merge of this fork made, and that the fork has since undone, isn't a conflict while the deletion is still recoverable in this namespace, because the merge restores the inode, and the items below it come back with it. An expired deletion comes back only as a new inode, so the fork's undo of it is a `visibility` conflict.
 
 The `conflict` field of a `merge_conflict` error's details is a "conflict entry", an object that describes one conflicting inode, here the one with the smallest ID:
 
@@ -2809,7 +2809,7 @@ Representative response:
 | Response field | Meaning |
 | --- | --- |
 | `fork_point_seq` | The fork point, which is the sequence of this namespace that the fork was made at. |
-| `source_head_seq` | The fork's head when the server read it. A merge without `through_seq` applies the fork's commits through the fork's head. |
+| `source_head_seq` | The head of the merge's source, the fork, when the server read it. A merge without `through_seq` applies the fork's commits through the fork's head. |
 | `outcome` | Whether the retention floors allow the fork's next merge: `open`, `range_start_below_floor`, or `fork_point_below_floor` (described below). Clients MUST tolerate other values. |
 
 The query finds the range's start with the checks that a merge makes at steps 3 to 5 of [`POST /merges`](#614-post-merges). When a retention floor would refuse the merge with `rebootstrap_required`, the query reports which floor in `outcome` instead of returning the error. The fields for each outcome are siblings of `outcome`, not a nested object:
@@ -2908,7 +2908,7 @@ To rebase a fork, the server:
 
 If a rebase fails after step 2 created the new fork, the new fork stays, because a later rebase continues into it.
 
-A replay commit is a merge of the fork into the new fork. Its merge record identifies the range of the fork's commits that the replay commit examined, and the replay commit leaves out the changes that conflict. A change that depends on a change that the replay commit left out is left out too, with a conflict entry of kind `dependency` after the entry of the change that it depends on. Such a change is a create, an undelete, or a move into a directory whose create or undelete was skipped, or the delete of a directory that still contains an inode whose move out of it was skipped, because the directory's delete would delete that inode in the new fork. When the replay commit leaves out a change that would free a name, it also leaves out the create or move that takes the name, with a conflict entry of kind `name`. If every change conflicts, the replay commit has the merge record and no operations, so the next rebase continues after its range.
+A replay commit is a merge of the fork into the new fork. Its merge record identifies the range of the fork's commits that the replay commit examined, and the replay commit leaves out the changes that conflict. A change that depends on a change that the replay commit left out is left out too, with a conflict entry of kind `dependency` after the entry of the change that it depends on. Such a change is a create, a restore, or a move into a directory whose create or restore was skipped, or the delete of a directory that still contains an inode whose move out of it was skipped, because the directory's delete would delete that inode in the new fork. When the replay commit leaves out a change that would free a name, it also leaves out the create or move that takes the name, with a conflict entry of kind `name`. If every change conflicts, the replay commit has the merge record and no operations, so the next rebase continues after its range.
 
 The new fork takes ordinary commits while a rebase runs, so the replay commit's preconditions work as a merge's do (see [`POST /merges`](#614-post-merges)). Each operation's precondition is the new fork's current value, and when the replay commit deletes or moves a directory, or moves an inode through a temporary name, the commit also expects the new fork's head to be the head that the plan read. A commit that fails because the new fork changed after the plan returns one of the codes that a merge's commit returns, and the server plans the replay commit again (step 8). For example, if another writer creates a file below a directory that the replay commit deletes, the commit fails with `stale_head`, and the next plan reports the directory as a `subtree` conflict and keeps the file.
 
@@ -2987,7 +2987,7 @@ The first page reads the namespace at its head, and it reports that head in `hea
 
 A pattern with no required literal bytes is rejected with `query_unindexable`, unless the request opts into a capped exhaustive scan with `allow_scan`. A tail longer than the scan budget is rejected with `index_lagging`, unless the request accepts results from the index alone with `allow_stale` (reported as `tail_scanned: false`). A stale page reads the namespace at the same sequence as any other page, and it treats the commits after the last commit that the index covers in full as unscanned. So a file whose current revision is newer than that commit is left out entirely instead of mixed in, and a file deleted after that commit isn't reported. The cursor records that commit, and every later page of the search leaves out the same commits and reports `tail_scanned: false`, even after the index catches up.
 
-The index covers the content of every retained file revision, including deleted files and files under a deleted directory, and each page checks the visibility of every candidate at the sequence that it reads. So a delete or an undelete changes no postings, and an exact query after an undelete includes the restored files without a rebuild.
+The index covers the content of every retained file revision, including deleted files and files under a deleted directory, and each page checks the visibility of every candidate at the sequence that it reads. So a delete or a restore changes no postings, and an exact query after a restore includes the restored files without a rebuild.
 
 The `path_prefix` value is a complete absolute path, not a partial prefix of a path segment. The server resolves it by name key, like any other path (see [Names and paths](format.md#14-names-and-paths)), and then limits results to descendants of that inode. So `path_prefix` MUST use the same canonical spelling as any other path. A scope that doesn't exist returns `path_not_found`, and an existing scope that's empty returns a successful response with no matches.
 
@@ -3003,7 +3003,7 @@ Returns metrics about what the process has been doing, in Prometheus text exposi
 
 Unlike `/health` and `/readiness`, `/metrics` requires the deployment's bearer token. A scrape sends the same `Authorization: Bearer` header that a client does, and an unauthorized scrape returns `401 unauthorized` in the standard error envelope.
 
-Metric names have the form `loonfs_<subsystem>_<metric>`. They cover the object-store calls the process made, the maintenance passes it finished, the publications it batched, what garbage collection reclaimed, and the requests this server served. Label values come only from closed vocabularies. For example, a request is labeled by the route template it matched (`/v0/namespaces/{namespace_id}`), never by its own path, so no namespace, upload, commit, or checkpoint ID ever appears in a label. Values are per process, and they reset when the process restarts, which is the usual contract for a counter that a scraper reads.
+Metric names have the form `loonfs_<subsystem>_<metric>`. They cover the object-store calls the process made, the maintenance steps and sweeps it finished, the publications it batched, what garbage collection reclaimed, and the requests this server served. Label values come only from closed vocabularies. For example, a request is labeled by the route template it matched (`/v0/namespaces/{namespace_id}`), never by its own path, so no namespace, upload, commit, or checkpoint ID ever appears in a label. Values are per process, and they reset when the process restarts, which is the usual contract for a counter that a scraper reads.
 
 The metric set isn't part of the v0 wire contract. Metric names might be added or changed as the runtime's instrumentation grows, and clients MUST NOT depend on any particular series existing.
 
@@ -3070,7 +3070,7 @@ Both direct and proxied downloads pass the caller's transport controls through:
 - TypeScript applies `timeoutInSeconds` (the client default, otherwise 60 seconds) across the metadata request and the body, and it also respects `abortSignal`.
 - Python uses the request or client HTTPX timeout for I/O waits on both transports. Its synchronous iterator closes the response when the caller exits a `with` block early, and the async iterator uses an `async with` block.
 
-API authorization, cookies, and API headers aren't copied into presigned object-store requests. Each direct request sends its range's `access.headers` unchanged, and it adds no `Range`. The helpers check each response's length, and one checksum across all ranges. A grant of zero bytes makes no request.
+API authorization, cookies, and API headers aren't copied into presigned object-store requests. Each direct request sends its range's `access.headers` unchanged, and it adds no `Range`. The helpers check each response's length, and one checksum across all ranges. A download of zero bytes makes no object request.
 
 ### SDK streaming uploads
 

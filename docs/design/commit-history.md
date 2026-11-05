@@ -14,7 +14,7 @@ The family shares a compaction group with `commit_receipts`, the same way the tw
 
 ## Writing
 
-A commit is one conditional put of the next numbered WAL object, and no row is written before that put. WAL replay adds one commit row for each record to the projected tail, next to the rows that the record's deltas produce. A fold writes the tail's commit rows into its new run, along with the other families, and compaction merges them under the group's retention rule. The folded WAL objects can then be collected.
+A commit is one conditional put of the next numbered WAL object, and no row is written before that put. WAL replay adds one commit row for each record to the projected tail, next to the rows that the record's deltas produce. A fold writes the tail's commit rows into its new run, along with the other families, and compaction rewrites them under the group's retention rule. The folded WAL objects can then be collected.
 
 ## Reading
 
@@ -46,7 +46,7 @@ The `commits` family has these costs:
 
 - A commit row repeats the deltas that the other families already store in other orders. An attribute or access delta includes a whole map, so those rows are the largest. Rows below the floor are removed at the next base compaction.
 - The projected tail keeps commit rows in memory, within the existing tail budgets. The fold trigger limits the size of a tail.
-- A fold writes one more family. A base compaction of the commits group merges two families instead of one.
+- A fold writes one more family. A base compaction of the commits group rewrites two families instead of one.
 - The mapping from deltas to events must keep covering every retained row, for both metadata rows and WAL records.
 
 ## Alternatives considered
@@ -56,4 +56,4 @@ This section describes other designs for reading commit history, and why LoonFS 
 - **Search the retained WAL.** A reader probes WAL objects by their sequence ranges, with a binary or exponential search. Every probe fetches and decompresses a whole object to learn its range, and the reader has to handle fences and batches along the way. This design keeps the WAL as the history store.
 - **Index WAL locations in a metadata family.** A family that maps sequence ranges to WAL numbers finds the object without probing. Two problems rule it out. A pinned manifest would list rows that point to WAL objects that garbage collection is allowed to delete, and no other reference in the format points to an object that doesn't have to exist. And every page would still fetch and decode a whole WAL object.
 - **Encode the WAL as block-indexed segments.** Each WAL object would include a sequence index, so a reader could fetch one block. This design needs self-describing framing, because segments keep their handles in the manifest, and it doesn't help a reader find the object. A store whose queries search the unindexed tail by key needs an index in each WAL entry. LoonFS replays a bounded tail into memory, so it doesn't need an index. LoonFS WAL objects average tens of kilobytes.
-- **Materialize events rather than deltas.** Storing the API's event shape would tie the durable row to the wire format. Deltas are already the durable vocabulary, and one mapping works for both the row and the WAL record.
+- **Store events rather than deltas.** Storing the API's event shape would tie the durable row to the wire format. Deltas are already the durable vocabulary, and one mapping works for both the row and the WAL record.

@@ -32,7 +32,7 @@ Why keep waiting commits in the queue and not in a list of their own? The queue 
 
 ## The write-stop wait
 
-`CommitOptions` has no deadline, and the HTTP binding's `request_deadline_ms` (60 s by default) cancels the request handler, but the cancellation doesn't remove the queued commit, which can still publish after the server returns `deadline_exceeded`. So the runtime needs one setting, the write-stop wait, in its publication policy.
+`CommitOptions` has no deadline, and the HTTP API's `request_deadline_ms` (60 s by default) cancels the request handler, but the cancellation doesn't remove the queued commit, which can still publish after the server returns `deadline_exceeded`. So the runtime needs one setting, the write-stop wait, in its publication policy.
 
 The reference server sets the write-stop wait to half its `request_deadline_ms`, and gains no setting. A commit that waits for the whole write-stop wait then receives `maintenance_required` (the commit didn't happen) before the server's deadline would return `deadline_exceeded` (the outcome is unknown).
 

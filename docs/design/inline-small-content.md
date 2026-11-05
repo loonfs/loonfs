@@ -6,7 +6,7 @@ The storage format defines the durable rules:
 
 - [File contents and ownership](../specs/format.md#15-file-contents-and-ownership) covers durability.
 - [Content verification](../specs/format.md#45-content-verification) covers reads.
-- [Publishing a materialized file set](../specs/format.md#72-publishing-a-materialized-file-set) covers the fold.
+- [Publishing a manifest](../specs/format.md#72-publishing-a-manifest) covers the fold.
 - [WAL records](../specs/format.md#a5-wal-records) defines the record and its limits.
 - [Content in a fingerprint](../specs/format.md#b2-content-in-a-fingerprint) defines the fingerprint form.
 
@@ -80,7 +80,7 @@ This section describes how a fold writes inline bytes to content objects.
 
 A fold writes every piece in its range into immutable content objects before it writes segments or publishes the manifest. The chain's own layout lists the objects that store its earlier bytes. A fresh chain's revision delta includes the base's extents, cut to the base size. Validation first writes any pending base pieces through the fold's materialization. The fresh chain shares the returned extents, and includes only its appended bytes as pieces. Copies and restores also include complete layouts, so they can still be read after the source chain's layout row is removed.
 
-The fold writes a whole object or a span object according to the rules in [Publishing a materialized file set](../specs/format.md#72-publishing-a-materialized-file-set). It merges the chain's own last extents by the doubling rule, and it writes every extent with one assembly call. If the result would exceed 32 own extents, it assembles the extents after the largest own extent. Shared base extents stay separate. For an append, the fold combines the base reference's checksum with the checksum of the appended bytes. Every reference uses the store's checksum algorithm (see [Required operations](../specs/format.md#31-required-operations)).
+The fold writes a whole object or a span object according to the rules in [Publishing a manifest](../specs/format.md#72-publishing-a-manifest). It combines the chain's own last extents by the doubling rule, and it writes every extent with one assembly call. If the result would exceed 32 own extents, it assembles the extents after the largest own extent. Shared base extents stay separate. For an append, the fold combines the base reference's checksum with the checksum of the appended bytes. Every reference uses the store's checksum algorithm (see [Required operations](../specs/format.md#31-required-operations)).
 
 The storage adapter chooses how to produce the object. Below its single-request threshold, it reads the sources and the tail in bounded chunks, and creates the object with one request. Above that threshold, the provider copies what it can, and the adapter reads the rest. An adapter buffers at most one part window or one read chunk.
 
@@ -88,7 +88,7 @@ Validation, folds, direct downloads, uploads, and imports each take one content-
 
 A fold's objects stay [rooted](../specs/glossary.md#content-root) while a fold can still need them. The unfolded tail refers to its pieces, and to the extents in its layout rows. After folding, a rooted manifest's revisions refer to the layouts whose extents keep those objects (see [Content roots](../specs/format.md#119-content-roots)). A fold that crashes, exceeds its budget, or loses the manifest race leaves objects that the next fold can reuse. An immutable write to a key that's already occupied succeeds when the existing object has the same stored checksum. If the bytes are different, the fold stops without publishing.
 
-A fold can pause between reading a tail and writing its content, and the namespace can be deleted and swept in the meantime. A fold call reads a fresh manifest, but a writer's own fold starts from its retained view, and neither one checks its publication budget until its content writes return. So a content object can be written after a sweep. It's found the same way as a late upload, because every later pass on the family root lists the content prefix again, and so does the family root's retirement sweep (see [Sweeping a retired owner's content](../specs/format.md#118-sweeping-a-retired-owners-content)).
+A fold can pause between reading a tail and writing its content, and the namespace can be deleted and swept in the meantime. A fold call reads a fresh manifest, but a writer's own fold starts from its retained view, and neither one checks its publication budget until its content writes return. So a content object can be written after a collection lists the content prefix. It's found the same way as a late upload, because every later collection on the family root lists the content prefix again, and so does the family root's retirement (see [Deleting a retired owner's content](../specs/format.md#118-deleting-a-retired-owners-content)).
 
 A fold becomes due when the unfolded tail reaches 256 WAL objects, when its WAL bytes reach 8 MiB, or when the tail's newest commit reaches the idle fold age (`idle_fold_after_ms`, 15 minutes by default), as [Folding and compacting a namespace](maintenance-hosting.md#folding-and-compacting-a-namespace) describes.
 
@@ -98,7 +98,7 @@ Why is there a byte trigger? It limits how much a cold reader has to download to
 
 Garbage collection has no separate object family for inline content. It deletes WAL objects at or below `folded_wal_no`, and the fold writes inline bytes to content objects before it publishes that boundary.
 
-A content object that a fold or an early direct download wrote is collected like any other content object. The unfolded WAL tail refers to it until a manifest covers it, and a rooted manifest's revisions refer to it after that. Upload sessions aren't involved in an inline write. A rejected or interrupted publication can leave a materialized extent behind, and garbage collection removes it after the grace once no root refers to it.
+A content object that a fold or an early direct download wrote is collected like any other content object. The unfolded WAL tail refers to it until a manifest covers it, and a rooted manifest's revisions refer to it after that. Upload sessions aren't involved in an inline write. A rejected or interrupted publication can leave a materialized extent behind, and garbage collection removes it after the grace window once no root refers to it.
 
 ## Costs
 
@@ -114,7 +114,7 @@ Inline content has these costs:
 
 ## Threshold measurements
 
-The defaults come from a lab sweep that compared thresholds of 1, 4, 16, and 64 KiB with the uploaded path. At p50, every size was at least three times faster than the uploaded path. The sweep stops at 64 KiB because small-object PUT latency is flat up to about that size. At 64 KiB, warm writes were three times faster at p50 and twice as fast at p90, and the read after a write made no content request.
+The defaults come from a lab experiment that compared thresholds of 1, 4, 16, and 64 KiB with the uploaded path. At p50, every size was at least three times faster than the uploaded path. The experiment stops at 64 KiB because small-object PUT latency is flat up to about that size. At 64 KiB, warm writes were three times faster at p50 and twice as fast at p90, and the read after a write made no content request.
 
 Cold-stat time and fold time grew with the tail. The tails in this table were made of 4 KiB files, and the cold-stat times are compared with a folded namespace:
 
@@ -124,7 +124,7 @@ Cold-stat time and fold time grew with the tail. The tails in this table were ma
 | 8 MiB | about 1.0 s | about 7 s |
 | 32 MiB | about 2.6 s | about 19 s |
 
-Based on that result, the fold threshold is 2 MiB. The sweep is `analysis/inline-content-sweep-20260918.md` in the lab repository.
+Based on that result, the fold threshold is 2 MiB. The experiment's write-up is `analysis/inline-content-sweep-20260918.md` in the lab repository.
 
 ## Alternatives considered
 

@@ -1,6 +1,6 @@
 # Optional access control
 
-A namespace can have per-item access grants, which LoonFS core enforces on reads and writes. Grants are ordinary metadata. They're published through the WAL, materialized into a row family, retained like attributes, and evaluated against the same view that a commit is validated against. The application is responsible for identity, group membership, role names, and sharing workflows. Core defines the stable set of rights, stores the grants and the inheritance boundaries, and evaluates every access check.
+A namespace can have per-item access grants, which LoonFS core enforces on reads and writes. Grants are ordinary metadata. They're published through the WAL, folded into a row family, retained like attributes, and evaluated against the same view that a commit is validated against. The application is responsible for identity, group membership, role names, and sharing workflows. Core defines the stable set of rights, stores the grants and the inheritance boundaries, and evaluates every access check.
 
 A namespace's access mode is set when the namespace is created, and it can't be changed. In the default unrestricted mode, the bearer token identifies the backend, the backend authorizes callers for whole namespaces, and core doesn't look up any permissions. In an ACL (access control list) namespace, per-subject operations require a subject context. No setting makes an ACL namespace unrestricted.
 
@@ -119,13 +119,13 @@ This rule has several consequences:
 - One evaluation at the moved inode covers the subtree. Descendants below a boundary aren't affected, and descendants with direct grants gain at most what the moved inode gains.
 - The check costs two ancestor walks and no descendant scan, and it writes no rows. The conferred rights are inherited from the destination.
 
-An undelete to a destination other than the original parent uses the same rule, with the saved original parent as the source. An undelete in place confers nothing.
+A restore to a destination other than the original parent uses the same rule, with the saved original parent as the source. A restore in place confers nothing.
 
 ## Recursive deletion
 
 Deleting a directory writes one subtree tombstone and doesn't inspect any descendants. So a limited-access boundary protects confidentiality, but it doesn't stop an authorized manager of an ancestor from making the subtree unavailable with a recoverable deletion.
 
-The deleter never sees the restricted subtree's bytes or names. Anyone with `remove` on the original parent can recover the deletion. A restricted descendant's manager might need an ancestor's manager or an administrator to restore the deletion root, because only the root of a deletion can be undeleted. Permanent erasure is outside this permission model.
+The deleter never sees the restricted subtree's bytes or names. Anyone with `remove` on the original parent can restore the deletion. A restricted descendant's manager might need an ancestor's manager or an administrator to restore the deletion root, because only the root of a deletion can be restored. Permanent erasure is outside this permission model.
 
 There's no server-side operation for a recursive copy or a recursive read. The CLI performs them as sequences of ordinary operations, and each operation is authorized on its own.
 
@@ -135,7 +135,7 @@ Administrators are a right on the root inode's row, and that right changes throu
 
 LoonFS consults `admin` only in the root-row check. It never appears in a union of grants along a chain, boundaries don't apply to it, and administrator principals are skipped when LoonFS computes a move's gain. Ordinary grants on the root are still subject to boundaries, so a namespace-wide membership still respects limited-access folders.
 
-The genesis administrators come from the manifest's immutable `access` field, which the genesis view materializes as the root row at access revision 0. Later revisions replace it in commit order. For authorization, the manifest keeps only the mode and the principal scope, and neither one can be changed.
+The genesis administrators come from the manifest's immutable `access` field, which the genesis view treats as the root row at access revision 0. Later revisions replace it in commit order. For authorization, the manifest keeps only the mode and the principal scope, and neither one can be changed.
 
 Core allows removing the last administrator, and warning the user is the application's job. The `recover_administrator` maintenance job restores an administrator. It publishes a root-row access revision through the writer, attributed to the request's actor, without a subject check. That revision is a commit, so it's ordered like every other commit.
 

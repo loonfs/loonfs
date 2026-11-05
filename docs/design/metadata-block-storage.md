@@ -1,10 +1,10 @@
 # Metadata block storage
 
-LoonFS stores filesystem metadata in immutable segments, arranged as a log-structured merge tree. Each namespace manifest describes the complete set of segments needed to reconstruct its materialized state. Recent changes are read from the write-ahead log (WAL) until a fold writes them into new segments.
+LoonFS stores filesystem metadata in immutable segments, arranged in sorted runs that compaction rewrites into fewer, larger runs. Each namespace manifest describes the complete set of segments needed to reconstruct its folded state. Recent changes are read from the write-ahead log (WAL) until a fold writes them into new segments.
 
 The main storage tradeoff is between object size and read amplification. Larger objects mean fewer objects, and they can be efficient to write, but a metadata lookup shouldn't have to download a whole object. So LoonFS divides each segment into sections that can be read independently.
 
-This note explains that layout and the read path. [Block-segment encoding](../specs/format.md#a7-block-segment-encoding) in the storage format defines the durable encodings and the required behavior, and [Metadata streaming compaction](metadata-streaming-compaction.md) describes the merge implementation and its resource limits.
+This note explains that layout and the read path. [Block-segment encoding](../specs/format.md#a7-block-segment-encoding) in the storage format defines the durable encodings and the required behavior, and [Metadata streaming compaction](metadata-streaming-compaction.md) describes the compaction implementation and its resource limits.
 
 ## Segment objects
 
@@ -56,11 +56,11 @@ The index contains the last row key and the block handle of each data block. A b
 
 For example, a directory lookup might overlap the descriptor ranges of several delta runs. The inline filters can rule out some of those segments without a fetch, and the indexes of the remaining segments identify the relevant blocks. So the read doesn't have to download every segment whose broad key range overlaps the directory.
 
-A key can also have rows in several runs. For example, a file that's written once before each of seven folds has a revision in each of the seven runs that those folds write, and the filters of all seven runs admit the file's key (none of the filters can show that its run has no row for the key). A lookup for the newest fact about a key (a file's latest revision, the newest version of a name's [directory binding](../specs/glossary.md#directory-binding-direntry), or an inode's newest attributes or access row) needs only the newest of those runs. Each run covers its own range of commits, and a compaction puts its output run at the position of the runs that it merged, so a newer run's rows for a key are newer than every older run's rows for that key. ([Compaction windows](../specs/format.md#102-compaction-windows) in the storage format defines that order.)
+A key can also have rows in several runs. For example, a file that's written once before each of seven folds has a revision in each of the seven runs that those folds write, and the filters of all seven runs admit the file's key (none of the filters can show that its run has no row for the key). A lookup for the newest fact about a key (a file's latest revision, the newest version of a name's [directory binding](../specs/glossary.md#directory-binding-direntry), or an inode's newest attributes or access row) needs only the newest of those runs. Each run covers its own range of commits, and a compaction puts its output run at the position of the runs that it rewrote, so a newer run's rows for a key are newer than every older run's rows for that key. ([Compaction windows](../specs/format.md#102-compaction-windows) in the storage format defines that order.)
 
-So LoonFS checks the filters of every run, then reads the admitted runs one at a time, newest first, and stops at the first run that has a row for the key. A run whose filter admitted the key by a false positive has no rows for the key, and the lookup goes on to the next run. For a read that sees every row of the manifest, LoonFS then applies the visibility rules to the rows of that one run, as it would to the merged rows of every run. A read whose sequence is below some run's sequence still merges the rows of every admitted run for a binding, attribute, or access lookup, because the newest run's rows for the key could all be newer than the read. In the example, a lookup of the file's latest revision sends one GET instead of seven with a cold cache, and with a warm cache it reads the index and data blocks of one run from the cache instead of seven runs' blocks, and decodes nothing.
+So LoonFS checks the filters of every run, then reads the admitted runs one at a time, newest first, and stops at the first run that has a row for the key. A run whose filter admitted the key by a false positive has no rows for the key, and the lookup goes on to the next run. For a read that sees every row of the manifest, LoonFS then applies the visibility rules to the rows of that one run, as it would to the combined rows of every run. A read whose sequence is below some run's sequence still combines the rows of every admitted run for a binding, attribute, or access lookup, because the newest run's rows for the key could all be newer than the read. In the example, a lookup of the file's latest revision sends one GET instead of seven with a cold cache, and with a warm cache it reads the index and data blocks of one run from the cache instead of seven runs' blocks, and decodes nothing.
 
-A lookup that needs every fact for a key, such as a file's revision listing or a tombstone check, still merges the rows of every run.
+A lookup that needs every fact for a key, such as a file's revision listing or a tombstone check, still combines the rows of every run.
 
 Why read one run at a time instead of several at once? The newest admitted run has a row for the key unless its filter admitted the key by a false positive, and a filter does that for about 1% of the keys that its run doesn't have. So reading more runs at once would mostly fetch blocks that the lookup then discards. A false positive costs the lookup one more round trip.
 
@@ -78,9 +78,9 @@ These optimizations are limited to the read path. They don't change block bounda
 
 ## Folds and compaction
 
-A fold and a compaction both publish manifests, but they do different work. A fold materializes the visible WAL tail into a new run, which is a delta run, except for the first fold over an empty manifest. The number of rows a fold encodes is proportional to the changes since the previous fold, but the complete manifest still describes the whole retained file set. A compaction merges complete runs of one family group, and the runs outside its window stay referenced without being rewritten.
+A fold and a compaction both publish manifests, but they do different work. A fold writes the visible WAL tail into a new run, which is a delta run, except for the first fold over an empty manifest. The number of rows a fold encodes is proportional to the changes since the previous fold, but the complete manifest still describes the whole retained metadata. A compaction rewrites complete runs of one family group, and the runs outside its window stay referenced without being rewritten.
 
-Each published file set replaces the previous one when the put-if-absent of the next numbered manifest succeeds, and readers keep using the earlier manifest until then. [Retention and compaction](../specs/format.md#10-retention-and-compaction) in the storage format defines where a merged run is placed and which rows it can remove. [Metadata streaming compaction](metadata-streaming-compaction.md) describes window selection, resource bounds, and restart behavior.
+Each published manifest replaces the previous one when the put-if-absent of the next numbered manifest succeeds, and readers keep using the earlier manifest until then. [Retention and compaction](../specs/format.md#10-retention-and-compaction) in the storage format defines where a compaction's output run is placed and which rows the compaction can remove. [Metadata streaming compaction](metadata-streaming-compaction.md) describes window selection, resource bounds, and restart behavior.
 
 ## Constants and tunables
 
@@ -98,7 +98,7 @@ Block sizes, segment targets, the scan refill, and ordinary maintenance budgets 
 | Segment row target | 65,536 rows | Segments are also split by row count. |
 | Filter | 10 bits per key | A filter has at least 64 bits. |
 | Extent filter | 20 bits per key | An extent filter has at least 64 bits. |
-| Merge input limit | 8 complete runs | A merge reads at most eight complete runs. |
+| Compaction input limit | 8 complete runs | A compaction reads at most eight complete runs. |
 | Decoded input memory | 64 MiB decoded SST data | Every compaction keeps at most this much decoded data-block memory across its open inputs. This budget is separate from the size-tiering decisions, which use stored bytes. |
 
 Changing a writer target is different from changing the stored encoding. Readers interpret the actual handles and lengths in each descriptor. The targets don't replace decoder validation or the resource limits that readers enforce.
