@@ -174,10 +174,7 @@ async fn proxied_references_match_stored_checksums_and_appends_combine_without_c
                 CommitId::generate(),
                 FilesystemOperation::PutFile {
                     path: path.clone(),
-                    content: loonfs_types::FileContent::Ref {
-                        content_ref: reference.clone(),
-                        source_namespace_id: None,
-                    },
+                    content: loonfs_types::FileContent::Ref(reference.clone()),
                     behavior: DestinationBehavior::NoReplace,
                     expected_inode_id: None,
                     expected_revision_no: None,
@@ -1001,10 +998,9 @@ mod direct_multipart {
             CommitId::generate(),
             FilesystemOperation::PutFile {
                 path: path.clone(),
-                content: loonfs_types::FileContent::Ref {
-                    content_ref: completed.content_ref().cloned().expect("completed content"),
-                    source_namespace_id: None,
-                },
+                content: loonfs_types::FileContent::Ref(
+                    completed.content_ref().cloned().expect("completed content"),
+                ),
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,

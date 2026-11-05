@@ -398,10 +398,9 @@ fn content_fingerprint_input<'a>(
     inline_content_identities: &BTreeMap<ContentId, InlineContentIdentity>,
 ) -> ContentRefFingerprintInput<'a> {
     match content {
-        FileContent::Ref {
-            content_ref: reference,
-            ..
-        } => content_ref_fingerprint_input(reference, inline_content_identities),
+        FileContent::Ref(reference) => {
+            content_ref_fingerprint_input(reference, inline_content_identities)
+        }
         FileContent::Inline(bytes) => InlineContentIdentity::from_bytes(bytes).preimage(),
     }
 }
@@ -1381,10 +1380,7 @@ mod tests {
         );
         let operation = |expected_inode_id, expected_revision_no| FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/docs/report.txt").expect("path"),
-            content: FileContent::Ref {
-                content_ref: content_ref.clone(),
-                source_namespace_id: None,
-            },
+            content: FileContent::Ref(content_ref.clone()),
             behavior: DestinationBehavior::Replace,
             expected_inode_id,
             expected_revision_no,
@@ -1495,10 +1491,7 @@ mod tests {
     fn put(path: &str, content_ref: ContentRef) -> FilesystemOperation {
         FilesystemOperation::PutFile {
             path: AbsolutePath::parse(path).expect("path"),
-            content: FileContent::Ref {
-                content_ref,
-                source_namespace_id: None,
-            },
+            content: FileContent::Ref(content_ref),
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -1624,10 +1617,7 @@ mod tests {
                     message: options.commit.message.as_deref(),
                     operations: &[FilesystemOperation::PutFile {
                         path: path.clone(),
-                        content: FileContent::Ref {
-                            content_ref: content_ref.clone(),
-                            source_namespace_id: None,
-                        },
+                        content: FileContent::Ref(content_ref.clone()),
                         behavior: options.behavior,
                         expected_inode_id: options.expected_inode_id,
                         expected_revision_no: options.expected_revision_no,

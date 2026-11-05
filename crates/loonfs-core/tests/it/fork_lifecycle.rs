@@ -574,10 +574,7 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
         commit_id("seed-shared"),
         FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/docs/shared.txt").expect("path"),
-            content: loonfs_types::FileContent::Ref {
-                content_ref: source_ref,
-                source_namespace_id: None,
-            },
+            content: loonfs_types::FileContent::Ref(source_ref),
             behavior: DestinationBehavior::Replace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -734,10 +731,7 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
         commit_id("clone-after-fork"),
         FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/docs/shared.txt").expect("path"),
-            content: loonfs_types::FileContent::Ref {
-                content_ref: uploaded_ref.clone(),
-                source_namespace_id: None,
-            },
+            content: loonfs_types::FileContent::Ref(uploaded_ref.clone()),
             behavior: DestinationBehavior::Replace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -1301,10 +1295,7 @@ async fn namespace_delete_blocks_reads_writes_and_forks() {
         CommitId::parse("before-delete").expect("valid commit id"),
         FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/keep.txt").expect("path"),
-            content: loonfs_types::FileContent::Ref {
-                content_ref: content.content_ref().clone(),
-                source_namespace_id: None,
-            },
+            content: loonfs_types::FileContent::Ref(content.content_ref().clone()),
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -1341,10 +1332,7 @@ async fn namespace_delete_blocks_reads_writes_and_forks() {
         CommitId::parse("after-delete").expect("valid commit id"),
         FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/late.txt").expect("path"),
-            content: loonfs_types::FileContent::Ref {
-                content_ref: content.content_ref().clone(),
-                source_namespace_id: None,
-            },
+            content: loonfs_types::FileContent::Ref(content.content_ref().clone()),
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,

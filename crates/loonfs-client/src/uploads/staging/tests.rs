@@ -1193,10 +1193,7 @@ async fn a_lost_commit_ack_replays_the_saved_request_without_reopening_the_uploa
         saved.operations,
         vec![FilesystemOperation::PutFile {
             path: spec().absolute_path().clone(),
-            content: loonfs_types::FileContent::Ref {
-                content_ref: uploaded,
-                source_namespace_id: None
-            },
+            content: loonfs_types::FileContent::Ref(uploaded),
             behavior: options.behavior,
             expected_inode_id: options.expected_inode_id,
             expected_revision_no: options.expected_revision_no,

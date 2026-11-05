@@ -4,9 +4,9 @@ use loonfs::publish::{CommitCandidate, CommitIntent};
 use loonfs::test_support::maintenance_past_the_grace_window;
 use loonfs::{
     ActorId, AdvanceRetentionFloorOptions, AdvanceRetentionResponse, ChangeSeq, Commit,
-    CompleteUploadBody, ContentRef, DeleteOptions, DirectoryPageCursor, Error, ErrorCode,
-    FileBytes, FileRevisionsPager, FoldWalResponse, InodeChildrenPager, ListChangesResponse,
-    LoonFs, LoonFsBuilder, MaintainMetadataOptions, MaintainMetadataReport, Maintenance, Namespace,
+    CompleteUploadBody, DeleteOptions, DirectoryPageCursor, Error, ErrorCode, FileBytes,
+    FileRevisionsPager, FoldWalResponse, InodeChildrenPager, ListChangesResponse, LoonFs,
+    LoonFsBuilder, MaintainMetadataOptions, MaintainMetadataReport, Maintenance, Namespace,
     NamespaceDiagnostics, NamespaceId, PathEntriesPager, PathEntry, PutFileOptions, ReadOnly,
     SharedObjectStore, Snapshot, UploadId, UploadSession, Writable,
 };
@@ -333,20 +333,6 @@ impl TestRuntime {
         let namespace = self.namespace_writer(namespace_id)?;
         namespace
             .put_file_with_options(absolute_path, bytes, actor, options)
-            .await
-    }
-
-    /// Imports `content_ref` from `namespace_id` itself into a file there.
-    pub(crate) async fn put_file_content_ref(
-        &self,
-        namespace_id: &NamespaceId,
-        absolute_path: &str,
-        content_ref: ContentRef,
-        actor: &ActorId,
-    ) -> loonfs::Result<Commit> {
-        let namespace = self.namespace_writer(namespace_id)?;
-        namespace
-            .put_file_content_ref(absolute_path, content_ref, namespace_id, actor)
             .await
     }
 

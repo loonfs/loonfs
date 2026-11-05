@@ -168,10 +168,7 @@ impl BindingChange {
                 Some(content_ref) => FilesystemOperation::CreateFileByInode {
                     parent_inode_id: *parent_inode_id,
                     display_name: display_name.clone(),
-                    content: loonfs_types::FileContent::Ref {
-                        content_ref: content_ref.clone(),
-                        source_namespace_id: None,
-                    },
+                    content: loonfs_types::FileContent::Ref(content_ref.clone()),
                 },
                 None => FilesystemOperation::CreateDirectoryByInode {
                     parent_inode_id: *parent_inode_id,
@@ -225,10 +222,7 @@ pub(super) fn revision_update(
 ) -> FilesystemOperation {
     FilesystemOperation::PutFileRevisionByInode {
         inode_id,
-        content: loonfs_types::FileContent::Ref {
-            content_ref: ours.content_ref.clone(),
-            source_namespace_id: None,
-        },
+        content: loonfs_types::FileContent::Ref(ours.content_ref.clone()),
         expected_revision_no: theirs.revision_no,
     }
 }

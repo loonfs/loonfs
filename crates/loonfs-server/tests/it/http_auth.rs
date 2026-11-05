@@ -48,7 +48,7 @@ fn assert_content_not_prepared_response(
 
 fn missing_content_proof_message(request: &CommitRequest) -> String {
     let [FilesystemOperation::PutFile {
-        content: loonfs_types::FileContent::Ref { content_ref, .. },
+        content: loonfs_types::FileContent::Ref(content_ref),
         ..
     }] = &request.operations[..]
     else {
@@ -64,7 +64,7 @@ fn missing_content_proof_message(request: &CommitRequest) -> String {
 /// entry per content ref, naming the ref and why its token was refused.
 fn rejected_content_token_message(request: &CommitRequest, reason: &str) -> String {
     let [FilesystemOperation::PutFile {
-        content: loonfs_types::FileContent::Ref { content_ref, .. },
+        content: loonfs_types::FileContent::Ref(content_ref),
         ..
     }] = &request.operations[..]
     else {
@@ -126,10 +126,7 @@ async fn path_puts_without_a_proof_for_their_content_fail_content_not_prepared()
             content_tokens,
             operations: vec![FilesystemOperation::PutFile {
                 path: AbsolutePath::parse(format!("/{label}.txt")).expect("path"),
-                content: loonfs_types::FileContent::Ref {
-                    content_ref: staged.content_ref.clone(),
-                    source_namespace_id: None,
-                },
+                content: loonfs_types::FileContent::Ref(staged.content_ref.clone()),
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,
@@ -173,10 +170,7 @@ async fn committed_path_put_replays_after_content_token_is_absent_rejected_or_ga
         content_tokens: vec![content_token(&completed)],
         operations: vec![FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/token-replay.txt").expect("path"),
-            content: loonfs_types::FileContent::Ref {
-                content_ref: completed.content_ref,
-                source_namespace_id: None,
-            },
+            content: loonfs_types::FileContent::Ref(completed.content_ref),
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -256,10 +250,7 @@ async fn puts_with_a_valid_token_reuse_the_ref_and_ignore_irrelevant_tokens() {
         ],
         operations: vec![FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/first.txt").expect("path"),
-            content: loonfs_types::FileContent::Ref {
-                content_ref: first.content_ref.clone(),
-                source_namespace_id: None,
-            },
+            content: loonfs_types::FileContent::Ref(first.content_ref.clone()),
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -288,10 +279,7 @@ async fn puts_with_a_valid_token_reuse_the_ref_and_ignore_irrelevant_tokens() {
         content_tokens: vec![content_token(&first)],
         operations: vec![FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/first-copy.txt").expect("path"),
-            content: loonfs_types::FileContent::Ref {
-                content_ref: first.content_ref.clone(),
-                source_namespace_id: None,
-            },
+            content: loonfs_types::FileContent::Ref(first.content_ref.clone()),
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,

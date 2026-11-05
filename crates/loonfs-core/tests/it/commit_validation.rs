@@ -23,10 +23,7 @@ use tempfile::tempdir;
 fn put_file(absolute_path: &str, content_ref: loonfs_types::ContentRef) -> FilesystemOperation {
     FilesystemOperation::PutFile {
         path: AbsolutePath::parse(absolute_path).expect("path"),
-        content: loonfs_types::FileContent::Ref {
-            content_ref,
-            source_namespace_id: None,
-        },
+        content: loonfs_types::FileContent::Ref(content_ref),
         behavior: DestinationBehavior::NoReplace,
         expected_inode_id: None,
         expected_revision_no: None,
@@ -531,10 +528,7 @@ async fn restore_revision_does_not_revalidate_retained_content_before_publish() 
         commit_id("restore-replace"),
         FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/restore.txt").expect("path"),
-            content: loonfs_types::FileContent::Ref {
-                content_ref: second.into_content_ref(),
-                source_namespace_id: None,
-            },
+            content: loonfs_types::FileContent::Ref(second.into_content_ref()),
             behavior: DestinationBehavior::Replace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -638,10 +632,7 @@ async fn a_put_with_preconditions_reports_missing_content_before_the_stale_revis
             None,
             FilesystemOperation::PutFile {
                 path: AbsolutePath::parse("/docs/replace.txt").expect("path"),
-                content: loonfs_types::FileContent::Ref {
-                    content_ref: missing_content.clone(),
-                    source_namespace_id: None,
-                },
+                content: loonfs_types::FileContent::Ref(missing_content.clone()),
                 behavior: DestinationBehavior::Replace,
                 expected_inode_id: Some(observed.inode_id),
                 expected_revision_no: Some(RevisionNo(99)),
@@ -997,10 +988,7 @@ async fn a_revision_precondition_observes_an_earlier_operation_of_the_same_reque
     let replace =
         |content_ref: loonfs_types::ContentRef, expected: u64| FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/docs/with_preconditions.txt").expect("path"),
-            content: loonfs_types::FileContent::Ref {
-                content_ref,
-                source_namespace_id: None,
-            },
+            content: loonfs_types::FileContent::Ref(content_ref),
             behavior: DestinationBehavior::Replace,
             expected_inode_id: Some(observed.inode_id),
             expected_revision_no: Some(RevisionNo(expected)),

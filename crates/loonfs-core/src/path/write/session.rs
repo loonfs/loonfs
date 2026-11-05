@@ -440,10 +440,7 @@ mod tests {
                 None,
                 FilesystemOperation::PutFile {
                     path: AbsolutePath::parse(absolute_path).expect("path"),
-                    content: loonfs_types::FileContent::Ref {
-                        content_ref: content_ref.clone(),
-                        source_namespace_id: None,
-                    },
+                    content: loonfs_types::FileContent::Ref(content_ref.clone()),
                     behavior: DestinationBehavior::NoReplace,
                     expected_inode_id: None,
                     expected_revision_no: None,
@@ -586,10 +583,7 @@ mod tests {
             None,
             FilesystemOperation::PutFile {
                 path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-                content: loonfs_types::FileContent::Ref {
-                    content_ref: staged.content_ref().clone(),
-                    source_namespace_id: None,
-                },
+                content: loonfs_types::FileContent::Ref(staged.content_ref().clone()),
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,
@@ -611,10 +605,7 @@ mod tests {
             None,
             FilesystemOperation::PutFile {
                 path: AbsolutePath::parse("/docs/b.txt").expect("path"),
-                content: loonfs_types::FileContent::Ref {
-                    content_ref: staged.content_ref().clone(),
-                    source_namespace_id: None,
-                },
+                content: loonfs_types::FileContent::Ref(staged.content_ref().clone()),
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,

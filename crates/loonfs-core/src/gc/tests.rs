@@ -970,10 +970,7 @@ async fn put_file_content_with_id<S: ObjectStore>(
                 None,
                 FilesystemOperation::PutFile {
                     path: loonfs_types::AbsolutePath::parse(path).expect("path"),
-                    content: loonfs_types::FileContent::Ref {
-                        content_ref: content_ref.clone(),
-                        source_namespace_id: None,
-                    },
+                    content: loonfs_types::FileContent::Ref(content_ref.clone()),
                     behavior: loonfs_types::DestinationBehavior::Replace,
                     expected_inode_id: None,
                     expected_revision_no: None,
@@ -1020,10 +1017,7 @@ async fn publish_inline(
         None,
         FilesystemOperation::PutFile {
             path: loonfs_types::AbsolutePath::parse(format!("/owned-{index}")).expect("path"),
-            content: loonfs_types::FileContent::Ref {
-                content_ref: value.content_ref().clone(),
-                source_namespace_id: None,
-            },
+            content: loonfs_types::FileContent::Ref(value.content_ref().clone()),
             behavior: loonfs_types::DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,

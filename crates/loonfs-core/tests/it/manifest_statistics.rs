@@ -61,30 +61,21 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
             },
             FilesystemOperation::PutFile {
                 path: AbsolutePath::parse("/a/b/file").expect("path"),
-                content: loonfs_types::FileContent::Ref {
-                    content_ref: content.content_ref().clone(),
-                    source_namespace_id: None,
-                },
+                content: loonfs_types::FileContent::Ref(content.content_ref().clone()),
                 behavior: DestinationBehavior::Replace,
                 expected_inode_id: None,
                 expected_revision_no: None,
             },
             FilesystemOperation::PutFile {
                 path: AbsolutePath::parse("/a/b/file").expect("path"),
-                content: loonfs_types::FileContent::Ref {
-                    content_ref: content.content_ref().clone(),
-                    source_namespace_id: None,
-                },
+                content: loonfs_types::FileContent::Ref(content.content_ref().clone()),
                 behavior: DestinationBehavior::Replace,
                 expected_inode_id: None,
                 expected_revision_no: None,
             },
             FilesystemOperation::PutFile {
                 path: AbsolutePath::parse("/a/b/empty").expect("path"),
-                content: loonfs_types::FileContent::Ref {
-                    content_ref: empty.content_ref().clone(),
-                    source_namespace_id: None,
-                },
+                content: loonfs_types::FileContent::Ref(empty.content_ref().clone()),
                 behavior: DestinationBehavior::Replace,
                 expected_inode_id: None,
                 expected_revision_no: None,

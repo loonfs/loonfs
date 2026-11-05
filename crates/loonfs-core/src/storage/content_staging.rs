@@ -68,12 +68,6 @@ impl ContentKeyOwner<'_> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum StreamedPayloadKind {
-    Request,
-    ContentImport,
-}
-
 /// Stages and hashes a payload under the prefix of `family_root_id`, without
 /// buffering the complete stream.
 ///
@@ -87,7 +81,6 @@ pub(crate) async fn stage_streamed_under_content_id<S: ObjectStore + ?Sized>(
     family_root_id: &NamespaceId,
     content_id: ContentId,
     body: ByteStream,
-    payload_kind: StreamedPayloadKind,
     owner: ContentKeyOwner<'_>,
     check_ownership: impl Future<Output = Result<()>>,
 ) -> Result<ContentRef> {
@@ -166,11 +159,6 @@ pub(crate) async fn stage_streamed_under_content_id<S: ObjectStore + ?Sized>(
                 Ok(_) => Ok(content_ref),
                 Err(error) => Err(owner.store_error(&object_key, &error)),
             }
-        }
-        Err(ObjectStoreError::BodyAborted(message))
-            if payload_kind == StreamedPayloadKind::ContentImport =>
-        {
-            Err(CoreError::NamespaceCorrupt(message))
         }
         Err(error) => Err(owner.store_error(&object_key, &error)),
     }

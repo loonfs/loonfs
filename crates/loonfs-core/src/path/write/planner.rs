@@ -330,10 +330,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
 
 fn prepared_reference(content: &FileContent) -> Result<&loonfs_types::ContentRef> {
     match content {
-        FileContent::Ref {
-            content_ref: reference,
-            ..
-        } => Ok(reference),
+        FileContent::Ref(reference) => Ok(reference),
         FileContent::Inline(_) => Err(CoreError::InvalidCommitRequest(
             "content must be prepared before planning".to_owned(),
         )),
@@ -388,10 +385,7 @@ mod tests {
     ) -> FilesystemOperation {
         FilesystemOperation::PutFile {
             path: AbsolutePath::parse(path).expect("path"),
-            content: loonfs_types::FileContent::Ref {
-                content_ref: content_ref.clone(),
-                source_namespace_id: None,
-            },
+            content: loonfs_types::FileContent::Ref(content_ref.clone()),
             behavior,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -579,10 +573,7 @@ mod tests {
             &namespace_id,
             &request(FilesystemOperation::PutFile {
                 path: AbsolutePath::parse("/dead/new.txt").expect("path"),
-                content: loonfs_types::FileContent::Ref {
-                    content_ref: staged.into_content_ref(),
-                    source_namespace_id: None,
-                },
+                content: loonfs_types::FileContent::Ref(staged.into_content_ref()),
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,
@@ -612,10 +603,7 @@ mod tests {
                     create_dir("/reports"),
                     FilesystemOperation::PutFile {
                         path: AbsolutePath::parse("/reports/a.txt").expect("path"),
-                        content: loonfs_types::FileContent::Ref {
-                            content_ref: staged.content_ref().clone(),
-                            source_namespace_id: None,
-                        },
+                        content: loonfs_types::FileContent::Ref(staged.content_ref().clone()),
                         behavior: DestinationBehavior::NoReplace,
                         expected_inode_id: None,
                         expected_revision_no: None,
@@ -707,10 +695,7 @@ mod tests {
                     },
                     FilesystemOperation::PutFile {
                         path: AbsolutePath::parse("/docs/tmp.txt").expect("path"),
-                        content: loonfs_types::FileContent::Ref {
-                            content_ref: staged.content_ref().clone(),
-                            source_namespace_id: None,
-                        },
+                        content: loonfs_types::FileContent::Ref(staged.content_ref().clone()),
                         behavior: DestinationBehavior::NoReplace,
                         expected_inode_id: None,
                         expected_revision_no: None,

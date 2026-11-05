@@ -417,10 +417,7 @@ mod tests {
                     None,
                     FilesystemOperation::PutFile {
                         path: AbsolutePath::parse(format!("/{name}")).expect("path"),
-                        content: loonfs_types::FileContent::Ref {
-                            content_ref: content_ref.clone(),
-                            source_namespace_id: None,
-                        },
+                        content: loonfs_types::FileContent::Ref(content_ref.clone()),
                         behavior: loonfs_types::DestinationBehavior::NoReplace,
                         expected_inode_id: None,
                         expected_revision_no: None,

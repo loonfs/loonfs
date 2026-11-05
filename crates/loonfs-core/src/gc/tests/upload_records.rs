@@ -30,10 +30,7 @@ async fn commit_upload<S: ObjectStore>(
                 None,
                 FilesystemOperation::PutFile {
                     path: loonfs_types::AbsolutePath::parse(path).expect("path"),
-                    content: loonfs_types::FileContent::Ref {
-                        content_ref,
-                        source_namespace_id: None,
-                    },
+                    content: loonfs_types::FileContent::Ref(content_ref),
                     behavior: loonfs_types::DestinationBehavior::Replace,
                     expected_inode_id: None,
                     expected_revision_no: None,

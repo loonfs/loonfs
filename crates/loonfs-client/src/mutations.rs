@@ -284,14 +284,7 @@ impl Client {
                 upload_id,
                 content_ref,
                 content_token,
-            } => (
-                FileContent::Ref {
-                    content_ref,
-                    source_namespace_id: None,
-                },
-                content_token,
-                upload_id,
-            ),
+            } => (FileContent::Ref(content_ref), content_token, upload_id),
         };
         let mut request = CommitRequest::with_operations(commit, vec![operation(content)]);
         request.content_tokens = content_token.into_iter().collect();

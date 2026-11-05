@@ -233,14 +233,11 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
                             "d/".repeat(loonfs_types::MAX_PATH_DEPTH - 1)
                         ))
                         .expect("path"),
-                        content: loonfs_types::FileContent::Ref {
-                            content_ref: if kind == "inline" {
-                                inline.content_ref().clone()
-                            } else {
-                                content_ref.clone()
-                            },
-                            source_namespace_id: None,
-                        },
+                        content: loonfs_types::FileContent::Ref(if kind == "inline" {
+                            inline.content_ref().clone()
+                        } else {
+                            content_ref.clone()
+                        }),
                         behavior: DestinationBehavior::NoReplace,
                         expected_inode_id: None,
                         expected_revision_no: None,
@@ -372,10 +369,7 @@ fn a_merges_bound_includes_the_layouts_of_its_proofs() {
         FilesystemOperation::CreateFileByInode {
             parent_inode_id: ROOT_INODE_ID,
             display_name: DisplayName::parse("merged.txt").expect("name"),
-            content: loonfs_types::FileContent::Ref {
-                content_ref: content_ref.clone(),
-                source_namespace_id: None,
-            },
+            content: loonfs_types::FileContent::Ref(content_ref.clone()),
         },
     );
     let merge = |proofs| {

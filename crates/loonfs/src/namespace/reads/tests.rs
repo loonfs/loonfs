@@ -157,10 +157,7 @@ async fn create_compacted_directory(
                         .expect("file path");
                 let put = FilesystemOperation::PutFile {
                     path: path.clone(),
-                    content: loonfs_types::FileContent::Ref {
-                        content_ref: content_ref.clone(),
-                        source_namespace_id: None,
-                    },
+                    content: loonfs_types::FileContent::Ref(content_ref.clone()),
                     behavior: DestinationBehavior::NoReplace,
                     expected_inode_id: None,
                     expected_revision_no: None,

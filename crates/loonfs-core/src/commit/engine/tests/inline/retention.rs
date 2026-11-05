@@ -19,10 +19,7 @@ fn replace(bytes: &'static [u8]) -> CommitCandidate {
             None,
             FilesystemOperation::PutFile {
                 path: AbsolutePath::parse("/file").expect("path"),
-                content: loonfs_types::FileContent::Ref {
-                    content_ref: value.content_ref().clone(),
-                    source_namespace_id: None,
-                },
+                content: loonfs_types::FileContent::Ref(value.content_ref().clone()),
                 behavior: DestinationBehavior::Replace,
                 expected_inode_id: None,
                 expected_revision_no: None,

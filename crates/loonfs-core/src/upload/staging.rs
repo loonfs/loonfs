@@ -1,5 +1,5 @@
 //! Owned staging, where the writer stages content and completes its session
-//! in one call, and imports of existing content references.
+//! in one call.
 
 use super::session::{create_upload_session_record, NewUploadSession};
 use crate::engine::{NamespaceEngine, Writable};
@@ -7,12 +7,9 @@ use crate::error::Result;
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::namespace::store::NamespaceStore;
 use crate::storage::content_admission::PreparedContent;
-use crate::storage::content_location::ContentLocation;
 use crate::storage::content_staging::{
     stage_bytes_under_content_id, stage_streamed_under_content_id, ContentKeyOwner,
-    StreamedPayloadKind,
 };
-use crate::storage::content_stream::open_content_import_reader;
 use crate::time::OperationClock;
 use loonfs_objectstore::{ByteStream, ObjectStore};
 use loonfs_types::format::control::UploadSessionPayload;
@@ -68,45 +65,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 self.own_catalog(catalog),
                 subject_id,
                 body,
-                StreamedPayloadKind::Request,
                 &self.namespace.start_clock(),
-            )
-            .await
-    }
-
-    /// Imports existing content from another fork family under a fresh
-    /// identity in this namespace's fork family.
-    ///
-    /// A reference into another fork family's prefix would point at objects
-    /// whose collection doesn't read this namespace's roots. This streams
-    /// the source bytes chunk by chunk into a new local upload session,
-    /// verifying the claimed size and checksum against what was staged, so
-    /// collection in the source's family cannot invalidate a later
-    /// publication here. `source_location` is where the source's view finds
-    /// the bytes.
-    pub async fn import_content_ref(
-        &self,
-        catalog: &VerifiedNamespaceCatalogEntry,
-        subject_id: Option<&SubjectId>,
-        content_ref: &ContentRef,
-        source_location: ContentLocation,
-    ) -> Result<PreparedContent>
-    where
-        S: Clone + 'static,
-    {
-        let catalog = self.own_catalog(catalog);
-        let clock = self.namespace.start_clock();
-        let body =
-            open_content_import_reader(self.namespace.store.clone(), source_location, content_ref)
-                .await?;
-        let _permit = self.namespace.content_writes.acquire().await;
-        self.namespace
-            .stage_owned_stream(
-                catalog,
-                subject_id,
-                body,
-                StreamedPayloadKind::ContentImport,
-                &clock,
             )
             .await
     }
@@ -123,7 +82,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
         catalog: &VerifiedNamespaceCatalogEntry,
         subject_id: Option<&SubjectId>,
         body: ByteStream,
-        payload_kind: StreamedPayloadKind,
         clock: &OperationClock,
     ) -> Result<PreparedContent> {
         let session = open_owned_staging_session(&self.store, catalog, subject_id, clock).await?;
@@ -132,7 +90,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
             catalog.family_root_id(),
             session.content_id.clone(),
             body,
-            payload_kind,
             ContentKeyOwner::FreshIdentity,
             self.ensure_session_still_open(catalog, &session.upload_id, clock),
         )

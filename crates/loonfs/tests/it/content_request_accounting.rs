@@ -8,7 +8,7 @@ use loonfs::publish::{
 };
 use loonfs::{
     CommitId, CompleteUploadBody, CoreError, DestinationBehavior, Error, ErrorCode, LoonFs,
-    NamespaceId, PutFileOptions, RevisionNo, SharedObjectStore, Writable, CONTENT_READ_CHUNK_BYTES,
+    NamespaceId, PutFileOptions, RevisionNo, SharedObjectStore, Writable,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStoreExtension;
@@ -187,10 +187,7 @@ fn put_request(commit_id: &str, path: &str, content_ref: loonfs::ContentRef) -> 
         None,
         FilesystemOperation::PutFile {
             path: parse_mutation_path(path).expect("valid mutation path"),
-            content: loonfs_types::FileContent::Ref {
-                content_ref,
-                source_namespace_id: None,
-            },
+            content: loonfs_types::FileContent::Ref(content_ref),
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -222,32 +219,6 @@ fn assert_content_not_prepared(error: impl Into<Error>, content_ref: &loonfs::Co
         )) if content_id == &content_ref.content_id,
         "content-not-prepared error should carry the rejected digest"
     );
-}
-
-#[tokio::test]
-async fn put_file_content_ref_validates_content_before_publication() {
-    let harness = TestHarness::new("content-ref-validation").await;
-    let namespace = harness
-        .writer
-        .open_namespace(&harness.namespace_id)
-        .expect("open namespace");
-    let bytes = b"pre-staged content";
-    let content_ref = harness.stage_content(bytes).await;
-    harness.recording.reset();
-
-    // The convenience method should validate the referenced content exactly
-    // once before publishing it.
-    namespace
-        .put_file_content_ref(
-            "/file.txt",
-            content_ref,
-            &harness.namespace_id,
-            &loonfs_test_support::test_actor(),
-        )
-        .await
-        .expect("publish content ref");
-
-    assert_content_counts(harness.recording.snapshot(), 0, 1, 1, bytes.len());
 }
 
 #[tokio::test]
@@ -382,109 +353,6 @@ async fn fork_and_source_reject_each_others_prepared_content() {
         .expect_err("source must reject fork proof");
     assert_content_not_prepared(error, &fork_content_ref);
     assert_content_counts(recording.snapshot(), 0, 0, 0, 0);
-}
-
-#[tokio::test]
-async fn prepare_content_ref_rejects_bytes_that_do_not_match_the_ref() {
-    let harness = TestHarness::new("content-import-mismatch").await;
-    let namespace = harness
-        .writer
-        .open_namespace(&harness.namespace_id)
-        .expect("open namespace");
-    let content_ref = harness.stage_content(b"real bytes").await;
-    let mut lying_ref = content_ref.clone();
-    lying_ref.checksum = loonfs_types::Checksum::crc64nvme(b"other bytes");
-
-    let error = namespace
-        .prepare_content_ref(lying_ref, &harness.namespace_id)
-        .await
-        .expect_err("import must reject a ref whose checksum does not match the bytes");
-    assert!(
-        error.to_string().contains("content checksum mismatch"),
-        "unexpected error: {error}"
-    );
-}
-
-#[tokio::test]
-async fn prepare_content_ref_accepts_a_matching_crc64nvme_ref() {
-    let harness = TestHarness::new("content-import-crc64nvme").await;
-    let namespace = harness
-        .writer
-        .open_namespace(&harness.namespace_id)
-        .expect("open namespace");
-    let bytes = b"direct-uploaded bytes";
-    let mut content_ref = harness.stage_content(bytes).await;
-    content_ref.checksum = loonfs_types::Checksum::crc64nvme(bytes);
-
-    let prepared = namespace
-        .prepare_content_ref(content_ref, &harness.namespace_id)
-        .await
-        .expect("import must validate with the source ref's checksum algorithm");
-
-    assert_eq!(prepared.content_ref().size_bytes, bytes.len() as u64);
-    assert_eq!(
-        prepared.content_ref().checksum,
-        loonfs_types::Checksum::crc64nvme(bytes),
-        "the destination may use its own checksum algorithm"
-    );
-}
-
-#[tokio::test]
-async fn prepare_content_ref_reads_large_sources_in_bounded_ranges() {
-    let harness = TestHarness::new("content-import-ranges").await;
-    let namespace = harness
-        .writer
-        .open_namespace(&harness.namespace_id)
-        .expect("open namespace");
-    let bytes = vec![b'x'; loonfs_types::usize_from_u64(CONTENT_READ_CHUNK_BYTES.get()) + 17];
-    let content_ref = harness.stage_content(&bytes).await;
-    harness.recording.reset();
-
-    let prepared = namespace
-        .prepare_content_ref(content_ref, &harness.namespace_id)
-        .await
-        .expect("import a source larger than one read chunk");
-
-    assert_eq!(prepared.content_ref().size_bytes, bytes.len() as u64);
-    assert_eq!(
-        prepared.content_ref().checksum,
-        loonfs_types::Checksum::crc64nvme(&bytes)
-    );
-    assert_content_counts(harness.recording.snapshot(), 0, 2, 1, bytes.len());
-}
-
-#[tokio::test]
-async fn prepare_content_ref_reads_once_and_prepared_publication_reads_nothing() {
-    let harness = TestHarness::new("prepare-content-ref").await;
-    let namespace = harness
-        .writer
-        .open_namespace(&harness.namespace_id)
-        .expect("open namespace");
-    let bytes = b"externally staged content";
-    let content_ref = harness.stage_content(bytes).await;
-    harness.recording.reset();
-
-    let prepared = namespace
-        .prepare_content_ref(content_ref.clone(), &harness.namespace_id)
-        .await
-        .expect("prepare content ref");
-
-    assert_ne!(
-        prepared.content_ref().content_id,
-        content_ref.content_id,
-        "import must mint a target-owned content identity"
-    );
-    assert_eq!(prepared.content_ref().checksum, content_ref.checksum);
-    assert_eq!(prepared.content_ref().size_bytes, content_ref.size_bytes);
-    assert_content_counts(harness.recording.snapshot(), 0, 1, 1, bytes.len());
-    harness.recording.reset();
-
-    namespace
-        .put_file_prepared("/file.txt", prepared, &loonfs_test_support::test_actor())
-        .await
-        .expect("publish prepared content ref");
-
-    assert_content_counts(harness.recording.snapshot(), 0, 0, 0, 0);
 }
 
 #[tokio::test]
@@ -640,10 +508,7 @@ async fn an_unprepared_external_ref_fails_typed_without_content_io() {
                 None,
                 FilesystemOperation::PutFile {
                     path: parse_mutation_path("/file.txt").expect("valid mutation path"),
-                    content: loonfs_types::FileContent::Ref {
-                        content_ref: content_ref.clone(),
-                        source_namespace_id: None,
-                    },
+                    content: loonfs_types::FileContent::Ref(content_ref.clone()),
                     behavior,
                     expected_inode_id: None,
                     expected_revision_no: None,
@@ -701,10 +566,7 @@ async fn prepared_commit_after_concurrent_preparations_uses_no_publication_conte
     // ref, so one proof covers both.
     let put = |path: &str, content_ref: loonfs::ContentRef| FilesystemOperation::PutFile {
         path: parse_mutation_path(path).expect("valid mutation path"),
-        content: loonfs_types::FileContent::Ref {
-            content_ref,
-            source_namespace_id: None,
-        },
+        content: loonfs_types::FileContent::Ref(content_ref),
         behavior: DestinationBehavior::NoReplace,
         expected_inode_id: None,
         expected_revision_no: None,

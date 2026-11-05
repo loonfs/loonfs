@@ -2279,7 +2279,7 @@
         "properties": {
           "content_ref": {
             "$ref": "#/components/schemas/ContentRef",
-            "description": "The content reference. Without `source_namespace_id`, the content was uploaded to this\nnamespace and a content token must cover it. Set this field or `inline_content`, but not\nboth."
+            "description": "The content reference. Set this field or `inline_content`, but not both."
           },
           "display_name": {
             "$ref": "#/components/schemas/DisplayName",
@@ -2299,10 +2299,6 @@
           "parent_inode_id": {
             "$ref": "#/components/schemas/InodeId",
             "description": "The parent directory."
-          },
-          "source_namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "The namespace to import `content_ref` from. The subject must be an administrator of that\nnamespace. Set this field only beside `content_ref`."
           }
         },
         "required": [
@@ -2462,7 +2458,7 @@
           },
           "content_ref": {
             "$ref": "#/components/schemas/ContentRef",
-            "description": "The content reference. Without `source_namespace_id`, the content was uploaded to this\nnamespace and a content token must cover it. Set this field or `inline_content`, but not\nboth."
+            "description": "The content reference. Set this field or `inline_content`, but not both."
           },
           "expected_inode_id": {
             "$ref": "#/components/schemas/InodeId",
@@ -2486,10 +2482,6 @@
           "path": {
             "$ref": "#/components/schemas/AbsolutePath",
             "description": "The absolute destination path. The operation creates any missing ancestor directories."
-          },
-          "source_namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "The namespace to import `content_ref` from. The subject must be an administrator of that\nnamespace. Set this field only beside `content_ref`."
           }
         },
         "required": [
@@ -2503,7 +2495,7 @@
         "properties": {
           "content_ref": {
             "$ref": "#/components/schemas/ContentRef",
-            "description": "The content reference. Without `source_namespace_id`, the content was uploaded to this\nnamespace and a content token must cover it. Set this field or `inline_content`, but not\nboth."
+            "description": "The content reference. Set this field or `inline_content`, but not both."
           },
           "expected_revision_no": {
             "$ref": "#/components/schemas/RevisionNo",
@@ -2523,10 +2515,6 @@
               "put_file_revision_by_inode"
             ],
             "type": "string"
-          },
-          "source_namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "The namespace to import `content_ref` from. The subject must be an administrator of that\nnamespace. Set this field only beside `content_ref`."
           }
         },
         "required": [

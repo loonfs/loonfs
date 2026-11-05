@@ -35,7 +35,7 @@ async fn matches_come_in_content_order_and_a_cursor_resumes_inside_a_value() {
     fixture.put("/shared-1.txt", b"order needle shared\n").await;
     let shared = fixture.content_ref("/shared-1.txt").await;
     for path in ["/shared-2.txt", "/shared-3.txt"] {
-        fixture.put_reference(path, &shared).await;
+        fixture.copy("/shared-1.txt", path).await;
     }
     fixture
         .host
@@ -151,13 +151,12 @@ async fn a_stale_search_keeps_its_first_pages_cut_after_the_index_moves() {
     // After the watermark, the second file takes the third's content, which
     // sorts after the first page's cursor, and the tail grows past its
     // budget.
-    let third_content = fixture.content_ref(&third).await;
     fixture
         .namespace
         .delete_path(&second, &loonfs_test_support::test_actor())
         .await
         .expect("delete the second file");
-    fixture.put_reference(&second, &third_content).await;
+    fixture.copy(&third, &second).await;
     publish_same_content_files(&fixture.namespace, "filler", 513, b"filler\n").await;
     let mut stale_request = request("pages needle");
     stale_request.allow_stale = true;
@@ -351,9 +350,7 @@ async fn a_file_deleted_at_the_cursors_sequence_stays_out_after_an_undelete() {
     let [first, last] = in_walk_order(&fixture.namespace, ["/a.txt", "/b.txt"]).await;
     // The deleted file shares the last file's content, so its place in the
     // walk is after the first page's cursor.
-    fixture
-        .put_reference("/deleted.txt", &fixture.content_ref(&last).await)
-        .await;
+    fixture.copy(&last, "/deleted.txt").await;
     let deleted = fixture
         .namespace
         .stat("/deleted.txt")

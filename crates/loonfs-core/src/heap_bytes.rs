@@ -286,10 +286,7 @@ impl HeapBytes for CommitPrecondition {
 impl HeapBytes for FileContent {
     fn heap_bytes(&self) -> usize {
         match self {
-            Self::Ref {
-                content_ref,
-                source_namespace_id,
-            } => content_ref.heap_bytes() + source_namespace_id.heap_bytes(),
+            Self::Ref(content_ref) => content_ref.heap_bytes(),
             Self::Inline(bytes) => bytes.capacity(),
         }
     }

@@ -54,7 +54,7 @@ fn request(method: &str, uri: &str, body: Option<String>) -> Request<Body> {
 }
 
 #[tokio::test]
-async fn hosted_subject_cannot_import_a_foreign_bare_content_reference() {
+async fn hosted_subject_cannot_commit_a_foreign_bare_content_reference() {
     let temp_dir = tempdir().expect("tempdir");
     let (router, state) = test_app(
         test_options(&temp_dir.path().join("store"), "hosted-content-ref-access"),
@@ -130,7 +130,7 @@ async fn hosted_subject_cannot_import_a_foreign_bare_content_reference() {
         "commit_id": "foreign-bare-content-ref",
         "operations": [{
             "kind": "put_file",
-            "path": "/imported",
+            "path": "/foreign",
             "content_ref": content_ref
         }]
     })
@@ -142,7 +142,7 @@ async fn hosted_subject_cannot_import_a_foreign_bare_content_reference() {
             Some(body),
         ))
         .await
-        .expect("import response");
+        .expect("commit response");
     assert_eq!(response.status(), StatusCode::CONFLICT);
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
@@ -151,7 +151,7 @@ async fn hosted_subject_cannot_import_a_foreign_bare_content_reference() {
     assert_eq!(error.code, ErrorCode::ContentNotPrepared.as_str());
     assert_eq!(
         destination_namespace
-            .read_file("/imported")
+            .read_file("/foreign")
             .await
             .expect_err("foreign reference was not published")
             .code(),
