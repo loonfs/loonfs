@@ -199,13 +199,24 @@ impl Namespace<Writable> {
         // Boxed so the replay's future stays within the compiler's layout depth.
         self.plan_commit(request, slot, |new_fork| {
             Box::pin(async move {
-                let fork = self
+                let new_fork = &new_fork;
+                let basis = self
                     .core
-                    .pinned_read(source_namespace_id, Consistency::Strong)
-                    .await?;
-                let basis = new_fork
-                    .engine
-                    .check_replay(&new_fork.context, &fork.engine, &fork.context, request)
+                    .read(
+                        source_namespace_id,
+                        Some(Consistency::Strong),
+                        |fork| async move {
+                            Ok(new_fork
+                                .engine
+                                .check_replay(
+                                    &new_fork.context,
+                                    &fork.engine,
+                                    &fork.context,
+                                    request,
+                                )
+                                .await?)
+                        },
+                    )
                     .await?;
                 let prepared_at_ms = self.core.now_ms();
                 let (fork, fork_pin) = self

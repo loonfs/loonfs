@@ -15,6 +15,7 @@ use futures::future::BoxFuture;
 use loonfs_core::limits::DIRECT_TRANSFER_URL_TTL_MS;
 use loonfs_core::MergeRequest;
 use loonfs_types::format::wal::MergeRecord;
+use std::sync::{Mutex, MutexGuard};
 
 /// The plans that one merge makes before it returns its commit's error,
 /// which are the first and three more after this namespace changed between
@@ -189,12 +190,18 @@ impl Namespace<Writable> {
         // Boxed so the merge's future stays within the compiler's layout depth.
         self.plan_commit(request, slot, |main| {
             Box::pin(async move {
-                let fork = self
-                    .core
-                    .pinned_read(source_namespace_id, Consistency::Strong)
-                    .await?;
-                main.engine
-                    .check_merge(&main.context, &fork.engine, &fork.context, request)
+                let main = &main;
+                self.core
+                    .read(
+                        source_namespace_id,
+                        Some(Consistency::Strong),
+                        |fork| async move {
+                            main.engine
+                                .check_merge(&main.context, &fork.engine, &fork.context, request)
+                                .await?;
+                            Ok(())
+                        },
+                    )
                     .await?;
                 let prepared_at_ms = self.core.now_ms();
                 let (fork, fork_pin) = self
@@ -230,37 +237,51 @@ impl Namespace<Writable> {
     ///
     /// The receipt lookup comes first, so a retry of a commit that committed
     /// takes no slot and folds nothing, even after the fork was deleted. The
-    /// receipt lookup and the plan read one view of this namespace.
+    /// receipt lookup and the plan read one view of this namespace, as a
+    /// read does: a view that a newer manifest replaced, whose segments a
+    /// collection removed, is read once more from the current manifest, and
+    /// the slot that the first view took stays with the second.
     pub(super) async fn plan_commit<R, Plan>(
         &self,
         request: &MergeRequest,
         slot: Option<MergeSlot>,
-        plan: impl FnOnce(PinnedRead) -> Plan,
+        plan: impl Fn(PinnedRead) -> Plan,
     ) -> Result<PlannedMerge<R>>
     where
         Plan: std::future::Future<Output = Result<(CommitCandidate, MergeRecord, R, PinId)>>,
     {
-        let target = self
-            .core
-            .pinned_read(&self.namespace_id, Consistency::Strong)
-            .await?;
-        if let Some(commit) = target.engine.find_merge(&target.context, request).await? {
-            return Ok(PlannedMerge::Committed(commit));
-        }
-        let slot = match slot {
-            Some(slot) => slot,
-            None => self.session().acquire_merge_slot()?,
-        };
-        let (candidate, record, report, fork_pin) = plan(target)
+        let held = Mutex::new(slot);
+        self.core
+            .read(
+                &self.namespace_id,
+                Some(Consistency::Strong),
+                |target| async {
+                    if let Some(commit) = target.engine.find_merge(&target.context, request).await?
+                    {
+                        return Ok(PlannedMerge::Committed(commit));
+                    }
+                    let slot = match lock_slot(&held).take() {
+                        Some(slot) => slot,
+                        None => self.session().acquire_merge_slot()?,
+                    };
+                    match plan(target).await {
+                        Ok((candidate, record, report, fork_pin)) => {
+                            Ok(PlannedMerge::Candidate(Box::new(PlannedCommit {
+                                candidate,
+                                slot,
+                                record,
+                                report,
+                                fork_pin,
+                            })))
+                        }
+                        Err(error) => {
+                            *lock_slot(&held) = Some(slot);
+                            Err(missing_fork(&request.source_namespace_id, error))
+                        }
+                    }
+                },
+            )
             .await
-            .map_err(|error| missing_fork(&request.source_namespace_id, error))?;
-        Ok(PlannedMerge::Candidate(Box::new(PlannedCommit {
-            candidate,
-            slot,
-            record,
-            report,
-            fork_pin,
-        })))
     }
 
     /// Commits the merge, or the replay commit, that `planned` found or
@@ -440,6 +461,14 @@ impl Namespace<Writable> {
             self.mode.writer.writer_id.clone(),
         )
     }
+}
+
+/// Locks the slot that a plan keeps while its view is read once more.
+fn lock_slot(held: &Mutex<Option<MergeSlot>>) -> MutexGuard<'_, Option<MergeSlot>> {
+    // A critical section under this lock only moves the slot, so it can't
+    // panic and poison the lock.
+    held.lock()
+        .expect("the merge slot lock should not be poisoned")
 }
 
 /// Returns `invalid_request` for a fork that doesn't exist or was deleted,

@@ -1108,9 +1108,9 @@ enum Grep {
 /// collect garbage, then one that does, and how many of the latter are lists. The
 /// docs quote these numbers.
 const IDLE_SWEEP_REQUESTS: [(Grep, usize, usize, usize); 3] = [
-    (Grep::NotMaintained, 14, 30, 10),
-    (Grep::Maintained, 18, 34, 10),
-    (Grep::Enabled, 19, 36, 10),
+    (Grep::NotMaintained, 14, 29, 9),
+    (Grep::Maintained, 18, 33, 9),
+    (Grep::Enabled, 19, 35, 9),
 ];
 
 #[tokio::test(start_paused = true)]
