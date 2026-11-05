@@ -63,5 +63,5 @@ async fn client_streams_uploads_and_downloads_through_the_server_router() {
         received.extend_from_slice(&chunk.expect("chunk"));
     }
     assert_eq!(received, chunks.concat());
-    state.binding.runtime.shutdown().await.expect("shutdown");
+    state.http.runtime.shutdown().await.expect("shutdown");
 }

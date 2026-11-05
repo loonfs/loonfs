@@ -1,6 +1,6 @@
 //! Applies retention rules while rows are streamed in key order.
 
-use super::merge_iterator::LocalityGrouping;
+use super::run_iterator::LocalityGrouping;
 use crate::error::{CoreError, Result};
 use crate::metadata::DirentryBindingRecord;
 use loonfs_types::format::manifest::{ActiveDeletionRowAction, MetadataRow, MetadataRowFamily};
@@ -116,7 +116,7 @@ fn keep_commit_history_row(row: MetadataRow, floor_seq: ChangeSeq) -> Option<Met
 /// state, and the floor keeps no older history. The operator keeps a
 /// recoverably deleted inode's rows like any other inode's, so an undelete
 /// restores the prior state, and a base compaction removes the rows of an inode
-/// that an expired deletion hides before they reach the operator. The
+/// that a removable deletion hides before they reach the operator. The
 /// operator processes this order without retaining the complete history.
 #[derive(Debug, Default)]
 pub(crate) struct WholeStateRetention {
@@ -447,7 +447,7 @@ mod tests {
 
     #[test]
     fn layout_compaction_keeps_the_first_row_per_content_id() {
-        use super::super::merge_iterator::locality_of;
+        use super::super::run_iterator::locality_of;
         use super::retention_clusters;
         use loonfs_types::format::manifest::{ContentLayoutRecord, MetadataFamilyGroup};
         use loonfs_types::{ContentExtent, ContentId, ContentLayout, ExtentObject, NamespaceId};
@@ -596,7 +596,7 @@ mod tests {
         family: MetadataRowFamily,
         mut rows: Vec<MetadataRow>,
     ) -> Vec<MetadataRow> {
-        use super::super::merge_iterator::locality_of;
+        use super::super::run_iterator::locality_of;
         if family == MetadataRowFamily::DirentryChildBinds {
             rows.retain(|row| {
                 matches!(row, MetadataRow::DirentryBinding(binding) if binding.is_binding_event())

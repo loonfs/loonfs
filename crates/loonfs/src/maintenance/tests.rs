@@ -77,7 +77,7 @@ fn counter(snapshot: &MetricsSnapshot, name: &str, labels: &[(&str, &str)]) -> u
 }
 
 #[tokio::test]
-async fn a_maintenance_gc_step_records_the_pass_counters_once() {
+async fn a_maintenance_gc_step_records_the_collection_counters_once() {
     let temp_dir = tempdir().expect("tempdir");
     let (writer, maintenance, recorder) = manual_deployment(temp_dir.path()).await;
     let namespace = namespace_id("maintenance-gc-metrics");
@@ -98,14 +98,14 @@ async fn a_maintenance_gc_step_records_the_pass_counters_once() {
         .expect("run the maintenance GC step");
     assert!(
         gc.retained.total() > 0,
-        "the live namespace gives the pass candidates to retain"
+        "the live namespace leaves the collection candidates to retain"
     );
 
     let snapshot = recorder.snapshot();
     assert_eq!(
         counter(&snapshot, "loonfs.gc.retained", &[]),
         gc.retained.total(),
-        "the maintenance pass records its retained count exactly once"
+        "the collection records its retained count exactly once"
     );
     assert_eq!(snapshot.by_name("loonfs.gc.reclaimed").count(), 10);
     for (category, reclaimed) in [
@@ -132,7 +132,7 @@ async fn a_maintenance_gc_step_records_the_pass_counters_once() {
         assert_eq!(
             counter(&snapshot, "loonfs.gc.reclaimed", &[("category", category)],),
             reclaimed,
-            "the maintenance pass records `{category}` exactly once"
+            "the collection records `{category}` exactly once"
         );
     }
 }
@@ -1037,7 +1037,7 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
         .expect("delete the namespace");
     writer.shutdown().await.expect("shut down the writer");
 
-    // A week ahead, a collection pass finds everything the test wrote past
+    // A week ahead, a collection finds everything the test wrote past
     // every grace window.
     let week_ahead_ms = loonfs_core::time::SystemWallClock.now_ms() + 7 * 24 * 60 * 60 * 1000;
     let maintenance = LoonFs::builder_with_store(store.clone())
@@ -1092,8 +1092,8 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
     // A load of a live namespace sends a HEAD request for the missing
     // manifest after the current one in its discovery, and again in its
     // check of the manifest's successor. A deleted namespace that wasn't
-    // forked is still a family root, so its pass lists its upload sessions
-    // as roots, as a live namespace's pass does.
+    // forked is still a family root, so its collection lists its upload sessions
+    // as roots, as a live namespace's collection does.
     let heads = 2;
     for (namespace, metadata_requests, metadata_error, gc_requests, gc_error) in [
         (&idle, [4, heads, 0, 0], None, [4, heads, 10, 0], None),
@@ -1294,7 +1294,7 @@ async fn an_advance_that_moves_no_floor_loads_the_manifest_once_and_writes_nothi
 }
 
 #[tokio::test]
-async fn a_repeated_retirement_pass_lists_once_and_deletes_nothing() {
+async fn a_repeated_retirement_collection_lists_once_and_deletes_nothing() {
     use loonfs_core::limits::{GC_SAFETY_MARGIN_MS, NAMESPACE_RETIREMENT_GRACE_WINDOW_MS};
     use loonfs_test_support::stores::{KeyPredicate, RecordingStore, StoreCounts};
 
@@ -1337,7 +1337,7 @@ async fn a_repeated_retirement_pass_lists_once_and_deletes_nothing() {
     let first = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)
         .gc(None, &crate::GcOptions::default(), &context.clock())
         .await
-        .expect("first pass");
+        .expect("first collection");
     assert_eq!(first.deleted.retired_content_objects, 3);
     assert_eq!(
         store.counts(),
@@ -1351,7 +1351,7 @@ async fn a_repeated_retirement_pass_lists_once_and_deletes_nothing() {
     let repeated = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)
         .gc(None, &crate::GcOptions::default(), &context.clock())
         .await
-        .expect("repeat pass");
+        .expect("repeat collection");
     assert_eq!(
         repeated.deleted,
         loonfs_types::DeletedObjectCounts::default()

@@ -444,7 +444,7 @@ async fn http_maintenance_gc_is_explicit_and_retains_young_namespaces() {
     assert_eq!(refused.code, "invalid_request");
 
     // Objects inside the grace window remain readable.
-    let report = post_gc(&server_url, namespace.as_str()).expect("gc pass");
+    let report = post_gc(&server_url, namespace.as_str()).expect("gc collection");
     assert_eq!(report.deleted.wal_objects, 0);
     assert_eq!(report.deleted.metadata_segments, 0);
     assert_eq!(report.deleted.manifests, 0);

@@ -10,7 +10,7 @@ use super::query_params::{
     checked_cursor, checked_list_cursor, effective_page_limit, live_consistency, read_at,
     required_query_param,
 };
-use super::{acquire_download_permit, AppJson, AppQuery, BindingState, NamespaceIdPath, NoQuery};
+use super::{acquire_download_permit, AppJson, AppQuery, HttpState, NamespaceIdPath, NoQuery};
 use axum::extract::State;
 use axum::response::Response;
 use axum::Json;
@@ -295,7 +295,7 @@ pub(super) struct DiffQuery {
     )
 )]
 pub(super) async fn list_path_entries(
-    State(state): State<Arc<BindingState>>,
+    State(state): State<Arc<HttpState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<ListPathPageQuery>,
@@ -350,7 +350,7 @@ pub(super) async fn list_path_entries(
     )
 )]
 pub(super) async fn get_path_entry(
-    State(state): State<Arc<BindingState>>,
+    State(state): State<Arc<HttpState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<PathQuery>,
@@ -401,7 +401,7 @@ pub(super) async fn get_path_entry(
     )
 )]
 pub(super) async fn get_file_content(
-    State(state): State<Arc<BindingState>>,
+    State(state): State<Arc<HttpState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<ContentQuery>,
@@ -458,7 +458,7 @@ pub(super) async fn get_file_content(
     )
 )]
 pub(super) async fn list_trash(
-    State(state): State<Arc<BindingState>>,
+    State(state): State<Arc<HttpState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<LivePageQuery>,
@@ -503,7 +503,7 @@ pub(super) async fn list_trash(
     )
 )]
 pub(super) async fn list_file_revisions(
-    State(state): State<Arc<BindingState>>,
+    State(state): State<Arc<HttpState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<PathPageQuery>,
@@ -551,7 +551,7 @@ pub(super) async fn list_file_revisions(
     )
 )]
 pub(super) async fn create_commit(
-    State(state): State<Arc<BindingState>>,
+    State(state): State<Arc<HttpState>>,
     ActorHeader(actor_id): ActorHeader,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
@@ -681,7 +681,7 @@ pub(super) async fn create_commit(
     )
 )]
 pub(super) async fn list_changes(
-    State(state): State<Arc<BindingState>>,
+    State(state): State<Arc<HttpState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<ChangesQuery>,
@@ -730,7 +730,7 @@ pub(super) async fn list_changes(
     )
 )]
 pub(super) async fn list_diff(
-    State(state): State<Arc<BindingState>>,
+    State(state): State<Arc<HttpState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<DiffQuery>,

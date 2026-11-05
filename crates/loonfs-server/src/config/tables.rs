@@ -92,8 +92,8 @@ impl MetadataCacheSsdConfig {
 #[serde(deny_unknown_fields)]
 pub struct GrepConfig {
     /// Whether this server serves grep queries, and whether it serves the
-    /// index-maintenance endpoints and its sweep builds and collects the
-    /// index.
+    /// index-maintenance endpoints and its scheduler builds and collects
+    /// the index.
     pub mode: JobMode,
     pub max_cache_bytes: Option<usize>,
     /// Flattening preserves the existing `[grep]` keys while leaving the

@@ -549,7 +549,7 @@ mod streamed_content {
                 Some(UploadOutcome::Aborted {
                     aborted_at_ms: expired.now_ms
                 }),
-                "the first pass keeps the aborted session"
+                "the first collection keeps the aborted session"
             );
             let aged = WriterAt {
                 now_ms: expired.now_ms + options.grace_window_ms + 1,

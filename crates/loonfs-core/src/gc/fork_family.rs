@@ -1,5 +1,5 @@
 //! The walk over fork pins that finds the other members of a family root's
-//! fork family, so that the family root's collection pass reads every
+//! fork family, so that the family root's collection reads every
 //! member's roots before it sweeps the family's content.
 
 use super::live_set::{LiveSet, RetirementStatus, Roots};
@@ -11,17 +11,17 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::NamespaceId;
 use std::sync::Arc;
 
-/// How far the pass has read one member of its fork family.
+/// How far the collection has read one member of its fork family.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MemberState {
-    /// The namespace that the pass collects. The pass reads its roots before
+    /// The namespace that the collection collects. The collection reads its roots before
     /// the walk starts, and [`LiveSet::retirement_status`] returns its status.
     Collected,
     /// The member is the target of a fork pin that the walk listed, and the
-    /// pass hasn't read its roots yet.
+    /// collection hasn't read its roots yet.
     Found,
-    /// The pass has read the member's roots, and its retirement status by the
-    /// pass's clock.
+    /// The collection has read the member's roots, and its retirement status by the
+    /// collection's clock.
     Read { status: RetirementStatus },
     /// The member is the target of a fork pin, and it has no current
     /// manifest, because its installation hasn't finished, or it failed. It
@@ -29,32 +29,32 @@ pub(crate) enum MemberState {
     Absent,
 }
 
-/// How one pass's walk over its fork family ended.
+/// How one collection's walk over its fork family ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum FamilyWalkOutcome {
-    /// The pass read the roots of every member that the walk found.
+    /// The collection read the roots of every member that the walk found.
     Complete,
-    /// [`FAMILY_ROOTS_READ_BUDGET_MS`] passed before the pass read every
+    /// [`FAMILY_ROOTS_READ_BUDGET_MS`] passed before the collection read every
     /// member's roots.
     BudgetExceeded,
-    /// The roots of a member other than the pass's own namespace couldn't be read.
+    /// The roots of a member other than the collection's own namespace couldn't be read.
     UnreadableMember,
 }
 
-/// What one pass read of its fork family's roots.
+/// What one collection read of its fork family's roots.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct FamilyWalkReport {
     pub(super) outcome: FamilyWalkOutcome,
-    /// The pass's own namespace, and every fork pin target that the walk
+    /// The collection's own namespace, and every fork pin target that the walk
     /// found, including a target whose installation hasn't finished.
     pub(super) members: usize,
-    /// The members whose roots the pass read. A fork pin target without a
+    /// The members whose roots the collection read. A fork pin target without a
     /// current manifest has no roots, and it counts as read.
     pub(super) members_read: usize,
 }
 
 impl FamilyWalkReport {
-    /// Returns the report of a pass that reads only its own namespace's roots.
+    /// Returns the report of a collection that reads only its own namespace's roots.
     pub(super) fn own_roots() -> Self {
         Self {
             outcome: FamilyWalkOutcome::Complete,
@@ -75,9 +75,9 @@ impl LiveSet {
     /// read. The walk reads each member once, one member at a time. It stops
     /// at the first member whose roots can't be read, and before a member that
     /// it would start after [`FAMILY_ROOTS_READ_BUDGET_MS`] has passed since
-    /// the pass's clock started. Either way the pass skips the content sweep
+    /// the collection's clock started. Either way the collection skips the content sweep
     /// and continues. A charge to the read working memory that fails ends the
-    /// pass, as it does while the pass reads its own roots.
+    /// collection, as it does while the collection reads its own roots.
     pub(super) async fn load_family_roots<S: ObjectStore>(
         &mut self,
         family_root: &NamespaceStore<S>,
@@ -158,19 +158,19 @@ impl LiveSet {
     }
 
     /// Returns the retirement status of `namespace_id`, the namespace of an
-    /// upload session that the pass sweeps, or `None` when the pass can't
+    /// upload session that the collection sweeps, or `None` when the collection can't
     /// decide it.
     ///
-    /// The pass can't decide the status of a member whose roots it hasn't
+    /// The collection can't decide the status of a member whose roots it hasn't
     /// read, or of a namespace that the walk didn't find when the walk
     /// stopped early. A member without a current manifest, and a namespace
     /// that a finished walk didn't find, are eligible, because no commit can
     /// be published in the first, and only retirement deletes the fork pin
     /// that would find the second. That holds for a namespace with a session that
-    /// the pass listed before the walk, because a namespace has a current
+    /// the collection listed before the walk, because a namespace has a current
     /// manifest before it can create a session. A fork installed after the
     /// walk read its source's pins isn't found either, so a session that the
-    /// pass didn't list as completed before the walk can't rely on this status
+    /// collection didn't list as completed before the walk can't rely on this status
     /// to skip the completed-content grace.
     pub(super) fn find_retirement_status(
         &self,

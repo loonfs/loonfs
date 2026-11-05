@@ -4,7 +4,7 @@
 use super::error::ApiResponseError;
 use super::extractors::SubjectHeaders;
 use super::{
-    AppJson, AppPath, AppQuery, BindingState, NamespaceIdPath, NoBody, NoQuery, UploadBodyStream,
+    AppJson, AppPath, AppQuery, HttpState, NamespaceIdPath, NoBody, NoQuery, UploadBodyStream,
     MAX_COMPLETION_BODY_BYTES, MAX_UPLOAD_CONTROL_BODY_BYTES,
 };
 use crate::WriterSessions;
@@ -32,10 +32,10 @@ use loonfs_types::{
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-/// Lifetime of one part-upload capability. Longer than a whole-object PUT's
+/// Lifetime of one part-upload presigned URL. Longer than a whole-object PUT's
 /// because a client works through a large file part by part and may not
 /// reach a late wave for a while, and short enough that an issued part URL
-/// is not a standing write capability.
+/// is not a standing write credential.
 const MULTIPART_PART_URL_TTL: Duration = Duration::from_secs(60 * 60);
 
 pub(super) enum PutContentPreparation {
@@ -60,7 +60,7 @@ pub(super) struct ContentTokenVerifier<'a> {
     secret: &'a str,
 }
 
-impl BindingState {
+impl HttpState {
     /// Returns the verifier of the content tokens that this deployment mints.
     pub(super) fn content_tokens(&self) -> ContentTokenVerifier<'_> {
         ContentTokenVerifier::new(self.options.content_token_secret.expose())
@@ -133,7 +133,7 @@ pub(super) struct UploadPathParams {
     )
 )]
 pub(super) async fn create_upload(
-    State(state): State<Arc<BindingState>>,
+    State(state): State<Arc<HttpState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
@@ -165,7 +165,7 @@ pub(super) async fn create_upload(
 }
 
 async fn begin_direct_put_upload(
-    state: &BindingState,
+    state: &HttpState,
     namespace: &Namespace<Writable>,
     namespace_id: NamespaceId,
     size_bytes: Option<u64>,
@@ -226,7 +226,7 @@ async fn fill_direct_put_access(
 }
 
 async fn begin_direct_multipart_upload(
-    state: &BindingState,
+    state: &HttpState,
     namespace: &Namespace<Writable>,
     namespace_id: NamespaceId,
     part_size_bytes: Option<u64>,
@@ -289,7 +289,7 @@ async fn begin_direct_multipart_upload(
     )
 )]
 pub(super) async fn sign_upload_parts(
-    State(state): State<Arc<BindingState>>,
+    State(state): State<Arc<HttpState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(UploadPathParams { upload_id }): AppPath<UploadPathParams>,
@@ -489,7 +489,7 @@ fn with_content_token(
     )
 )]
 pub(super) async fn put_upload_content(
-    State(state): State<Arc<BindingState>>,
+    State(state): State<Arc<HttpState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(UploadPathParams { upload_id }): AppPath<UploadPathParams>,
@@ -544,7 +544,7 @@ pub(super) async fn put_upload_content(
     )
 )]
 pub(super) async fn complete_upload(
-    State(state): State<Arc<BindingState>>,
+    State(state): State<Arc<HttpState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(UploadPathParams { upload_id }): AppPath<UploadPathParams>,
@@ -592,7 +592,7 @@ pub(super) async fn complete_upload(
     )
 )]
 pub(super) async fn get_upload(
-    State(state): State<Arc<BindingState>>,
+    State(state): State<Arc<HttpState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(UploadPathParams { upload_id }): AppPath<UploadPathParams>,
@@ -654,7 +654,7 @@ pub(super) async fn get_upload(
     )
 )]
 pub(super) async fn abort_upload(
-    State(state): State<Arc<BindingState>>,
+    State(state): State<Arc<HttpState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(UploadPathParams { upload_id }): AppPath<UploadPathParams>,

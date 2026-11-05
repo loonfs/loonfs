@@ -4,8 +4,8 @@ use super::publish::manifest_ref_for;
 use crate::error::{CoreError, Result};
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::store::NamespaceStore;
-use crate::pin::load_pin_basis;
 use crate::segment::index_block_load::segment_object_bytes;
+use crate::snapshot::load_pin_basis;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::{ForkBasis, ManifestRef, NamespaceStatus};
 use loonfs_types::format::manifest::{
@@ -56,15 +56,16 @@ impl<S: ObjectStore> NamespaceStore<S> {
         self.load_current_manifest().await?.statistics()
     }
 
-    /// Reads the exact manifest a pin of any owner references. Later namespace
-    /// activity is excluded. A missing pin returns `snapshot_not_found`.
-    pub async fn load_checkpoint_statistics(
+    /// Reads the exact manifest that a snapshot of either owner references.
+    /// Later namespace activity is excluded. A missing snapshot returns
+    /// `snapshot_not_found`.
+    pub async fn load_snapshot_statistics(
         &self,
-        checkpoint_id: &PinId,
+        snapshot_id: &PinId,
     ) -> Result<NamespaceStatistics> {
-        let Some(loaded) = self.load_pin(checkpoint_id).await? else {
+        let Some(loaded) = self.load_pin(snapshot_id).await? else {
             return Err(CoreError::SnapshotNotFound {
-                snapshot_id: checkpoint_id.clone(),
+                snapshot_id: snapshot_id.clone(),
             });
         };
         let pinned = load_pin_basis(&self.store, &self.segment_cache, loaded.state).await?;

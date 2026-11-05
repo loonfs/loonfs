@@ -6,7 +6,7 @@ use loonfs::{
     ActorId, AdvanceRetentionFloorOptions, AdvanceRetentionResponse, ChangeSeq, Commit,
     CompleteUploadBody, ContentRef, DeleteOptions, DirectoryPageCursor, Error, ErrorCode,
     FileBytes, FileRevisionsPager, FoldWalResponse, InodeChildrenPager, ListChangesResponse,
-    LoonFs, LoonFsBuilder, MaintainMetadataOptions, Maintenance, MetadataPassReport, Namespace,
+    LoonFs, LoonFsBuilder, MaintainMetadataOptions, MaintainMetadataReport, Maintenance, Namespace,
     NamespaceDiagnostics, NamespaceId, PathEntriesPager, PathEntry, PutFileOptions, ReadOnly,
     SharedObjectStore, Snapshot, UploadId, UploadSession, Writable,
 };
@@ -465,7 +465,7 @@ impl TestRuntime {
         &self,
         namespace_id: &NamespaceId,
         options: MaintainMetadataOptions,
-    ) -> loonfs::Result<MetadataPassReport> {
+    ) -> loonfs::Result<MaintainMetadataReport> {
         block_on(
             self.maintenance
                 .maintain_metadata_with_options(namespace_id, &options),

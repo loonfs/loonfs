@@ -1,9 +1,9 @@
-//! The usage report that the binding records once for each request to a
+//! The usage report that the HTTP API records once for each request to a
 //! namespace route, and the recorder trait that embedders implement.
 
 use super::extractors::namespace_id_segment;
 use super::router::find_route;
-use crate::BindingState;
+use crate::HttpState;
 use axum::body::{Body, Bytes};
 use axum::extract::{MatchedPath, Request, State};
 use axum::http::StatusCode;
@@ -38,7 +38,7 @@ pub struct UsageReport {
 
 /// Embedders adapt this trait to their own usage accounting.
 ///
-/// The binding calls it once for each request to a route with a `{namespace_id}`
+/// The HTTP API calls the recorder once for each request to a route with a `{namespace_id}`
 /// parameter whose namespace ID parses: after the response body ended or the
 /// client went away, from the task that drove the body, or when the request
 /// ended before the handler produced a response, from the task that dropped
@@ -49,7 +49,7 @@ pub trait UsageRecorder: Send + Sync + 'static {
     fn record(&self, report: UsageReport);
 }
 
-/// The bytes that the signed URLs of a download grant response cover.
+/// The bytes that the presigned URLs of a direct download response cover.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct GrantedBytes(pub(super) u64);
 
@@ -57,7 +57,7 @@ pub(super) struct GrantedBytes(pub(super) u64);
 /// response body ends, the client goes away, or the request ends before its
 /// response.
 pub(super) async fn report_usage(
-    State(state): State<Arc<BindingState>>,
+    State(state): State<Arc<HttpState>>,
     mut request: Request,
     next: Next,
 ) -> Response {

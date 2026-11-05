@@ -24,10 +24,13 @@ async fn compositions_preserve_operational_routes_capabilities_and_filesystem_be
         let router = if serves_maintenance {
             router
         } else {
-            loonfs_http::router(state.binding.clone())
+            loonfs_http::router(state.http.clone())
         };
-        assert_eq!(state.binding.options.serves_maintenance, serves_maintenance);
-        assert!(state.sweep.is_some(), "the maintenance sweep survives");
+        assert_eq!(state.http.options.serves_maintenance, serves_maintenance);
+        assert!(
+            state.scheduler.is_some(),
+            "the maintenance scheduler survives"
+        );
 
         for path in ["/health", "/readiness", "/metrics"] {
             let response = router
@@ -145,7 +148,7 @@ async fn compositions_preserve_operational_routes_capabilities_and_filesystem_be
             }
         );
         state
-            .binding
+            .http
             .runtime
             .shutdown()
             .await

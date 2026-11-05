@@ -4,7 +4,7 @@ use super::error::ApiResponseError;
 use super::extractors::{ActorHeader, SubjectHeaders};
 use super::query_params::required_query_param;
 
-use super::{AppJson, AppQuery, BindingState, NamespaceIdPath, NoQuery};
+use super::{AppJson, AppQuery, HttpState, NamespaceIdPath, NoQuery};
 use axum::extract::State;
 use axum::Json;
 use loonfs::{CreateNamespaceOptions, DeleteNamespaceOptions, MergeForkOptions};
@@ -88,7 +88,7 @@ fn advertised_limit(limit: Option<u64>) -> u64 {
     )
 )]
 pub(super) async fn get_capabilities(
-    State(state): State<Arc<BindingState>>,
+    State(state): State<Arc<HttpState>>,
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<loonfs_types::CapabilityDocument>, ApiResponseError> {
     let mut capabilities = state.runtime.capabilities();
@@ -206,7 +206,7 @@ pub(super) async fn get_capabilities(
     )
 )]
 pub(super) async fn create_namespace(
-    State(state): State<Arc<BindingState>>,
+    State(state): State<Arc<HttpState>>,
     ActorHeader(actor_id): ActorHeader,
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<CreateNamespaceRequest>,
@@ -251,7 +251,7 @@ pub(super) async fn create_namespace(
     )
 )]
 pub(super) async fn get_namespace(
-    State(state): State<Arc<BindingState>>,
+    State(state): State<Arc<HttpState>>,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<loonfs_types::NamespaceMetadata>, ApiResponseError> {
@@ -285,7 +285,7 @@ pub(super) async fn get_namespace(
     )
 )]
 pub(super) async fn get_namespace_diagnostics(
-    State(state): State<Arc<BindingState>>,
+    State(state): State<Arc<HttpState>>,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<loonfs_types::NamespaceDiagnostics>, ApiResponseError> {
@@ -323,7 +323,7 @@ pub(super) async fn get_namespace_diagnostics(
     )
 )]
 pub(super) async fn delete_namespace(
-    State(state): State<Arc<BindingState>>,
+    State(state): State<Arc<HttpState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<DeleteNamespaceQuery>,
@@ -367,7 +367,7 @@ pub(super) async fn delete_namespace(
     )
 )]
 pub(super) async fn fork_namespace(
-    State(state): State<Arc<BindingState>>,
+    State(state): State<Arc<HttpState>>,
     SubjectHeaders(subject): SubjectHeaders,
     ActorHeader(actor_id): ActorHeader,
     NamespaceIdPath(source_namespace_id): NamespaceIdPath,
@@ -422,7 +422,7 @@ pub(super) async fn fork_namespace(
     )
 )]
 pub(super) async fn merge_fork(
-    State(state): State<Arc<BindingState>>,
+    State(state): State<Arc<HttpState>>,
     ActorHeader(actor_id): ActorHeader,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
@@ -490,7 +490,7 @@ pub(super) async fn merge_fork(
     )
 )]
 pub(super) async fn get_next_merge_range(
-    State(state): State<Arc<BindingState>>,
+    State(state): State<Arc<HttpState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<NextMergeRangeQuery>,
@@ -551,7 +551,7 @@ pub(super) async fn get_next_merge_range(
     )
 )]
 pub(super) async fn rebase_fork(
-    State(state): State<Arc<BindingState>>,
+    State(state): State<Arc<HttpState>>,
     ActorHeader(actor_id): ActorHeader,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,

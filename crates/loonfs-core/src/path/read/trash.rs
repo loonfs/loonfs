@@ -18,7 +18,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     /// first, as one bounded range scan over the derived active-deletion
     /// family.
     ///
-    /// The materializer keeps that family in step with the tombstone family
+    /// Each commit keeps that family in step with the tombstone family
     /// (a delete adds the row, and an undelete removes it). The scan starts
     /// above the view's retention floor, so an expired deletion is never
     /// listed, and the page reads only the deletions it returns, never the

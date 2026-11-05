@@ -10,11 +10,11 @@ use tower::ServiceExt;
 async fn binding_routes_exclude_host_routes_and_preserve_maintenance_admission() {
     let directory = tempfile::tempdir().expect("store");
     let (_, mut state) = test_app(
-        test_options(directory.path(), "binding-surface"),
+        test_options(directory.path(), "http-surface"),
         TestAppOptions::default(),
     )
     .await
-    .expect("binding state");
+    .expect("http state");
     for serves_maintenance in [true, false] {
         Arc::make_mut(&mut state.options).serves_maintenance = serves_maintenance;
         let router = crate::router(state.clone());

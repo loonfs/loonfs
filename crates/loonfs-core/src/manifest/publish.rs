@@ -119,7 +119,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// revalidation bound after a check that found no successor of it, so
     /// within the bound a put that succeeds proves that the basis had no
     /// successor, and a put that loses proves that it had one (format spec,
-    /// "Publishing a materialized file set").
+    /// "Publishing a manifest").
     ///
     /// The call doesn't raise the hint. The runtime that published the manifest
     /// raises the hint afterward with

@@ -202,7 +202,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     ///
     /// An outcome record counts only while its session record exists, so the
     /// session record goes first. If this call stops between the two deletes,
-    /// the outcome record is left without its session record, and a later pass
+    /// the outcome record is left without its session record, and a later collection
     /// deletes it without acting on the session's content. The other order would
     /// be unsafe: a session record left without its outcome reads as an open
     /// session, and once its lease had passed, garbage collection would abort it

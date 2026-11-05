@@ -5,7 +5,7 @@ use super::error::{ApiResponseError, ServedErrorCode};
 use super::extractors::{authorize, namespace_id_segment};
 use super::metrics::{route_label, UNMATCHED_ROUTE};
 use super::router::{find_route, method_not_allowed, Deadline};
-use crate::BindingState;
+use crate::HttpState;
 use axum::extract::{MatchedPath, Request, State};
 use axum::http::{HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
@@ -150,7 +150,7 @@ pub fn panic_message(payload: &(dyn Any + Send)) -> &str {
 
 /// Counts, times, and logs every request once it reaches its HTTP outcome.
 async fn with_request_observability(
-    State(state): State<Arc<BindingState>>,
+    State(state): State<Arc<HttpState>>,
     request: Request,
     next: Next,
 ) -> Response {
@@ -231,7 +231,7 @@ fn request_clock() -> std::time::Instant {
 }
 
 async fn require_bearer_token(
-    State(state): State<Arc<BindingState>>,
+    State(state): State<Arc<HttpState>>,
     request: Request,
     next: Next,
 ) -> Result<Response, ApiResponseError> {
@@ -239,13 +239,13 @@ async fn require_bearer_token(
     Ok(next.run(request).await)
 }
 
-/// Applies the binding's authentication and request deadline to host routes.
-pub fn authenticate_routes(router: Router, state: &BindingState) -> Router {
+/// Applies the HTTP API's authentication and request deadline to host routes.
+pub fn authenticate_routes(router: Router, state: &HttpState) -> Router {
     authenticate(router, Arc::new(state.clone()))
 }
 
-/// Applies the binding's authentication and request deadline to `router`.
-pub(super) fn authenticate(router: Router, state: Arc<BindingState>) -> Router {
+/// Applies the HTTP API's authentication and request deadline to `router`.
+pub(super) fn authenticate(router: Router, state: Arc<HttpState>) -> Router {
     let request_deadline_ms = state.options.request_deadline_ms;
     router
         .route_layer(middleware::from_fn(move |request: Request, next: Next| {
@@ -256,13 +256,13 @@ pub(super) fn authenticate(router: Router, state: Arc<BindingState>) -> Router {
 
 /// Applies request admission, usage reports, error envelopes, correlation IDs, and metrics
 /// to host routes.
-pub fn observe_routes(router: Router, state: &BindingState) -> Router {
+pub fn observe_routes(router: Router, state: &HttpState) -> Router {
     observe(router, Arc::new(state.clone()))
 }
 
 /// Applies request admission, usage reports, error envelopes, correlation IDs, and metrics
 /// to `router`.
-pub(super) fn observe(router: Router, state: Arc<BindingState>) -> Router {
+pub(super) fn observe(router: Router, state: Arc<HttpState>) -> Router {
     router
         .method_not_allowed_fallback(method_not_allowed)
         .layer(middleware::from_fn(catch_handler_panic))

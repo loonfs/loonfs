@@ -19,7 +19,7 @@ async fn a_slow_client_keeps_the_request_slot_until_only_transport_buffering_rem
 
     let directory = tempfile::tempdir().expect("temporary store");
     let mut options = test_options(directory.path(), "slow-response-writer");
-    options.binding.max_in_flight_requests = Some(NonZeroUsize::new(1).expect("positive cap"));
+    options.http.max_in_flight_requests = Some(NonZeroUsize::new(1).expect("positive cap"));
     let (_, state) = test_app(options, TestAppOptions::default())
         .await
         .expect("app");

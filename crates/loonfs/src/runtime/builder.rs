@@ -191,8 +191,8 @@ impl<M> LoonFsBuilder<M> {
     /// The runtime registers its instrument set once, here, and reports into
     /// it from then on. Every mode reports object-store calls and where each
     /// read took the head it started from. A writable runtime and its
-    /// maintenance also report publications, compactions, and collection
-    /// passes. A runtime built without one registers nothing. The metadata
+    /// maintenance also report publications, compactions, and
+    /// collections. A runtime built without one registers nothing. The metadata
     /// cache doesn't report here, and its counters are read with
     /// [`MetadataCache::stats`]. The private execution budget that a runtime
     /// creates without [`Self::execution_budget`] also reports here, and a

@@ -75,8 +75,8 @@ impl Maintenance {
     /// folds as [`Self::fold_wal`] describes them.
     ///
     /// The runtime doesn't schedule this call. The reference server makes
-    /// it on each full maintenance pass, before the pass's retention
-    /// advance, so it acknowledges the floor that the previous pass set.
+    /// it on each maintenance sweep, before the sweep's retention advance,
+    /// so it acknowledges the floor that the previous sweep set.
     pub async fn acknowledge_retention_floor(
         &self,
         namespace_id: &NamespaceId,

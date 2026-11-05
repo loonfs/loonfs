@@ -1,7 +1,7 @@
-//! The value tables that a reorganize step reads. One pass over the input
+//! The value tables that a reorganize step reads. One read of the input
 //! runs' tables, in content order, decides the output run's table in the
 //! reorganization's first step, or reads it back in a later step, and builds
-//! each input run's translation to the output run's ordinals. The pass reads
+//! each input run's translation to the output run's ordinals. The read takes
 //! a block of each table at a time, so a step keeps only the translations.
 
 use super::pruning::{filter_from_rows, RetainedReferences};

@@ -233,11 +233,11 @@ fn no_schema_a_response_reaches_admits_null() {
         &std::fs::read_to_string(OPENAPI_JSON_PATH).expect("read static openapi json"),
     )
     .expect("parse openapi json");
-    let mut visited = BTreeSet::new();
+    let mut seen = BTreeSet::new();
     let mut properties = 0usize;
 
     for (location, response) in documented_responses(&spec) {
-        assert_no_null_property(&spec, response, &location, &mut visited, &mut properties);
+        assert_no_null_property(&spec, response, &location, &mut seen, &mut properties);
     }
 
     for schema_name in [
@@ -248,7 +248,7 @@ fn no_schema_a_response_reaches_admits_null() {
         "PinId",
     ] {
         assert!(
-            visited.contains(&format!("#/components/schemas/{schema_name}")),
+            seen.contains(&format!("#/components/schemas/{schema_name}")),
             "the walk never reached `{schema_name}`"
         );
     }
@@ -1963,17 +1963,17 @@ fn assert_no_null_property<'a>(
     spec: &'a Value,
     value: &'a Value,
     location: &str,
-    visited: &mut BTreeSet<String>,
+    seen: &mut BTreeSet<String>,
     properties: &mut usize,
 ) {
     match value {
         Value::Object(object) => {
             if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
-                if visited.insert(reference.to_owned()) {
+                if seen.insert(reference.to_owned()) {
                     let component = component_for_ref(spec, reference).unwrap_or_else(|| {
                         panic!("{location} references a missing component: {reference}")
                     });
-                    assert_no_null_property(spec, component, reference, visited, properties);
+                    assert_no_null_property(spec, component, reference, seen, properties);
                 }
             }
 
@@ -1994,12 +1994,12 @@ fn assert_no_null_property<'a>(
             }
 
             for child in object.values() {
-                assert_no_null_property(spec, child, location, visited, properties);
+                assert_no_null_property(spec, child, location, seen, properties);
             }
         }
         Value::Array(values) => {
             for child in values {
-                assert_no_null_property(spec, child, location, visited, properties);
+                assert_no_null_property(spec, child, location, seen, properties);
             }
         }
         Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}

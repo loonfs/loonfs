@@ -210,15 +210,15 @@ async fn reorganize_with_cache(warm_cache: bool) -> usize {
         })
         .await
         .expect("reorganize");
-    // The merge reads every input row but the value tables, which the
+    // The combination reads every input row but the value tables, which the
     // step reads whole and replaces with the output's table.
     assert_matches!(
         outcome,
         GrepReorganizeOutcome::UnitWritten {
-            merged_rows,
+            combined_rows,
             completed: true,
             ..
-        } if merged_rows == (built.row_count - FIXTURE_VALUES) * 8
+        } if combined_rows == (built.row_count - FIXTURE_VALUES) * 8
     );
     assert_eq!(host.block_cache.stats(), cache_before);
     let reads = watched.reads();

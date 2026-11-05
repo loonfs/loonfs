@@ -154,7 +154,7 @@ impl Client {
         job_response!(response, Metadata)
     }
 
-    /// Runs one garbage collection pass over a namespace with the server's
+    /// Runs one garbage collection of a namespace with the server's
     /// default grace window.
     ///
     /// See [`Self::gc_with_options`].
@@ -168,7 +168,7 @@ impl Client {
         job_response!(response, Gc)
     }
 
-    /// Runs one garbage collection pass over a namespace with the grace
+    /// Runs one garbage collection of a namespace with the grace
     /// window that `options` sets.
     ///
     /// Retrying this request starts a distinct attempt.

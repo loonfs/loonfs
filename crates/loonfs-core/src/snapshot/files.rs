@@ -1,7 +1,7 @@
 //! Lists files from the manifest pinned by a snapshot.
 
+use super::lifecycle::ensure_unexpired;
 use super::read_basis::{load_pin_basis, PinBasis};
-use super::snapshot::ensure_unexpired;
 use crate::engine::{NamespaceEngine, RuntimeReadContext};
 use crate::error::{CoreError, Result};
 use crate::metadata::MetadataView;
@@ -18,7 +18,7 @@ const INODE_SCAN_WAVE_ROWS: usize = 64;
 
 /// Resumes a file listing after this inode id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CheckpointFilesPageCursor {
+pub struct SnapshotFilesPageCursor {
     /// Last inode id returned by the previous page.
     pub after_inode_id: InodeId,
 }
@@ -26,7 +26,7 @@ pub struct CheckpointFilesPageCursor {
 /// One file in the state a snapshot pins, with the content the snapshot
 /// pinned for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CheckpointFile {
+pub struct SnapshotFile {
     /// The file's inode id.
     pub inode_id: InodeId,
     /// The file revision at the snapshot's captured sequence.
@@ -41,7 +41,7 @@ pub struct CheckpointFile {
 
 /// Options for listing the files a snapshot pins.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct ListCheckpointFilesOptions {
+pub struct ListSnapshotFilesOptions {
     /// Whether to include deleted files and files under a deleted directory,
     /// disabled by default.
     pub include_deleted: bool,
@@ -49,28 +49,28 @@ pub struct ListCheckpointFilesOptions {
 
 /// One page of the files a snapshot pins.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CheckpointFilesPage {
+pub struct SnapshotFilesPage {
     /// The sequence captured by the snapshot.
     pub captured_seq: ChangeSeq,
     /// Files in ascending inode-id order.
-    pub files: Vec<CheckpointFile>,
+    pub files: Vec<SnapshotFile>,
     /// Resume position when more files remain.
-    pub next_cursor: Option<CheckpointFilesPageCursor>,
+    pub next_cursor: Option<SnapshotFilesPageCursor>,
 }
 
-impl PagedResponse for CheckpointFilesPage {
-    type Item = CheckpointFile;
-    type Cursor = CheckpointFilesPageCursor;
+impl PagedResponse for SnapshotFilesPage {
+    type Item = SnapshotFile;
+    type Cursor = SnapshotFilesPageCursor;
 
-    fn items_mut(&mut self) -> &mut Vec<CheckpointFile> {
+    fn items_mut(&mut self) -> &mut Vec<SnapshotFile> {
         &mut self.files
     }
 
-    fn items(&self) -> &[CheckpointFile] {
+    fn items(&self) -> &[SnapshotFile] {
         &self.files
     }
 
-    fn next_cursor(&self) -> Option<CheckpointFilesPageCursor> {
+    fn next_cursor(&self) -> Option<SnapshotFilesPageCursor> {
         self.next_cursor
     }
 
@@ -81,7 +81,7 @@ impl PagedResponse for CheckpointFilesPage {
 }
 
 impl<S: ObjectStore, M> NamespaceEngine<S, M> {
-    /// Lists files from the manifest pinned by the snapshot `checkpoint_id`,
+    /// Lists files from the manifest pinned by the snapshot `snapshot_id`,
     /// ordered by inode ID: the files visible at the snapshot, or every file it
     /// retains with `options.include_deleted`. Directories are omitted.
     ///
@@ -92,32 +92,32 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// snapshot that expired at or before the current wall-clock time, returns
     /// `snapshot_not_found`, and a snapshot whose manifest is gone returns
     /// `checkpoint_unavailable`.
-    pub async fn list_checkpoint_files_page(
+    pub async fn list_snapshot_files_page(
         &self,
-        checkpoint_id: &PinId,
-        request: PageRequest<CheckpointFilesPageCursor>,
-        options: ListCheckpointFilesOptions,
+        snapshot_id: &PinId,
+        request: PageRequest<SnapshotFilesPageCursor>,
+        options: ListSnapshotFilesOptions,
         context: &RuntimeReadContext,
-    ) -> Result<CheckpointFilesPage> {
+    ) -> Result<SnapshotFilesPage> {
         // Rejects a mismatched or deleted namespace before any read work.
         self.ensure_live_context(context)?;
         self.namespace
-            .list_checkpoint_files_page(checkpoint_id, request, options)
+            .list_snapshot_files_page(snapshot_id, request, options)
             .await
     }
 }
 
 impl<S: ObjectStore> NamespaceStore<S> {
-    /// Lists one page of the files the snapshot `checkpoint_id` pins, as
-    /// [`NamespaceEngine::list_checkpoint_files_page`] describes.
-    pub(crate) async fn list_checkpoint_files_page(
+    /// Lists one page of the files the snapshot `snapshot_id` pins, as
+    /// [`NamespaceEngine::list_snapshot_files_page`] describes.
+    pub(crate) async fn list_snapshot_files_page(
         &self,
-        checkpoint_id: &PinId,
-        request: PageRequest<CheckpointFilesPageCursor>,
-        options: ListCheckpointFilesOptions,
-    ) -> Result<CheckpointFilesPage> {
+        snapshot_id: &PinId,
+        request: PageRequest<SnapshotFilesPageCursor>,
+        options: ListSnapshotFilesOptions,
+    ) -> Result<SnapshotFilesPage> {
         let now_ms = self.wall_clock.now_ms();
-        let record = ensure_unexpired(self.load_user_pin(checkpoint_id).await?, now_ms)?.state;
+        let record = ensure_unexpired(self.load_user_pin(snapshot_id).await?, now_ms)?.state;
         let PinBasis { manifest, segments } =
             load_pin_basis(&self.store, &self.segment_cache, record).await?;
 
@@ -183,7 +183,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 let Some(revision) = revision else {
                     continue;
                 };
-                files.push(CheckpointFile {
+                files.push(SnapshotFile {
                     inode_id,
                     revision_no: revision.revision_no,
                     committed_seq: revision.committed_seq,
@@ -201,10 +201,10 @@ impl<S: ObjectStore> NamespaceStore<S> {
 
         let next_cursor = request
             .limit
-            .finish_page(&mut files, |last| CheckpointFilesPageCursor {
+            .finish_page(&mut files, |last| SnapshotFilesPageCursor {
                 after_inode_id: last.inode_id,
             });
-        Ok(CheckpointFilesPage {
+        Ok(SnapshotFilesPage {
             captured_seq,
             files,
             next_cursor,

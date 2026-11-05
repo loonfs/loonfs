@@ -3,7 +3,7 @@
 
 use super::durable_cache::{ParentNameCacheKey, SharedRows};
 use super::manifest_index;
-use super::manifest_tail_merge::{ManifestPage, ManifestTailMerge, TieOrder};
+use super::manifest_tail_combiner::{ManifestPage, ManifestTailCombiner, TieOrder};
 use super::visibility;
 use crate::error::Result;
 use crate::metadata::view::latest_visible_binding;
@@ -189,7 +189,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     /// Returns one page of the namespace's deletions in `range` that no
     /// undelete has cancelled, oldest deletion first.
     ///
-    /// Manifest rows merge with the rows the WAL tail derives, so a deletion
+    /// Manifest rows combine with the rows the WAL tail derives, so a deletion
     /// committed seconds ago lists like a fresh file appears in `ls`. Both
     /// sides arrive in row-key order and a removal marker sorts ahead of the
     /// row it removes, so one ascending walk determines the page: a marker hides
@@ -241,12 +241,12 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
                 rows,
             })
         };
-        let mut merge =
-            ManifestTailMerge::new(range.lower_bound.clone(), tail, TieOrder::TailFirst);
+        let mut combiner =
+            ManifestTailCombiner::new(range.lower_bound.clone(), tail, TieOrder::TailFirst);
         let mut entries = Vec::with_capacity(limit);
         let mut removed_position: Option<(ChangeSeq, InodeId)> = None;
         while entries.len() < limit {
-            let Some((_, record)) = merge.next(refill).await? else {
+            let Some((_, record)) = combiner.next(refill).await? else {
                 break;
             };
             let position = (record.deletion_seq, record.root_inode_id);

@@ -1,4 +1,4 @@
-//! Writes WAL pieces as immutable extents and merges the chain's own extents.
+//! Writes WAL pieces as immutable extents and combines the chain's own extents.
 
 use super::content::{
     content_object_key_for_ref, describe_checksum, DurableContentValidationError,
@@ -303,12 +303,12 @@ async fn tail_extent_plan<L: LayoutLookup>(
     let whole = location.extents.is_empty() && !lookup.content_has_other_size(newest);
     let extents = location.extents;
     let tail_length = candidate.iter().map(|piece| piece.len() as u64).sum();
-    let MergePlan {
+    let CombinePlan {
         retained,
         candidate_length,
-    } = merge_plan(&extents, newest, tail_length);
-    let merged_length = candidate_length - tail_length;
-    start -= merged_length;
+    } = combine_plan(&extents, newest, tail_length);
+    let combined_length = candidate_length - tail_length;
+    start -= combined_length;
     let object = if whole && start == 0 {
         ExtentObject::Whole
     } else {
@@ -339,12 +339,18 @@ fn checksum_pieces(pieces: &[Bytes], algorithm: ChecksumAlgorithm) -> Checksum {
     checksum.finish()
 }
 
-struct MergePlan {
+/// How a fold combines the chain's newest own extents with the tail's pieces.
+///
+/// `retained` counts the leading extents that the fold keeps, and
+/// `candidate_length` is the length of the extent that combines the rest.
+struct CombinePlan {
     retained: usize,
     candidate_length: u64,
 }
 
-fn merge_plan(extents: &[LocatedExtent], newest: &ContentRef, tail_length: u64) -> MergePlan {
+/// Returns which of `extents` a fold keeps, and how long the extent is that
+/// combines the newest own extents with `tail_length` bytes of tail pieces.
+fn combine_plan(extents: &[LocatedExtent], newest: &ContentRef, tail_length: u64) -> CombinePlan {
     let mut retained = extents.len();
     let mut candidate_length = tail_length;
     if tail_length == 0 {
@@ -381,7 +387,7 @@ fn merge_plan(extents: &[LocatedExtent], newest: &ContentRef, tail_length: u64) 
                 .map(|located| located.extent.length)
                 .sum::<u64>();
     }
-    MergePlan {
+    CombinePlan {
         retained,
         candidate_length,
     }

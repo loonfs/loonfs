@@ -172,7 +172,7 @@ impl ServerConfig {
                 validate_non_empty("auth.token", token.expose())?;
                 Ok(AuthPolicy::BearerToken(token.clone()))
             }
-            Some(AuthConfig::Open) => Ok(AuthPolicy::Unauthenticated),
+            Some(AuthConfig::Open) => Ok(AuthPolicy::Open),
             None if bind_serves_beyond_localhost(bind) => {
                 Err(ServerError::Config(ConfigFieldError::Invalid {
                     field: "auth",
@@ -184,7 +184,7 @@ impl ServerConfig {
                     ),
                 }))
             }
-            None => Ok(AuthPolicy::Unauthenticated),
+            None => Ok(AuthPolicy::Open),
         }
     }
 

@@ -32,7 +32,7 @@ pub(super) enum Decision {
     Gone,
 }
 
-/// Whether the pass's live set references one listed content object.
+/// Whether the collection's live set references one listed content object.
 #[derive(Clone, Copy)]
 pub(super) enum ContentReference {
     Referenced,
@@ -70,9 +70,9 @@ impl<S: ObjectStore> Sweep<'_, S> {
     }
 
     async fn process_pin(&self, key: String) -> Result<Decision> {
-        // A family root's pass read its pin records while it loaded its roots.
+        // A family root's collection read its pin records while it loaded its roots.
         // A record changes only when an unexpired user pin is extended, so a
-        // record that the pass read earlier leads to the same decision as one
+        // record that the collection read earlier leads to the same decision as one
         // that it reads now.
         let decision = match self.live.pin_records.get(&key) {
             Some(record) => {
@@ -114,9 +114,9 @@ impl<S: ObjectStore> Sweep<'_, S> {
             // families. A listing isn't a snapshot, so it can miss the
             // session record of a session that was created and ended while
             // the listing ran. Deleting that session's new outcome would make
-            // the session read as open, and a later pass would abort it and
+            // the session read as open, and a later collection would abort it and
             // delete content that a commit might reference. That outcome was
-            // created after the pass started, so it's younger than the window.
+            // created after the collection started, so it's younger than the window.
             ListedUploadKind::OrphanOutcome { entry } => Ok(self.sweep_aged(
                 entry.clone(),
                 self.grace_window_ms,
@@ -134,7 +134,7 @@ impl<S: ObjectStore> Sweep<'_, S> {
         outcome_listing: OutcomeListing,
     ) -> Result<Decision> {
         let sweep = match self.live.completed_sessions.get(&upload_id) {
-            // The pass listed this session as completed before the walk, so its
+            // The collection listed this session as completed before the walk, so its
             // namespace's status decides it, including when a finished walk
             // didn't find the namespace because it has been retired.
             Some(session) => {
@@ -148,9 +148,9 @@ impl<S: ObjectStore> Sweep<'_, S> {
                             session.completed_at_ms,
                         )
                     });
-                // The sweep adds a kept session to the cache, so a later pass
+                // The sweep adds a kept session to the cache, so a later collection
                 // doesn't read its record. Adding it here instead of when the
-                // record is read means that this pass's inserts can't evict an
+                // record is read means that this collection's inserts can't evict an
                 // entry that its own listing hasn't looked up yet.
                 if let (Some(cache), UploadSessionSweep::Retain { .. }) =
                     (self.session_cache, sweep)
@@ -159,7 +159,7 @@ impl<S: ObjectStore> Sweep<'_, S> {
                 }
                 sweep
             }
-            // An open session can end during the pass, and an aborted
+            // An open session can end during the collection, and an aborted
             // session's cleanup needs its session record, so the sweep reads
             // these records again.
             None => {

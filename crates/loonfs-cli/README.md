@@ -2,15 +2,15 @@
 
 `loonfs-cli` provides the `loonfs` command, which you can use to manage profiles, namespaces, and namespace maintenance, and to work with files and directories by path. To use LoonFS from a Rust program instead, use the `loonfs` crate to embed the runtime, or `loonfs-client` to call a LoonFS server. To run a server, use `loonfs-server`.
 
-A "profile" is an entry in the config file that tells the CLI which object store or server to use. A remote profile sends requests to a LoonFS server. An embedded profile (`local`, `s3`, `r2`, or `gcs`) reads and writes the object store directly. It runs the HTTP binding (`loonfs-http`) in memory, on top of its own runtime handles, and the CLI sends requests to the binding through the same client that a remote profile uses. Because of that, both kinds of profile follow the same API contract. An embedded profile doesn't open a network listener and doesn't need a bearer token.
+A "profile" is an entry in the config file that tells the CLI which object store or server to use. A remote profile sends requests to a LoonFS server. An embedded profile (`local`, `s3`, `r2`, or `gcs`) reads and writes the object store directly. It runs the HTTP API (`loonfs-http`) in memory, on top of its own runtime handles, and the CLI sends requests to that in-memory HTTP API through the same client that a remote profile uses. Because of that, both kinds of profile follow the same API contract. An embedded profile doesn't open a network listener and doesn't need a bearer token.
 
-On an embedded profile, `loonfs maintenance index enable` runs its bounded index steps directly on the local runtime handles, instead of through the binding. A command on an embedded profile returns only after the [folds](../../docs/specs/glossary.md#fold) and metadata compactions that its writes started have finished.
+On an embedded profile, `loonfs maintenance index enable` runs its bounded index steps directly on the local runtime handles, instead of through the HTTP API. A command on an embedded profile returns only after the [folds](../../docs/specs/glossary.md#fold) and metadata compactions that its writes started have finished.
 
 Requests through an embedded profile work as follows:
 
-- **Validation and errors.** Requests go through the binding's validation, error envelope, and JSON body limits. A failed request reports the binding's request ID and error details.
-- **Deadline.** The binding cancels a request that runs longer than 60 seconds (the server's default deadline). Routes that stream file content and maintenance runs aren't subject to that deadline.
-- **Concurrency.** The binding admits at most 8 concurrent uploads and 16 concurrent downloads, the same defaults as the server.
+- **Validation and errors.** Requests go through the HTTP API's validation, error envelope, and JSON body limits. A failed request reports the HTTP API's request ID and error details.
+- **Deadline.** The HTTP API cancels a request that runs longer than 60 seconds (the server's default deadline). Routes that stream file content and maintenance runs aren't subject to that deadline.
+- **Concurrency.** The HTTP API admits at most 8 concurrent uploads and 16 concurrent downloads, the same defaults as the server.
 - **Transfer size.** The upload and download size limits are `u64::MAX`, so embedded transfers aren't limited in size.
 - **Downloads.** An interrupted embedded download starts again from the beginning. Progress for a single-file `loonfs get` counts the bytes received, but doesn't show a total.
 - **Uploads.** A file upload records its prepared commit request. If you rerun the command after the process restarts, the rerun submits that request again and renews its content token through the upload session, so the file isn't uploaded again.

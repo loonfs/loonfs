@@ -1,10 +1,10 @@
 //! Manifests, runs, WAL objects, and content protected by namespace retention,
 //! pins, and upload sessions, and on a family root by the roots of every other
 //! member of its fork family. Superseded manifests and their runs remain
-//! rooted while their successor is younger than the pass's grace window or has
+//! rooted while their successor is younger than the collection's grace window or has
 //! no provider timestamp.
 
-use super::charged_set::{Charge, ChargedMap, ChargedQueue, ChargedSet, PassMemory};
+use super::charged_set::{Charge, ChargedMap, ChargedQueue, ChargedSet, CollectionMemory};
 use super::families::CandidateFamily;
 use super::fork_family::{FamilyWalkReport, MemberState};
 use super::pins::{GraceAge, PinSweep};
@@ -18,8 +18,8 @@ use crate::manifest::load_namespace_manifest_envelope_if_present;
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::read_anchor::{project_anchor_tail, NamespaceReadAnchor};
 use crate::namespace::store::NamespaceStore;
-use crate::pin::record::pin_key_ids;
 use crate::segment::cache::read_working_memory;
+use crate::snapshot::record::pin_key_ids;
 use crate::time::Observation;
 use crate::time::OperationClock;
 use crate::wal::{live_folded_wal_no, object_is_required};
@@ -77,25 +77,25 @@ impl RetirementStatus {
 /// Whose roots one read adds to the live set.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Roots {
-    /// The namespace that the pass collects, when it was forked from another
+    /// The namespace that the collection collects, when it was forked from another
     /// namespace.
     CollectedFork,
-    /// The namespace that the pass collects, when it's the root of its fork
+    /// The namespace that the collection collects, when it's the root of its fork
     /// family.
     CollectedFamilyRoot,
-    /// Another member of the fork family whose root the pass collects.
+    /// Another member of the fork family whose root the collection collects.
     Member,
 }
 
 impl Roots {
     /// Returns whether the roots protect the namespace's own manifests and
-    /// segments, which only the namespace's own pass collects.
+    /// segments, which only the namespace's own collection collects.
     fn protects_own_objects(self) -> bool {
         self != Self::Member
     }
 
     /// Returns whether the read finds the namespace's forks through its pin
-    /// records, which only the pass on a family root needs.
+    /// records, which only the collection on a family root needs.
     fn finds_forks(self) -> bool {
         self != Self::CollectedFork
     }
@@ -110,7 +110,7 @@ pub(super) struct ListedPins {
 
 pub(super) struct LiveSet {
     /// Whether the collected namespace is a fork or the root of its fork
-    /// family. Only the pass on a family root collects content and upload
+    /// family. Only the collection on a family root collects content and upload
     /// records, because the family root's prefix stores them for the whole
     /// family.
     pub(super) collected: Roots,
@@ -118,29 +118,29 @@ pub(super) struct LiveSet {
     pub(super) discovery_start_manifest_no: ManifestNo,
     pub(super) objects: ChargedSet<String>,
     pub(super) content_ids: ChargedSet<ContentId>,
-    /// Each upload session that was completed when the pass listed the
+    /// Each upload session that was completed when the collection listed the
     /// sessions, keyed by upload ID. An outcome record can't change, so the
     /// session sweep uses these facts instead of reading the records again.
     pub(super) completed_sessions: ChargedMap<UploadId, CompletedUploadSession>,
-    /// The entries of the uploads prefix that the pass listed to root the
+    /// The entries of the uploads prefix that the collection listed to root the
     /// sessions' content, which the session sweep decides from instead of
-    /// listing the prefix again. Only the pass on a family root lists them.
+    /// listing the prefix again. Only the collection on a family root lists them.
     pub(super) uploads: ChargedQueue<ListedUpload>,
-    /// The records of the namespace's own pins that the pass read while it
+    /// The records of the namespace's own pins that the collection read while it
     /// loaded its roots, keyed by object key, which the pin sweep uses
-    /// instead of reading each record again. The pass on a family root reads
+    /// instead of reading each record again. The collection on a family root reads
     /// every record of its own pins to find its forks.
     pub(super) pin_records: ChargedMap<String, PinPayload>,
-    /// The layout views of every namespace whose roots the pass read.
+    /// The layout views of every namespace whose roots the collection read.
     pub(super) manifests: Vec<LoadedManifest>,
     manifest_charge: Charge,
-    pub(super) memory: PassMemory,
-    /// What the pass read of its fork family's roots.
+    pub(super) memory: CollectionMemory,
+    /// What the collection read of its fork family's roots.
     pub(super) family: FamilyWalkReport,
-    /// The collected namespace, and on a family root's pass every other
+    /// The collected namespace, and on a family root's collection every other
     /// member of the fork family that the walk has found.
     pub(super) members: ChargedMap<NamespaceId, MemberState>,
-    /// The members whose roots the pass hasn't read yet, in the order that
+    /// The members whose roots the collection hasn't read yet, in the order that
     /// the fork pin listings found them.
     pub(super) member_queue: ChargedQueue<NamespaceId>,
     has_pins: bool,
@@ -158,8 +158,8 @@ impl LiveSet {
     /// namespace's segment cache, with up to `STORE_READS_IN_FLIGHT` root
     /// manifests loading at once, and the object keys, content IDs, listed
     /// upload records, completed sessions, manifests, and fork family members
-    /// that the pass keeps are charged to its read working memory as they
-    /// arrive. The pass doesn't read the record of a completed session that
+    /// that the collection keeps are charged to its read working memory as they
+    /// arrive. The collection doesn't read the record of a completed session that
     /// `session_cache` has.
     pub(super) async fn load<S: ObjectStore>(
         namespace: &NamespaceStore<S>,
@@ -175,12 +175,12 @@ impl LiveSet {
         } else {
             Roots::CollectedFork
         };
-        // Sessions are listed before the WAL tail is read. A session this pass
-        // misses is newer than the pass, or it ended before the tail read and
+        // Sessions are listed before the WAL tail is read. A session this collection
+        // misses is newer than the collection, or it ended before the tail read and
         // the tail or a rooted manifest names every commit of its content. Only
         // a family root's prefix stores upload sessions, and a deleted family
-        // root's pass still sweeps content, so its sessions are still roots.
-        let memory = PassMemory::new(
+        // root's collection still sweeps content, so its sessions are still roots.
+        let memory = CollectionMemory::new(
             namespace_id,
             read_working_memory(Some(namespace.segment_cache.as_ref())),
         );
@@ -325,8 +325,8 @@ impl LiveSet {
     ///
     /// The first listed pin for a manifest number loads that manifest, and
     /// later pins for the number use the result. A pin whose manifest is
-    /// missing fails the pass unless pin cleanup would delete it. Another
-    /// member's pass decides about that member's pins, so there a missing
+    /// missing fails the collection unless pin cleanup would delete it. Another
+    /// member's collection decides about that member's pins, so there a missing
     /// manifest makes the member's roots unreadable.
     async fn load_pinned_manifests<S: ObjectStore>(
         &mut self,
@@ -403,7 +403,7 @@ impl LiveSet {
                 }
                 // A failed pin installation can outlive both its basis and its
                 // cleanup attempt. Another collector can also remove a released
-                // pin's basis after this pass listed it. Every pin for a missing
+                // pin's basis after this collection listed it. Every pin for a missing
                 // manifest is checked on its own, because another pin for the
                 // number can still require retention when an earlier pin was
                 // deletable.
@@ -499,7 +499,7 @@ impl LiveSet {
         Ok(())
     }
 
-    /// Returns whether the pass keeps the object of `family` at `key`, because
+    /// Returns whether the collection keeps the object of `family` at `key`, because
     /// a live root references the object, discovery can still read it, or a
     /// live head hasn't folded it.
     pub(super) fn protects(&self, family: CandidateFamily, key: &str) -> bool {
@@ -518,8 +518,8 @@ impl LiveSet {
             }
     }
 
-    /// Returns whether the pass collects content and upload records, which
-    /// only the pass on a family root does.
+    /// Returns whether the collection collects content and upload records, which
+    /// only the collection on a family root does.
     pub(super) fn collects_family_content(&self) -> bool {
         self.collected == Roots::CollectedFamilyRoot
     }

@@ -2,7 +2,7 @@
 //! attributes and access revisions, and content layouts.
 
 use super::manifest_index;
-use super::manifest_tail_merge::{ManifestPage, ManifestTailMerge, TieOrder};
+use super::manifest_tail_combiner::{ManifestPage, ManifestTailCombiner, TieOrder};
 use crate::error::{CoreError, Result};
 use crate::metadata::view::newest;
 use crate::metadata::view::MetadataView;
@@ -100,7 +100,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     /// newest first within each inode). With an `inode_id`, the page holds
     /// only that inode's revisions.
     ///
-    /// The manifest's rows merge with the WAL tail's rows, and the page reads
+    /// The manifest's rows combine with the WAL tail's rows, and the page reads
     /// manifest rows until it has `limit` rows at or below the view's
     /// sequence, so a page below the manifest's head is short only at the end
     /// of the range.
@@ -132,10 +132,11 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
                 rows,
             })
         };
-        let mut merge = ManifestTailMerge::new(lower_bound.to_owned(), tail, TieOrder::TailFirst);
+        let mut combiner =
+            ManifestTailCombiner::new(lower_bound.to_owned(), tail, TieOrder::TailFirst);
         let mut rows: Vec<(String, RevisionRecord)> = Vec::with_capacity(limit);
         while rows.len() < limit {
-            let Some((row_key, revision)) = merge.next(refill).await? else {
+            let Some((row_key, revision)) = combiner.next(refill).await? else {
                 break;
             };
             if revision.committed_seq <= visible_seq {

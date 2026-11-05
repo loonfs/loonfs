@@ -1,7 +1,7 @@
 //! Bounded loading must return the same raw-row prefix as an unbounded scan.
 
 use super::*;
-use crate::manifest::tests::inspection_materialization::load_manifest_segment_rows_in_key_range_with_cache;
+use crate::manifest::tests::inspection_state::load_manifest_segment_rows_in_key_range_with_cache;
 use crate::segment::block_memo::SessionBlockMemo;
 use crate::segment::cache::{DecodedMetadataSegmentBlock, MetadataSegmentCacheKey};
 use crate::segment::segment_block_cache::{
@@ -140,7 +140,7 @@ async fn bounded_pages_match_full_rows_across_ranges_and_eviction() {
 }
 
 #[tokio::test]
-async fn bounded_pages_merge_overlapping_runs_and_binding_versions() {
+async fn bounded_pages_combine_overlapping_runs_and_binding_versions() {
     let temp = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp.path()).expect("store");
     let first = rows(0, 1024, 1);
@@ -187,7 +187,7 @@ async fn bounded_pages_merge_overlapping_runs_and_binding_versions() {
                     scan::BlocksPerRefill::One,
                 )
                 .await
-                .expect("merged page");
+                .expect("combined page");
             let peak = view.peak_page_rows();
             assert_eq!(peak, page.len());
             assert!(peak <= limit, "owned scan rows must fit one page");
@@ -200,7 +200,7 @@ async fn bounded_pages_merge_overlapping_runs_and_binding_versions() {
         assert_eq!(
             actual,
             expected[window.clone()],
-            "merged traversal with page limit {limit}"
+            "combined traversal with page limit {limit}"
         );
     }
 }
@@ -292,7 +292,7 @@ async fn bounded_pages_open_and_refill_segments_in_a_concurrent_window() {
             .collect();
         let rows: Vec<_> = page
             .await
-            .expect("merged page")
+            .expect("combined page")
             .into_iter()
             .map(|(_, row)| row)
             .collect();

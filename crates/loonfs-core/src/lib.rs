@@ -98,11 +98,11 @@ mod object_cache;
 mod options;
 mod permit_pool;
 mod phase;
-mod pin;
 mod read_working_memory;
 mod recency;
 mod segment;
 mod shared_check;
+mod snapshot;
 mod storage;
 mod upload;
 mod wal;
@@ -186,7 +186,7 @@ pub mod control {
 pub mod publish {
     pub use crate::commit::engine::{
         CommitCandidate, ContentPreparationError, NamespaceCommitEngine,
-        NamespaceCommitEnginePublishResult, SharedWriterSessionStatus, TailSource, WalTailReport,
+        NamespaceCommitEnginePublishOutcome, SharedWriterSessionStatus, TailSource, WalTailReport,
         WriterSessionStatus,
     };
     pub use crate::commit::publish_view::WriterPosition;
@@ -223,15 +223,15 @@ pub use namespace::store::NamespaceStore;
 pub use options::{CreateNamespaceOptions, DeleteNamespaceOptions};
 pub use path::read::{
     CurrentFile, CurrentFileState, DirectDownloadByInodeTarget, DirectDownloadTarget, FileBytes,
-    FileRevisionsPage, GrantedRange, RetainedRevisionsPage, RetainedRevisionsPageCursor,
+    FileRevisionsPage, ObjectRange, RetainedRevisionsPage, RetainedRevisionsPageCursor,
 };
 pub use permit_pool::{BudgetPermit, PermitPool, PermitPoolObserver, PoolCounts};
 pub use phase::Phase;
-pub use pin::{
-    CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointPageCursor,
-    ListCheckpointFilesOptions, SnapshotPageCursor,
-};
 pub use segment::{MetadataFamilyGroup, MetadataRunPolicy};
+pub use snapshot::{
+    CheckpointPageCursor, ListSnapshotFilesOptions, SnapshotFile, SnapshotFilesPage,
+    SnapshotFilesPageCursor, SnapshotPageCursor,
+};
 pub use upload::{
     DirectMultipartUploadTarget, DirectPutUploadTarget, MultipartPartTarget, MultipartPartTargets,
     UploadSessionView,

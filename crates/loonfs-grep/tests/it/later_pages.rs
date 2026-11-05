@@ -187,7 +187,7 @@ impl AclPages {
     }
 
     /// Returns the first page of one match for each principal, and the
-    /// order in which the walk visits the files that `request` matches.
+    /// order in which the walk reads the files that `request` matches.
     async fn first_pages(
         &self,
         request: &GrepRequest,

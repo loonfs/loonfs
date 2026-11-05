@@ -7,9 +7,9 @@
 use crate::entry::{grep_extension_name, GrepEntry};
 use crate::{GrepError, Result};
 use loonfs::{
-    CheckpointFilesPager, Consistency, CoreError, CurrentFileState, ListChangesOptions,
-    ListCheckpointFilesOptions, LoonFs, Namespace, NamespaceMetadata, ReadAt, ReadOnly, ReadView,
-    RetainedRevisionsPage, RetainedRevisionsPageCursor, StatOptions, MAX_CURRENT_FILES_PER_STAT,
+    Consistency, CoreError, CurrentFileState, ListChangesOptions, ListSnapshotFilesOptions, LoonFs,
+    Namespace, NamespaceMetadata, ReadAt, ReadOnly, ReadView, RetainedRevisionsPage,
+    RetainedRevisionsPageCursor, SnapshotFilesPager, StatOptions, MAX_CURRENT_FILES_PER_STAT,
 };
 use loonfs_types::{
     AbsolutePath, ChangeSeq, ContentRef, EffectiveLimit, InodeId, LimitError, NamespaceId, Page,
@@ -97,10 +97,10 @@ impl NamespaceReads {
     /// A page returns `snapshot_not_found` if the snapshot was deleted,
     /// expired, or collected, and `checkpoint_unavailable` if its manifest is
     /// gone. The caller must then restart the backfill from a new snapshot.
-    pub fn list_checkpoint_files(&self, checkpoint_id: &PinId) -> CheckpointFilesPager {
-        self.namespace.list_checkpoint_files_with_options(
-            checkpoint_id,
-            &ListCheckpointFilesOptions {
+    pub fn list_snapshot_files(&self, snapshot_id: &PinId) -> SnapshotFilesPager {
+        self.namespace.list_snapshot_files_with_options(
+            snapshot_id,
+            &ListSnapshotFilesOptions {
                 include_deleted: true,
             },
         )

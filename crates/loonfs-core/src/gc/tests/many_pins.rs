@@ -8,7 +8,7 @@ use loonfs_test_support::stores::RecordedOperation;
 use loonfs_types::format::control::UploadOutcome;
 
 #[tokio::test]
-async fn one_pass_deletes_an_aged_upload_and_every_expired_snapshot_among_many_pins() {
+async fn one_collection_deletes_an_aged_upload_and_every_expired_snapshot_among_many_pins() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("many-pins").expect("namespace");
     let store = RecordingStore::new(
@@ -42,7 +42,7 @@ async fn one_pass_deletes_an_aged_upload_and_every_expired_snapshot_among_many_p
             },
             ..basis.clone()
         };
-        crate::pin::record::write_pin(&store, &record)
+        crate::snapshot::record::write_pin(&store, &record)
             .await
             .expect("expired pin");
     }
@@ -60,7 +60,7 @@ async fn one_pass_deletes_an_aged_upload_and_every_expired_snapshot_among_many_p
     let report = crate::test_support::namespace_store(&store, &namespace_id)
         .gc(None, &options(), &context(2_000 + GRACE_MS).clock())
         .await
-        .expect("complete pass");
+        .expect("complete collection");
     assert_eq!(report.deleted.upload_sessions, 1);
     assert_eq!(report.deleted_checkpoints_by_owner.user, 1025);
     assert_eq!(report.retained.checkpoint_not_deletable, 1);

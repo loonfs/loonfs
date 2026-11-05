@@ -35,7 +35,7 @@ pub use config::{GrepWorkerConfig, GrepWorkerConfigError};
 pub use error::{GrepError, Result};
 pub use reads::NamespaceReads;
 pub use service::{GrepService, MAX_GREP_SCAN_FILES, MAX_GREP_TAIL_FILES};
-pub use step_budget::{GrepPassBudget, DEFAULT_MAX_CONCURRENT_GREP_STEPS};
+pub use step_budget::{GrepStepBudget, DEFAULT_MAX_CONCURRENT_GREP_STEPS};
 pub use worker::{
     GramIndexBuildPolicy, GrepBuildOutcome, GrepDisableOutcome, GrepEnableOutcome, GrepProgress,
     GrepPublicationStats, GrepPublishOutcome, GrepReorganizeOutcome, GrepSteps, GrepWorker,

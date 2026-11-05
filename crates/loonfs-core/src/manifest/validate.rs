@@ -3,9 +3,7 @@
 
 use super::error::ManifestLoadError;
 use crate::segment::row::manifest_row_commit_seq;
-use crate::segment::runs::{
-    runs_in_materialization_order, MetadataFamilyGroup, MetadataRunManifest,
-};
+use crate::segment::runs::{runs_oldest_first, MetadataFamilyGroup, MetadataRunManifest};
 use crate::segment::scan::ordered_manifest_segments;
 use loonfs_objectstore::keys::{extension_segment_object_key, metadata_segment_object_key};
 use loonfs_types::format::manifest::{
@@ -69,9 +67,9 @@ pub(super) fn validate_manifest(
             ),
         });
     }
-    validate_manifest_materialization_ranges(object_key, payload)?;
+    validate_manifest_sequence_ranges(object_key, payload)?;
     validate_extension_runs(object_key, payload)?;
-    let runs = runs_in_materialization_order(payload);
+    let runs = runs_oldest_first(payload);
     validate_one_base_run_per_family_group(object_key, &runs)?;
     validate_segment_block_layout(object_key, &runs)?;
     validate_segment_key_ranges(object_key, &runs)?;
@@ -79,7 +77,7 @@ pub(super) fn validate_manifest(
     Ok(())
 }
 
-pub(super) fn validate_manifest_materialization_ranges(
+pub(super) fn validate_manifest_sequence_ranges(
     object_key: &str,
     payload: &NamespaceManifestPayload,
 ) -> Result<(), ManifestLoadError> {
@@ -513,7 +511,7 @@ pub(crate) fn validate_manifest_row_seq_range<'a>(
 /// outright, over rows a caller has all of. The bind family's summary rows
 /// have no copy in the reverse index.
 ///
-/// Only the test-only inspection materialization keeps a whole family, so only
+/// Only the test-only inspection load keeps a whole family, so only
 /// it can afford this. A compaction never keeps a whole family and checks parity by digesting
 /// the rows it writes instead
 /// (`crate::compaction::group_compaction::GroupCompaction::refuse_a_run_whose_index_disagrees`).

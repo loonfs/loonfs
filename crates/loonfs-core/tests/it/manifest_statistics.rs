@@ -222,7 +222,7 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
         .await
         .expect("snapshot");
     let baseline = namespace_store(&store, &parent)
-        .load_checkpoint_statistics(&snapshot.snapshot_id)
+        .load_snapshot_statistics(&snapshot.snapshot_id)
         .await
         .expect("pin activity");
     NamespaceFixture::new(&store, &parent, &context)
@@ -238,7 +238,7 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
     unavailable_wal.fail_all();
     assert_eq!(
         namespace_store(&unavailable_wal, &parent)
-            .load_checkpoint_statistics(&snapshot.snapshot_id)
+            .load_snapshot_statistics(&snapshot.snapshot_id)
             .await
             .expect("checkpoint statistics exclude newer WAL"),
         baseline
@@ -300,7 +300,7 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
     );
     assert_eq!(
         namespace_store(&store, &parent)
-            .load_checkpoint_statistics(&layout_snapshot.snapshot_id)
+            .load_snapshot_statistics(&layout_snapshot.snapshot_id)
             .await
             .expect("checkpoint layout statistics"),
         layout
@@ -369,7 +369,7 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
     );
     assert_eq!(
         namespace_store(&store, &parent)
-            .load_checkpoint_statistics(&snapshot.snapshot_id)
+            .load_snapshot_statistics(&snapshot.snapshot_id)
             .await
             .expect("pin unchanged"),
         baseline

@@ -5,7 +5,7 @@ use super::extractors::SubjectHeaders;
 use super::handlers_filesystem::PageQuery;
 
 use super::query_params::{checked_cursor, effective_page_limit};
-use super::{AppJson, AppPath, AppQuery, BindingState, NamespaceIdPath, NoQuery};
+use super::{AppJson, AppPath, AppQuery, HttpState, NamespaceIdPath, NoQuery};
 use axum::extract::State;
 use axum::Json;
 use loonfs::{CheckpointPageCursor, SnapshotPageCursor};
@@ -42,7 +42,7 @@ use std::sync::Arc;
     )
 )]
 pub(super) async fn create_snapshot(
-    State(state): State<Arc<BindingState>>,
+    State(state): State<Arc<HttpState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
@@ -92,7 +92,7 @@ pub(super) async fn create_snapshot(
     )
 )]
 pub(super) async fn list_snapshots(
-    State(state): State<Arc<BindingState>>,
+    State(state): State<Arc<HttpState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<PageQuery>,
@@ -136,7 +136,7 @@ pub(super) async fn list_snapshots(
     )
 )]
 pub(super) async fn extend_snapshot(
-    State(state): State<Arc<BindingState>>,
+    State(state): State<Arc<HttpState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(SnapshotPathParams { snapshot_id }): AppPath<SnapshotPathParams>,
@@ -178,7 +178,7 @@ pub(super) async fn extend_snapshot(
     )
 )]
 pub(super) async fn get_snapshot(
-    State(state): State<Arc<BindingState>>,
+    State(state): State<Arc<HttpState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(SnapshotPathParams { snapshot_id }): AppPath<SnapshotPathParams>,
@@ -217,7 +217,7 @@ pub(super) async fn get_snapshot(
     )
 )]
 pub(super) async fn delete_snapshot(
-    State(state): State<Arc<BindingState>>,
+    State(state): State<Arc<HttpState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(SnapshotPathParams { snapshot_id }): AppPath<SnapshotPathParams>,
@@ -271,7 +271,7 @@ pub(super) struct SnapshotPathParams {
     )
 )]
 pub(super) async fn list_checkpoints(
-    State(state): State<Arc<BindingState>>,
+    State(state): State<Arc<HttpState>>,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<PageQuery>,
 ) -> Result<Json<ListCheckpointsResponse>, ApiResponseError> {
@@ -311,7 +311,7 @@ pub(super) async fn list_checkpoints(
     )
 )]
 pub(super) async fn get_checkpoint(
-    State(state): State<Arc<BindingState>>,
+    State(state): State<Arc<HttpState>>,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(CheckpointPathParams { checkpoint_id }): AppPath<CheckpointPathParams>,
     AppQuery(_): AppQuery<NoQuery>,

@@ -15,24 +15,24 @@ use loonfs_http::RequestLimit;
 /// Renders the recorder's snapshot, then the values that a scrape reads from
 /// the server's state, such as the caches' stats and the free transfer slots.
 pub(super) fn render(state: &AppState) -> String {
-    let binding = &state.binding;
-    let mut rendered = render_snapshot(&binding.metrics.snapshot());
-    render_metadata_cache(&mut rendered, &binding.runtime.metadata_cache().stats());
+    let http = &state.http;
+    let mut rendered = render_snapshot(&http.metrics.snapshot());
+    render_metadata_cache(&mut rendered, &http.runtime.metadata_cache().stats());
     // A server that doesn't serve grep has no grep cache. Reporting zeros
     // would incorrectly suggest that the cache is idle.
-    if let Some(service) = binding.grep.service() {
+    if let Some(service) = http.grep.service() {
         render_grep_block_cache(&mut rendered, &service.block_cache_stats());
     }
-    let grep_worker = binding.grep.worker();
+    let grep_worker = http.grep.worker();
     if let Some(worker) = grep_worker {
         render_grep_worker_block_cache(&mut rendered, &worker.block_cache_stats());
     }
     render_scrape_gauges(
         &mut rendered,
         grep_worker.map(|worker| worker.step_budget().stats()),
-        binding.upload_permits().available_permits(),
-        binding.download_permits().available_permits(),
-        binding.request_limit().map_or(0, RequestLimit::in_flight),
+        http.upload_permits().available_permits(),
+        http.download_permits().available_permits(),
+        http.request_limit().map_or(0, RequestLimit::in_flight),
     );
     // A server that doesn't maintain grep publishes no grep entries, and
     // zeros would suggest that its index steps publish nothing.

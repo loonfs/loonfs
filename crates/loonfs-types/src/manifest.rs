@@ -1,5 +1,5 @@
 //! The namespace manifest format: the durable document naming the
-//! metadata segment runs that materialize one namespace file-set version
+//! metadata segment runs that store one version of a namespace's metadata
 //! ([manifest format](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#71-manifests-runs-and-segments)).
 
 use crate::control::{ForkBasis, NamespaceStatus, WriterBlock};
@@ -43,7 +43,7 @@ pub const METADATA_SEGMENT_ENCODING: u32 = 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NamespaceManifestKind {
-    /// Marks the file-set descriptor used to materialize a namespace snapshot.
+    /// Marks the document that lists the manifest's runs.
     Manifest,
 }
 
@@ -310,11 +310,11 @@ impl ManifestActivity {
 
 /// Contains one complete namespace file-set description inside a manifest envelope.
 ///
-/// See [manifest publication](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#72-publishing-a-materialized-file-set).
+/// See [manifest publication](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#72-publishing-a-manifest).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NamespaceManifestPayload {
-    /// Namespace whose materialized state this manifest describes.
+    /// Namespace whose metadata this manifest describes.
     pub namespace_id: NamespaceId,
     /// Namespace creation stamp in Unix milliseconds.
     pub created_at_ms: u64,
@@ -349,7 +349,7 @@ pub struct NamespaceManifestPayload {
     /// Streaming compaction rebuilds a whole family group and publishes once at the end.
     /// Grep publishes each bounded step, so a lost race costs only one step.
     pub compactor_epoch: CompactorEpoch,
-    /// Materialized head sequence, or the final namespace sequence on deletion.
+    /// Folded head, or the final namespace sequence on deletion.
     pub head_seq: ChangeSeq,
     /// Activity committed in this namespace through `head_seq`.
     pub activity: ManifestActivity,
@@ -663,7 +663,7 @@ pub fn encode_namespace_manifest_json(
 /// Decoding fails for invalid compression or JSON, a document longer than
 /// [`MAX_NAMESPACE_MANIFEST_BYTES`], the wrong kind or version, a checksum
 /// mismatch, or an invalid payload. See
-/// [manifest publication](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#72-publishing-a-materialized-file-set).
+/// [manifest publication](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#72-publishing-a-manifest).
 pub fn decode_namespace_manifest_json(
     bytes: &[u8],
 ) -> Result<NamespaceManifestEnvelope, EnvelopeCodecError> {
@@ -967,7 +967,7 @@ mod tests {
     }
 
     #[test]
-    fn namespace_manifest_codec_round_trips_base_only_materialization() {
+    fn namespace_manifest_codec_round_trips_a_base_only_manifest() {
         let (envelope, encoded) = encode_namespace_manifest_json(NamespaceManifestPayload {
             activity: Default::default(),
             created_at_ms: 1_000,

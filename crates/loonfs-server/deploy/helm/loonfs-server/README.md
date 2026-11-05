@@ -123,6 +123,6 @@ Why reject unknown values? A value that's quietly ignored is worse than one that
 
 This section describes how the server shuts down, and why `terminationGracePeriodSeconds` defaults to 660.
 
-When the server shuts down, it stops accepting new requests, drains the requests in flight, and settles its background work. It abandons requests that are still running after `shutdown_deadline_ms` (600 seconds by default), and it drops maintenance sweep visits that are still running at the same deadline. The extra minute in the grace period lets the server finish settling its writers before the kubelet sends SIGKILL.
+When the server shuts down, it stops accepting new requests, drains the requests in flight, and settles its background work. It abandons requests that are still running after `shutdown_deadline_ms` (600 seconds by default), and it drops maintenance steps that are still running at the same deadline. The extra minute in the grace period lets the server finish settling its writers before the kubelet sends SIGKILL.
 
 The kubelet sends SIGKILL when the grace period runs out. A killed process doesn't corrupt anything, because writer-epoch fencing limits the effect of whatever it leaves behind. But the process doesn't get to settle cleanly, and work that the server had already accepted can be lost. Lower this value only if you'd rather have a faster rollout.

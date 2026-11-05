@@ -16,7 +16,7 @@ mod runtime;
 pub use loonfs_objectstore::metrics::{
     InstrumentedObjectStore, JsonlObjectStoreMetricsRecorder, ObjectKeyKind,
     ObjectStoreMetricSample, ObjectStoreMetricsRecorder, ObjectStoreOperation,
-    ObjectStoreResultKind, PutModeKind, RangeKind, VecObjectStoreMetricsRecorder,
+    ObjectStoreOutcomeKind, PutModeKind, RangeKind, VecObjectStoreMetricsRecorder,
 };
 
 pub(crate) use object_store::fan_out_object_store_recorder;

@@ -1,14 +1,14 @@
-//! Listing ages and store requests made by a complete pass.
+//! Listing ages and store requests made by a complete collection.
 
 use super::*;
 use loonfs_objectstore::keys::{content_blob, metadata_segment_object_key};
 use loonfs_types::format::manifest::MetadataRowFamily;
 
-/// Checks that a pass sends HEAD requests only for discovery's probe above
+/// Checks that a collection sends HEAD requests only for discovery's probe above
 /// the hinted manifest and for the anchor's check of the current manifest's
 /// successor.
 #[tokio::test]
-async fn a_pass_heads_only_the_discovery_probe_and_successor() {
+async fn a_collection_heads_only_the_discovery_probe_and_successor() {
     let directory = tempdir().expect("directory");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let namespace_id = NamespaceId::parse("no-heads").expect("namespace");
@@ -40,7 +40,7 @@ async fn a_pass_heads_only_the_discovery_probe_and_successor() {
     let report = crate::test_support::namespace_store(&recorded, &namespace_id)
         .gc(None, &options(), &context(GRACE_MS + 1).clock())
         .await
-        .expect("pass");
+        .expect("collection");
     assert_eq!(report.deleted.content_objects, 1);
     let mut operations = recorded.snapshot();
     loonfs_test_support::stores::sort_head_runs(&mut operations);
@@ -117,7 +117,7 @@ async fn listed_times_retain_undated_content_and_delete_aged_content() {
     let report = crate::test_support::namespace_store(&recorded, &namespace_id)
         .gc(None, &options(), &context(GRACE_MS + 1).clock())
         .await
-        .expect("pass");
+        .expect("collection");
     assert_eq!(report.retained.no_provider_timestamp, 1);
     assert_eq!(report.deleted.content_objects, 1);
     let deleted: Vec<_> = recorded
@@ -235,7 +235,7 @@ async fn superseded_views_add_segment_reads_only_for_uncovered_layout_segments()
             .gc(None, &options(), &context(now_ms).clock())
             .await
             .expect("root predecessor");
-        // Reads within one pass have no fixed order, so both lists are
+        // Reads within one collection have no fixed order, so both lists are
         // compared sorted.
         let mut rooted_reads = rooted.take_get_keys();
         rooted_reads.sort();
@@ -260,12 +260,12 @@ async fn superseded_views_add_segment_reads_only_for_uncovered_layout_segments()
     }
 }
 
-/// Checks that a pass reads the extent filter of each layout segment once,
+/// Checks that a collection reads the extent filter of each layout segment once,
 /// when every rooted manifest adds one delta run over a base that the current
 /// manifest no longer lists, and that it loads those manifests with more than
 /// one read and at most `STORE_READS_IN_FLIGHT` reads in flight.
 #[tokio::test]
-async fn a_pass_reads_each_extent_filter_once_however_many_roots_list_its_segment() {
+async fn a_collection_reads_each_extent_filter_once_however_many_roots_list_its_segment() {
     use crate::compaction::CompactionUnitOutcome;
 
     const DELTA_RUNS: usize = 8;
@@ -340,7 +340,7 @@ async fn a_pass_reads_each_extent_filter_once_however_many_roots_list_its_segmen
     crate::test_support::namespace_store(&store, &namespace_id)
         .gc(None, &options(), &context(now_ms).clock())
         .await
-        .expect("pass");
+        .expect("collection");
 
     // Each extent filter read is one GET. A read per view would read the
     // base's filter once for each of the eight views that list it.

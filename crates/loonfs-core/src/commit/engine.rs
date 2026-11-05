@@ -22,7 +22,7 @@ pub use self::candidate::{CommitCandidate, ContentPreparationError};
 pub(crate) use self::candidate::{ContentPreparation, MergeIntent, TemporaryMove};
 
 #[derive(Debug, Clone)]
-pub struct NamespaceCommitEnginePublishResult {
+pub struct NamespaceCommitEnginePublishOutcome {
     pub results: Vec<Result<Commit>>,
     /// The WAL tail this attempt loaded, for opportunistic maintenance
     /// scheduling, or `None` when it loaded no projection.
@@ -285,10 +285,10 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
         &mut self,
         candidates: impl AsRef<[CommitCandidate]>,
         clock: &OperationClock,
-    ) -> NamespaceCommitEnginePublishResult {
+    ) -> NamespaceCommitEnginePublishOutcome {
         let candidates = candidates.as_ref();
         if candidates.is_empty() {
-            return NamespaceCommitEnginePublishResult {
+            return NamespaceCommitEnginePublishOutcome {
                 results: Vec::new(),
                 wal_tail: None,
             };
@@ -473,7 +473,7 @@ impl PositionState {
         loaded: LoadedPublishView<'_, S>,
         candidates: &[CommitCandidate],
         clock: &OperationClock,
-    ) -> NamespaceCommitEnginePublishResult {
+    ) -> NamespaceCommitEnginePublishOutcome {
         let LoadedPublishView {
             view: publish_view,
             attempt,
@@ -502,7 +502,7 @@ impl PositionState {
         if update.advanced && self.current.is_some() {
             self.projection_observed = Some(attempt);
         }
-        NamespaceCommitEnginePublishResult {
+        NamespaceCommitEnginePublishOutcome {
             results: published.results,
             wal_tail: Some(WalTailReport {
                 objects: update.wal_tail_objects,
@@ -595,8 +595,8 @@ fn repeated_error(count: usize, error: CoreError) -> Vec<Result<Commit>> {
 }
 
 /// The result of a unit that failed before it published anything.
-fn failed_publication(count: usize, error: CoreError) -> NamespaceCommitEnginePublishResult {
-    NamespaceCommitEnginePublishResult {
+fn failed_publication(count: usize, error: CoreError) -> NamespaceCommitEnginePublishOutcome {
+    NamespaceCommitEnginePublishOutcome {
         results: repeated_error(count, error),
         wal_tail: None,
     }

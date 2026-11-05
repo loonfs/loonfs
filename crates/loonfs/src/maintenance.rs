@@ -38,8 +38,8 @@ pub use floor_acknowledgment::{
     AcknowledgeRetentionFloorOutcome, AcknowledgeRetentionFloorReport, RetentionFloors,
 };
 pub use reports::{
-    MetadataCompactionOutcome, MetadataCompactionReport, MetadataMaintenanceReport,
-    MetadataPassReport,
+    MaintainMetadataReport, MetadataCompactionOutcome, MetadataCompactionReport,
+    MetadataMaintenanceReport,
 };
 
 /// Explicit maintenance: namespace diagnostics, operator checkpoints, WAL
@@ -169,7 +169,7 @@ impl Maintenance {
     pub async fn maintain_metadata(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<MetadataPassReport> {
+    ) -> Result<MaintainMetadataReport> {
         self.maintain_metadata_with_options(namespace_id, &MaintainMetadataOptions::default())
             .await
     }
@@ -189,7 +189,7 @@ impl Maintenance {
         &self,
         namespace_id: &NamespaceId,
         options: &MaintainMetadataOptions,
-    ) -> Result<MetadataPassReport> {
+    ) -> Result<MaintainMetadataReport> {
         trace::in_operation(
             operation_span!(self.core, "maintain_metadata", namespace_id),
             async {
@@ -208,9 +208,9 @@ impl Maintenance {
                 tracing::debug!(
                     ?wal_fold,
                     ?compaction,
-                    "metadata maintenance pass concluded"
+                    "metadata maintenance step concluded"
                 );
-                Ok(MetadataPassReport {
+                Ok(MaintainMetadataReport {
                     namespace_id: namespace_id.clone(),
                     wal_fold,
                     compaction,
@@ -372,11 +372,11 @@ impl Maintenance {
             .await
     }
 
-    /// Runs one complete garbage-collection pass for one namespace.
+    /// Runs one complete garbage collection of one namespace.
     ///
-    /// Every call rebuilds the current live roots and keeps no cursor. A pass
-    /// runs only when asked. A deleted namespace is collected, which is how
-    /// its objects are reclaimed; a namespace that does not exist returns
+    /// Every call rebuilds the current live roots and keeps no cursor. A
+    /// collection runs only when asked. A deleted namespace is collected, which is how
+    /// it is retired; a namespace that does not exist returns
     /// `namespace_not_found`.
     pub async fn gc_with_options(
         &self,
@@ -394,12 +394,12 @@ impl Maintenance {
                 .await
                 .map_err(Error::from)?;
             // A caller may drop the response, so its counts survive only when
-            // this shared pass records them here.
-            self.core.instruments().gc.pass(&report);
-            // A pass publishes no manifest, so the head didn't move. The
+            // this shared collection path records them here.
+            self.core.instruments().gc.record_collection(&report);
+            // A collection publishes no manifest, so the head didn't move. The
             // publisher keeps its position, and the cached head stays confirmed.
             // The collection grace covers the revalidation bound, so a head
-            // inside its bound never lists a segment that a pass deleted
+            // inside its bound never lists a segment that a collection deleted
             // (format.md sections 11.2 and 11.4).
             self.publisher
                 .invalidate_namespace(namespace_id, NamespaceChange::Unchanged)
@@ -518,8 +518,8 @@ impl Maintenance {
     /// Advancing the floor abandons the replay history below it, and a later
     /// base compaction keeps, for each file, every revision above the floor
     /// and the newest revision at or below it. The runtime doesn't schedule
-    /// an advance. The reference server makes one on each full maintenance
-    /// pass, toward [`RetentionTarget::Window`](crate::RetentionTarget::Window)
+    /// an advance. The reference server makes one on each maintenance sweep,
+    /// toward [`RetentionTarget::Window`](crate::RetentionTarget::Window)
     /// with its `retention_window_ms` as the default window, so a namespace
     /// with neither its own window nor that setting keeps its whole history.
     pub async fn advance_retention_floor_with_options(

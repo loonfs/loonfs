@@ -1,4 +1,5 @@
-//! Streams rows from multiple runs in row-key order with bounded buffering.
+//! Combines sorted runs: streams the rows of several runs in row-key order
+//! with bounded buffering.
 
 use crate::error::{CoreError, Result};
 use crate::in_flight::STORE_READS_IN_FLIGHT;

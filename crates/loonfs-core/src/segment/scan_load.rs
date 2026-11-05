@@ -5,7 +5,7 @@ use super::cache::MetadataSegmentCache;
 use super::data_block_load::load_segment_data_block_span;
 use super::index_block_load::load_segment_index;
 use super::scan::BlocksPerRefill;
-use crate::compaction::merge_iterator::{LoadedBlocks, SegmentBlockLoader};
+use crate::compaction::run_iterator::{LoadedBlocks, SegmentBlockLoader};
 use crate::limits::MAX_SCAN_REFILL_BYTES;
 use crate::manifest::error::ManifestLoadError;
 use crate::manifest::validate::validate_manifest_row_seq_range;

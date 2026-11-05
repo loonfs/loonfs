@@ -1,11 +1,11 @@
 //! One page of a directory's visible children in a
-//! [`MetadataViewSession`]: one scan of the parent's slot-index rows, merged
+//! [`MetadataViewSession`]: one scan of the parent's slot-index rows, combined
 //! with the WAL tail's rows, that reads each edge's value at the session's
 //! sequence and skips the edge's older rows.
 
 use super::durable_cache::ParentNameCacheKey;
 use super::manifest_index;
-use super::manifest_tail_merge::{ManifestPage, ManifestTailMerge, TieOrder};
+use super::manifest_tail_combiner::{ManifestPage, ManifestTailCombiner, TieOrder};
 use super::visibility;
 use super::DirentryBindingRecord;
 use crate::error::Result;
@@ -57,7 +57,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
             .expect("a slot prefix should end in a hyphen"),
             None => lookup_keys::direntry_parent_prefix(parent_inode_id),
         };
-        let mut merge = ManifestTailMerge::new(
+        let mut combiner = ManifestTailCombiner::new(
             lower_bound.clone(),
             self.base.tail_direntry_binds(parent_inode_id, &lower_bound),
             TieOrder::ManifestFirst,
@@ -65,7 +65,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         let mut children = Vec::with_capacity(limit);
         while children.len() < limit {
             let bound = self
-                .next_bound_edges(&mut merge, parent_inode_id, limit - children.len())
+                .next_bound_edges(&mut combiner, parent_inode_id, limit - children.len())
                 .await?;
             if bound.is_empty() {
                 break;
@@ -81,11 +81,11 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         Ok(children)
     }
 
-    /// Reads the merged rows until it has the values of up to `edge_limit`
+    /// Reads the combined rows until it has the values of up to `edge_limit`
     /// bound edges, or the parent's rows run out.
     async fn next_bound_edges(
         &mut self,
-        merge: &mut ManifestTailMerge<DirentryBindingRecord>,
+        combiner: &mut ManifestTailCombiner<DirentryBindingRecord>,
         parent_inode_id: InodeId,
         edge_limit: usize,
     ) -> Result<Vec<DirentryBindingRecord>> {
@@ -111,13 +111,13 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         };
         let mut bound = Vec::new();
         while bound.len() < edge_limit {
-            let Some((_, record)) = merge.next(&mut refill).await? else {
+            let Some((_, record)) = combiner.next(&mut refill).await? else {
                 break;
             };
             if record.committed_seq > visible_seq {
                 continue;
             }
-            merge.seek(&manifest_index::slot_edge_end(&record));
+            combiner.seek(&manifest_index::slot_edge_end(&record));
             if record.is_bound() {
                 bound.push(record);
             }

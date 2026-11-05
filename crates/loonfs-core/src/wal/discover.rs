@@ -65,7 +65,7 @@ pub(crate) async fn discover_tail<S: ObjectStore + ?Sized>(
 /// How [`load_wal_after`] ended.
 enum WalReadOutcome {
     /// The reads reached the first missing number or the largest WAL number,
-    /// or `visit` stopped them.
+    /// or `each` stopped them.
     Ended,
     /// A number was still missing when it was read again, and a later number
     /// in the same window was present.
@@ -73,8 +73,8 @@ enum WalReadOutcome {
 }
 
 /// Loads the WAL objects after `after` in widening windows, and passes each
-/// object to `visit` in WAL order, until the first number that's still missing
-/// or until `visit` returns `ControlFlow::Break`.
+/// object to `each` in WAL order, until the first number that's still missing
+/// or until `each` returns `ControlFlow::Break`.
 ///
 /// The first window is one number, so a caller at the tip sends one GET. Each
 /// window that finds every number doubles, up to [`WAL_DISCOVERY_PROBE_WAVE`].
@@ -86,7 +86,7 @@ async fn load_wal_after<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     after: WalNo,
-    mut visit: impl FnMut(String, StoredWalEnvelope) -> Result<ControlFlow<()>, ControlObjectLoadError>,
+    mut each: impl FnMut(String, StoredWalEnvelope) -> Result<ControlFlow<()>, ControlObjectLoadError>,
 ) -> Result<WalReadOutcome, ControlObjectLoadError> {
     let mut through = after.0;
     let mut window = 1;
@@ -124,7 +124,7 @@ async fn load_wal_after<S: ObjectStore + ?Sized>(
                     }
                 }
             };
-            if visit(object_key, envelope)?.is_break() {
+            if each(object_key, envelope)?.is_break() {
                 return Ok(WalReadOutcome::Ended);
             }
         }
@@ -196,8 +196,8 @@ pub async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
         state.basis_floor_seq,
     );
     let mut other_epoch = false;
-    let visit = |object_key: String,
-                 envelope: StoredWalEnvelope|
+    let each = |object_key: String,
+                envelope: StoredWalEnvelope|
      -> Result<ControlFlow<()>, ControlObjectLoadError> {
         if envelope.envelope.payload().writer_epoch != state.writer_epoch {
             other_epoch = true;
@@ -225,7 +225,7 @@ pub async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
         Ok(ControlFlow::Continue(()))
     };
     let outcome =
-        load_wal_after(store, &namespace_id, context.read_basis.head.wal_no, visit).await?;
+        load_wal_after(store, &namespace_id, context.read_basis.head.wal_no, each).await?;
     if other_epoch || matches!(outcome, WalReadOutcome::Gap { .. }) {
         return Ok(false);
     }

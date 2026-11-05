@@ -633,11 +633,11 @@ pub struct CreateSnapshotOptions {
     pub ttl_ms: Option<NonZeroU64>,
 }
 
-/// Options for one garbage collection pass over a namespace.
+/// Options for one garbage collection of a namespace.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GcOptions {
-    /// How old an unreferenced object must be before the pass deletes it, in
-    /// milliseconds. A runtime rejects a window below its derived minimum.
+    /// How old an unreferenced object must be before the collection deletes it,
+    /// in milliseconds. A runtime rejects a window below its derived minimum.
     pub grace_window_ms: u64,
 }
 

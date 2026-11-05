@@ -96,11 +96,8 @@ fn label_sets_of_one_name_share_a_single_header_pair() {
 fn rendering_the_same_readings_twice_produces_the_same_bytes() {
     let recorder = DefaultMetricsRecorder::new();
     for (name, labels) in [
-        ("loonfs.maintenance.sweep_visit_failures", [("call", "gc")]),
-        (
-            "loonfs.maintenance.sweep_visit_failures",
-            [("call", "metadata")],
-        ),
+        ("loonfs.maintenance.sweep_failures", [("call", "gc")]),
+        ("loonfs.maintenance.sweep_failures", [("call", "metadata")]),
         ("loonfs.gc.retained", [("category", "all")]),
     ] {
         recorder

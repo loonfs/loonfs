@@ -22,7 +22,7 @@ async fn full_request_admission_refuses_an_unsent_body_and_keeps_probes_availabl
     )
     .await
     .expect("app");
-    let limit = state.binding.request_limit().expect("request limit");
+    let limit = state.http.request_limit().expect("request limit");
     let before = store.counts();
     let first_polls = Arc::new(AtomicUsize::new(0));
     let mut first = Box::pin(
@@ -84,20 +84,20 @@ async fn full_request_admission_refuses_an_unsent_body_and_keeps_probes_availabl
     assert_eq!(limit.in_flight(), 0);
 
     store.take();
-    let binding = &state.binding;
-    let uncapped = loonfs_http::BindingState::new(
-        loonfs_http::BindingConfig {
+    let http = &state.http;
+    let uncapped = loonfs_http::HttpState::new(
+        loonfs_http::HttpConfig {
             max_in_flight_requests: None,
-            ..(*binding.options).clone()
+            ..(*http.options).clone()
         },
-        loonfs_http::BindingHandles {
-            runtime: binding.runtime.clone(),
-            namespaces: Arc::clone(&binding.namespaces),
-            maintenance: binding.maintenance.clone(),
-            direct_transfers: binding.direct_transfers.clone(),
-            grep: binding.grep.clone(),
-            metrics: Arc::clone(&binding.metrics),
-            usage_recorder: binding.usage_recorder.clone(),
+        loonfs_http::HttpHandles {
+            runtime: http.runtime.clone(),
+            namespaces: Arc::clone(&http.namespaces),
+            maintenance: http.maintenance.clone(),
+            direct_transfers: http.direct_transfers.clone(),
+            grep: http.grep.clone(),
+            metrics: Arc::clone(&http.metrics),
+            usage_recorder: http.usage_recorder.clone(),
         },
     );
     let response = loonfs_http::router(uncapped)
@@ -114,7 +114,7 @@ async fn full_request_admission_refuses_an_unsent_body_and_keeps_probes_availabl
     assert_eq!(limit.in_flight(), 1);
     drop(response);
     assert_eq!(limit.in_flight(), 0);
-    state.binding.runtime.shutdown().await.expect("shutdown");
+    state.http.runtime.shutdown().await.expect("shutdown");
 }
 
 fn request(path: &str) -> Request<Body> {
@@ -216,5 +216,5 @@ async fn a_full_server_answers_busy_before_the_client_sends_any_body_byte() {
         .await
         .expect("first response");
     server.abort();
-    state.binding.runtime.shutdown().await.expect("shutdown");
+    state.http.runtime.shutdown().await.expect("shutdown");
 }

@@ -66,7 +66,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// Lists the uploads prefix and pairs each session record with its outcome
     /// record.
     ///
-    /// Only the pass on a family root lists its uploads prefix, which stores
+    /// Only the collection on a family root lists its uploads prefix, which stores
     /// the upload records of every member of its fork family. An outcome key
     /// sorts directly after its session key, so the pairing looks one key
     /// ahead and keeps no other state across the listing.
@@ -111,20 +111,20 @@ impl<S: ObjectStore> NamespaceStore<S> {
         })
     }
 
-    /// Lists the uploads prefix and calls `visit` with each listed entry, and
-    /// with what the pass read of each listed session, so the caller can keep
-    /// the entry and charge both to its budget as they arrive.
+    /// Lists the uploads prefix and calls `each` with each listed entry, and
+    /// with what the collection read of each listed session, so the caller
+    /// can keep the entry and charge both to its budget as they arrive.
     ///
-    /// A completed session that `session_cache` has costs no store request. The
-    /// pass reads one record of every other session, and both records of an
-    /// aborted one, with at most `STORE_READS_IN_FLIGHT` reads in flight. A
-    /// session that another pass deleted after the listing isn't visited. An
-    /// outcome record without its session record isn't a root, because nothing
-    /// can issue admission evidence from it.
+    /// A completed session that `session_cache` has costs no store request.
+    /// The collection reads one record of every other session, and both
+    /// records of an aborted one, with at most `STORE_READS_IN_FLIGHT` reads
+    /// in flight. A session that another collection deleted after the listing
+    /// isn't handed to `each`. An outcome record without its session record
+    /// isn't a root, because nothing can issue admission evidence from it.
     pub(super) async fn load_upload_sessions(
         &self,
         session_cache: Option<&CompletedUploadSessionCache>,
-        mut visit: impl FnMut(ListedUpload, Option<ListedUploadSession>) -> Result<()>,
+        mut each: impl FnMut(ListedUpload, Option<ListedUploadSession>) -> Result<()>,
     ) -> Result<()> {
         let mut uploads = pin!(self
             .list_uploads()
@@ -166,7 +166,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     Some(session)
                 }
             };
-            visit(listed, session)?;
+            each(listed, session)?;
         }
         tracing::debug!(
             namespace_id = %self.namespace_id,
@@ -177,7 +177,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         Ok(())
     }
 
-    /// Reads what a pass needs from one listed session: the outcome record if
+    /// Reads what a collection needs from one listed session: the outcome record if
     /// the listing included one, and the session record unless a completed
     /// outcome already identifies the content.
     async fn load_listed_session(
@@ -216,7 +216,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             }))
     }
 
-    /// Reads the records of a listed session that the pass hasn't already read
+    /// Reads the records of a listed session that the collection hasn't already read
     /// to be completed, or returns `None` if the session record is gone.
     ///
     /// A session listed without an outcome is read as open, without reading the
@@ -270,7 +270,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 if clock.request_at_ms().saturating_sub(*aborted_at_ms) < grace_window_ms {
                     return Ok(retain_until(aborted_at_ms.saturating_add(grace_window_ms)));
                 }
-                // Repeat provider cleanup so a later pass completes work left by a crash
+                // Repeat provider cleanup so a later collection completes work left by a crash
                 // after the abort.
                 if !AbandonedUpload::of(&self.namespace_id, &state.session)
                     .release(&self.store)
@@ -281,7 +281,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 // Abort cleanup runs even when no content object was written.
                 Ok(UploadSessionSweep::Delete)
             }
-            // The pass read this session as open or aborted when it listed
+            // The collection read this session as open or aborted when it listed
             // the sessions, and the sweep reads an outcome only when the
             // listing returned one. An outcome record never changes, so a
             // completed outcome here contradicts the earlier read, and the
@@ -338,14 +338,14 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 );
                 Ok(retain_undated())
             }
-            // Another pass deleted the session after this one listed it.
+            // Another collection deleted the session after this one listed it.
             Err(CoreError::UploadNotFound { .. }) => Ok(retain_undated()),
             Err(error) => Err(error),
         }
     }
 }
 
-/// One upload session that a pass listed, with what the pass needs from it.
+/// One upload session that a collection listed, with what the collection needs from it.
 pub(super) enum ListedUploadSession {
     /// A completed session, from the cache or from its outcome record.
     Completed {
@@ -356,25 +356,25 @@ pub(super) enum ListedUploadSession {
     Incomplete { content_id: ContentId },
 }
 
-/// Where a pass found one listed upload session.
+/// Where a collection found one listed upload session.
 enum SessionLookup {
     /// The cache had the session.
     Cached(ListedUploadSession),
-    /// The pass read the records. `None` means that another pass deleted the
-    /// session after this pass listed it.
+    /// The collection read the records. `None` means that another collection deleted the
+    /// session after this collection listed it.
     Read(Option<ListedUploadSession>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum UploadSessionSweep {
-    /// The pass keeps the session's records. It might have aborted the session.
+    /// The collection keeps the session's records. It might have aborted the session.
     Retain {
         /// Earliest time this session may be reconsidered when retention is
-        /// time-based. `None` means the pass must retry later for a non-time-based
+        /// time-based. `None` means the collection must retry later for a non-time-based
         /// reason, such as a lost race or failed cleanup.
         reclaimable_at_ms: Option<u64>,
     },
-    /// No later pass needs the session, so its records can be deleted.
+    /// No later collection needs the session, so its records can be deleted.
     Delete,
 }
 

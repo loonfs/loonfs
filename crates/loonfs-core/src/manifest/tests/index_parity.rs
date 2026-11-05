@@ -266,7 +266,7 @@ async fn a_base_rebuild_drops_what_the_floor_covers_and_keeps_what_it_does_not()
     .await
     .0;
     let materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, compacted_manifest_no)
+        load_manifest_state_for_inspection(&store, &namespace_id, compacted_manifest_no)
             .await
             .expect("load manifest");
 
@@ -527,7 +527,7 @@ async fn manifest_load_rejects_a_child_index_with_more_rows_than_the_slot_index(
 
     // The file's revision wrote a summary row to the slot index alone.
     let manifest =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, checkpoint.manifest_no)
+        load_manifest_state_for_inspection(&store, &namespace_id, checkpoint.manifest_no)
             .await
             .expect("a slot index with summary rows loads")
             .manifest;
@@ -591,7 +591,7 @@ async fn manifest_load_rejects_unequal_commit_and_receipt_counts() {
         .await
         .expect("create checkpoint");
     let manifest =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, checkpoint.manifest_no)
+        load_manifest_state_for_inspection(&store, &namespace_id, checkpoint.manifest_no)
             .await
             .expect("load manifest")
             .manifest;
@@ -646,7 +646,7 @@ async fn manifest_rejects_segment_whose_index_fails_its_descriptor_checksum() {
     )
     .await;
     let materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, compacted_manifest_no)
+        load_manifest_state_for_inspection(&store, &namespace_id, compacted_manifest_no)
             .await
             .expect("load manifest");
     let manifest = materialized.manifest;
@@ -671,7 +671,7 @@ async fn manifest_rejects_segment_whose_index_fails_its_descriptor_checksum() {
         .await
         .expect("overwrite manifest");
 
-    match load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_no).await {
+    match load_manifest_state_for_inspection(&store, &namespace_id, manifest_no).await {
         Err(ManifestLoadError::SegmentCodec { message, .. }) => {
             assert!(
                 message.contains("checksum"),
@@ -699,7 +699,7 @@ async fn manifest_load_names_the_segment_codec_for_a_pre_commit_id_row() {
         .await
         .expect("checkpoint");
     let materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, checkpoint.manifest_no)
+        load_manifest_state_for_inspection(&store, &namespace_id, checkpoint.manifest_no)
             .await
             .expect("load manifest before replacing a row");
 
@@ -758,7 +758,7 @@ async fn manifest_load_names_the_segment_codec_for_a_pre_commit_id_row() {
     )
     .await;
 
-    match load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_no).await {
+    match load_manifest_state_for_inspection(&store, &namespace_id, manifest_no).await {
         Err(ManifestLoadError::SegmentCodec {
             object_key,
             message,
@@ -794,10 +794,9 @@ async fn manifest_writes_and_validates_direntry_child_bind_index() {
         MetadataRunPolicy::default(),
     )
     .await;
-    let materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_no)
-            .await
-            .expect("load manifest");
+    let materialized = load_manifest_state_for_inspection(&store, &namespace_id, manifest_no)
+        .await
+        .expect("load manifest");
     let base = base_tier(&materialized.manifest);
     let child_binds = base
         .iter()
@@ -819,7 +818,7 @@ async fn manifest_writes_and_validates_direntry_child_bind_index() {
         .delete(&deleted_key)
         .await
         .expect("delete child index");
-    match load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_no).await {
+    match load_manifest_state_for_inspection(&store, &namespace_id, manifest_no).await {
         Err(ManifestLoadError::MissingSegment { object_key }) => {
             assert_eq!(object_key, deleted_key);
         }
@@ -852,10 +851,9 @@ async fn manifest_rejects_child_bind_index_that_diverges_from_canonical_binds() 
         MetadataRunPolicy::default(),
     )
     .await;
-    let materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_no)
-            .await
-            .expect("load manifest before corruption");
+    let materialized = load_manifest_state_for_inspection(&store, &namespace_id, manifest_no)
+        .await
+        .expect("load manifest before corruption");
     let manifest = materialized.manifest;
     let mut child_index_rows = manifest_rows_for_family(
         &materialized.metadata_state,
@@ -895,7 +893,7 @@ async fn manifest_rejects_child_bind_index_that_diverges_from_canonical_binds() 
         .expect("overwrite manifest");
 
     assert_child_index_mismatch(
-        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_no).await,
+        load_manifest_state_for_inspection(&store, &namespace_id, manifest_no).await,
     );
 }
 
@@ -922,10 +920,9 @@ async fn lookups_find_rows_in_a_segment_whose_last_row_closed_a_block() {
         MetadataRunPolicy::default(),
     )
     .await;
-    let materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_no)
-            .await
-            .expect("load manifest before the rewrite");
+    let materialized = load_manifest_state_for_inspection(&store, &namespace_id, manifest_no)
+        .await
+        .expect("load manifest before the rewrite");
     let manifest = materialized.manifest;
     let mut inode_rows =
         manifest_rows_for_family(&materialized.metadata_state, ApiMetadataRowFamily::Inodes);

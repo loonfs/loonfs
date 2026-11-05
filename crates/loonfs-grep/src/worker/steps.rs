@@ -13,8 +13,8 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::{NamespaceId, PinId, RunNo};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// How long a run of steps in a host without a tick of its own, such as
-/// the CLI, keeps its changes in memory before it publishes them.
+/// How long a run of steps in a host without a maintenance interval of its
+/// own, such as the CLI, keeps its changes in memory before it publishes them.
 ///
 /// A crash loses at most this much of the run's work.
 pub const DEFAULT_GREP_PUBLISH_INTERVAL_MS: u64 = 5_000;

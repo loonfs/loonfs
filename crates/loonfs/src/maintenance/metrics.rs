@@ -1,4 +1,4 @@
-//! The instruments of compaction units and garbage collection passes.
+//! The instruments of compaction units and garbage collections.
 
 use crate::metrics::labels::{LabeledCounters, MetricLabel};
 use crate::metrics::{
@@ -38,7 +38,7 @@ impl MetricLabel for CompactionOutcome {
     }
 }
 
-/// One reclaimable family: its label, and the count a pass reports for it.
+/// One reclaimable family: its label, and the count a collection reports for it.
 type GcKind = (&'static str, fn(&GcResponse) -> u64);
 
 /// Counts each deletion once, with pins grouped by owner.
@@ -179,24 +179,24 @@ impl GcInstruments {
                 .map(|(category, _)| {
                     recorder.register_counter(
                         "loonfs.gc.reclaimed",
-                        "Objects one collection pass reclaimed, by family",
+                        "Objects one collection reclaimed, by family",
                         &[("category", *category)],
                     )
                 })
                 .collect(),
             retained: recorder.register_counter(
                 "loonfs.gc.retained",
-                "Candidates a collection pass retained rather than deleting",
+                "Candidates a collection retained rather than deleting",
                 &[],
             ),
         }
     }
 
-    /// Reports what one collection pass reclaimed and retained.
+    /// Reports what one collection reclaimed and retained.
     ///
-    /// Every runtime collection path records at the shared maintenance pass before
-    /// its caller can drop the response.
-    pub(crate) fn pass(&self, gc: &GcResponse) {
+    /// Every runtime collection path records its counts here before its
+    /// caller can drop the response.
+    pub(crate) fn record_collection(&self, gc: &GcResponse) {
         for (category, count) in GC_CATEGORIES.iter().zip(self.reclaimed.iter()) {
             let reclaimed = (category.1)(gc);
             if reclaimed > 0 {

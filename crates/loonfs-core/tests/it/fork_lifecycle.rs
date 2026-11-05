@@ -1113,7 +1113,7 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
 }
 
 #[tokio::test]
-async fn a_fork_survives_a_concurrent_collection_pass() {
+async fn a_fork_survives_a_concurrent_collection() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
     let context = default_writer();
@@ -1128,7 +1128,7 @@ async fn a_fork_survives_a_concurrent_collection_pass() {
     let collecting = source_store.gc(None, &gc_options, &clock);
     let (forked, collected) = tokio::join!(forking, collecting);
     forked.expect("creation grace protects the fork");
-    collected.expect("the pass finishes");
+    collected.expect("the collection finishes");
     assert_eq!(
         head_state(store.as_ref(), &clone).await.status,
         loonfs_types::format::control::NamespaceStatus::Active {}
@@ -1666,7 +1666,7 @@ async fn a_create_after_the_collection_of_manifest_one_reports_the_id_as_taken()
         .await
         .expect("write");
     // A fold publishes manifest 2, the runtime raises the hint to it, and a
-    // collection pass after the grace window deletes manifest 1.
+    // collection after the grace window deletes manifest 1.
     loonfs_core::test_support::folded_manifest(&fixture.namespace)
         .await
         .expect("fold the WAL tail");
@@ -1774,7 +1774,7 @@ async fn a_creator_losing_after_namespace_discovery_leaves_no_extra_objects() {
 }
 
 /// Checks that a fork's retirement deletes no content, and that the family
-/// root's pass collects the content that only a retired fork wrote, while
+/// root's collection collects the content that only a retired fork wrote, while
 /// the content of live members stays.
 #[tokio::test]
 async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_content() {
@@ -1865,7 +1865,7 @@ async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_cont
             .count();
         assert_eq!(
             content_lists, 0,
-            "a fork's pass lists no content and no sessions"
+            "a fork's collection lists no content and no sessions"
         );
         assert!(store.head(&leaf_key).await.expect("leaf content").is_some());
         let report = namespace_store(&store, &source)

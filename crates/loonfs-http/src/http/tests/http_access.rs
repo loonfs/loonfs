@@ -602,7 +602,7 @@ async fn a_repeated_grant_principal_is_invalid_and_does_not_commit() {
 async fn a_former_server_observes_revocation_on_its_first_strong_read() {
     let temp_dir = tempdir().expect("tempdir");
     let mut config = test_options(&temp_dir.path().join("store"), "old-writer");
-    config.binding.serves_maintenance = true;
+    config.http.serves_maintenance = true;
     let (old_router, old_state) = test_app(config.clone(), TestAppOptions::default())
         .await
         .expect("old server");

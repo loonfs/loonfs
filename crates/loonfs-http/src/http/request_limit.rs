@@ -2,7 +2,7 @@
 
 use super::error::ApiResponseError;
 use super::extractors::server_busy_error;
-use crate::BindingState;
+use crate::HttpState;
 use axum::body::Body;
 use axum::extract::{MatchedPath, Request, State};
 use axum::http::Method;
@@ -58,7 +58,7 @@ impl RequestLimit {
 }
 
 pub(super) async fn admit_request(
-    State(state): State<Arc<BindingState>>,
+    State(state): State<Arc<HttpState>>,
     request: Request,
     next: Next,
 ) -> Response {

@@ -13,13 +13,13 @@ use loonfs_types::GcResponse;
 impl<S: ObjectStore> NamespaceStore<S> {
     /// Deletes a family root's content prefix, which stores the content of its
     /// whole fork family, and the source pin of a fork's basis, once the
-    /// namespace is eligible for retirement. Returns whether the pass listed
+    /// namespace is eligible for retirement. Returns whether the collection listed
     /// the content prefix.
     ///
     /// A family root is retired after every other member of its family, and
     /// a fork's content prefix stores nothing, so a fork's retirement deletes
     /// no content.
-    pub(super) async fn reclaim_namespace(
+    pub(super) async fn retire_namespace(
         &self,
         live: &LiveSet,
         report: &mut GcResponse,

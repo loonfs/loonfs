@@ -6,7 +6,7 @@ use super::cache::MetadataSegmentCache;
 use super::index_block_load::load_segment_filter;
 use super::runs::{MetadataFamilySegments, MetadataRunManifest};
 use super::scan_load::{ScanDescriptor, ScanLoader};
-use crate::compaction::merge_iterator::{refill_iterators, SegmentRowIterator};
+use crate::compaction::run_iterator::{refill_iterators, SegmentRowIterator};
 use crate::heap_bytes::HeapBytes;
 use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::manifest::error::ManifestLoadError;
@@ -63,7 +63,7 @@ pub(crate) enum BlocksPerRefill {
 
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ManifestMaterializationForInspection {
+pub(crate) struct ManifestStateForInspection {
     pub(crate) manifest: NamespaceManifestEnvelope,
     pub(crate) metadata_state: MetadataState,
 }
@@ -75,7 +75,7 @@ pub(crate) struct VerifiedMetadataSegments<'a, S: ObjectStore + ?Sized> {
     pub(crate) manifest: Arc<NamespaceManifestEnvelope>,
     pub(crate) manifest_bytes: u64,
     /// The manifest's runs, newest first, grouped once during load
-    /// validation and shared through the manifest cache entry. A merge
+    /// validation and shared through the manifest cache entry. Combining the runs
     /// doesn't depend on this order, because row keys are unique across
     /// runs, but [`Self::scan_prefix_in_newest_run_for_lookup`] does.
     pub(crate) scan_runs: Arc<Vec<MetadataRunManifest>>,
@@ -218,7 +218,7 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
     /// A lookup for the newest fact about one key prefix (the latest revision
     /// of an inode, the newest value of a directory slot, a child's newest
     /// binding, the newest tombstone event of a root, or the newest attribute
-    /// or access revision) finds the same fact here as in the merge of every
+    /// or access revision) finds the same fact here as in the combination of every
     /// run, for two reasons:
     ///
     /// - Each run covers its own range of commit sequences, and `scan_runs`
@@ -247,7 +247,7 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
     /// first page reads, so every later page can only add older facts.
     ///
     /// The lookup checks the candidate segments' filters in every run at
-    /// once, as the merge does, and then reads the admitted runs one at a
+    /// once, as the combination does, and then reads the admitted runs one at a
     /// time, newest first. The newest admitted run has the rows unless its
     /// filter admitted the prefix by a false positive, and then the lookup
     /// reads the next admitted run. A lookup that needs every fact for a
@@ -285,7 +285,7 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
                 continue;
             }
             let page = self
-                .merge_segment_rows(
+                .combine_segment_rows(
                     admitted,
                     lower_bound,
                     upper_bound,
@@ -394,7 +394,7 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
         let admitted = self
             .filter_admitted_descriptors(candidates, filter_probe)
             .await?;
-        self.merge_segment_rows(
+        self.combine_segment_rows(
             admitted,
             lower_bound,
             upper_bound,
@@ -438,11 +438,11 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
         Ok(())
     }
 
-    /// Merges the rows of `descriptors` in `[lower_bound, upper_bound)` into
+    /// Combines the rows of `descriptors` in `[lower_bound, upper_bound)` into
     /// one page within `bounds` in row-key order. When a filter
     /// admitted the descriptors, a descriptor with no row in the range is
     /// recorded as a false positive.
-    async fn merge_segment_rows(
+    async fn combine_segment_rows(
         &self,
         mut descriptors: Vec<ScanDescriptor<'_>>,
         lower_bound: &str,

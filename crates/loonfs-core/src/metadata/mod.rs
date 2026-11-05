@@ -1,4 +1,4 @@
-//! Materialized namespace metadata.
+//! Namespace metadata in memory.
 //!
 //! `MetadataState` stores append-only rows at a WAL sequence. Derived indexes
 //! accelerate current reads, while historical reads scan the retained rows.
@@ -10,7 +10,7 @@ mod children_page;
 mod durable_cache;
 mod indexes;
 pub(crate) mod manifest_index;
-mod manifest_tail_merge;
+mod manifest_tail_combiner;
 mod queries;
 pub(crate) mod row_decode;
 mod rows;

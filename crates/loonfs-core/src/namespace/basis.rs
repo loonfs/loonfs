@@ -39,7 +39,7 @@ pub struct ReadBasis {
 /// [`READ_REVALIDATION_BOUND_MS`](crate::limits::READ_REVALIDATION_BOUND_MS)
 /// ago puts the basis's successor without a request first, and after a lost
 /// put it finds the current manifest above the basis instead of through the
-/// hint (format spec, "Publishing a materialized file set").
+/// hint (format spec, "Publishing a manifest").
 #[derive(Debug, Clone)]
 pub struct PublicationBasis {
     pub manifest: LoadedManifest,

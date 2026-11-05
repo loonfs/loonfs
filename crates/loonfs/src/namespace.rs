@@ -10,7 +10,6 @@ use loonfs_types::Subject;
 use std::fmt;
 use std::sync::Arc;
 
-mod checkpoints;
 mod content_preparation;
 mod lifecycle;
 mod merges;
@@ -18,6 +17,7 @@ mod reads;
 mod reads_by_inode;
 mod rebases;
 mod revisions;
+mod snapshot_files;
 mod snapshots;
 mod uploads;
 mod writes;

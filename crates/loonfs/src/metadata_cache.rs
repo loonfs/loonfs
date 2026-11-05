@@ -44,7 +44,7 @@ pub const DEFAULT_MAX_CACHED_OBJECT_BYTES: u64 = 1024 * 1024;
 ///
 /// The cache keeps segment blocks, manifests, namespace heads, WAL-tail
 /// projections, small content objects, and the completed upload sessions
-/// that garbage collection reuses between passes.
+/// that garbage collection reuses between collections.
 /// A cache built with an SSD tier (see
 /// [`MetadataCacheBuilder::ssd_segment_blocks`]) also keeps every segment
 /// block that it inserts on local disk.
@@ -299,11 +299,11 @@ impl MetadataCacheBuilder {
     }
 
     /// Sets the bytes of completed upload sessions that the cache keeps
-    /// between garbage collection passes.
+    /// between garbage collections.
     ///
-    /// A pass doesn't read the record of a completed session that the cache
+    /// A collection doesn't read the record of a completed session that the cache
     /// keeps. Defaults to [`DEFAULT_MAX_COMPLETED_UPLOAD_SESSION_BYTES`]. Zero
-    /// keeps none, so every pass reads every session's record. The least
+    /// keeps none, so every collection reads every session's record. The least
     /// recently used session is evicted first.
     pub fn max_completed_upload_session_bytes(
         mut self,
@@ -394,6 +394,7 @@ pub struct MetadataCacheStats {
     /// The small content objects.
     pub content_objects: DecodedBlockCacheStats,
     /// The completed upload sessions that garbage collection keeps between
-    /// passes. A lookup misses when the pass reads the session's record.
+    /// collections. A lookup misses when the collection reads the session's
+    /// record.
     pub completed_upload_sessions: DecodedBlockCacheStats,
 }

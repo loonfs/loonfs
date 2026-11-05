@@ -2,9 +2,9 @@
 //! use.
 
 use crate::{
-    ChangeSeq, CheckpointFilesPage, CoreError, Error, InodeId, ListChangesResponse,
-    ListCheckpointsResponse, ListFileRevisionsResponse, ListInodeChildrenResponse, ListOptions,
-    ListPathEntriesResponse, ListSnapshotsResponse, NamespaceId,
+    ChangeSeq, CoreError, Error, InodeId, ListChangesResponse, ListCheckpointsResponse,
+    ListFileRevisionsResponse, ListInodeChildrenResponse, ListOptions, ListPathEntriesResponse,
+    ListSnapshotsResponse, NamespaceId, SnapshotFilesPage,
 };
 use loonfs_types::{
     decode_cursor, encode_cursor, FileRevision, FileRevisionsPageCursor, ListPageCursor, Page,
@@ -22,7 +22,7 @@ pub type TrashPager = loonfs_types::Pager<loonfs_types::ListTrashResponse, Error
 /// A pager over committed changes.
 pub type ChangesPager = loonfs_types::Pager<ListChangesResponse, Error>;
 /// A pager over the files a snapshot pins.
-pub type CheckpointFilesPager = loonfs_types::Pager<CheckpointFilesPage, Error>;
+pub type SnapshotFilesPager = loonfs_types::Pager<SnapshotFilesPage, Error>;
 /// A pager over every retained file revision in a read view.
 pub type RetainedRevisionsPager = loonfs_types::Pager<loonfs_core::RetainedRevisionsPage, Error>;
 /// A pager over existing checkpoints.

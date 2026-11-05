@@ -1,4 +1,4 @@
-//! Completed upload sessions that garbage collection keeps between passes.
+//! Completed upload sessions that garbage collection keeps between collections.
 
 use crate::block_cache::CacheScope;
 use crate::block_cache::{
@@ -19,7 +19,7 @@ pub(crate) struct CompletedUploadSession {
     /// The namespace that created the session, whose retirement status the
     /// sweep applies to the session.
     pub(crate) namespace_id: NamespaceId,
-    /// The content that the session uploaded, which a pass protects.
+    /// The content that the session uploaded, which a collection protects.
     pub(crate) content_id: ContentId,
     /// When the session was completed. The sweep deletes the session's
     /// records once the content reclamation grace has passed since this time.
@@ -41,7 +41,7 @@ impl DecodedBlockKey for UploadId {
 /// Completed upload sessions for every scope, under one byte budget.
 ///
 /// The cache evicts the least recently used session to stay within the
-/// budget. An evicted session costs one record read on a later pass.
+/// budget. An evicted session costs one record read on a later collection.
 pub struct SharedCompletedUploadSessions {
     sessions: DecodedBlockCache<(CacheScope, UploadId), CompletedUploadSession>,
 }
@@ -75,7 +75,7 @@ impl SharedCompletedUploadSessions {
 ///
 /// An entry is keyed by the runtime's scope and the upload ID, without the
 /// namespace ID. An upload ID is 128 random bits, so it's unique across the
-/// namespaces of a store, and a pass looks up only the IDs that it just
+/// namespaces of a store, and a collection looks up only the IDs that it just
 /// listed under one namespace's prefix. The scope keeps two runtimes that
 /// share a metadata cache apart, as it does for their heads and WAL tails.
 #[derive(Debug)]

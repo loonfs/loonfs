@@ -502,7 +502,7 @@ async fn publish_one<S: ObjectStore>(
     engine: &mut NamespaceCommitEngine<S>,
     writer: &WriterAt,
     name: &str,
-) -> NamespaceCommitEnginePublishResult {
+) -> NamespaceCommitEnginePublishOutcome {
     let deadline = OperationClock::start(writer.now_ms, Arc::clone(&engine.namespace.timer));
     let published = engine
         .publish_batch(vec![create_dir(name, name)], &deadline)
@@ -1543,7 +1543,7 @@ async fn publish_views_reuse_cached_segment_blocks_across_publishes() {
             &writer.clock(),
         )
         .await
-        .map(crate::pin::checkpoint_summary)
+        .map(crate::snapshot::checkpoint_summary)
         .expect("checkpoint");
 
     // Without a cache, every publish view re-fetches the segment blocks

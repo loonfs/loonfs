@@ -8,7 +8,7 @@ use loonfs_objectstore::keys::{hint, metadata_manifest_object, metadata_segment,
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::metrics::{
     InstrumentedObjectStore, JsonlObjectStoreMetricsRecorder, ObjectKeyKind,
-    ObjectStoreMetricsRecorder, ObjectStoreOperation, ObjectStoreResultKind, PutModeKind,
+    ObjectStoreMetricsRecorder, ObjectStoreOperation, ObjectStoreOutcomeKind, PutModeKind,
     RangeKind, VecObjectStoreMetricsRecorder,
 };
 use loonfs_objectstore::ListedObject;
@@ -37,45 +37,45 @@ fn metric_result_classes_preserve_every_error_class() {
     let cases = [
         (
             ObjectStoreErrorKind::NotFound,
-            ObjectStoreResultKind::NotFound,
+            ObjectStoreOutcomeKind::NotFound,
         ),
         (
             ObjectStoreErrorKind::InvalidRequest,
-            ObjectStoreResultKind::InvalidRequest,
+            ObjectStoreOutcomeKind::InvalidRequest,
         ),
         (
             ObjectStoreErrorKind::InvalidKey,
-            ObjectStoreResultKind::InvalidKey,
+            ObjectStoreOutcomeKind::InvalidKey,
         ),
         (
             ObjectStoreErrorKind::PreconditionFailed,
-            ObjectStoreResultKind::PreconditionFailed,
+            ObjectStoreOutcomeKind::PreconditionFailed,
         ),
         (
             ObjectStoreErrorKind::PermissionDenied,
-            ObjectStoreResultKind::PermissionDenied,
+            ObjectStoreOutcomeKind::PermissionDenied,
         ),
         (
             ObjectStoreErrorKind::StoredChecksumMissing,
-            ObjectStoreResultKind::StoredChecksumMissing,
+            ObjectStoreOutcomeKind::StoredChecksumMissing,
         ),
         (
             ObjectStoreErrorKind::Unsupported,
-            ObjectStoreResultKind::Unsupported,
+            ObjectStoreOutcomeKind::Unsupported,
         ),
         (
             ObjectStoreErrorKind::Configuration,
-            ObjectStoreResultKind::Configuration,
+            ObjectStoreOutcomeKind::Configuration,
         ),
         (
             ObjectStoreErrorKind::RetryableTransport,
-            ObjectStoreResultKind::RetryableTransport,
+            ObjectStoreOutcomeKind::RetryableTransport,
         ),
-        (ObjectStoreErrorKind::Other, ObjectStoreResultKind::Other),
+        (ObjectStoreErrorKind::Other, ObjectStoreOutcomeKind::Other),
     ];
 
     for (error_class, result_class) in cases {
-        assert_eq!(ObjectStoreResultKind::from(error_class), result_class);
+        assert_eq!(ObjectStoreOutcomeKind::from(error_class), result_class);
     }
 }
 
@@ -98,7 +98,7 @@ async fn records_put_success() {
     assert_eq!(samples.len(), 1);
     let sample = &samples[0];
     assert_eq!(sample.operation, ObjectStoreOperation::Put);
-    assert_eq!(sample.result, ObjectStoreResultKind::Ok);
+    assert_eq!(sample.outcome, ObjectStoreOutcomeKind::Ok);
     assert_eq!(sample.bytes_in, Some(4));
     assert_eq!(sample.bytes_out, None);
     assert_eq!(sample.put_mode, Some(PutModeKind::CreateIfAbsent));
@@ -134,7 +134,7 @@ async fn records_an_assembly_with_its_tail_as_bytes_in() {
     let samples = recorder.samples();
     let sample = samples.last().expect("assembly sample");
     assert_eq!(sample.operation, ObjectStoreOperation::Assemble);
-    assert_eq!(sample.result, ObjectStoreResultKind::Ok);
+    assert_eq!(sample.outcome, ObjectStoreOutcomeKind::Ok);
     assert_eq!(sample.bytes_in, Some(5));
     assert_eq!(sample.key_class, ObjectKeyKind::Content);
 }
@@ -190,7 +190,7 @@ async fn a_verified_write_reaches_the_inner_store_and_records_one_put() {
     assert_eq!(samples.len(), 1);
     let sample = &samples[0];
     assert_eq!(sample.operation, ObjectStoreOperation::Put);
-    assert_eq!(sample.result, ObjectStoreResultKind::Ok);
+    assert_eq!(sample.outcome, ObjectStoreOutcomeKind::Ok);
     assert_eq!(sample.bytes_in, Some(7));
     assert_eq!(sample.put_mode, Some(PutModeKind::CreateIfAbsent));
     assert_eq!(sample.key_class, ObjectKeyKind::Content);
@@ -226,7 +226,7 @@ async fn records_get_success_bytes_out() {
     let samples = recorder.samples();
     let sample = samples.last().expect("get sample");
     assert_eq!(sample.operation, ObjectStoreOperation::Get);
-    assert_eq!(sample.result, ObjectStoreResultKind::Ok);
+    assert_eq!(sample.outcome, ObjectStoreOutcomeKind::Ok);
     assert_eq!(sample.bytes_out, Some(3));
     assert_eq!(sample.key_class, ObjectKeyKind::Content);
     assert_eq!(sample.range_class, Some(RangeKind::Bounded));
@@ -247,7 +247,7 @@ async fn records_not_found_without_key_leak() {
 
     let sample = recorder.samples().pop().expect("get sample");
     assert_eq!(sample.operation, ObjectStoreOperation::Get);
-    assert_eq!(sample.result, ObjectStoreResultKind::NotFound);
+    assert_eq!(sample.outcome, ObjectStoreOutcomeKind::NotFound);
     let encoded = serde_json::to_string(&sample).expect("serialize sample");
     assert!(!encoded.contains(&raw_key));
     assert!(!encoded.contains(SECRET_KEY_SEGMENT));
@@ -267,7 +267,7 @@ async fn records_invalid_key_without_error_text() {
 
     let sample = recorder.samples().pop().expect("put sample");
     assert_eq!(sample.operation, ObjectStoreOperation::Put);
-    assert_eq!(sample.result, ObjectStoreResultKind::InvalidKey);
+    assert_eq!(sample.outcome, ObjectStoreOutcomeKind::InvalidKey);
     let encoded = serde_json::to_string(&sample).expect("serialize sample");
     assert!(!encoded.contains(raw_key));
     assert!(!encoded.contains("escape"));
@@ -298,7 +298,7 @@ async fn records_list_count() {
     assert_eq!(keys.len(), 2);
     let sample = recorder.samples().pop().expect("list sample");
     assert_eq!(sample.operation, ObjectStoreOperation::ListPrefixStream);
-    assert_eq!(sample.result, ObjectStoreResultKind::Ok);
+    assert_eq!(sample.outcome, ObjectStoreOutcomeKind::Ok);
     assert_eq!(sample.item_count, Some(2));
 
     let page = store
@@ -426,11 +426,11 @@ async fn jsonl_recorder_writes_privacy_safe_samples() {
 
     let first: serde_json::Value = serde_json::from_str(lines[0]).expect("first sample");
     assert_eq!(first["operation"], "put");
-    assert_eq!(first["result"], "ok");
+    assert_eq!(first["outcome"], "ok");
     assert_eq!(first["attempts"], 1);
     let second: serde_json::Value = serde_json::from_str(lines[1]).expect("second sample");
     assert_eq!(second["operation"], "get");
-    assert_eq!(second["result"], "not_found");
+    assert_eq!(second["outcome"], "not_found");
 }
 
 fn instrumented_object_store<R>(

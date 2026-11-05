@@ -38,4 +38,4 @@ use self::extractors::{
     OptionalAppJson, UploadBodyStream, MAX_COMPLETION_BODY_BYTES, MAX_JSON_BODY_BYTES,
     MAX_UPLOAD_CONTROL_BODY_BYTES,
 };
-use crate::BindingState;
+use crate::HttpState;

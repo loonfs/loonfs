@@ -1,6 +1,6 @@
 //! Races between garbage collection and the two records of an upload
-//! session: a pass that stops between its two deletes, and a completion or
-//! abort that stalls while a pass deletes the session.
+//! session: a collection that stops between its two deletes, and a completion or
+//! abort that stalls while a collection deletes the session.
 
 use super::*;
 use crate::storage::content_admission::PreparedContent;
@@ -95,7 +95,7 @@ async fn upload_keys<S: ObjectStore + ?Sized>(
         .expect("list upload records")
 }
 
-async fn pass<S: ObjectStore + ?Sized>(
+async fn collect_at<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     now_ms: u64,
@@ -105,13 +105,14 @@ async fn pass<S: ObjectStore + ?Sized>(
         .await
 }
 
-/// A pass that stops between deleting a session's two records leaves the
-/// outcome record without its session record. The next pass deletes that
+/// A collection that stops between deleting a session's two records leaves the
+/// outcome record without its session record. The next collection deletes that
 /// outcome and keeps the committed content. If the outcome record were
 /// deleted first, the session record left behind would read as an open,
-/// expired session, and the next pass would abort it and delete the content.
+/// expired session, and the next collection would abort it and delete the content.
 #[tokio::test]
-async fn a_pass_that_stops_between_the_two_deletes_leaves_an_outcome_the_next_pass_removes() {
+async fn a_collection_that_stops_between_the_two_deletes_leaves_an_outcome_the_next_collection_removes(
+) {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let prefix = upload_session_prefix(&namespace_id);
@@ -149,9 +150,9 @@ async fn a_pass_that_stops_between_the_two_deletes_leaves_an_outcome_the_next_pa
 
     upload_deletes.store(0, Ordering::SeqCst);
     store.fail_next(1);
-    pass(&store, &namespace_id, past_grace)
+    collect_at(&store, &namespace_id, past_grace)
         .await
-        .expect_err("the pass stops at its second delete");
+        .expect_err("the collection stops at its second delete");
     assert_eq!(
         upload_keys(&store, &namespace_id).await,
         [upload_outcome(&namespace_id, &upload_id)],
@@ -161,9 +162,9 @@ async fn a_pass_that_stops_between_the_two_deletes_leaves_an_outcome_the_next_pa
         .await
         .is_none());
 
-    let report = pass(&store, &namespace_id, past_grace)
+    let report = collect_at(&store, &namespace_id, past_grace)
         .await
-        .expect("the next pass");
+        .expect("the next collection");
     assert_eq!(report.deleted.upload_sessions, 1);
     assert_eq!(report.deleted.content_objects, 0);
     assert!(upload_keys(&store, &namespace_id).await.is_empty());
@@ -171,20 +172,20 @@ async fn a_pass_that_stops_between_the_two_deletes_leaves_an_outcome_the_next_pa
         store.head(&content_key).await.expect("head").is_some(),
         "the committed content stays"
     );
-    let report = pass(&store, &namespace_id, past_grace)
+    let report = collect_at(&store, &namespace_id, past_grace)
         .await
-        .expect("a later pass");
+        .expect("a later collection");
     assert_eq!(report.deleted.content_objects, 0);
     assert!(store.head(&content_key).await.expect("head").is_some());
 }
 
 /// A completion that read the session as open, and then stalled while the
-/// session was aborted and a pass deleted its records, creates an outcome
+/// session was aborted and a collection deleted its records, creates an outcome
 /// record for a session that no longer exists. The completion finds the
 /// session record gone and refuses, so it returns no token, and the next
-/// pass deletes the outcome it left.
+/// collection deletes the outcome it left.
 #[tokio::test]
-async fn a_completion_stalled_across_a_pass_that_deleted_an_aborted_session_is_refused() {
+async fn a_completion_stalled_across_a_collection_that_deleted_an_aborted_session_is_refused() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let setup = context(1_000);
@@ -208,9 +209,9 @@ async fn a_completion_stalled_across_a_pass_that_deleted_an_aborted_session_is_r
             abort(store.inner(), &namespace_id, &upload_id, aborted_at_ms)
                 .await
                 .expect("abort while the completion is stalled");
-            let report = pass(store.inner(), &namespace_id, past_abort_grace)
+            let report = collect_at(store.inner(), &namespace_id, past_abort_grace)
                 .await
-                .expect("a pass deletes the aborted session");
+                .expect("a collection deletes the aborted session");
             assert_eq!(report.deleted.upload_sessions, 1);
             assert!(upload_keys(store.inner(), &namespace_id).await.is_empty());
             store.release();
@@ -241,16 +242,16 @@ async fn a_completion_stalled_across_a_pass_that_deleted_an_aborted_session_is_r
     }
     // The leftover outcome is deleted once it's older than the grace window.
     let outcome_aged = now_after_newest_object(&store, &namespace_id, GRACE_MS).await;
-    let report = pass(&store, &namespace_id, outcome_aged)
+    let report = collect_at(&store, &namespace_id, outcome_aged)
         .await
-        .expect("the next pass");
+        .expect("the next collection");
     assert_eq!(report.deleted.upload_sessions, 1);
     assert!(upload_keys(&store, &namespace_id).await.is_empty());
     assert!(store.head(&content_key).await.expect("head").is_none());
 }
 
 /// An outcome record without its session record is deleted only once it's
-/// at least the grace window old by its listing time. A pass can't tell a
+/// at least the grace window old by its listing time. A collection can't tell a
 /// leftover outcome from the new outcome of a session whose session record
 /// its listing missed, so a young one survives.
 #[tokio::test]
@@ -285,26 +286,26 @@ async fn an_outcome_without_its_session_record_is_deleted_only_once_older_than_t
         .last_modified_at_ms
         .expect("the local store reports modification times");
 
-    let young = pass(&store, &namespace_id, written_at_ms + GRACE_MS - 1)
+    let young = collect_at(&store, &namespace_id, written_at_ms + GRACE_MS - 1)
         .await
-        .expect("a pass inside the grace window");
+        .expect("a collection inside the grace window");
     assert_eq!(young.deleted.upload_sessions, 0);
     assert_eq!(upload_keys(&store, &namespace_id).await, [outcome_key]);
 
-    let aged = pass(&store, &namespace_id, written_at_ms + GRACE_MS)
+    let aged = collect_at(&store, &namespace_id, written_at_ms + GRACE_MS)
         .await
-        .expect("a pass at the grace window");
+        .expect("a collection at the grace window");
     assert_eq!(aged.deleted.upload_sessions, 1);
     assert!(upload_keys(&store, &namespace_id).await.is_empty());
 }
 
 /// An abort that read the session as open, and then stalled while the
-/// session completed, its content was committed, and a pass deleted the
+/// session completed, its content was committed, and a collection deleted the
 /// session's records after the content grace, would otherwise delete
 /// committed content. The abort finds the session record gone and deletes
 /// nothing.
 #[tokio::test]
-async fn an_abort_stalled_across_a_pass_that_deleted_a_completed_session_keeps_its_content() {
+async fn an_abort_stalled_across_a_collection_that_deleted_a_completed_session_keeps_its_content() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let setup = context(1_000);
@@ -337,9 +338,9 @@ async fn an_abort_stalled_across_a_pass_that_deleted_a_completed_session_keeps_i
             CONTENT_RECLAMATION_GRACE_WINDOW_MS + 1,
         )
         .await;
-        let report = pass(store.inner(), &namespace_id, past_grace)
+        let report = collect_at(store.inner(), &namespace_id, past_grace)
             .await
-            .expect("a pass deletes the completed session");
+            .expect("a collection deletes the completed session");
         assert_eq!(report.deleted.upload_sessions, 1);
         store.release();
     });

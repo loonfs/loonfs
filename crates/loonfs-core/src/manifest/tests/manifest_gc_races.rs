@@ -280,7 +280,7 @@ async fn a_stale_basis_whose_successor_was_collected_publishes_after_the_current
         checked: crate::time::Observation::now(clock.clone()),
     };
     // Other processes publish manifests 3 to 5 and raise the hint, and a
-    // garbage collection pass one grace later deletes every manifest below
+    // garbage collection one grace later deletes every manifest below
     // the hint.
     for _ in 3..=5 {
         crate::test_support::namespace_store(&store, &namespace_id)

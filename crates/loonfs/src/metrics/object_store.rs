@@ -73,7 +73,7 @@ impl ObjectStoreMetricsRecorder for ObjectStoreInstruments {
     fn record(&self, sample: ObjectStoreMetricSample) {
         let instruments = self.reading(
             sample.operation.as_str(),
-            sample.result.as_str(),
+            sample.outcome.as_str(),
             sample.key_class.as_str(),
         );
         instruments.outcome.increment(1);

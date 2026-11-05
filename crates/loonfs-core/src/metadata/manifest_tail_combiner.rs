@@ -1,4 +1,4 @@
-//! [`ManifestTailMerge`]: merges a paged scan of manifest rows with the rows
+//! [`ManifestTailCombiner`]: combines a paged scan of manifest rows with the rows
 //! that the WAL tail contains in the same range, in row-key order.
 
 use crate::error::Result;
@@ -6,7 +6,7 @@ use loonfs_types::format::manifest::lookup_keys;
 use std::collections::VecDeque;
 use std::future::Future;
 
-/// Which side a merge takes first when both contain a row with the same key.
+/// Which side a combiner takes first when both contain a row with the same key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TieOrder {
     TailFirst,
@@ -20,15 +20,15 @@ pub(super) struct ManifestPage<T> {
     pub(super) more: bool,
 }
 
-/// A merge of manifest pages, read on demand, with a sorted set of tail
+/// A combination of manifest pages, read on demand, with a sorted set of tail
 /// rows.
 ///
-/// A row that both sides hold is one row, so the merge returns each row key
+/// A row that both sides hold is one row, so the combiner returns each row key
 /// once.
 ///
-/// The merge buffers one manifest page at a time, so it keeps at most one
+/// The combiner buffers one manifest page at a time, so it keeps at most one
 /// page of manifest rows beside the tail rows.
-pub(super) struct ManifestTailMerge<T> {
+pub(super) struct ManifestTailCombiner<T> {
     position: ScanPosition,
     manifest: VecDeque<(String, T)>,
     tail: VecDeque<(String, T)>,
@@ -36,8 +36,8 @@ pub(super) struct ManifestTailMerge<T> {
     last_row_key: Option<String>,
 }
 
-impl<T> ManifestTailMerge<T> {
-    /// Starts a merge of the manifest's rows from `lower_bound` with `tail`,
+impl<T> ManifestTailCombiner<T> {
+    /// Starts a combination of the manifest's rows from `lower_bound` with `tail`,
     /// whose rows are in row-key order and at or after `lower_bound`.
     pub(super) fn new(lower_bound: String, tail: Vec<(String, T)>, ties: TieOrder) -> Self {
         Self {
@@ -52,7 +52,7 @@ impl<T> ManifestTailMerge<T> {
     /// Returns the next row of either side in row-key order, or `None` when
     /// both sides are spent.
     ///
-    /// When no manifest row is buffered, the merge first reads the next
+    /// When no manifest row is buffered, the combiner first reads the next
     /// manifest page with `refill`, which takes the key that the page starts
     /// at.
     pub(super) async fn next<F, Fut>(&mut self, mut refill: F) -> Result<Option<(String, T)>>
@@ -161,13 +161,13 @@ mod tests {
             }
         };
         let tail = vec![("a3".to_owned(), ()), ("c4".to_owned(), ())];
-        let mut merge = ManifestTailMerge::new("a".to_owned(), tail, TieOrder::ManifestFirst);
+        let mut combiner = ManifestTailCombiner::new("a".to_owned(), tail, TieOrder::ManifestFirst);
         let mut read = Vec::new();
-        while let Some((row_key, ())) = merge.next(refill).await.expect("next row") {
+        while let Some((row_key, ())) = combiner.next(refill).await.expect("next row") {
             // Read the first row of each letter, then skip to the next one.
             let letter = row_key[..1].to_owned();
             read.push(row_key);
-            merge.seek(&format!("{letter}\u{ff}"));
+            combiner.seek(&format!("{letter}\u{ff}"));
         }
         assert_eq!(read, ["a1", "b1", "c1", "d1"]);
         // The pages after a spent page start at the seek's bound, so `c2` and
@@ -188,9 +188,9 @@ mod tests {
             async move { Ok(ManifestPage { rows, more: false }) }
         };
         let tail = vec![("b".to_owned(), ())];
-        let mut merge = ManifestTailMerge::new("a".to_owned(), tail, TieOrder::TailFirst);
+        let mut combiner = ManifestTailCombiner::new("a".to_owned(), tail, TieOrder::TailFirst);
         let mut read = Vec::new();
-        while let Some((row_key, ())) = merge.next(refill).await.expect("next row") {
+        while let Some((row_key, ())) = combiner.next(refill).await.expect("next row") {
             read.push(row_key);
         }
         assert_eq!(read, ["a", "b", "c"]);

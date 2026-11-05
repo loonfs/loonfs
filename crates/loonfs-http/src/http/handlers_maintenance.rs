@@ -3,7 +3,7 @@
 use super::error::ApiResponseError;
 use super::extractors::{missing_actor, OptionalActorHeader};
 
-use super::{AppJson, AppQuery, BindingState, NamespaceIdPath, NoQuery};
+use super::{AppJson, AppQuery, HttpState, NamespaceIdPath, NoQuery};
 use axum::extract::State;
 use axum::Json;
 use loonfs::{AdvanceRetentionFloorOptions, GcOptions, MaintainMetadataOptions};
@@ -37,7 +37,7 @@ use std::sync::Arc;
     )
 )]
 pub(super) async fn run_maintenance(
-    State(state): State<Arc<BindingState>>,
+    State(state): State<Arc<HttpState>>,
     OptionalActorHeader(actor_id): OptionalActorHeader,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,

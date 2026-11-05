@@ -1642,11 +1642,11 @@ async fn wal_bytes_make_automatic_and_explicit_folds_due_before_wal_object_count
             .await
             .expect("automatic fold settles");
         // The fold moved the session's position to its manifest, so the next
-        // pass finds nothing left to fold.
+        // metadata step finds nothing left to fold.
         let again = maintenance
             .maintain_metadata_with_options(&namespace, &options)
             .await
-            .expect("pass after the fold");
+            .expect("metadata step after the fold");
         assert_eq!(again.wal_fold, None);
         let usage = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace)
             .load_wal_tail_usage()
@@ -1666,12 +1666,12 @@ async fn wal_bytes_make_automatic_and_explicit_folds_due_before_wal_object_count
     }
 }
 
-/// Checks that a maintenance pass folds a tail at `FOLD_AT_WAL_BYTES` after
+/// Checks that a metadata maintenance step folds a tail at `FOLD_AT_WAL_BYTES` after
 /// the session's position passes the revalidation bound. The session's own
-/// fold fails, and the pass loads the tail from the store and counts the WAL
+/// fold fails, and the step loads the tail from the store and counts the WAL
 /// bytes that it loaded.
 #[tokio::test]
-async fn a_pass_without_a_current_position_counts_the_wal_bytes_that_it_loads() {
+async fn a_metadata_step_without_a_current_position_counts_the_wal_bytes_that_it_loads() {
     let directory = tempdir().expect("directory");
     let namespace = NamespaceId::parse("stale-position").expect("namespace");
     let store = Arc::new(FailStore::matching(
@@ -1716,7 +1716,7 @@ async fn a_pass_without_a_current_position_counts_the_wal_bytes_that_it_loads() 
         .maintenance(loonfs_test_support::ids::writer_id("maintenance"))
         .maintain_metadata_with_options(&namespace, &MaintainMetadataOptions::default())
         .await
-        .expect("pass");
+        .expect("metadata step");
     assert_matches!(
         step.wal_fold,
         Some(crate::FoldWalResponse {
@@ -1727,7 +1727,7 @@ async fn a_pass_without_a_current_position_counts_the_wal_bytes_that_it_loads() 
     let usage = loonfs_core::test_support::namespace_store(store.as_ref(), &namespace)
         .load_wal_tail_usage()
         .await
-        .expect("usage after the pass");
+        .expect("usage after the metadata step");
     assert_eq!(usage.wal_tail_objects, 0);
     writer.shutdown().await.expect("shutdown");
 }

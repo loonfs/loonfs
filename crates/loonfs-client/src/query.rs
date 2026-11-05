@@ -12,7 +12,7 @@ impl Client {
     /// Searches content through the namespace's grep index (query API group).
     ///
     /// Gate on the `query.grep` capability before calling against unknown
-    /// deployments; the namespace must also have a materialized active grep
+    /// deployments; the namespace must also have a built, active grep
     /// manifest or the server returns `not_supported`.
     pub fn grep(&self, namespace_id: &NamespaceId, request: &GrepRequest) -> GrepPager {
         Pager::with_state(

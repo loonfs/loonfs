@@ -47,7 +47,7 @@ pub struct ObjectStoreMetricSample {
     /// stream always reports `1`.
     pub attempts: u32,
     /// Cardinality-bounded success or failure classification.
-    pub result: ObjectStoreResultKind,
+    pub outcome: ObjectStoreOutcomeKind,
     /// Request payload bytes for a put or an assembly, including failed
     /// attempts; otherwise `None`.
     pub bytes_in: Option<u64>,
@@ -72,14 +72,14 @@ impl ObjectStoreMetricSample {
         key: &str,
         elapsed: Duration,
         attempts: u32,
-        result: ObjectStoreResultKind,
+        outcome: ObjectStoreOutcomeKind,
         store_kind: Option<&'static str>,
     ) -> Self {
         Self {
             operation,
             elapsed_micros: elapsed.as_micros(),
             attempts,
-            result,
+            outcome,
             bytes_in: None,
             bytes_out: None,
             item_count: None,
@@ -147,7 +147,7 @@ impl ObjectStoreOperation {
 /// Collapses object-store outcomes into a bounded metrics vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ObjectStoreResultKind {
+pub enum ObjectStoreOutcomeKind {
     /// Indicates the operation returned its requested value or mutation result.
     Ok,
     /// Indicates an optional read observed absence or an explicit lookup returned not found.
@@ -172,7 +172,7 @@ pub enum ObjectStoreResultKind {
     Other,
 }
 
-impl ObjectStoreResultKind {
+impl ObjectStoreOutcomeKind {
     /// Returns the label an aggregating recorder groups by.
     ///
     /// Identical to the serde name: one outcome has one spelling wherever it is
@@ -194,7 +194,7 @@ impl ObjectStoreResultKind {
     }
 }
 
-impl From<ObjectStoreErrorKind> for ObjectStoreResultKind {
+impl From<ObjectStoreErrorKind> for ObjectStoreOutcomeKind {
     fn from(class: ObjectStoreErrorKind) -> Self {
         match class {
             ObjectStoreErrorKind::NotFound => Self::NotFound,
@@ -401,14 +401,14 @@ impl<S> InstrumentedObjectStore<S> {
     }
 
     /// Times `call`, counts its attempts, and records one sample of
-    /// `operation` on `key`. `classify` sets the sample's result, and `fill`
+    /// `operation` on `key`. `classify` sets the sample's outcome, and `fill`
     /// sets the fields that only this operation reports.
     async fn measure<T>(
         &self,
         operation: ObjectStoreOperation,
         key: &str,
         call: impl Future<Output = Result<T>>,
-        classify: fn(&Result<T>) -> ObjectStoreResultKind,
+        classify: fn(&Result<T>) -> ObjectStoreOutcomeKind,
         fill: impl FnOnce(&Result<T>, &mut ObjectStoreMetricSample),
     ) -> Result<T> {
         let start = monotonic_instant();
@@ -661,7 +661,7 @@ struct RecordedListStream {
     prefix: String,
     started: Instant,
     items: u64,
-    first_error: Option<ObjectStoreResultKind>,
+    first_error: Option<ObjectStoreOutcomeKind>,
 }
 
 impl futures::Stream for RecordedListStream {
@@ -693,7 +693,7 @@ impl Drop for RecordedListStream {
             &self.prefix,
             self.started.elapsed(),
             1,
-            self.first_error.unwrap_or(ObjectStoreResultKind::Ok),
+            self.first_error.unwrap_or(ObjectStoreOutcomeKind::Ok),
             self.store_kind,
         );
         sample.item_count = Some(self.items);
@@ -723,17 +723,17 @@ fn classify_key(key: &str) -> ObjectKeyKind {
     }
 }
 
-fn classify_optional_result<T>(result: &Result<Option<T>>) -> ObjectStoreResultKind {
+fn classify_optional_result<T>(result: &Result<Option<T>>) -> ObjectStoreOutcomeKind {
     match result {
-        Ok(Some(_)) => ObjectStoreResultKind::Ok,
-        Ok(None) => ObjectStoreResultKind::NotFound,
+        Ok(Some(_)) => ObjectStoreOutcomeKind::Ok,
+        Ok(None) => ObjectStoreOutcomeKind::NotFound,
         Err(error) => error.kind().into(),
     }
 }
 
-fn classify_result<T>(result: &Result<T>) -> ObjectStoreResultKind {
+fn classify_result<T>(result: &Result<T>) -> ObjectStoreOutcomeKind {
     match result {
-        Ok(_) => ObjectStoreResultKind::Ok,
+        Ok(_) => ObjectStoreOutcomeKind::Ok,
         Err(error) => error.kind().into(),
     }
 }
@@ -762,7 +762,7 @@ fn classify_put_mode(mode: &PutMode) -> PutModeKind {
 
 #[cfg(test)]
 mod tests {
-    use super::{ObjectKeyKind, ObjectStoreOperation, ObjectStoreResultKind};
+    use super::{ObjectKeyKind, ObjectStoreOperation, ObjectStoreOutcomeKind};
     use serde::de::DeserializeOwned;
     use serde::Serialize;
     use std::fmt::Debug;
@@ -802,20 +802,20 @@ mod tests {
         ] {
             assert_spelling(operation, operation.as_str());
         }
-        for result in [
-            ObjectStoreResultKind::Ok,
-            ObjectStoreResultKind::NotFound,
-            ObjectStoreResultKind::InvalidKey,
-            ObjectStoreResultKind::InvalidRequest,
-            ObjectStoreResultKind::PreconditionFailed,
-            ObjectStoreResultKind::PermissionDenied,
-            ObjectStoreResultKind::Unsupported,
-            ObjectStoreResultKind::StoredChecksumMissing,
-            ObjectStoreResultKind::Configuration,
-            ObjectStoreResultKind::RetryableTransport,
-            ObjectStoreResultKind::Other,
+        for outcome in [
+            ObjectStoreOutcomeKind::Ok,
+            ObjectStoreOutcomeKind::NotFound,
+            ObjectStoreOutcomeKind::InvalidKey,
+            ObjectStoreOutcomeKind::InvalidRequest,
+            ObjectStoreOutcomeKind::PreconditionFailed,
+            ObjectStoreOutcomeKind::PermissionDenied,
+            ObjectStoreOutcomeKind::Unsupported,
+            ObjectStoreOutcomeKind::StoredChecksumMissing,
+            ObjectStoreOutcomeKind::Configuration,
+            ObjectStoreOutcomeKind::RetryableTransport,
+            ObjectStoreOutcomeKind::Other,
         ] {
-            assert_spelling(result, result.as_str());
+            assert_spelling(outcome, outcome.as_str());
         }
         for class in [
             ObjectKeyKind::Content,

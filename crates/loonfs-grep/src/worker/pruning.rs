@@ -192,7 +192,7 @@ pub(super) fn filter_from_rows(
 /// run's translation drops it, because a run's table lists every value that
 /// the run has a `texts` row for. The check reads each input run's table from
 /// its first value beside the sorted values that the commits refer to, a
-/// block at a time, as a translation pass does, and stops after the last of
+/// block at a time, as a translation does, and stops after the last of
 /// those values.
 pub(super) async fn re_reference_check_fails<S: ObjectStore + ?Sized>(
     reads: &NamespaceReads,

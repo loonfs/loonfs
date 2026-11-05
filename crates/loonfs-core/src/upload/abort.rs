@@ -146,7 +146,7 @@ impl AbandonedUpload {
 /// keeping it would leak bytes nobody can name again. This runs strictly
 /// after the durable transition that made the session terminal, and it is
 /// idempotent, so a cleanup lost to a crash is repeated by the next
-/// garbage-collection pass. The returned flag tells that pass whether it may
+/// garbage collection. The returned flag tells that collection whether it may
 /// remove the durable session record that makes the retry possible.
 #[must_use]
 pub(crate) async fn delete_unpublished_content_object<S: ObjectStore + ?Sized>(

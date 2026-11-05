@@ -409,10 +409,10 @@ fn validate_display_name(value: &str) -> Result<(), PathError> {
         });
     }
     // Portability floor: names every target filesystem can store. Windows
-    // cannot materialize its reserved characters, trailing dots or spaces,
+    // cannot store its reserved characters, trailing dots or spaces,
     // or its reserved device names, and an all-whitespace name is invisible
     // in every listing. Enforce this before storing a name so it remains
-    // possible to materialize every accepted path on those filesystems.
+    // possible to write every accepted path on those filesystems.
     if let Some(character) = first_windows_reserved_character(value) {
         return Err(PathError::UnportableDisplayNameCharacter {
             display_name: value.to_owned(),
@@ -459,7 +459,7 @@ fn validate_path_bounds(byte_length: usize, depth: usize) -> Result<(), PathErro
 /// Characters Windows reserves inside a path component. Each one means
 /// something else there — a drive or stream separator, a wildcard, a pipe, a
 /// quote, a redirect — so a name that contains one cannot be written to an NTFS
-/// volume at all, and a tree containing it could not be materialized,
+/// volume at all, and a tree containing it could not be written,
 /// archived, or synced on Windows.
 ///
 /// This is the same portability floor the trailing-dot and device-name rules

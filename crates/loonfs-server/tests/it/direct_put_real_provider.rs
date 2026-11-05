@@ -1042,7 +1042,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
     let part_size = MULTIPART_PART_SIZE;
     let payload = multipart_payload(part_size, 2);
     let whole_object = Checksum::crc64nvme(&payload);
-    // Begin declares nothing about the payload. A one-pass uploader could
+    // Begin declares nothing about the payload. A streaming uploader could
     // not fill in a length or a digest here, and this session proves it does
     // not have to: the claim arrives with the completion below.
     let begin = harness
@@ -1255,13 +1255,13 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
         .expect("prepared CRC content replays without another upload");
     assert_eq!(replayed_rerun, rerun);
 
-    one_pass_puts_against_the_provider(&harness, namespace).await;
+    streaming_puts_against_the_provider(&harness, namespace).await;
 
     harness.server.abort();
     delete_everything_under_the_run_prefix(&store_config).await;
 }
 
-/// The one-pass path, against the provider that has to accept it.
+/// The streaming path, against the provider that has to accept it.
 ///
 /// Both puts here are what `loonfs put` runs: a payload that is never held
 /// whole, cut into parts as it is read, with the object's length and digest
@@ -1270,17 +1270,17 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
 /// process's — and the second reads a source that cannot say how long it
 /// is, which is the case a pipe presents and the one no amount of buffering
 /// would rescue.
-async fn one_pass_puts_against_the_provider(harness: &crate::common::TestServer, namespace: &str) {
-    // Three parts and a bit at the deployment's geometry, so the pass
+async fn streaming_puts_against_the_provider(harness: &crate::common::TestServer, namespace: &str) {
+    // Three parts and a bit at the deployment's geometry, so the upload
     // crosses a wave boundary and ends on a short part.
     let payload: Vec<u8> = (0..251_u8)
         .cycle()
         .take(3 * MULTIPART_PART_SIZE + 4_096)
         .collect();
 
-    let file = tempfile::NamedTempFile::new().expect("temp file for the one-pass put");
+    let file = tempfile::NamedTempFile::new().expect("temp file for the streaming put");
     std::fs::write(file.path(), &payload).expect("write the payload to disk");
-    let from_file = NamespacePath::parse(namespace, "/one-pass-file.bin").expect("file target");
+    let from_file = NamespacePath::parse(namespace, "/streaming-file.bin").expect("file target");
     harness
         .client
         .put_file_stream_with_options(
@@ -1289,7 +1289,7 @@ async fn one_pass_puts_against_the_provider(harness: &crate::common::TestServer,
                 .await
                 .expect("open the payload file"),
             &loonfs_test_support::test_actor(),
-            &put_options("one-pass-file"),
+            &put_options("streaming-file"),
         )
         .await
         .expect("a file streams straight into object storage");
@@ -1305,8 +1305,8 @@ async fn one_pass_puts_against_the_provider(harness: &crate::common::TestServer,
 
     // The same flow with the length withheld. Nothing in the transport
     // needed it: begin declares nothing, and the claim is produced by the
-    // pass itself.
-    let piped = NamespacePath::parse(namespace, "/one-pass-piped.bin").expect("piped target");
+    // upload itself.
+    let piped = NamespacePath::parse(namespace, "/streaming-piped.bin").expect("piped target");
     let chunks: Vec<Bytes> = payload
         .chunks(64 * 1024)
         .map(Bytes::copy_from_slice)
@@ -1319,7 +1319,7 @@ async fn one_pass_puts_against_the_provider(harness: &crate::common::TestServer,
             &piped,
             source,
             &loonfs_test_support::test_actor(),
-            &put_options("one-pass-piped"),
+            &put_options("streaming-piped"),
         )
         .await
         .expect("a source of unknown length uploads the same way");

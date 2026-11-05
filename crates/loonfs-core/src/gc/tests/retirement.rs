@@ -145,7 +145,7 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
         .snapshot()
         .iter()
         .all(|operation| { !operation.key().starts_with("namespaces/source/") }));
-    // The family root's pass, not the fork's, collects the fork's session.
+    // The family root's collection, not the fork's, collects the fork's session.
     assert!(read_upload_session(&store, &target, &upload.upload_id)
         .await
         .is_some());
@@ -219,7 +219,7 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
         .await
         .expect("before deadline");
     assert_eq!(before.next_reclamation_at_ms, Some(deadline));
-    // Each pass inside the grace lists the content prefix once to measure the
+    // Each collection inside the grace lists the content prefix once to measure the
     // content, and deletes nothing.
     assert_eq!(store.counts().lists, 2);
     assert_eq!(store.counts().deletes, 0);

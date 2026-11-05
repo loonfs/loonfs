@@ -106,11 +106,11 @@ fn segment_reads_and_manifest_puts(store: &RecordingStore<LocalFsStore>) -> (usi
     counts
 }
 
-/// Checks that one `metadata` run does the work of repeated passes until a
-/// pass finds nothing due, with the same metadata segment reads and the same
+/// Checks that one `metadata` run does the work of repeated metadata steps
+/// until a step finds nothing due, with the same metadata segment reads and the same
 /// manifest publications.
 #[tokio::test]
-async fn one_metadata_run_does_the_work_of_repeated_passes() {
+async fn one_metadata_run_does_the_work_of_repeated_metadata_steps() {
     let directory = tempdir().expect("tempdir");
     let store = Arc::new(RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),

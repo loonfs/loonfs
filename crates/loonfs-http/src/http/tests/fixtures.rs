@@ -1,8 +1,8 @@
-//! Runtime handles and options for binding tests.
+//! Runtime handles and options for HTTP API tests.
 
 use crate::{
-    AuthPolicy, BindingConfig, BindingHandles, BindingState, GrepBinding, HttpMetrics, JobMode,
-    Namespaces, UsageRecorder,
+    AuthPolicy, GrepMode, HttpConfig, HttpHandles, HttpMetrics, HttpState, JobMode, Namespaces,
+    UsageRecorder,
 };
 use loonfs::{InlineContentPolicy, LoonFs, SharedObjectStore, TraceMode};
 use loonfs_grep::{
@@ -17,8 +17,8 @@ use std::sync::Arc;
 
 #[derive(Clone)]
 pub(super) struct TestOptions {
-    pub(super) binding: BindingConfig,
-    /// The runtime's inline content policy, which the binding reads from the
+    pub(super) http: HttpConfig,
+    /// The runtime's inline content policy, which the HTTP API reads from the
     /// runtime.
     pub(super) inline_content: InlineContentPolicy,
     pub(super) grep: JobMode,
@@ -42,13 +42,13 @@ pub(super) struct TestAppOptions {
     /// The WAL objects that make a writer session's own fold due, or the
     /// default when `None`.
     pub(super) session_fold_at_wal_objects: Option<std::num::NonZeroU64>,
-    /// The binding's usage recorder, or no recorder when `None`.
+    /// The HTTP API's usage recorder, or no recorder when `None`.
     pub(super) usage_recorder: Option<Arc<dyn UsageRecorder>>,
 }
 
 pub(super) fn test_options(root: &Path, writer_id: &str) -> TestOptions {
     TestOptions {
-        binding: BindingConfig {
+        http: HttpConfig {
             serves_maintenance: true,
             max_upload_bytes: Some(256 * 1024 * 1024),
             max_download_bytes: Some(256 * 1024 * 1024),
@@ -69,18 +69,18 @@ pub(super) fn test_options(root: &Path, writer_id: &str) -> TestOptions {
 pub(super) async fn test_app(
     config: TestOptions,
     inputs: TestAppOptions,
-) -> loonfs::Result<(axum::Router, BindingState)> {
+) -> loonfs::Result<(axum::Router, HttpState)> {
     let (router, state, _) = test_app_with_sessions(config, inputs).await?;
     Ok((router, state))
 }
 
 /// Builds the app of [`test_app`], and returns the table of writer sessions
-/// that its binding holds.
+/// that its HTTP API holds.
 pub(super) async fn test_app_with_sessions(
     config: TestOptions,
     inputs: TestAppOptions,
-) -> loonfs::Result<(axum::Router, BindingState, Arc<Namespaces<()>>)> {
-    let options = config.binding;
+) -> loonfs::Result<(axum::Router, HttpState, Arc<Namespaces<()>>)> {
+    let options = config.http;
     let metrics = HttpMetrics::new();
     let defaults = loonfs::RuntimeConfig::default();
     let builder = LoonFs::builder_with_store(inputs.store.unwrap_or(config.store)).config(
@@ -91,7 +91,7 @@ pub(super) async fn test_app_with_sessions(
             inline_content: config.inline_content,
             max_read_content_bytes: options
                 .max_download_bytes
-                .expect("test bindings should cap proxied reads"),
+                .expect("test HTTP APIs should cap proxied reads"),
             trace_mode: TraceMode::Remote,
             ..defaults
         },
@@ -126,7 +126,7 @@ pub(super) async fn test_app_with_sessions(
             runtime.read_only(),
             runtime.clone(),
             maintenance.clone(),
-            loonfs_grep::GrepPassBudget::default(),
+            loonfs_grep::GrepStepBudget::default(),
         )
     };
     let grep_service = || {
@@ -136,22 +136,22 @@ pub(super) async fn test_app_with_sessions(
         Arc::new(GrepService::new(cache))
     };
     let grep = match config.grep {
-        JobMode::Disabled => GrepBinding::Disabled,
-        JobMode::ServeOnly => GrepBinding::ServeOnly {
+        JobMode::Disabled => GrepMode::Disabled,
+        JobMode::ServeOnly => GrepMode::ServeOnly {
             service: grep_service(),
         },
-        JobMode::MaintainOnly => GrepBinding::MaintainOnly {
+        JobMode::MaintainOnly => GrepMode::MaintainOnly {
             worker: grep_worker(),
         },
-        JobMode::ServeAndMaintain => GrepBinding::ServeAndMaintain {
+        JobMode::ServeAndMaintain => GrepMode::ServeAndMaintain {
             service: grep_service(),
             worker: grep_worker(),
         },
     };
     let namespaces = Arc::new(Namespaces::<()>::new(runtime.clone()));
-    let state = BindingState::new(
+    let state = HttpState::new(
         options,
-        BindingHandles {
+        HttpHandles {
             namespaces: namespaces.clone(),
             runtime,
             maintenance,

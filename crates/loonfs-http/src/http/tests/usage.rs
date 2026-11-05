@@ -1,9 +1,9 @@
-//! The usage report that the binding records once for each request to a
+//! The usage report that the HTTP API records once for each request to a
 //! namespace route.
 
 use super::direct_download::LoopbackIssuer;
 use super::fixtures::{test_app, test_options, TestAppOptions};
-use crate::{BindingState, JobMode, UsageRecorder, UsageReport};
+use crate::{HttpState, JobMode, UsageRecorder, UsageReport};
 use axum::body::{Body, Bytes};
 use axum::http::{Request, StatusCode};
 use futures::StreamExt as _;
@@ -51,14 +51,14 @@ struct Fixture {
     /// Keeps the store's directory until the test ends.
     _directory: TempDir,
     router: axum::Router,
-    state: BindingState,
+    state: HttpState,
     usage: Arc<RecordingUsage>,
     namespace_id: NamespaceId,
     /// The inode ID of `/file.txt`, in its public form.
     file_inode: String,
 }
 
-/// Creates a namespace `demo` with `/file.txt`, behind a binding that records
+/// Creates a namespace `demo` with `/file.txt`, behind an HTTP API that records
 /// usage and presigns object reads.
 async fn fixture(name: &str) -> Fixture {
     let directory = tempfile::tempdir().expect("tempdir");

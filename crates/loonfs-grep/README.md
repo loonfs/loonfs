@@ -6,10 +6,12 @@ The index records content values rather than file revisions. A "content value" i
 
 Grep never scans the store to discover namespaces. Instead, its host calls typed steps, passing the ID of the namespace to work on. `GrepWorker::steps` starts a run of steps over one namespace, whose changes to grep's entry are kept in memory and published together in one manifest once a publish interval has passed, and when the host calls `GrepSteps::publish`. `GrepSteps::step` runs the next step, which is a reorganize step when a reorganization is in progress or a level of the index has reached its run limit, and a build step otherwise. (`GrepSteps::build_step` and `GrepSteps::reorganize_step` run one kind of step.)
 
-Commits don't schedule index work. The reference server (`loonfs-server`) runs index work in two passes:
+Commits don't schedule index work. The reference server (`loonfs-server`) runs index work as the index step of its maintenance scheduler:
 
-- The maintenance sweep visits every namespace on a regular schedule. Each visit runs `GrepSteps::step` for as long as each step does some work (at most 16 steps), so the index is reorganized while it's behind a writer. The steps' changes are published once per tick interval (5 seconds by default), and again when the visit ends.
-- A second pass runs every 5 seconds. For each writer session the server has open, it builds that namespace's index if the session's last published sequence number has changed since this pass last indexed it.
+- Every maintenance interval (`maintenance_interval_ms`, 5 seconds by default), the scheduler runs an index step for each writer session the server has open, if the session's last published sequence number has changed since the step last indexed it.
+- A sweep, which runs at start and then every `sweep_interval_ms` (a day by default), runs an index step for every namespace in the store.
+
+An index step runs `GrepSteps::step` for as long as each step does some work (at most 16 steps), so the index is reorganized while it's behind a writer. The steps' changes are published once per maintenance interval, and again when the index step ends.
 
 A query still returns correct results while the index is behind, because it scans the files that were committed after the last commit the index covers.
 
@@ -33,8 +35,8 @@ max_content_bytes_per_step = 67108864
 max_concurrent_steps = 2
 ```
 
-Every value must be greater than zero, and `max_files_per_step` can be at most 1,000, the largest page a build step reads. The host builds one `GrepPassBudget` from `max_concurrent_steps` and passes it to `GrepWorker::new`. When a build or reorganize step finds work to do, it waits for one of the budget's permits before it reads file content or index segments, and it keeps the permit until it writes its segments. A step that finds the index up to date, or finds nothing to reorganize, doesn't take a permit. `GrepPassBudget::stats` reports how many steps are running and how many are waiting, and `GrepWorker::publication_stats` counts the worker's publications of grep's entry by how each one ended (published, rebuilt over another manifest, or superseded).
+Every value must be greater than zero, and `max_files_per_step` can be at most 1,000, the largest page a build step reads. The host builds one `GrepStepBudget` from `max_concurrent_steps` and passes it to `GrepWorker::new`. When a build or reorganize step finds work to do, it waits for one of the budget's permits before it reads file content or index segments, and it keeps the permit until it writes its segments. A step that finds the index up to date, or finds nothing to reorganize, doesn't take a permit. `GrepStepBudget::stats` reports how many steps are running and how many are waiting, and `GrepWorker::publication_stats` counts the worker's publications of grep's entry by how each one ended (published, rebuilt over another manifest, or superseded).
 
-The server's `max_concurrent_maintenance` limits how many namespaces its sweep visits at once. Separately, `max_concurrent_steps` limits how many steps read and process content at once, no matter how many visits are running.
+The server's `max_concurrent_maintenance` limits how many namespaces its scheduler runs steps on at once. Separately, `max_concurrent_steps` limits how many grep steps read and process content at once, no matter how many namespaces have steps running.
 
 Clones of a budget share its permits. If your host runs more than one worker (for example, one for each runtime or store), pass a clone of the same budget to each worker. `max_concurrent_steps` then limits the steps of all the workers together. A worker that's given its own budget runs its steps in addition to that limit.

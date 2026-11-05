@@ -218,7 +218,7 @@ async fn maintenance_preserves_writer_and_logical_head() {
     namespace_store(&store, &namespace_id)
         .gc(None, &GcOptions::default(), &context.clock())
         .await
-        .expect("gc pass");
+        .expect("collection");
     let staged = engine.begin_upload().await.expect("second upload");
     engine
         .upload_content(&staged.upload_id, b"more\n")

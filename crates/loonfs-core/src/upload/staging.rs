@@ -78,7 +78,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// identity in this namespace's fork family.
     ///
     /// A reference into another fork family's prefix would point at objects
-    /// whose collection pass doesn't read this namespace's roots. This streams
+    /// whose collection doesn't read this namespace's roots. This streams
     /// the source bytes chunk by chunk into a new local upload session,
     /// verifying the claimed size and checksum against what was staged, so
     /// collection in the source's family cannot invalidate a later

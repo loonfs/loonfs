@@ -47,13 +47,13 @@ memory_limit_bytes = 4294967296
 #request_deadline_ms = 60000
 
 # Whether this server serves the maintenance API group, runs the maintenance
-# sweep, both, or neither. `serve_and_maintain` is the default. The other
+# scheduler, both, or neither. `serve_and_maintain` is the default. The other
 # values are `serve_only`, `maintain_only`, and `disabled`. A mode that does
 # not serve the group answers its routes with `route_not_found`; a mode that
-# does not maintain leaves background work to another process. The sweep
-# visits sessions this process wrote to and periodically every namespace in
-# the store. It folds idle WAL tails, compacts metadata, builds the grep index,
-# and collects garbage.
+# does not maintain leaves background work to another process. The scheduler
+# runs the due steps of the sessions this process wrote to, and sweeps every
+# namespace in the store periodically. It folds idle WAL tails, compacts
+# metadata, builds the grep index, and collects garbage.
 #maintenance = "serve_and_maintain"
 
 # Largest request body accepted for service-proxied upload content, in
@@ -82,27 +82,31 @@ memory_limit_bytes = 4294967296
 #max_concurrent_uploads = 8
 #max_concurrent_downloads = 16
 
-# How many namespaces the maintenance sweep visits at once. Defaults to 8.
+# How many namespaces the maintenance scheduler runs steps on at once.
+# Defaults to 8.
 #max_concurrent_maintenance = 8
 
-# Milliseconds between ticks of held sessions. Each tick runs the first due
-# step: metadata, index, collection, or close. Defaults to 5000 (5 seconds).
-#tick_interval_ms = 5000
+# Milliseconds between the scheduler's runs of each open session's due steps.
+# Each run makes the session's metadata step when it's due, then the first
+# due step of collection, index, and close. Defaults to 5000 (5 seconds).
+#maintenance_interval_ms = 5000
 
-# Milliseconds before retrying unfinished metadata. Defaults to 300000 (5 minutes).
-#maintenance_interval_ms = 300000
+# Milliseconds before a metadata step that left work runs again. Defaults to
+# 300000 (5 minutes).
+#metadata_retry_interval_ms = 300000
 
 # Least milliseconds between collections for sessions whose published seq moved. Defaults to 3600000 (1 hour).
 #gc_interval_ms = 3600000
 
-# Milliseconds between full passes over every namespace, with collection.
-# The first runs at start. Defaults to 86400000 (24 hours). An idle namespace
-# costs no request between full passes.
-#full_sweep_interval_ms = 86400000
+# Milliseconds between sweeps, which list every namespace in the store and
+# run each one's due steps, with collection. The first sweep runs at start.
+# Defaults to 86400000 (24 hours). An idle namespace costs no request between
+# sweeps.
+#sweep_interval_ms = 86400000
 
 # How long, in milliseconds, the server keeps a namespace's history before
 # it advances the namespace's retention floor past that history, for each
-# namespace without a retention window of its own. Each full pass advances
+# namespace without a retention window of its own. Each sweep advances
 # every namespace's floor to the last commit at or before the current time
 # minus the namespace's window, or minus this setting for a namespace that
 # has no window of its own. Must be positive. Omit it to advance only the
@@ -136,7 +140,7 @@ memory_limit_bytes = 4294967296
 
 # How old a namespace's newest commit must be before maintenance folds a WAL
 # tail that is below the fold thresholds, in milliseconds. The maintenance
-# sweep and explicit `metadata` requests use the same period. Zero turns the
+# scheduler and explicit `metadata` requests use the same period. Zero turns the
 # rule off. Defaults to 900000 (15 minutes).
 #idle_fold_after_ms = 900000
 

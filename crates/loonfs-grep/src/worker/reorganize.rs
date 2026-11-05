@@ -57,7 +57,7 @@ impl<S: ObjectStore + Clone> GrepSteps<'_, S> {
     /// run's pending change when it's due.
     ///
     /// Each step translates the inputs' posting ordinals to the output run's
-    /// ordinals, through one pass over the input runs' value tables beside
+    /// ordinals, through one read of the input runs' value tables beside
     /// the output run's, a block of each at a time, so it keeps four bytes
     /// for each input value. The first step decides the output run's table
     /// and writes it as it decides it.
@@ -114,18 +114,18 @@ impl<S: ObjectStore + Clone> GrepSteps<'_, S> {
             policy.max_rows_per_segment,
         )
         .await?;
-        let merged = segments
-            .merge_range(
+        let combined = segments
+            .combine_range(
                 &input_runs,
                 &reorganize.row_key_cursor,
                 policy.max_decoded_input_rows_per_step.get(),
-                &MergeTables {
+                &CombineTables {
                     translations: &translations,
                     revisions: filters.as_ref(),
                 },
             )
             .await?;
-        let completed = merged.exhausted;
+        let completed = combined.exhausted;
         if completed
             && re_reference_check_fails(&reads, &reorganize, &segments, &translations).await?
         {
@@ -139,7 +139,7 @@ impl<S: ObjectStore + Clone> GrepSteps<'_, S> {
         }
         new_segments.extend(
             segments
-                .write_run(merged.rows.into_rows(), policy.max_rows_per_segment)
+                .write_run(combined.rows.into_rows(), policy.max_rows_per_segment)
                 .await?,
         );
         let segments_written = new_segments.len() as u64;
@@ -164,7 +164,7 @@ impl<S: ObjectStore + Clone> GrepSteps<'_, S> {
             without_segments(&mut runs, &input_ids);
             None
         } else {
-            reorganize.row_key_cursor = merged.next_cursor;
+            reorganize.row_key_cursor = combined.next_cursor;
             Some(reorganize)
         };
         self.pending().await?.set_entry(
@@ -173,7 +173,7 @@ impl<S: ObjectStore + Clone> GrepSteps<'_, S> {
         );
         self.finish_step(
             GrepReorganizeOutcome::UnitWritten {
-                merged_rows: merged.rows_read,
+                combined_rows: combined.rows_read,
                 segments_written,
                 completed,
             },
@@ -369,7 +369,7 @@ fn without_segments(runs: &mut Vec<ExtensionRunRef>, segment_ids: &BTreeSet<&Ind
 
 /// The translations and the revision filter that one reorganize step merges
 /// its input rows by.
-struct MergeTables<'a> {
+struct CombineTables<'a> {
     /// Each input run's translation to the output run's ordinals.
     translations: &'a BTreeMap<RunNo, Translation>,
     /// The revisions whose `content_revisions` rows the step keeps, or
@@ -377,7 +377,7 @@ struct MergeTables<'a> {
     revisions: Option<&'a RetainedReferences>,
 }
 
-struct MergedRange {
+struct CombinedRange {
     rows: IndexRows,
     next_cursor: String,
     exhausted: bool,
@@ -385,18 +385,18 @@ struct MergedRange {
 }
 
 impl<S: ObjectStore + ?Sized> GrepSegments<'_, S> {
-    /// Merges the rows of `inputs` from `cursor` on, stopping after the key
-    /// that brings the merge to `max_rows` rows, and keeps what `tables`
-    /// keep. The merge ends at the inputs' value tables, which the output's
+    /// Combines the rows of `inputs` from `cursor` on, stopping after the key
+    /// that brings the combination to `max_rows` rows, and keeps what `tables`
+    /// keep. The combination ends at the inputs' value tables, which the output's
     /// table replaces.
-    async fn merge_range(
+    async fn combine_range(
         &self,
         inputs: &BTreeMap<RunNo, Vec<ExtensionSegmentRef>>,
         cursor: &str,
         max_rows: usize,
-        tables: &MergeTables<'_>,
-    ) -> Result<MergedRange> {
-        let loader = MergeInputs(self);
+        tables: &CombineTables<'_>,
+    ) -> Result<CombinedRange> {
+        let loader = CombineInputs(self);
         let start = (!cursor.is_empty()).then(|| cursor.to_owned());
         let start = &start;
         // A reorganization's first step writes its output's filter and value
@@ -411,7 +411,7 @@ impl<S: ObjectStore + ?Sized> GrepSegments<'_, S> {
                 })
             })
             .collect();
-        let mut merged = MergedRange {
+        let mut combined = CombinedRange {
             rows: IndexRows::default(),
             next_cursor: String::new(),
             exhausted: false,
@@ -419,7 +419,7 @@ impl<S: ObjectStore + ?Sized> GrepSegments<'_, S> {
         };
         let mut text_tables = BTreeMap::new();
         let mut last_key = String::new();
-        while merged.rows_read < max_rows as u64 {
+        while combined.rows_read < max_rows as u64 {
             refill_iterators(
                 &loader,
                 &mut readers,
@@ -427,8 +427,8 @@ impl<S: ObjectStore + ?Sized> GrepSegments<'_, S> {
             )
             .await?;
             let Some(position) = select_next_iterator(&readers, |_, row_key| row_key) else {
-                merged.exhausted = true;
-                return Ok(merged);
+                combined.exhausted = true;
+                return Ok(combined);
             };
             let key = readers[position]
                 .head()
@@ -436,13 +436,13 @@ impl<S: ObjectStore + ?Sized> GrepSegments<'_, S> {
                 .0
                 .to_owned();
             if key.as_str() >= lookup::VALUE_ROW_PREFIX {
-                merged.exhausted = true;
-                return Ok(merged);
+                combined.exhausted = true;
+                return Ok(combined);
             }
             let (object_key, run_no) = current_segment(&readers[position], self);
             let row = readers[position].take_head();
-            self.merge_row(
-                &mut merged,
+            self.combine_row(
+                &mut combined,
                 row,
                 &object_key,
                 run_no,
@@ -462,8 +462,8 @@ impl<S: ObjectStore + ?Sized> GrepSegments<'_, S> {
                     while reader.head().is_some_and(|(row_key, _)| row_key == key) {
                         let (object_key, run_no) = current_segment(reader, self);
                         let duplicate = reader.take_head();
-                        self.merge_row(
-                            &mut merged,
+                        self.combine_row(
+                            &mut combined,
                             duplicate,
                             &object_key,
                             run_no,
@@ -491,32 +491,32 @@ impl<S: ObjectStore + ?Sized> GrepSegments<'_, S> {
                 .head()
                 .is_some_and(|(row_key, _)| row_key < lookup::VALUE_ROW_PREFIX)
         }) {
-            merged.next_cursor = after_row_key(&last_key);
+            combined.next_cursor = after_row_key(&last_key);
         } else {
-            merged.exhausted = true;
+            combined.exhausted = true;
         }
-        Ok(merged)
+        Ok(combined)
     }
 
-    /// Adds one input row to the merge: a gram's postings join the gram's
+    /// Adds one input row to the combination: a gram's postings join the gram's
     /// other batches as ordinals in the output run's table, and two rows of
-    /// one `texts` or `content_revisions` key merge into one row.
+    /// one `texts` or `content_revisions` key combine into one row.
     ///
     /// A run's `texts` rows list the values of its table in the same order,
     /// so the `n`th `texts` row of a run has ordinal `n`. The step finds the
     /// ordinal of a run's first `texts` row with a binary search of the run's
     /// table, and reads the table on from there, a block at a time, beside
     /// the run's later `texts` rows in `text_tables`.
-    async fn merge_row(
+    async fn combine_row(
         &self,
-        merged: &mut MergedRange,
+        combined: &mut CombinedRange,
         row: IndexRow,
         object_key: &str,
         run_no: RunNo,
-        tables: &MergeTables<'_>,
+        tables: &CombineTables<'_>,
         text_tables: &mut BTreeMap<RunNo, TableReader>,
     ) -> Result<()> {
-        merged.rows_read += 1;
+        combined.rows_read += 1;
         let translation = tables
             .translations
             .get(&run_no)
@@ -528,7 +528,7 @@ impl<S: ObjectStore + ?Sized> GrepSegments<'_, S> {
                         "index segment `{object_key}` carries an unreadable posting batch: {error}"
                     ),
                 })?;
-                let postings = merged.rows.postings.entry(row.gram).or_default();
+                let postings = combined.rows.postings.entry(row.gram).or_default();
                 for ordinal in ordinals {
                     let output =
                         translation
@@ -568,7 +568,7 @@ impl<S: ObjectStore + ?Sized> GrepSegments<'_, S> {
                     .output(ordinal)
                     .ok_or_else(|| text_without_table(object_key, &row))?
                     .is_some();
-                if kept && merged.rows.texts.insert(value, row.eligible) == Some(!row.eligible) {
+                if kept && combined.rows.texts.insert(value, row.eligible) == Some(!row.eligible) {
                     return Err(GrepError::IndexCorrupt {
                         message: format!(
                             "index segment `{object_key}` records content `{}` of {} bytes as \
@@ -583,7 +583,7 @@ impl<S: ObjectStore + ?Sized> GrepSegments<'_, S> {
                     .revisions
                     .is_none_or(|revisions| revisions.keeps_revision(row.inode_id, row.revision_no))
                 {
-                    merged
+                    combined
                         .rows
                         .add_content_revision(IndexRow::ContentRevision(row));
                 }
@@ -592,7 +592,7 @@ impl<S: ObjectStore + ?Sized> GrepSegments<'_, S> {
             // wrote the input, and the output has a filter of its own if it
             // needs one.
             IndexRow::Filter(_) => {}
-            // The merge stops at the first value table key, so a value row
+            // The combination stops at the first value table key, so a value row
             // here sits under another family's key.
             IndexRow::Value(_) => {
                 return Err(GrepError::IndexCorrupt {
@@ -618,13 +618,13 @@ fn text_without_table(object_key: &str, row: &TextRow) -> GrepError {
     }
 }
 
-/// Loads a merge's input blocks: index blocks through the step's cache, and
-/// data blocks around it, so a merge of up to 64 MiB doesn't evict the value
+/// Loads a combination's input blocks: index blocks through the step's cache, and
+/// data blocks around it, so a combination of up to 64 MiB doesn't evict the value
 /// table blocks that every step reads again.
-struct MergeInputs<'s, 'a, S: ?Sized>(&'s GrepSegments<'a, S>);
+struct CombineInputs<'s, 'a, S: ?Sized>(&'s GrepSegments<'a, S>);
 
 impl<S: ObjectStore + ?Sized> SegmentBlockLoader<IndexRow, ExtensionSegmentRef>
-    for MergeInputs<'_, '_, S>
+    for CombineInputs<'_, '_, S>
 {
     type Error = GrepError;
 
