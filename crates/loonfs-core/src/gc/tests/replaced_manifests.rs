@@ -56,20 +56,21 @@ async fn seed_segments<S: ObjectStore>(store: &S, namespace_id: &NamespaceId) ->
 }
 
 async fn compact_bindings<S: ObjectStore>(store: &S, namespace_id: &NamespaceId) -> LoadedManifest {
-    let outcome = crate::test_support::NamespaceFixture::new(
+    let mut fixture = crate::test_support::NamespaceFixture::new(
         store,
         namespace_id,
         &crate::test_support::writer_at("test-writer", 0),
-    )
-    .engine()
-    .compact_metadata_unit(
-        None,
-        MetadataCompactionPolicy::CompactImmediately,
-        loonfs_types::CompactorEpoch(0),
-        &crate::compaction::MetadataCompactionCancellation::default(),
-    )
-    .await
-    .expect("compact bindings");
+    );
+    fixture.namespace.run_policy = crate::test_support::one_delta_run_policy();
+    let outcome = fixture
+        .engine()
+        .compact_metadata_unit(
+            None,
+            loonfs_types::CompactorEpoch(0),
+            &crate::compaction::MetadataCompactionCancellation::default(),
+        )
+        .await
+        .expect("compact bindings");
     assert_matches!(
         outcome,
         CompactionUnitOutcome::Published {

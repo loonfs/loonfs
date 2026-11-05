@@ -625,7 +625,11 @@ async fn shared_file_and_download_options_select_the_snapshot() {
 #[tokio::test]
 async fn a_fork_pin_reads_a_revision_after_the_sources_floor_passes_it() {
     let temp_dir = tempdir().expect("tempdir");
-    let fs = open_runtime_async(store(temp_dir.path()), "fork-pin-reads").await;
+    let fs =
+        open_compacting_runtime_with_async(store(temp_dir.path()), "fork-pin-reads", |builder| {
+            builder
+        })
+        .await;
     let actor = loonfs_test_support::test_actor();
     let source = namespace_id("source");
     fs.create_namespace(&source, &actor)

@@ -7,9 +7,7 @@ mod rebase;
 
 use super::*;
 use crate::changes::list_changes_after;
-use crate::compaction::{
-    CompactionUnitOutcome, MetadataCompactionCancellation, MetadataCompactionPolicy,
-};
+use crate::compaction::{CompactionUnitOutcome, MetadataCompactionCancellation};
 use crate::manifest::RetentionTarget;
 use crate::test_support::NamespaceFixture;
 use loonfs_types::format::wal::{MergeRecord, MAX_WAL_OBJECT_BYTES};
@@ -691,7 +689,7 @@ async fn advance_floor_and_compact(
         .fold_wal()
         .await
         .expect("fold");
-    let maintainer = NamespaceFixture::new(
+    let mut maintainer = NamespaceFixture::new(
         store,
         namespace_id,
         &crate::test_support::writer_at(
@@ -699,6 +697,7 @@ async fn advance_floor_and_compact(
             crate::test_support::grace_elapsed_after(1_000),
         ),
     );
+    maintainer.namespace.run_policy = crate::test_support::one_delta_run_policy();
     let advanced = maintainer
         .engine()
         .advance_retention_floor(target)
@@ -710,7 +709,6 @@ async fn advance_floor_and_compact(
             .engine()
             .compact_metadata_unit(
                 None,
-                MetadataCompactionPolicy::CompactImmediately,
                 CompactorEpoch(0),
                 &MetadataCompactionCancellation::default(),
             )

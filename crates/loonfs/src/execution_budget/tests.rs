@@ -65,7 +65,12 @@ async fn gated_runtime(
 }
 
 async fn sharing(budget: &ExecutionBudget) -> GatedRuntime {
-    gated_runtime(|builder| builder.execution_budget(budget.clone())).await
+    gated_runtime(|builder| {
+        builder
+            .execution_budget(budget.clone())
+            .run_policy(loonfs_core::test_support::one_delta_run_policy())
+    })
+    .await
 }
 
 impl GatedRuntime {
@@ -464,7 +469,12 @@ async fn shutting_down_one_runtime_leaves_the_budget_usable() {
 #[tokio::test]
 async fn a_runtime_without_a_budget_reports_the_default_limits_to_its_recorder() {
     let recorder = Arc::new(DefaultMetricsRecorder::new());
-    let gated = gated_runtime(|builder| builder.metrics_recorder(recorder.clone())).await;
+    let gated = gated_runtime(|builder| {
+        builder
+            .metrics_recorder(recorder.clone())
+            .run_policy(loonfs_core::test_support::one_delta_run_policy())
+    })
+    .await;
     let mut namespaces = Vec::new();
     for index in 0..3 {
         namespaces.push(gated.namespace_with_work(&format!("private-{index}")).await);

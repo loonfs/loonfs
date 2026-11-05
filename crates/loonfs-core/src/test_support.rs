@@ -207,7 +207,7 @@ use crate::engine::NamespaceWriterEngine;
 use crate::namespace::store::NamespaceStore;
 use crate::segment::{MetadataRunPolicy, MetadataSegmentCache};
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::{NamespaceId, WallClock, WriterId};
+use loonfs_types::{ManifestNo, NamespaceId, WallClock, WriterId};
 use std::sync::Arc;
 
 /// Returns `namespace_id`'s components over `store`, for a test whose caches,
@@ -343,10 +343,86 @@ impl<S: ObjectStore + Clone> NamespaceFixture<S> {
         }
     }
 
+    /// Returns the fixture with `run_policy` in place of the namespace's run
+    /// policy.
+    pub fn with_run_policy(self, run_policy: MetadataRunPolicy) -> Self {
+        Self {
+            namespace: NamespaceStore {
+                run_policy,
+                ..self.namespace
+            },
+            ..self
+        }
+    }
+
     /// Returns a writable engine over the fixture's namespace, which commits
     /// as the fixture's writer at the fixture's time.
     pub fn engine(&self) -> NamespaceWriterEngine<S> {
         NamespaceWriterEngine::writer(self.namespace.clone(), self.writer_id.clone())
+    }
+}
+
+/// The default run policy with a delta run limit of one, under which every
+/// family group with a delta run has a compaction unit due.
+pub fn one_delta_run_policy() -> MetadataRunPolicy {
+    MetadataRunPolicy {
+        max_delta_runs: std::num::NonZeroUsize::MIN,
+        ..MetadataRunPolicy::default()
+    }
+}
+
+/// Runs metadata compaction units on `namespace_id` under
+/// [`one_delta_run_policy`] until no unit is due, and returns the manifest
+/// number at the end and how many units published.
+///
+/// The units end with one base run in each family group that has rows.
+pub async fn compact_every_group<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> (ManifestNo, usize) {
+    drain_compaction(store, namespace_id, one_delta_run_policy()).await
+}
+
+/// Runs metadata compaction units on `namespace_id` under `policy` until no
+/// unit is due, and returns the manifest number at the end and how many units
+/// published.
+pub async fn drain_compaction<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    policy: MetadataRunPolicy,
+) -> (ManifestNo, usize) {
+    let mut published = 0;
+    loop {
+        let outcome = NamespaceFixture::new(store, namespace_id, &writer_at("test-writer", 0))
+            .with_run_policy(policy)
+            .engine()
+            .compact_metadata_unit(
+                None,
+                loonfs_types::CompactorEpoch(0),
+                &crate::compaction::MetadataCompactionCancellation::default(),
+            )
+            .await
+            .expect("compaction step");
+        match outcome {
+            crate::CompactionUnitOutcome::Published { .. } => published += 1,
+            crate::CompactionUnitOutcome::Abandoned | crate::CompactionUnitOutcome::Fenced => {
+                continue
+            }
+            other => {
+                std::assert_matches!(
+                    other,
+                    crate::CompactionUnitOutcome::NotNeeded,
+                    "an admitted unit should publish or find nothing"
+                );
+                let manifest_no = namespace_store(store, namespace_id)
+                    .load_current_manifest()
+                    .await
+                    .expect("read metadata manifest")
+                    .manifest()
+                    .manifest_no;
+                return (manifest_no, published);
+            }
+        }
     }
 }
 

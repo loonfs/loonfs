@@ -1435,8 +1435,6 @@ For example, suppose a group's runs, from oldest to newest, are a 300 MiB base a
 
 As an example of step 5, suppose a group has eight delta runs but no tier of four runs, and its newest runs, from oldest to newest, are 400, 40, 2, 1, and 1 MiB. The window starts with the two 1 MiB runs, adds the 2 MiB run, and stops before the 40 MiB run, because 40 is more than four times the window's 4 MiB total. The 40 MiB run joins a window only once the runs above it total at least 10 MiB. If the newest runs were 400, 40, 30, and 1 MiB instead, the window would start with the 1 and 30 MiB runs and add the 40 MiB run, because 40 is at most four times the window's 31 MiB total. The window would then stop before the 400 MiB run, because 400 is more than four times the new 71 MiB total.
 
-An explicit compaction request compacts a group's runs whatever their sizes. If the group has more than eight runs, the request compacts its oldest eight, unless the oldest run is more than four times the size of the smallest of the next seven. In that case, it compacts the eight runs above the oldest one first, so the oldest run is rewritten once, by the compaction that finishes the group.
-
 (The tier size of four runs, the size ratio of four, the limit of eight delta runs, and the limit of eight input runs to one compaction are implementation defaults, not format requirements. A compaction can rewrite any window that follows the earlier rules in this section.)
 
 Why can't a compaction above the oldest run drop rows? An excluded older run might contain rows that a row in the window supersedes, such as an older binding version below an unbound one, or a listed deletion whose removal row is in the window. Dropping rows in the window could make those older rows visible again.

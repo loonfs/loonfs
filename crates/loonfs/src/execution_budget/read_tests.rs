@@ -140,6 +140,7 @@ impl Fixture {
                 },
                 ..crate::RuntimeConfig::default()
             })
+            .run_policy(loonfs_core::test_support::one_delta_run_policy())
             .build()
             .await
             .expect("runtime");

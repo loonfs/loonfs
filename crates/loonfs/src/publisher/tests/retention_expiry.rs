@@ -114,6 +114,7 @@ async fn an_undelete_against_an_older_floor_keeps_its_rows_through_every_compact
     let maintainer = crate::LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("maintainer"))
         .wall_clock(maintainer_clock)
+        .run_policy(loonfs_core::test_support::one_delta_run_policy())
         .build()
         .await
         .expect("build the maintainer");

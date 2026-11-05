@@ -1495,21 +1495,7 @@ async fn commit_and_compact_at_the_floor(
         }
     }
     maintenance.fold_wal().await.expect("fold the history");
-    for _ in 0..16 {
-        let outcome = maintenance
-            .compact_metadata_unit(
-                None,
-                loonfs_core::MetadataCompactionPolicy::CompactImmediately,
-                loonfs_types::CompactorEpoch(0),
-                &loonfs_core::MetadataCompactionCancellation::default(),
-            )
-            .await
-            .expect("compact");
-        if matches!(outcome, loonfs_core::CompactionUnitOutcome::NotNeeded) {
-            return;
-        }
-    }
-    panic!("compaction did not drain within the family-group bound");
+    loonfs_core::test_support::compact_every_group(store, namespace_id).await;
 }
 
 async fn commit_retention_step(

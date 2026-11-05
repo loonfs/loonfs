@@ -14,7 +14,7 @@ use loonfs_objectstore::keys::wal_prefix;
 use loonfs_objectstore::layout::{parse_object_key, wal_no_of, DurableObjectFamily};
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::{RecordedOperation, StoreCounts};
-use loonfs_types::{CompactorEpoch, ContentId, DeleteDirectoryBehavior, WalNo, WriterEpoch};
+use loonfs_types::{ContentId, DeleteDirectoryBehavior, WalNo, WriterEpoch};
 
 /// A manifest another process publishes while a fold waits at its
 /// manifest put.
@@ -42,28 +42,8 @@ impl Rival {
                 .expect("claim the compactor");
             }
             Self::Compaction => {
-                let mut compactions = 0;
-                loop {
-                    match crate::test_support::NamespaceFixture::new(
-                        store,
-                        namespace_id,
-                        &crate::test_support::writer_at("test-writer", 0),
-                    )
-                    .engine()
-                    .compact_metadata_unit(
-                        None,
-                        MetadataCompactionPolicy::CompactImmediately,
-                        CompactorEpoch(0),
-                        &crate::compaction::MetadataCompactionCancellation::default(),
-                    )
-                    .await
-                    .expect("compact")
-                    {
-                        CompactionUnitOutcome::Published { .. } => compactions += 1,
-                        CompactionUnitOutcome::NotNeeded => break,
-                        other => panic!("expected a compaction, got {other:?}"),
-                    }
-                }
+                let (_, compactions) =
+                    crate::test_support::compact_every_group(store, namespace_id).await;
                 assert!(compactions > 0, "the compaction rival should publish");
             }
             Self::RetentionAdvance => {

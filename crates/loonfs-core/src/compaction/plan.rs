@@ -1,7 +1,6 @@
 //! Plans one metadata compaction unit: the family group it compacts, the
 //! window of runs, and the tier and sequence of the output run.
 
-use super::step::MetadataCompactionPolicy;
 use crate::segment::index_block_load::segment_object_bytes;
 use crate::segment::runs::{
     runs_in_compaction_order, MetadataFamilyGroup, MetadataRunManifest, MetadataRunPolicy,
@@ -116,10 +115,9 @@ pub(crate) fn plan_compaction(
     payload: &NamespaceManifestPayload,
     runs: &[MetadataRunManifest],
     run_policy: MetadataRunPolicy,
-    compaction_policy: MetadataCompactionPolicy,
 ) -> Option<MetadataCompactionSpec> {
-    let group = select_family_group(runs, payload, compaction_policy, run_policy)?;
-    plan_group(payload, runs, group, run_policy, compaction_policy)
+    let group = select_family_group(runs, payload, run_policy)?;
+    plan_group(payload, runs, group, run_policy)
 }
 
 /// Plans a unit over `group`'s window, if the group has one to compact.
@@ -128,10 +126,9 @@ pub(crate) fn plan_group(
     runs: &[MetadataRunManifest],
     group: MetadataFamilyGroup,
     run_policy: MetadataRunPolicy,
-    compaction_policy: MetadataCompactionPolicy,
 ) -> Option<MetadataCompactionSpec> {
     let candidates = group_candidates(runs, group);
-    let range = select_compaction_window(&candidates, group, run_policy, compaction_policy)?;
+    let range = select_compaction_window(&candidates, group, run_policy)?;
     let bottom_anchored = range.start == 0;
     let selected = candidates[range]
         .iter()
@@ -237,7 +234,6 @@ fn select_compaction_window(
     candidates: &[&MetadataRunManifest],
     group: MetadataFamilyGroup,
     run_policy: MetadataRunPolicy,
-    compaction_policy: MetadataCompactionPolicy,
 ) -> Option<std::ops::Range<usize>> {
     let max_runs = run_policy.max_input_runs_per_step.get();
     let stored_bytes = candidates
@@ -248,46 +244,16 @@ fn select_compaction_window(
                 .sum::<u64>()
         })
         .collect::<Vec<_>>();
-    let window = match compaction_policy {
-        MetadataCompactionPolicy::CompactImmediately => {
-            Some(immediate_window(&stored_bytes, max_runs))
-        }
-        MetadataCompactionPolicy::SizeTiered => {
-            let min_runs = effective_min_compaction_runs(run_policy);
-            tiered_window(&stored_bytes, min_runs, max_runs).or_else(|| {
-                capped_window(
-                    candidates,
-                    &stored_bytes,
-                    run_policy.max_delta_runs,
-                    max_runs,
-                )
-            })
-        }
-    }?;
+    let min_runs = effective_min_compaction_runs(run_policy);
+    let window = tiered_window(&stored_bytes, min_runs, max_runs).or_else(|| {
+        capped_window(
+            candidates,
+            &stored_bytes,
+            run_policy.max_delta_runs,
+            max_runs,
+        )
+    })?;
     window_is_valid(candidates, &window).then_some(window)
-}
-
-/// Returns the window that compacts a group's runs whatever their sizes.
-///
-/// A group that fits in one unit is compacted whole. A larger group compacts its
-/// oldest `max_runs` runs, unless the oldest run is too large to join a tier
-/// with the runs above it. Then the unit compacts the runs above it first, so
-/// the large run is rewritten once, by the unit that finishes the group.
-/// `stored_bytes` lists the runs in compaction order, oldest first.
-fn immediate_window(stored_bytes: &[u64], max_runs: usize) -> std::ops::Range<usize> {
-    let runs = stored_bytes.len();
-    if runs <= max_runs {
-        return 0..runs;
-    }
-    let oldest_joins = stored_bytes[1..max_runs]
-        .iter()
-        .min()
-        .is_none_or(|smallest| stored_bytes[0] <= smallest.saturating_mul(COMPACTION_SIZE_RATIO));
-    if oldest_joins {
-        0..max_runs
-    } else {
-        1..1 + max_runs
-    }
 }
 
 /// Returns the newest size tier that has at least `min_runs` runs.
@@ -378,17 +344,10 @@ pub(crate) fn group_run_descriptors(
 pub(crate) fn select_family_group(
     runs: &[MetadataRunManifest],
     payload: &NamespaceManifestPayload,
-    compaction_policy: MetadataCompactionPolicy,
     run_policy: MetadataRunPolicy,
 ) -> Option<MetadataFamilyGroup> {
     ranked_family_groups(payload).into_iter().find(|group| {
-        select_compaction_window(
-            &group_candidates(runs, *group),
-            *group,
-            run_policy,
-            compaction_policy,
-        )
-        .is_some()
+        select_compaction_window(&group_candidates(runs, *group), *group, run_policy).is_some()
     })
 }
 
@@ -468,14 +427,8 @@ mod planning_tests {
     fn planned(
         payload: &NamespaceManifestPayload,
         policy: MetadataRunPolicy,
-        compaction_policy: MetadataCompactionPolicy,
     ) -> Option<Range<u64>> {
-        let spec = plan_compaction(
-            payload,
-            &runs_newest_first(payload),
-            policy,
-            compaction_policy,
-        )?;
+        let spec = plan_compaction(payload, &runs_newest_first(payload), policy)?;
         let inputs = spec.inputs();
         let window = inputs[0].0..inputs[inputs.len() - 1].0 + 1;
         assert_eq!(
@@ -487,19 +440,7 @@ mod planning_tests {
     }
 
     fn tiered(sizes_mib: &[u64]) -> Option<Range<u64>> {
-        planned(
-            &manifest(sizes_mib),
-            MetadataRunPolicy::default(),
-            MetadataCompactionPolicy::SizeTiered,
-        )
-    }
-
-    fn immediate(sizes_mib: &[u64]) -> Option<Range<u64>> {
-        planned(
-            &manifest(sizes_mib),
-            MetadataRunPolicy::default(),
-            MetadataCompactionPolicy::CompactImmediately,
-        )
+        planned(&manifest(sizes_mib), MetadataRunPolicy::default())
     }
 
     fn min_compaction_runs() -> usize {
@@ -511,50 +452,19 @@ mod planning_tests {
     }
 
     #[test]
-    fn a_lone_delta_is_promoted_at_the_delta_run_limit_or_on_request_but_a_lone_base_is_not() {
+    fn a_lone_delta_is_promoted_at_the_delta_run_limit_but_a_lone_base_is_not() {
         let at_the_limit = MetadataRunPolicy {
             max_delta_runs: NonZeroUsize::MIN,
             ..MetadataRunPolicy::default()
         };
-        for (tier, policy, compaction_policy, expected) in [
-            (
-                RunTier::Delta,
-                MetadataRunPolicy::default(),
-                MetadataCompactionPolicy::SizeTiered,
-                None,
-            ),
-            (
-                RunTier::Delta,
-                at_the_limit,
-                MetadataCompactionPolicy::SizeTiered,
-                Some(0..1),
-            ),
-            (
-                RunTier::Delta,
-                MetadataRunPolicy::default(),
-                MetadataCompactionPolicy::CompactImmediately,
-                Some(0..1),
-            ),
-            (
-                RunTier::Base,
-                at_the_limit,
-                MetadataCompactionPolicy::SizeTiered,
-                None,
-            ),
-            (
-                RunTier::Base,
-                MetadataRunPolicy::default(),
-                MetadataCompactionPolicy::CompactImmediately,
-                None,
-            ),
+        for (tier, policy, expected) in [
+            (RunTier::Delta, MetadataRunPolicy::default(), None),
+            (RunTier::Delta, at_the_limit, Some(0..1)),
+            (RunTier::Base, at_the_limit, None),
         ] {
             let mut payload = manifest(&[1024]);
             payload.runs[0].tier = tier;
-            assert_eq!(
-                planned(&payload, policy, compaction_policy),
-                expected,
-                "{tier:?} {compaction_policy:?}"
-            );
+            assert_eq!(planned(&payload, policy), expected, "{tier:?}");
         }
     }
 
@@ -616,11 +526,7 @@ mod planning_tests {
                 .expect("a run count plus one is nonzero"),
             ..MetadataRunPolicy::default()
         };
-        planned(
-            &manifest(sizes_mib),
-            policy,
-            MetadataCompactionPolicy::SizeTiered,
-        )
+        planned(&manifest(sizes_mib), policy)
     }
 
     #[test]
@@ -660,35 +566,5 @@ mod planning_tests {
         let mut sizes = vec![4096];
         sizes.extend([1; 100]);
         assert_eq!(tiered(&sizes), Some(1..1 + fan_in));
-    }
-
-    #[test]
-    fn immediate_compaction_compacts_deltas_before_rewriting_a_large_base() {
-        let fan_in = max_input_runs();
-        for delta_runs in [12, 20] {
-            let mut sizes = vec![4096];
-            sizes.extend(vec![1; delta_runs]);
-            while sizes.len() > fan_in {
-                let selected = immediate(&sizes).expect("delta compaction");
-                assert_eq!(selected, 1..1 + fan_in as u64);
-                let selected = 1..1 + fan_in;
-                let compacted_size = sizes[selected.clone()].iter().sum();
-                sizes.splice(selected, [compacted_size]);
-            }
-            assert_eq!(immediate(&sizes), Some(0..sizes.len() as u64));
-        }
-        assert_eq!(immediate(&[8, 1, 1]), Some(0..3));
-        assert_eq!(immediate(&[1024, 2]), Some(0..2));
-        assert_eq!(immediate(&[8; 12]), Some(0..fan_in as u64));
-        // A base joins the runs above it when a tier would take it.
-        let mut sizes = vec![4];
-        sizes.extend(vec![1; fan_in]);
-        assert_eq!(immediate(&sizes), Some(0..fan_in as u64));
-        sizes[0] = 5;
-        assert_eq!(immediate(&sizes), Some(1..1 + fan_in as u64));
-        assert_eq!(
-            immediate(&[4096, 1, 1, 1, 1, 1, 1, 1]),
-            Some(0..fan_in as u64)
-        );
     }
 }

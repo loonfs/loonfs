@@ -868,28 +868,7 @@ async fn acknowledge_floor(
 
 /// Compacts every family group that needs it.
 async fn compact_all(store: &RecordingStore<LocalFsStore>, namespace_id: &NamespaceId) {
-    use crate::compaction::MetadataCompactionPolicy;
-    for _ in 0..16 {
-        if matches!(
-            crate::test_support::NamespaceFixture::new(
-                store,
-                namespace_id,
-                &crate::test_support::writer_at("test-writer", 0)
-            )
-            .engine()
-            .compact_metadata_unit(
-                None,
-                MetadataCompactionPolicy::CompactImmediately,
-                loonfs_types::CompactorEpoch(0),
-                &crate::compaction::MetadataCompactionCancellation::default()
-            )
-            .await
-            .expect("compact"),
-            crate::compaction::CompactionUnitOutcome::NotNeeded
-        ) {
-            break;
-        }
-    }
+    crate::test_support::compact_every_group(store, namespace_id).await;
 }
 
 /// Collects with every object aged past the grace.

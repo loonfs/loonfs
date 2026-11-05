@@ -7,7 +7,7 @@ use crate::compaction::kept_inodes::{load_kept_inode_filter, KeptInodeFilter};
 use crate::storage::content_admission::PreparedContent;
 use crate::test_support::kept_inodes::{
     compact_groups_without_false_positives, compact_with_seed, seeded_kept_inode_filter,
-    seeded_manifest,
+    seeded_manifest, whole_group_spec,
 };
 use loonfs_types::{
     AccessGrants, AccessRight, AccessRights, AttributeKey, AttributeValue, DeleteDirectoryBehavior,
@@ -981,15 +981,7 @@ async fn a_kept_inode_filter_over_its_byte_limit_still_removes_hidden_rows() {
             inodes.segments[0].row_count = inode_rows;
         }
         basis.scan_runs = Arc::new(runs.clone());
-        let spec = plan::plan_group(
-            current.payload(),
-            &runs,
-            group,
-            policy,
-            MetadataCompactionPolicy::CompactImmediately,
-        )
-        .expect("plan the group");
-        assert_matches!(spec.placement(), CompactionPlacement::Base { .. });
+        let spec = whole_group_spec(&current, group);
         // The low bits of an inode ID are random, so the test seeds this
         // variant's filter with a run number whose filter has no false
         // positive for the hidden revision, and the compaction then removes the
@@ -1090,16 +1082,7 @@ async fn a_false_positive_keeps_a_hidden_row_until_a_compaction_with_another_see
         .load_current_manifest()
         .await
         .expect("load the current manifest");
-    let payload = current.payload();
-    let spec = plan::plan_group(
-        payload,
-        &runs_newest_first(payload),
-        MetadataFamilyGroup::Inodes,
-        MetadataRunPolicy::default(),
-        MetadataCompactionPolicy::CompactImmediately,
-    )
-    .expect("plan the inodes group");
-    assert_matches!(spec.placement(), CompactionPlacement::Base { .. });
+    let spec = whole_group_spec(&current, MetadataFamilyGroup::Inodes);
     compact_with_seed(&store, &namespace_id, &spec, seed).await;
     let inodes = family_rows(&store, &namespace_id, ApiMetadataRowFamily::Inodes).await;
     assert!(
@@ -1197,20 +1180,7 @@ pub(super) async fn compact_group<S: ObjectStore + ?Sized>(
         .load_current_manifest()
         .await
         .expect("load the current manifest");
-    let payload = current.payload();
-    let spec = plan::plan_group(
-        payload,
-        &runs_newest_first(payload),
-        group,
-        MetadataRunPolicy::default(),
-        MetadataCompactionPolicy::CompactImmediately,
-    )
-    .expect("plan the group");
-    assert_matches!(
-        spec.placement(),
-        CompactionPlacement::Base { .. },
-        "{group:?}"
-    );
+    let spec = whole_group_spec(&current, group);
     let outcome = run_planned_compaction(
         store,
         namespace_id,

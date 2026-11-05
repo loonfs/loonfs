@@ -1,8 +1,8 @@
 //! Read views that keep related reads on one captured namespace state.
 
 use crate::common::{
-    assert_core_error_kind, compact_until_done, metadata_options, open_runtime_async,
-    open_runtime_with_async, store,
+    assert_core_error_kind, compact_until_done, metadata_options,
+    open_compacting_runtime_with_async, open_runtime_async, open_runtime_with_async, store,
 };
 use loonfs::{
     ChangeSeq, CreateSnapshotOptions, CurrentFile, DestinationBehavior, ErrorCode, ListOptions,
@@ -42,7 +42,9 @@ async fn read_during_compaction_and_collection(
         KeyPredicate::metadata_segment(),
         OperationSelector::Get,
     ));
-    let runtime = open_runtime_async(store.clone(), "reader-gc-probe").await;
+    let runtime =
+        open_compacting_runtime_with_async(store.clone(), "reader-gc-probe", |builder| builder)
+            .await;
     let runtime_namespace = runtime.reader.namespace(&namespace);
     runtime
         .create_namespace(&namespace, &loonfs_test_support::test_actor())

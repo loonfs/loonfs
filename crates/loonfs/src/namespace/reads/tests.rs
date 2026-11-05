@@ -97,6 +97,7 @@ async fn create_compacted_directory(
         .writer_id(loonfs_test_support::ids::writer_id(
             "compacted-page-maintenance",
         ))
+        .run_policy(loonfs_core::test_support::one_delta_run_policy())
         .build()
         .await
         .expect("maintenance")

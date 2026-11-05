@@ -6,9 +6,12 @@
 //! with [`super::group_compaction`] whatever the number of rows its runs list,
 //! and publishes the replacement
 //! manifest through [`super::publication`]. A base compaction may apply retention,
-//! and a delta compaction drops only superseded layouts. [`MetadataCompactionPolicy`]
-//! sets which runs a group compacts, and when. A unit publishes under the
-//! compactor epoch that [`NamespaceEngine::claim_compactor`] claims.
+//! and a delta compaction drops only superseded layouts. The namespace's
+//! [`MetadataRunPolicy`](crate::segment::MetadataRunPolicy) sets which runs a
+//! group compacts, and when: a tier of similar-size runs once it has
+//! `min_compaction_runs` runs, and a group's newest runs once it has
+//! `max_delta_runs` delta runs. A unit publishes under the compactor epoch
+//! that [`NamespaceEngine::claim_compactor`] claims.
 
 use super::group_compaction::run_metadata_compaction;
 use super::plan::{plan_compaction, select_family_group, MetadataCompactionSpec};
@@ -28,20 +31,6 @@ use loonfs_types::{CompactorEpoch, NamespaceId};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Notify;
-
-/// Which runs of a family group a unit compacts, and when.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum MetadataCompactionPolicy {
-    /// Compact a tier of similar-size runs once it has
-    /// [`MetadataRunPolicy::min_compaction_runs`](crate::segment::MetadataRunPolicy::min_compaction_runs) runs, and a group's newest
-    /// runs once it has [`MetadataRunPolicy::max_delta_runs`](crate::segment::MetadataRunPolicy::max_delta_runs) delta runs.
-    /// Background compaction plans with this policy.
-    #[default]
-    SizeTiered,
-    /// Compact a group's runs whatever their sizes, for an explicit compaction
-    /// request. Input fan-in stays bounded.
-    CompactImmediately,
-}
 
 /// How one compaction unit ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,16 +65,11 @@ pub enum CompactionUnitOutcome {
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Checks `manifest`'s descriptors for a compaction unit that is due
     /// under the namespace's run policy, without reading the store.
-    pub fn metadata_compaction_due(
-        &self,
-        manifest: &LoadedManifest,
-        compaction_policy: MetadataCompactionPolicy,
-    ) -> bool {
+    pub fn metadata_compaction_due(&self, manifest: &LoadedManifest) -> bool {
         let payload = manifest.envelope.payload();
         select_family_group(
             &runs_newest_first(payload),
             payload,
-            compaction_policy,
             self.namespace.run_policy,
         )
         .is_some()
@@ -96,7 +80,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// The unit plans from `basis`, a manifest that the caller already has,
     /// or from the current manifest that it loads when `basis` is `None`, and
     /// reads its input runs without the cache. The unit compacts the whole
-    /// window that `compaction_policy` selects, whatever the number of rows
+    /// window that the namespace's run policy selects, whatever the number of rows
     /// its runs list, and the compaction checks `cancellation` between
     /// blocks. The unit publishes through
     /// `finalize_metadata_compaction`, starting from the
@@ -115,7 +99,6 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     pub async fn compact_metadata_unit(
         &self,
         basis: Option<PublicationBasis>,
-        compaction_policy: MetadataCompactionPolicy,
         compactor_epoch: CompactorEpoch,
         cancellation: &MetadataCompactionCancellation,
     ) -> Result<CompactionUnitOutcome> {
@@ -139,12 +122,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         // The unit reads its input runs without the cache, and the compaction inserts
         // its output into the cache.
         let segments = metadata_basis_from_manifest(&self.namespace.store, None, current).segments;
-        let Some(spec) = plan_compaction(
-            payload,
-            &segments.scan_runs,
-            self.namespace.run_policy,
-            compaction_policy,
-        ) else {
+        let Some(spec) = plan_compaction(payload, &segments.scan_runs, self.namespace.run_policy)
+        else {
             return Ok(CompactionUnitOutcome::NotNeeded);
         };
         // What the unit is about to read, recorded before it reads anything.

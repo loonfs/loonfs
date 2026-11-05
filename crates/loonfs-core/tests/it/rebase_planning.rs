@@ -249,25 +249,10 @@ impl Family {
     async fn compact_rebase(&self) {
         let rebase = namespace_engine(&self.store, &self.rebase, &self.writer);
         rebase.fold_wal().await.expect("fold the new fork");
-        let mut compacted = false;
-        for _ in 0..16 {
-            let outcome = rebase
-                .compact_metadata_unit(
-                    None,
-                    loonfs_core::MetadataCompactionPolicy::CompactImmediately,
-                    loonfs_types::CompactorEpoch(0),
-                    &loonfs_core::MetadataCompactionCancellation::default(),
-                )
-                .await
-                .expect("compact the new fork");
-            match outcome {
-                loonfs_core::CompactionUnitOutcome::NotNeeded => break,
-                loonfs_core::CompactionUnitOutcome::Published { .. } => compacted = true,
-                other => panic!("expected bounded compaction, got {other:?}"),
-            }
-        }
+        let (_, published) =
+            loonfs_core::test_support::compact_every_group(&self.store, &self.rebase).await;
         assert!(
-            compacted,
+            published > 0,
             "the new fork's own commit gives it a run to compact"
         );
     }

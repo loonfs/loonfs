@@ -163,6 +163,17 @@ async fn cold_runtime(store: Arc<AgedBlockingStore>, name: &str) -> LoonFs<Writa
         .expect("runtime")
 }
 
+/// Opens a cold runtime whose maintenance compacts every family group that
+/// has a delta run.
+async fn maintainer_runtime(store: Arc<AgedBlockingStore>) -> LoonFs<Writable> {
+    LoonFs::builder_with_store(store)
+        .writer_id(writer_id("maintainer"))
+        .run_policy(loonfs_core::test_support::one_delta_run_policy())
+        .build()
+        .await
+        .expect("runtime")
+}
+
 /// Waits until the plan's segment read is blocked, replaces `namespace`'s
 /// manifest with a compaction, removes the replaced manifest's segments
 /// with a collection, and lets the read go on.
@@ -241,7 +252,7 @@ async fn a_write_planned_on_a_replaced_manifest_commits_on_the_current_one() {
 
     let writer = cold_runtime(store.clone(), "cold-writer").await;
     let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
-    let maintainer = cold_runtime(store.clone(), "maintainer").await;
+    let maintainer = maintainer_runtime(store.clone()).await;
     let maintenance = maintainer.maintenance(writer_id("maintainer"));
     store.block_next();
     let write = annotate_shared_file(&namespace_writer, "written", "cold");
@@ -287,7 +298,7 @@ async fn a_merge_planned_on_a_replaced_manifest_commits_on_the_current_one() {
 
     let writer = cold_runtime(store.clone(), "cold-writer").await;
     let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
-    let maintainer = cold_runtime(store.clone(), "maintainer").await;
+    let maintainer = maintainer_runtime(store.clone()).await;
     let maintenance = maintainer.maintenance(writer_id("maintainer"));
     store.block_next();
     let actor = test_actor();
@@ -329,7 +340,7 @@ async fn a_replay_planned_on_a_replaced_manifest_commits_on_the_current_one() {
 
     let writer = cold_runtime(store.clone(), "cold-writer").await;
     let rebase_writer = writer.open_namespace(&rebase).expect("open the new fork");
-    let maintainer = cold_runtime(store.clone(), "maintainer").await;
+    let maintainer = maintainer_runtime(store.clone()).await;
     let maintenance = maintainer.maintenance(writer_id("maintainer"));
     store.block_next();
     let actor = test_actor();

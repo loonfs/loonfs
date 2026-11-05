@@ -502,7 +502,7 @@ async fn content_expiring_after_the_put_starts_does_not_undo_the_commit() {
 
 #[tokio::test]
 async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_without_content_io() {
-    use crate::compaction::{CompactionUnitOutcome, MetadataCompactionPolicy};
+    use crate::compaction::CompactionUnitOutcome;
     use crate::content::{mint_content_token, verify_content_token};
     use crate::segment::MetadataRunPolicy;
     use loonfs_test_support::stores::{RecordedOperation, RecordingStore};
@@ -600,7 +600,6 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
         .engine()
         .compact_metadata_unit(
             None,
-            MetadataCompactionPolicy::default(),
             loonfs_types::CompactorEpoch(0),
             &crate::compaction::MetadataCompactionCancellation::default(),
         )

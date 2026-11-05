@@ -1,12 +1,11 @@
-//! Explicit compaction, the compaction loop, and the store requests of other
-//! maintenance calls, over a live runtime.
+//! The compaction loop, `Maintenance::compact_metadata`, and the store
+//! requests of other maintenance calls, over a live runtime.
 
 use crate::metrics::{DefaultMetricsRecorder, MetricValue, MetricsSnapshot};
 use crate::test_support::maintenance_past_the_grace_window;
 use crate::{
     LoonFs, Maintenance, MetadataCompactionOutcome, NamespaceId, SharedObjectStore, Writable,
 };
-use loonfs_core::{MetadataCompactionPolicy, MetadataFamilyGroup};
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
@@ -25,12 +24,6 @@ use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use tempfile::tempdir;
-
-/// The group these tests watch, because it is the one the planner selects:
-/// selection takes the group holding the most delta rows, and every write and
-/// every rename puts more rows there than anywhere else. Manifest
-/// descriptors are per family, so its families are what they are filtered by.
-const BINDINGS: MetadataFamilyGroup = MetadataFamilyGroup::Bindings;
 
 /// A writer and a maintenance of a second runtime over one store, the
 /// maintenance with a metrics recorder of its own.
@@ -155,126 +148,6 @@ async fn write_and_fold(
         .expect("fold the tail");
 }
 
-/// Builds a namespace whose bindings group holds one base run of real size,
-/// with retention-eligible churn inside it, and then leaves delta runs piling
-/// up above that base.
-///
-/// The order matters. The churn is compacted into the base while the retention
-/// floor is still at the bottom, so nothing drops on the way in and the rows a
-/// rebuild may drop are in the base when the rebuild reads it. The floor is
-/// advanced past that churn next, and the delta runs come last, because they
-/// are what makes a delta-only compaction available at the moment the tests ask for
-/// a compaction.
-async fn namespace_with_a_frozen_base(
-    writer: &LoonFs<Writable>,
-    maintenance: &Maintenance,
-    namespace_id: &NamespaceId,
-) {
-    writer
-        .create_namespace(namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("create the namespace");
-    let namespace = writer.open_namespace(namespace_id).expect("open namespace");
-    // Twelve files keep the base's stored bytes within the size ratio of the
-    // delta runs that `sustained_writes` leaves, so an immediate window joins
-    // the base and the delta runs above it.
-    for index in 0..12 {
-        write_and_fold(
-            writer,
-            maintenance,
-            namespace_id,
-            &format!("/docs/file-{index}.txt"),
-        )
-        .await;
-    }
-    // Churn: every rename retires one binding and creates another, and a
-    // bottom-anchored rebuild below the floor drops the retired pair.
-    for index in 0..8 {
-        namespace
-            .move_path(
-                &format!("/docs/file-{index}.txt"),
-                &format!("/docs/moved-{index}.txt"),
-                &loonfs_test_support::test_actor(),
-            )
-            .await
-            .expect("rename a file");
-    }
-    maintenance
-        .fold_wal(namespace_id)
-        .await
-        .expect("fold the tail");
-
-    // Compact everything into one base run per group, under the shipped budgets
-    // and with the floor still at the bottom, so the churn is written to the base.
-    for _ in 0..64 {
-        let response = maintenance
-            .compact_metadata(namespace_id, &crate::MaintenanceCancellation::new())
-            .await
-            .expect("compact a unit");
-        if response.compaction == MetadataCompactionOutcome::NotNeeded {
-            break;
-        }
-    }
-
-    // Now the floor moves past that churn, so the next bottom-anchored rebuild
-    // is the one that may drop it.
-    namespace
-        .create_snapshot("retention")
-        .await
-        .expect("snapshot the namespace");
-    maintenance_past_the_grace_window(writer.object_store())
-        .await
-        .advance_retention_floor(namespace_id)
-        .await
-        .expect("advance the retention floor past the churn");
-}
-
-/// Keeps writing while the group's base is frozen, so a delta-only compaction is
-/// always available above it. Each write is folded with no compaction unit,
-/// so each leaves one more delta run behind.
-async fn sustained_writes(
-    writer: &LoonFs<Writable>,
-    maintenance: &Maintenance,
-    namespace_id: &NamespaceId,
-) {
-    for index in 0..10 {
-        write_and_fold(
-            writer,
-            maintenance,
-            namespace_id,
-            &format!("/arrivals/arrival-{index}.txt"),
-        )
-        .await;
-    }
-}
-
-/// One family's descriptors in one run of the current manifest.
-struct ManifestRun {
-    run_seq: u64,
-    tier: RunTier,
-    family: MetadataRowFamily,
-    rows: u64,
-}
-
-async fn manifest_runs<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-) -> Vec<ManifestRun> {
-    current_manifest_payload(store, namespace_id)
-        .await
-        .runs
-        .iter()
-        .flat_map(|run| {
-            run.segments.iter().map(|descriptor| ManifestRun {
-                run_seq: run.run_seq.0,
-                tier: run.tier,
-                family: descriptor.family,
-                rows: descriptor.row_count,
-            })
-        })
-        .collect()
-}
-
 async fn current_manifest_payload<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -292,94 +165,6 @@ async fn current_manifest_payload<S: ObjectStore + ?Sized>(
     decode_namespace_manifest_json(&bytes)
         .expect("decode the manifest")
         .into_payload()
-}
-
-/// The runs the bindings group holds right now, and the rows in them.
-async fn bindings_runs<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-) -> (BTreeSet<(u64, RunTier)>, u64) {
-    manifest_runs(store, namespace_id)
-        .await
-        .into_iter()
-        .filter(|run| BINDINGS.families().contains(&run.family))
-        .fold((BTreeSet::new(), 0), |(mut runs, rows), run| {
-            runs.insert((run.run_seq, run.tier));
-            (runs, rows + run.rows)
-        })
-}
-
-#[tokio::test]
-async fn explicit_compaction_has_bounded_fan_in_and_rebuilds_the_base() {
-    let temp_dir = tempdir().expect("tempdir");
-    let (writer, standalone, recorder) = manual_deployment(temp_dir.path()).await;
-    let explicit = namespace_id("explicit");
-    namespace_with_a_frozen_base(&writer, &standalone, &explicit).await;
-    sustained_writes(&writer, &standalone, &explicit).await;
-    let store = LocalFsStore::new(temp_dir.path()).expect("create local-fs store");
-
-    let (runs_before, rows_before) = bindings_runs(&store, &explicit).await;
-    assert!(
-        runs_before.len() > 1,
-        "the group must hold a base run and delta runs above it, got {runs_before:?}"
-    );
-
-    let completed_before = counter(
-        &recorder.snapshot(),
-        "loonfs.maintenance.compactions",
-        &[("outcome", "completed")],
-    );
-    let outcome = standalone
-        .compact_metadata(&explicit, &crate::MaintenanceCancellation::new())
-        .await
-        .expect("run the explicit compaction");
-    assert_matches!(
-        outcome.compaction,
-        MetadataCompactionOutcome::Published { .. },
-        "the explicit call must compact the whole window rather than a delta window, got \
-         {outcome:?}"
-    );
-
-    let (runs_after, rows_after) = bindings_runs(&store, &explicit).await;
-    assert_eq!(
-        runs_after.len(),
-        runs_before.len() - 8 + 1,
-        "one unit replaces eight inputs and preserves the rest, got {runs_after:?}"
-    );
-    assert_eq!(
-        runs_after
-            .iter()
-            .filter(|(_, tier)| *tier == RunTier::Base)
-            .count(),
-        1,
-        "the group retains exactly one base"
-    );
-    assert!(
-        rows_after < rows_before,
-        "the rebuild drops the churn below the retention floor: {rows_before} rows became \
-         {rows_after}"
-    );
-
-    let snapshot = recorder.snapshot();
-    assert_eq!(
-        counter(
-            &snapshot,
-            "loonfs.maintenance.compactions",
-            &[("outcome", "completed")],
-        ),
-        completed_before + 1,
-    );
-    for (name, direction) in [
-        ("loonfs.maintenance.compaction_rows", "input"),
-        ("loonfs.maintenance.compaction_rows", "output"),
-        ("loonfs.maintenance.compaction_bytes", "input"),
-        ("loonfs.maintenance.compaction_bytes", "output"),
-    ] {
-        assert!(
-            counter(&snapshot, name, &[("direction", direction)]) > 0,
-            "`{name}` must report nonzero `{direction}` work"
-        );
-    }
 }
 
 /// Writes 320 revisions of fifteen large attributes of `/file` and folds
@@ -473,115 +258,6 @@ fn attribute_base(manifest: &NamespaceManifestPayload) -> (Vec<RunNo>, BTreeSet<
         })
         .collect();
     (run_nos, keys)
-}
-
-#[tokio::test]
-async fn explicit_compaction_rewrites_twenty_deltas_and_reads_the_large_base_once() {
-    use crate::AttributeChanges;
-    use loonfs_test_support::ids::{attribute_key, attribute_text};
-    use loonfs_test_support::stores::RecordingStore;
-
-    let directory = tempdir().expect("tempdir");
-    let store = Arc::new(RecordingStore::metadata_segments(
-        LocalFsStore::new(directory.path()).expect("store"),
-    ));
-    let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id("writer"))
-        .build()
-        .await
-        .expect("writer");
-    let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("maintenance"));
-    let namespace = namespace_id("compact-deltas-first");
-    writer
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
-        .await
-        .expect("namespace");
-    let namespace_writer = writer.open_namespace(&namespace).expect("open namespace");
-    let keys = write_a_large_attribute_base(&writer, &maintenance, &namespace).await;
-    for revision in 0..20 {
-        let mut changes = AttributeChanges {
-            remove: keys.clone(),
-            ..Default::default()
-        };
-        changes.set.insert(
-            attribute_key("delta"),
-            attribute_text(&revision.to_string()),
-        );
-        namespace_writer
-            .update_attributes("/file", &loonfs_test_support::test_actor(), changes)
-            .await
-            .expect("write delta");
-        maintenance.fold_wal(&namespace).await.expect("fold delta");
-    }
-
-    let attribute_runs = |manifest: &NamespaceManifestPayload| {
-        manifest
-            .runs
-            .iter()
-            .filter(|run| {
-                run.segments
-                    .iter()
-                    .any(|segment| segment.family == MetadataRowFamily::Attributes)
-            })
-            .count()
-    };
-    let mut manifest = current_manifest_payload(store.as_ref(), &namespace).await;
-    assert_eq!(attribute_runs(&manifest), 21);
-    let base_bytes: u64 = manifest
-        .runs
-        .iter()
-        .filter(|run| run.tier == RunTier::Base)
-        .flat_map(|run| &run.segments)
-        .filter(|segment| segment.family == MetadataRowFamily::Attributes)
-        .map(|segment| segment.index_block.offset + u64::from(segment.index_block.stored_bytes))
-        .sum();
-    assert!(
-        base_bytes > 8 * 1024 * 1024,
-        "base has {base_bytes} stored bytes"
-    );
-    let mut base_reads = 0;
-    let mut remaining_runs = vec![21];
-    let mut completed = false;
-    for _ in 0..32 {
-        let (_, base_keys) = attribute_base(&manifest);
-        store.reset();
-        let compaction = maintenance
-            .compact_metadata(&namespace, &crate::MaintenanceCancellation::new())
-            .await
-            .expect("compact one unit")
-            .compaction;
-        let read_base = store
-            .take_get_keys()
-            .iter()
-            .any(|key| base_keys.contains(key));
-        base_reads += usize::from(read_base);
-        let next = current_manifest_payload(store.as_ref(), &namespace).await;
-        if attribute_runs(&next) != attribute_runs(&manifest) {
-            remaining_runs.push(attribute_runs(&next));
-            if read_base {
-                assert_matches!(
-                    compaction,
-                    MetadataCompactionOutcome::Published {
-                        rows_read: 340,
-                        rows_written: 340,
-                        ..
-                    }
-                );
-            } else {
-                assert_matches!(compaction, MetadataCompactionOutcome::Published { .. });
-            }
-        }
-        manifest = next;
-        if compaction == MetadataCompactionOutcome::NotNeeded {
-            completed = true;
-            break;
-        }
-    }
-    assert!(completed, "compaction must finish");
-    assert_eq!(remaining_runs, [21, 14, 7, 1]);
-    assert_eq!(base_reads, 1);
-    assert!(manifest.runs.iter().all(|run| run.tier == RunTier::Base));
-    writer.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test]
@@ -705,7 +381,6 @@ async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
         maintenance
             .compact_once(
                 &namespace,
-                MetadataCompactionPolicy::SizeTiered,
                 None,
                 &loonfs_core::MetadataCompactionCancellation::default(),
             )
@@ -751,7 +426,6 @@ async fn maintenance_clones_share_one_claim_and_never_reclaim_after_fencing() {
         maintenance
             .compact_once(
                 &namespace,
-                MetadataCompactionPolicy::SizeTiered,
                 None,
                 &loonfs_core::MetadataCompactionCancellation::default(),
             )
@@ -1447,6 +1121,7 @@ async fn a_read_after_a_fold_or_a_compaction_unit_sends_no_segment_get() {
     ));
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("writer"))
+        .run_policy(loonfs_core::test_support::one_delta_run_policy())
         .build()
         .await
         .expect("writer");

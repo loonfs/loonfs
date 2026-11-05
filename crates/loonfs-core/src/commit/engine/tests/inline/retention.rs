@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
-use crate::compaction::{CompactionUnitOutcome, MetadataCompactionPolicy};
+use crate::compaction::CompactionUnitOutcome;
 use crate::gc::GcOptions;
 use crate::manifest::RetentionTarget;
 use crate::test_support::WriterAt;
@@ -36,22 +36,23 @@ async fn compact_and_check_pair(
     commit_id: &CommitId,
     seq: ChangeSeq,
 ) {
+    let mut fixture = crate::test_support::NamespaceFixture::new(
+        store,
+        namespace_id,
+        &crate::test_support::writer_at("test-writer", 0),
+    );
+    fixture.namespace.run_policy = crate::test_support::one_delta_run_policy();
     let mut finished = false;
     for _ in 0..32 {
-        let outcome = crate::test_support::NamespaceFixture::new(
-            store,
-            namespace_id,
-            &crate::test_support::writer_at("test-writer", 0),
-        )
-        .engine()
-        .compact_metadata_unit(
-            None,
-            MetadataCompactionPolicy::CompactImmediately,
-            loonfs_types::CompactorEpoch(0),
-            &crate::compaction::MetadataCompactionCancellation::default(),
-        )
-        .await
-        .expect("compact a family group");
+        let outcome = fixture
+            .engine()
+            .compact_metadata_unit(
+                None,
+                loonfs_types::CompactorEpoch(0),
+                &crate::compaction::MetadataCompactionCancellation::default(),
+            )
+            .await
+            .expect("compact a family group");
         let namespace = crate::test_support::namespace_store(store, namespace_id);
         let view = namespace
             .load_current_metadata_view()

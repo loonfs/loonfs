@@ -811,7 +811,12 @@ fn inode_children_empty_resumed_page_reports_the_drifted_head() {
 #[tokio::test]
 async fn a_revision_listing_paged_across_a_compaction_neither_repeats_nor_skips() {
     let temp_dir = tempdir().expect("tempdir");
-    let fs = open_runtime_async(store(temp_dir.path()), "revision-floor-pages").await;
+    let fs = open_compacting_runtime_with_async(
+        store(temp_dir.path()),
+        "revision-floor-pages",
+        |builder| builder,
+    )
+    .await;
     let namespace_id = namespace_id("demo");
     let actor = loonfs_test_support::test_actor();
     fs.create_namespace(&namespace_id, &actor)

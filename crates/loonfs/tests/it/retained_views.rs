@@ -29,17 +29,18 @@ use tempfile::tempdir;
 async fn retained_views_keep_their_meaning_across_maintenance() {
     let directory = tempdir().expect("tempdir");
     let object_store = store(directory.path());
-    let runtime = open_runtime_with_async(object_store.clone(), "retained-views", |builder| {
-        builder.config(loonfs::RuntimeConfig {
-            min_publish_interval_ms: 0,
-            inline_content: InlineContentPolicy {
-                inline_content_threshold_bytes: Some(64),
-                ..Default::default()
-            },
-            ..loonfs::RuntimeConfig::default()
+    let runtime =
+        open_compacting_runtime_with_async(object_store.clone(), "retained-views", |builder| {
+            builder.config(loonfs::RuntimeConfig {
+                min_publish_interval_ms: 0,
+                inline_content: InlineContentPolicy {
+                    inline_content_threshold_bytes: Some(64),
+                    ..Default::default()
+                },
+                ..loonfs::RuntimeConfig::default()
+            })
         })
-    })
-    .await;
+        .await;
     let source = namespace_id("source");
     let fork = namespace_id("fork");
     let principal = PrincipalId::parse("prn_admin").expect("principal");
