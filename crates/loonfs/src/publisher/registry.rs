@@ -595,7 +595,7 @@ pub(crate) enum NamespaceChange {
     /// the cached head move to it, or each one that can't move there is
     /// dropped.
     Published(PublishedManifest),
-    /// The mutation published no manifest, such as a garbage collection pass
+    /// The mutation published no manifest, such as a garbage collection
     /// or a change to a pin. The publisher keeps its position, and the
     /// cached head stays confirmed, because the head didn't move.
     Unchanged,

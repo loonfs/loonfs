@@ -18,11 +18,11 @@ use loonfs_types::format::segment_blocks::{filter_key_hashes, SegmentFilter};
 use loonfs_types::GcResponse;
 use std::sync::Arc;
 
-/// The extent filters of the distinct layout segments that the pass's rooted
+/// The extent filters of the distinct layout segments that the collection's rooted
 /// manifests list, which protect the content objects that those segments'
 /// layout rows refer to.
 ///
-/// A manifest's merged layout rows are rows of its layout segments, so every
+/// A manifest's combined layout rows are rows of its layout segments, so every
 /// extent of every rooted view is in the extent filter of some distinct
 /// segment. A filter also covers superseded layout rows (a shorter layout of
 /// a chain that a later row replaces), and it can report a name that no row
@@ -68,7 +68,7 @@ impl ContentSweep {
         let segment_cache = sweep.namespace.segment_cache.as_ref();
         let mut filters = Vec::with_capacity(segments.len());
         let mut extent_filter_bytes = 0;
-        // Unboxed, rustc cannot prove the pass future `Send` through this stream.
+        // Unboxed, rustc cannot prove the collection future `Send` through this stream.
         let mut loads = stream::iter(segments)
             .map(|descriptor| load_segment_extent_filter(store, segment_cache, descriptor))
             .buffered(STORE_READS_IN_FLIGHT)
@@ -94,7 +94,7 @@ impl ContentSweep {
         sweep: &Sweep<'_, S>,
         report: &mut GcResponse,
     ) -> Result<()> {
-        // Only a family root's pass sweeps content, so the collected
+        // Only a family root's collection sweeps content, so the collected
         // namespace's prefix is the family's.
         let prefix = content_prefix(&sweep.namespace.namespace_id);
         let decisions = sweep

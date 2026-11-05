@@ -4,19 +4,19 @@
 //! writes bounded output segments. It buffers only input blocks, retention
 //! state, one segment builder per family, and a bounded wave of encoded outputs.
 //! Only base compactions may remove rows below the retention floor, and only base
-//! compactions remove the rows of inodes that an expired deletion hides. Every
+//! compactions remove the rows of inodes that a removable deletion hides. Every
 //! compaction drops superseded layout rows.
 
 use super::kept_inodes::{load_kept_inode_filter, KeptInodeFilter};
-use super::merge_iterator::{
-    locality_of, refill_iterators, select_next_iterator, MetadataSegmentBlockLoader,
-    MetadataSegmentRowIterator,
-};
 use super::plan::MetadataCompactionSpec;
 use super::plan::{group_run_descriptors, CompactionPlacement};
 use super::retention::retention_clusters;
 use super::retention::RetentionCluster;
 use super::retention::{KeptRow, RetentionRule};
+use super::run_iterator::{
+    locality_of, refill_iterators, select_next_iterator, MetadataSegmentBlockLoader,
+    MetadataSegmentRowIterator,
+};
 use super::step::CompactionUnitOutcome;
 use super::step::MetadataCompactionCancellation;
 use crate::bloom_filter::BloomFilter;

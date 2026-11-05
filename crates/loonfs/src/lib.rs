@@ -91,11 +91,11 @@ pub use loonfs_core::limits::{
 };
 pub use loonfs_core::time::WallClock;
 pub use loonfs_core::{
-    classify_store_failure, CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor,
-    CheckpointPageCursor, CoreError, CreateNamespaceOptions, CurrentFile, CurrentFileState,
-    DeleteNamespaceOptions, ErrorCode, ErrorKind, FileBytes, FileContentStream, FoldWalOutcome,
-    FoldWalResponse, GcOptions, ListCheckpointFilesOptions, RetainedRevisionsPage,
-    RetainedRevisionsPageCursor, RetentionTarget, SnapshotPageCursor, StreamRange, WriterFence,
+    classify_store_failure, CheckpointPageCursor, CoreError, CreateNamespaceOptions, CurrentFile,
+    CurrentFileState, DeleteNamespaceOptions, ErrorCode, ErrorKind, FileBytes, FileContentStream,
+    FoldWalOutcome, FoldWalResponse, GcOptions, ListSnapshotFilesOptions, RetainedRevisionsPage,
+    RetainedRevisionsPageCursor, RetentionTarget, SnapshotFile, SnapshotFilesPage,
+    SnapshotFilesPageCursor, SnapshotPageCursor, StreamRange, WriterFence,
     CONTENT_READ_CHUNK_BYTES, MAX_CURRENT_FILES_PER_STAT,
 };
 pub use loonfs_types::{
@@ -185,7 +185,7 @@ pub mod uploads {
 /// Direct-download target type used by servers to create a presigned
 /// object-read URL. Most embedded applications do not need this module.
 pub mod downloads {
-    pub use loonfs_core::{DirectDownloadByInodeTarget, DirectDownloadTarget, GrantedRange};
+    pub use loonfs_core::{DirectDownloadByInodeTarget, DirectDownloadTarget, ObjectRange};
 }
 
 /// Durable namespace control objects, as the loaders of [`NamespaceStore`]
@@ -221,9 +221,9 @@ pub use execution_budget::{
 };
 pub use loonfs_core::{phase_span, Phase};
 pub use maintenance::{
-    AcknowledgeRetentionFloorOutcome, AcknowledgeRetentionFloorReport, Maintenance,
-    MaintenanceCancellation, MetadataCompactionOutcome, MetadataCompactionReport,
-    MetadataMaintenanceReport, MetadataPassReport, RetentionFloors,
+    AcknowledgeRetentionFloorOutcome, AcknowledgeRetentionFloorReport, MaintainMetadataReport,
+    Maintenance, MaintenanceCancellation, MetadataCompactionOutcome, MetadataCompactionReport,
+    MetadataMaintenanceReport, RetentionFloors,
 };
 pub use metadata_cache::{
     MetadataCache, MetadataCacheBuilder, MetadataCacheStats, SsdBlockWriter, SsdSegmentBlocks,
@@ -245,8 +245,8 @@ pub use options::{
     UpdateAttributesOptions,
 };
 pub use pagers::{
-    ChangesPager, CheckpointFilesPager, CheckpointsPager, FileRevisionsPager, InodeChildrenPager,
-    PathEntriesPager, RetainedRevisionsPager, SnapshotsPager, TrashPager,
+    ChangesPager, CheckpointsPager, FileRevisionsPager, InodeChildrenPager, PathEntriesPager,
+    RetainedRevisionsPager, SnapshotFilesPager, SnapshotsPager, TrashPager,
 };
 pub use publisher::{CloseNamespaceReport, NamespaceSessionStatus};
 pub use read_view::ReadView;
@@ -264,13 +264,14 @@ pub enum Error {
     /// An error reported by the underlying `loonfs-core` engine.
     #[error(transparent)]
     Core(#[from] CoreError),
-    /// A newer manifest replaced a captured view whose segment is missing.
-    #[error("captured manifest `{expected_manifest_no}` has a missing segment; current manifest is `{actual_manifest_no}`")]
-    StaleHead {
-        /// Manifest captured by the read.
-        expected_manifest_no: ManifestNo,
-        /// Current manifest observed after the missing segment.
-        actual_manifest_no: ManifestNo,
+    /// The manifest that a read used was replaced by a newer manifest, and a
+    /// segment that the read needed is missing.
+    #[error("manifest replaced: the read used manifest `{read_manifest_no}`, and manifest `{current_manifest_no}` replaced it")]
+    ManifestReplaced {
+        /// The manifest that the read used.
+        read_manifest_no: ManifestNo,
+        /// The current manifest, observed after the read found a segment missing.
+        current_manifest_no: ManifestNo,
     },
     /// A request field fails runtime policy.
     #[error("invalid request: {message}")]
@@ -317,7 +318,7 @@ impl Error {
     pub fn code(&self) -> ErrorCode {
         match self {
             Self::Core(error) => error.code(),
-            Self::StaleHead { .. } => ErrorCode::StaleHead,
+            Self::ManifestReplaced { .. } => ErrorCode::StaleHead,
             Self::Config(_) | Self::InvalidRequest { .. } => ErrorCode::InvalidRequest,
             Self::NotSupported { .. } => ErrorCode::NotSupported,
             Self::RuntimeTask(_) => ErrorCode::ServerError,
@@ -337,7 +338,7 @@ impl Error {
             | Self::RuntimeTask(_)
             | Self::InvalidRequest { .. }
             | Self::NotSupported { .. }
-            | Self::StaleHead { .. } => None,
+            | Self::ManifestReplaced { .. } => None,
         }
     }
 
@@ -378,7 +379,7 @@ impl Error {
             | Self::RuntimeTask(_)
             | Self::InvalidRequest { .. }
             | Self::NotSupported { .. }
-            | Self::StaleHead { .. } => None,
+            | Self::ManifestReplaced { .. } => None,
         };
         if let Some(message) = store_message {
             return message;
@@ -390,7 +391,7 @@ impl Error {
             | Self::InvalidRequest { message, .. }
             | Self::NotSupported { message, .. } => std::borrow::Cow::Owned(message.clone()),
             Self::Core(error) => std::borrow::Cow::Owned(error.to_string()),
-            Self::StaleHead { .. } => std::borrow::Cow::Owned(self.to_string()),
+            Self::ManifestReplaced { .. } => std::borrow::Cow::Owned(self.to_string()),
         }
     }
 }

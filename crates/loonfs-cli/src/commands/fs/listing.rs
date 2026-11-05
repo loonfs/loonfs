@@ -30,7 +30,7 @@ async fn follow_path_entry_pages(
     spec: &NamespacePath,
     pagination: &PaginationArgs,
     at: &ReadAt,
-    mut visit: impl FnMut(Vec<loonfs_types::PathEntry>) -> Result<()>,
+    mut each_page: impl FnMut(Vec<loonfs_types::PathEntry>) -> Result<()>,
 ) -> Result<FollowedPathEntryPages, CommandFailure> {
     let mut heads = ListingHeadObservation::default();
     let mut followed = None;
@@ -57,7 +57,7 @@ async fn follow_path_entry_pages(
                 head_drift: heads.drift(),
                 next_cursor: page.next_cursor,
             });
-            visit(page.entries)
+            each_page(page.entries)
         },
     )
     .await

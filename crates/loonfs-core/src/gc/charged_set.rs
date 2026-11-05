@@ -1,4 +1,4 @@
-//! Bytes a collection pass keeps, charged to the read working memory.
+//! Bytes a collection keeps, charged to the read working memory.
 
 use crate::error::{CoreError, Result};
 use crate::heap_bytes::{hash_map_table_bytes, hash_set_table_bytes, HeapBytes};
@@ -8,17 +8,17 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-/// The read working memory one collection pass charges, and the bytes all of
-/// the pass's charges reserve together, so a failed charge can report the whole
+/// The read working memory one collection charges, and the bytes all of
+/// the collection's charges reserve together, so a failed charge can report the whole
 /// live set.
 #[derive(Clone)]
-pub(super) struct PassMemory {
+pub(super) struct CollectionMemory {
     namespace_id: NamespaceId,
     memory: Arc<ReadWorkingMemory>,
     held_bytes: Arc<AtomicUsize>,
 }
 
-impl PassMemory {
+impl CollectionMemory {
     pub(super) fn new(namespace_id: &NamespaceId, memory: Arc<ReadWorkingMemory>) -> Self {
         Self {
             namespace_id: namespace_id.clone(),
@@ -27,7 +27,7 @@ impl PassMemory {
         }
     }
 
-    /// The bytes that all of the pass's charges reserve now.
+    /// The bytes that all of the collection's charges reserve now.
     pub(super) fn held_bytes(&self) -> usize {
         self.held_bytes.load(Ordering::Relaxed)
     }
@@ -39,14 +39,14 @@ impl PassMemory {
 
 /// One reservation in the read working memory, released when it drops.
 pub(super) struct Charge {
-    pass: PassMemory,
+    memory: CollectionMemory,
     reserved_bytes: usize,
 }
 
 impl Charge {
-    pub(super) fn new(pass: &PassMemory) -> Self {
+    pub(super) fn new(memory: &CollectionMemory) -> Self {
         Self {
-            pass: pass.clone(),
+            memory: memory.clone(),
             reserved_bytes: 0,
         }
     }
@@ -55,30 +55,30 @@ impl Charge {
         self.reserved_bytes
     }
 
-    /// Adds `bytes` to the reservation, or fails the pass when the memory
-    /// can't fit them. The error reports what the pass's charges would reserve
+    /// Adds `bytes` to the reservation, or fails the collection when the memory
+    /// can't fit them. The error reports what the collection's charges would reserve
     /// together with `bytes` added.
     pub(super) fn add(&mut self, bytes: usize) -> Result<()> {
         if bytes == 0 {
             return Ok(());
         }
-        if !self.pass.memory.try_reserve(bytes) {
+        if !self.memory.memory.try_reserve(bytes) {
             return Err(CoreError::LiveSetExceedsReadMemory {
-                namespace_id: self.pass.namespace_id.clone(),
+                namespace_id: self.memory.namespace_id.clone(),
                 bytes: self
-                    .pass
+                    .memory
                     .held_bytes
                     .load(Ordering::Relaxed)
                     .saturating_add(bytes),
-                limit: self.pass.memory.limit(),
+                limit: self.memory.memory.limit(),
             });
         }
         self.reserved_bytes += bytes;
-        self.pass.held_bytes.fetch_add(bytes, Ordering::Relaxed);
+        self.memory.held_bytes.fetch_add(bytes, Ordering::Relaxed);
         Ok(())
     }
 
-    /// Grows the reservation to `bytes`, or fails the pass when the memory
+    /// Grows the reservation to `bytes`, or fails the collection when the memory
     /// can't fit the difference. A reservation never shrinks, so it keeps the
     /// most bytes that its collection has needed.
     fn grow_to(&mut self, bytes: usize) -> Result<()> {
@@ -88,8 +88,8 @@ impl Charge {
 
 impl Drop for Charge {
     fn drop(&mut self) {
-        self.pass.memory.release(self.reserved_bytes);
-        self.pass
+        self.memory.memory.release(self.reserved_bytes);
+        self.memory
             .held_bytes
             .fetch_sub(self.reserved_bytes, Ordering::Relaxed);
     }
@@ -102,11 +102,11 @@ pub(super) struct ChargedSet<T> {
 }
 
 impl<T: Eq + std::hash::Hash + HeapBytes> ChargedSet<T> {
-    pub(super) fn new(pass: &PassMemory) -> Self {
+    pub(super) fn new(memory: &CollectionMemory) -> Self {
         Self {
             values: HashSet::new(),
             heap_bytes: 0,
-            charge: Charge::new(pass),
+            charge: Charge::new(memory),
         }
     }
 
@@ -141,11 +141,11 @@ pub(super) struct ChargedMap<K, V> {
 }
 
 impl<K: Eq + std::hash::Hash + HeapBytes, V: HeapBytes> ChargedMap<K, V> {
-    pub(super) fn new(pass: &PassMemory) -> Self {
+    pub(super) fn new(memory: &CollectionMemory) -> Self {
         Self {
             entries: HashMap::new(),
             heap_bytes: 0,
-            charge: Charge::new(pass),
+            charge: Charge::new(memory),
         }
     }
 
@@ -182,11 +182,11 @@ pub(super) struct ChargedQueue<T> {
 }
 
 impl<T: HeapBytes> ChargedQueue<T> {
-    pub(super) fn new(pass: &PassMemory) -> Self {
+    pub(super) fn new(memory: &CollectionMemory) -> Self {
         Self {
             values: VecDeque::new(),
             heap_bytes: 0,
-            charge: Charge::new(pass),
+            charge: Charge::new(memory),
         }
     }
 

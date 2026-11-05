@@ -85,7 +85,7 @@ async fn disabled_mode_returns_not_supported_and_omits_grep_capabilities() {
     )
     .await;
     server
-        .binding
+        .http
         .runtime
         .shutdown()
         .await
@@ -118,7 +118,7 @@ async fn gc_reports_only_the_core_counts_where_the_deployment_maintains_no_index
         assert_eq!(body["namespace_id"], namespace_id.as_str());
         assert!(body.get("extensions").is_none(), "{mode:?}: {body}");
         server
-            .binding
+            .http
             .runtime
             .shutdown()
             .await
@@ -197,7 +197,7 @@ async fn grep_get_query_parameters_use_the_list_route_grammar() {
     assert!(error.message.contains("maximum is 1024 bytes"));
 
     server
-        .binding
+        .http
         .runtime
         .shutdown()
         .await
@@ -248,8 +248,13 @@ async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
         }
     );
     // The session published nothing, so only the enable's mark makes the
-    // next tick build the index.
-    server.sweep.as_ref().expect("sweep").tick().await;
+    // next run of the session steps build the index.
+    server
+        .scheduler
+        .as_ref()
+        .expect("scheduler")
+        .run_due_steps()
+        .await;
     assert_eq!(watermark(&store, &namespace_id).await, ChangeSeq(0));
     let active = index_status(&router, &namespace_id).await;
     assert_eq!(
@@ -276,7 +281,7 @@ async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
 
     // The file is written through a writer of its own, so this server holds no
     // session that saw the publish: the index stays where it was until the
-    // next sweep pass.
+    // next sweep.
     namespace
         .put_file(
             "/note.txt",
@@ -303,7 +308,7 @@ async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
     assert_served_document_matches_the_spec_example(&capabilities);
 
     // A search over a namespace whose index trails answers from the
-    // exhaustive tail, and the next sweep pass catches the index up.
+    // exhaustive tail, and the next sweep catches the index up.
     let response = grep(&router, &namespace_id, "automatic needle").await;
     assert_eq!(response.matches.len(), 1);
     assert_eq!(response.matches[0].path, "/note.txt");
@@ -361,7 +366,7 @@ async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
     let reenabled = grep(&router, &namespace_id, "automatic needle").await;
     assert_eq!(reenabled.matches.len(), 1);
     server
-        .binding
+        .http
         .runtime
         .shutdown()
         .await
@@ -441,7 +446,7 @@ async fn one_sweep_after_restart_resumes_stale_and_mid_backfill_namespaces() {
     drop(worker);
     drop(store);
 
-    // Nothing in this process has touched either namespace: one sweep pass
+    // Nothing in this process has touched either namespace: one sweep
     // carries both indexes to their heads.
     let (router, server) = app(
         test_config(temp_dir.path(), JobMode::ServeAndMaintain)
@@ -469,7 +474,7 @@ async fn one_sweep_after_restart_resumes_stale_and_mid_backfill_namespaces() {
     let resumed = grep(&router, &backfill, "mid-backfill needle").await;
     assert_eq!(resumed.matches.len(), 3);
     server
-        .binding
+        .http
         .runtime
         .shutdown()
         .await
@@ -564,7 +569,7 @@ async fn serve_only_answers_searches_over_an_index_it_refuses_to_maintain() {
     assert_eq!(response.matches.len(), 1);
     assert_eq!(response.built_through_seq, ChangeSeq(1));
     server
-        .binding
+        .http
         .runtime
         .shutdown()
         .await
@@ -600,7 +605,7 @@ async fn an_invalid_grep_pattern_reports_the_pattern_param() {
     assert_eq!(error.code, "invalid_request");
     assert_eq!(error.param.as_deref(), Some("pattern"));
     server
-        .binding
+        .http
         .runtime
         .shutdown()
         .await
@@ -659,7 +664,7 @@ async fn maintain_only_keeps_the_index_built_without_serving_searches() {
     );
 
     // The index itself is this deployment's job: enabling it here publishes
-    // the backfill, and the next sweep pass carries it to the namespace's
+    // the backfill, and the next sweep carries it to the namespace's
     // head.
     namespace
         .put_file(
@@ -679,7 +684,7 @@ async fn maintain_only_keeps_the_index_built_without_serving_searches() {
         "the index this deployment maintains holds real segments"
     );
     server
-        .binding
+        .http
         .runtime
         .shutdown()
         .await
@@ -708,7 +713,10 @@ async fn serve_only_maintenance_serves_the_index_routes_without_a_sweep() {
         maintains_grep_index(&server),
         "a serve-only deployment still serves the index routes"
     );
-    assert!(server.sweep.is_none(), "serve-only mode builds no sweep");
+    assert!(
+        server.scheduler.is_none(),
+        "serve-only mode builds no scheduler"
+    );
 
     namespace
         .put_file(
@@ -719,7 +727,7 @@ async fn serve_only_maintenance_serves_the_index_routes_without_a_sweep() {
         .await
         .expect("write file");
     // Every index route still answers: serve-only maintenance withdraws the
-    // sweep, not the operator's reach.
+    // scheduler, not the operator's reach.
     assert_eq!(enable_grep(&router, &namespace_id).await, StatusCode::OK);
     assert_matches!(
         index_status(&router, &namespace_id).await.status,
@@ -745,7 +753,7 @@ async fn serve_only_maintenance_serves_the_index_routes_without_a_sweep() {
         1
     );
     server
-        .binding
+        .http
         .runtime
         .shutdown()
         .await
@@ -791,21 +799,21 @@ fn test_config(store_root: &Path, mode: JobMode) -> ServerConfig {
     config
 }
 
-/// Runs one maintenance sweep pass, so the durable state read next is the
-/// state that pass left.
+/// Runs one maintenance sweep, so the durable state read next is the state
+/// that the sweep left.
 async fn sweep(server: &loonfs_server::AppState) {
     server
-        .sweep
+        .scheduler
         .as_ref()
-        .expect("a maintaining server has a sweep")
-        .run_pass(GarbageCollection::Skip)
+        .expect("a maintaining server has a scheduler")
+        .run_sweep(GarbageCollection::Skip)
         .await
         .expect("list the namespaces");
 }
 
 /// Whether this deployment serves the index-maintenance routes.
 fn maintains_grep_index(server: &loonfs_server::AppState) -> bool {
-    server.binding.grep.maintains()
+    server.http.grep.maintains()
 }
 
 /// The sequence this namespace's index is built through.
@@ -1002,7 +1010,7 @@ async fn grep_worker(store: &SharedObjectStore, actor: &str) -> GrepWorker<Share
         reader,
         writer,
         maintenance,
-        loonfs_grep::GrepPassBudget::default(),
+        loonfs_grep::GrepStepBudget::default(),
     )
 }
 

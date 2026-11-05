@@ -252,7 +252,7 @@ async fn two_stores_with_the_same_ids_read_their_own_bytes_through_one_cache() {
     }
     assert!(
         cache.stats().wal_tails.hits > 0,
-        "the second pass reads warm"
+        "the second round of reads reads warm"
     );
 
     first.core.invalidate_namespace_read_cache(&demo());
@@ -306,10 +306,10 @@ async fn runtimes_over_one_store_share_decoded_segment_blocks() {
 }
 
 /// Checks that the builder's manifest limit bounds the manifests that the cache
-/// keeps. A second pass of the same reads loads no manifest from the store when
+/// keeps. A second round of the same reads loads no manifest from the store when
 /// the limit fits the namespace's manifest, and the cache doesn't keep a
 /// manifest heavier than the limit. With a zero limit, the cache keeps no
-/// manifest, so every read of the second pass loads the manifest again, and the
+/// manifest, so every read of the second round loads the manifest again, and the
 /// segment limit is charged the same blocks as with the default.
 #[tokio::test]
 async fn the_manifest_limit_bounds_the_cached_manifests() {
@@ -341,7 +341,7 @@ async fn the_manifest_limit_bounds_the_cached_manifests() {
     assert_eq!(
         (kept.manifests.inserts, kept.manifests.evictions, kept_gets),
         (1, 0, 0),
-        "the second pass reads the manifest from the cache: {kept:?}"
+        "the second round reads the manifest from the cache: {kept:?}"
     );
     let (exact, exact_gets) = read_twice(
         MetadataCache::builder()
@@ -379,7 +379,7 @@ async fn the_manifest_limit_bounds_the_cached_manifests() {
             none_gets
         ),
         (0, 0, 2),
-        "each of the second pass's two reads loads the manifest: {none:?}"
+        "each of the second round's two reads loads the manifest: {none:?}"
     );
     assert_eq!(
         (

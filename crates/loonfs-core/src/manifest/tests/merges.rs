@@ -110,7 +110,7 @@ async fn merges_are_indexed_in_the_tail_and_the_fold_newest_first_for_each_fork(
         .await
         .expect("projection")
         .tail_state
-        .merged_rows();
+        .combined_rows();
     assert_eq!(
         manifest_rows_for_family(&tail_rows, ApiMetadataRowFamily::Merges),
         expected

@@ -8,10 +8,10 @@ use loonfs_types::format::manifest::{AccessRevisionRecord, TombstoneRowAction};
 use loonfs_types::{AccessRight, AccessRights, InodeId, PrincipalSet, ROOT_INODE_ID};
 use std::collections::HashMap;
 
-/// The inodes an inheritance walk visited, nearest first, each with its own
+/// The inodes an inheritance walk reached, nearest first, each with its own
 /// access row, and the known ancestor the walk stopped before, if any.
 struct AccessWalk {
-    visited: Vec<(InodeId, Option<AccessRevisionRecord>)>,
+    walked: Vec<(InodeId, Option<AccessRevisionRecord>)>,
     known_ancestor: Option<InodeId>,
 }
 
@@ -33,7 +33,7 @@ async fn walk_access_rows<R: MetadataVisibilityReads>(
 where
     CoreError: From<R::Error>,
 {
-    let mut visited = Vec::new();
+    let mut walked = Vec::new();
     let mut walk = AncestorWalk::new(inode_id);
     let mut last = inode_id;
     loop {
@@ -57,20 +57,20 @@ where
         };
         if known(current) {
             return Ok(AccessWalk {
-                visited,
+                walked,
                 known_ancestor: Some(current),
             });
         }
         last = current;
         let row = reads.find_access_row(current).await?;
         let boundary = row.as_ref().is_some_and(|row| row.boundary);
-        visited.push((current, row));
+        walked.push((current, row));
         if boundary || current == ROOT_INODE_ID {
             break;
         }
     }
     Ok(AccessWalk {
-        visited,
+        walked,
         known_ancestor: None,
     })
 }
@@ -85,11 +85,7 @@ where
     CoreError: From<R::Error>,
 {
     let walk = walk_access_rows(reads, inode_id, |_| false).await?;
-    Ok(walk
-        .visited
-        .into_iter()
-        .filter_map(|(_, row)| row)
-        .collect())
+    Ok(walk.walked.into_iter().filter_map(|(_, row)| row).collect())
 }
 
 /// Effective rights that one subject's checks have found on one view,
@@ -98,7 +94,7 @@ where
 /// The rights on an inode are the rights its own row grants, united with
 /// the rights on its parent unless that row is a boundary, so a walk from an
 /// inode stops at the first ancestor whose rights are memoized, and it
-/// memoizes every inode it visited. The children of one directory then share
+/// memoizes every inode it reached. The children of one directory then share
 /// one walk above the directory.
 #[derive(Debug, Default)]
 pub(crate) struct EffectiveRightsMemo {
@@ -153,8 +149,8 @@ impl EffectiveRightsMemo {
                 .expect("the walk stops only at a memoized ancestor")
         });
         // The walk stops after a boundary row, so a boundary is the last
-        // inode visited, and nothing above the boundary reaches its rights.
-        for (visited, row) in walk.visited.into_iter().rev() {
+        // inode reached, and nothing above the boundary reaches its rights.
+        for (walked, row) in walk.walked.into_iter().rev() {
             if let Some(row) = row {
                 rights = principals
                     .iter()
@@ -162,7 +158,7 @@ impl EffectiveRightsMemo {
                     .fold(rights, AccessRights::union)
                     .difference(AccessRights::ADMIN);
             }
-            self.inherited.insert(visited, rights);
+            self.inherited.insert(walked, rights);
         }
         Ok(rights)
     }

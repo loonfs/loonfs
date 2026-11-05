@@ -1,5 +1,5 @@
 //! Point lookups that walk a manifest's runs newest first, checked against
-//! the merge of every run, and the segment reads those lookups cost.
+//! the combination of every run, and the segment reads those lookups cost.
 
 use super::*;
 use crate::metadata::{
@@ -53,7 +53,7 @@ impl ManyRunFixture {
         *self.run_heads.last().expect("the fixture folds three runs")
     }
 
-    /// The current manifest's segments, and the merge of every row they
+    /// The current manifest's segments, and the combination of every row they
     /// list.
     async fn load<'a>(
         &'a self,
@@ -71,15 +71,12 @@ impl ManyRunFixture {
         )
         .await
         .expect("load the manifest's segments");
-        let merged = load_manifest_materialization_for_inspection(
-            &self.store,
-            &self.namespace_id,
-            manifest_no,
-        )
-        .await
-        .expect("merge every run")
-        .metadata_state;
-        (verified, merged)
+        let combined =
+            load_manifest_state_for_inspection(&self.store, &self.namespace_id, manifest_no)
+                .await
+                .expect("combine every run")
+                .metadata_state;
+        (verified, combined)
     }
 }
 
@@ -261,11 +258,11 @@ async fn many_run_fixture() -> ManyRunFixture {
 }
 
 fn newest_revision(
-    merged: &MetadataState,
+    combined: &MetadataState,
     inode_id: InodeId,
     visible_seq: ChangeSeq,
 ) -> Option<RevisionRecord> {
-    merged
+    combined
         .revisions()
         .iter()
         .filter(|record| record.inode_id == inode_id && record.committed_seq <= visible_seq)
@@ -274,11 +271,11 @@ fn newest_revision(
 }
 
 fn newest_attributes(
-    merged: &MetadataState,
+    combined: &MetadataState,
     inode_id: InodeId,
     visible_seq: ChangeSeq,
 ) -> Option<AttributesRevisionRecord> {
-    merged
+    combined
         .attributes_revisions()
         .iter()
         .filter(|record| record.inode_id == inode_id && record.committed_seq <= visible_seq)
@@ -293,11 +290,11 @@ fn newest_attributes(
 }
 
 fn newest_access(
-    merged: &MetadataState,
+    combined: &MetadataState,
     inode_id: InodeId,
     visible_seq: ChangeSeq,
 ) -> Option<AccessRevisionRecord> {
-    merged
+    combined
         .access_revisions()
         .iter()
         .filter(|record| record.inode_id == inode_id && record.committed_seq <= visible_seq)
@@ -314,9 +311,9 @@ fn newest_access(
 /// Checks the lookups at the head, which see every manifest row, and at
 /// the heads of the older runs, which read below the manifest's head.
 #[tokio::test]
-async fn newest_first_lookups_return_what_the_merge_of_every_run_returns() {
+async fn newest_first_lookups_return_what_the_combination_of_every_run_returns() {
     let fixture = many_run_fixture().await;
-    let (verified, merged) = fixture.load(None).await;
+    let (verified, combined) = fixture.load(None).await;
     let tiers: Vec<RunTier> = verified
         .scan_runs
         .iter()
@@ -337,7 +334,7 @@ async fn newest_first_lookups_return_what_the_merge_of_every_run_returns() {
                 view.bound_child(fixture.docs, name)
                     .await
                     .expect("slot lookup"),
-                merged.bound_child_at_seq(fixture.docs, name, visible_seq),
+                combined.bound_child_at_seq(fixture.docs, name, visible_seq),
                 "the slot {name:?} at {visible_seq:?}"
             );
         }
@@ -347,19 +344,19 @@ async fn newest_first_lookups_return_what_the_merge_of_every_run_returns() {
                 view.latest_attributes_revision(inode_id)
                     .await
                     .expect("attributes"),
-                newest_attributes(&merged, inode_id, visible_seq),
+                newest_attributes(&combined, inode_id, visible_seq),
                 "{context}"
             );
             assert_eq!(
                 view.latest_access_revision(inode_id).await.expect("access"),
-                newest_access(&merged, inode_id, visible_seq),
+                newest_access(&combined, inode_id, visible_seq),
                 "{context}"
             );
             assert_eq!(
                 view.latest_revision_record(inode_id)
                     .await
                     .expect("revision"),
-                newest_revision(&merged, inode_id, visible_seq),
+                newest_revision(&combined, inode_id, visible_seq),
                 "{context}"
             );
         }
@@ -370,9 +367,9 @@ async fn newest_first_lookups_return_what_the_merge_of_every_run_returns() {
 /// a deleted file's own tombstone, and a tombstone on a file's ancestor,
 /// each in a newer run than the rows it hides.
 #[tokio::test]
-async fn visibility_over_newest_first_lookups_matches_the_merge() {
+async fn visibility_over_newest_first_lookups_matches_the_combination() {
     let fixture = many_run_fixture().await;
-    let (verified, merged) = fixture.load(None).await;
+    let (verified, combined) = fixture.load(None).await;
     let head = fixture.head();
     let view = MetadataView::over_manifest_segments(&verified, head);
     for name in &fixture.names {
@@ -380,7 +377,7 @@ async fn visibility_over_newest_first_lookups_matches_the_merge() {
             view.visible_child(fixture.docs, name)
                 .await
                 .expect("visible child"),
-            merged.visible_child(fixture.docs, name, head),
+            combined.visible_child(fixture.docs, name, head),
             "the slot {name:?}"
         );
     }
@@ -389,16 +386,16 @@ async fn visibility_over_newest_first_lookups_matches_the_merge() {
             view.current_parent_binding_for_child(inode_id)
                 .await
                 .expect("parent binding"),
-            merged.current_parent_binding_for_child(inode_id, head),
+            combined.current_parent_binding_for_child(inode_id, head),
             "inode {inode_id:?}"
         );
         assert_eq!(
             view.latest_revision_head(inode_id)
                 .await
                 .expect("revision head"),
-            merged
+            combined
                 .visible_inode(inode_id, head)
-                .and_then(|_| newest_revision(&merged, inode_id, head)),
+                .and_then(|_| newest_revision(&combined, inode_id, head)),
             "inode {inode_id:?}"
         );
     }
@@ -563,7 +560,7 @@ async fn cold_lookup_gets(
 async fn a_false_positive_in_a_newer_run_falls_through_to_the_run_with_the_row() {
     let fixture = many_run_fixture().await;
     let cache = MetadataSegmentCache::unshared(usize::MAX);
-    let (verified, merged) = fixture.load(Some(&cache)).await;
+    let (verified, combined) = fixture.load(Some(&cache)).await;
     let keys = false_positive_keys(&fixture, &verified).await;
     let (docs, head) = (fixture.docs, fixture.head());
 
@@ -576,14 +573,14 @@ async fn a_false_positive_in_a_newer_run_falls_through_to_the_run_with_the_row()
     assert!(binding.as_ref().is_some_and(|binding| binding.is_bound()));
     assert_eq!(
         binding,
-        merged.bound_child_at_seq(docs, &keys.binding, head)
+        combined.bound_child_at_seq(docs, &keys.binding, head)
     );
     let revision = view
         .latest_revision_record(keys.revision)
         .await
         .expect("revision");
     assert!(revision.is_some());
-    assert_eq!(revision, newest_revision(&merged, keys.revision, head));
+    assert_eq!(revision, newest_revision(&combined, keys.revision, head));
     assert!(
         cache.filter_stats().false_positives >= false_positives + 2,
         "both lookups open a delta segment that has no row for the key: {:?}",

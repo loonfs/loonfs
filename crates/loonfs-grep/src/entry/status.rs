@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GrepIndexStatus {
-    /// Initial materialization is walking the checkpointed file set.
+    /// The initial build is walking the files that a snapshot pins.
     Backfilling {
         /// Namespace sequence the pinned checkpoint captured. The walk ends
         /// at exactly this state however far the namespace has moved since.

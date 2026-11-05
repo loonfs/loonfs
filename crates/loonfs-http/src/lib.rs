@@ -12,7 +12,7 @@ pub use http::request_limit::RequestLimit;
 pub use http::usage::{UsageRecorder, UsageReport};
 pub use http::{authenticate_routes, error_response, observe_routes, panic_message, router};
 pub use state::{
-    AuthPolicy, BindingConfig, BindingHandles, BindingState, GrepBinding, HeldNamespace, HostState,
-    JobMode, Namespaces, WriterSessions, DEFAULT_MAX_CONCURRENT_DOWNLOADS,
-    DEFAULT_MAX_CONCURRENT_UPLOADS, DEFAULT_REQUEST_DEADLINE_MS,
+    AuthPolicy, GrepMode, HeldNamespace, HostState, HttpConfig, HttpHandles, HttpState, JobMode,
+    Namespaces, WriterSessions, DEFAULT_MAX_CONCURRENT_DOWNLOADS, DEFAULT_MAX_CONCURRENT_UPLOADS,
+    DEFAULT_REQUEST_DEADLINE_MS,
 };

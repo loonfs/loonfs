@@ -1,4 +1,4 @@
-//! Completed upload sessions that a pass keeps for later passes.
+//! Completed upload sessions that a collection keeps for later collections.
 
 use super::*;
 use crate::cache::CompletedUploadSessionCache;
@@ -35,7 +35,7 @@ async fn completed_sessions(
     upload_ids
 }
 
-/// Runs one pass at `now_ms` through `cache`, and returns its report and the
+/// Runs one collection at `now_ms` through `cache`, and returns its report and the
 /// number of times it read each upload session record.
 async fn collect(
     store: &RecordingStore<LocalFsStore>,
@@ -47,7 +47,7 @@ async fn collect(
     let report = crate::test_support::namespace_store(store, namespace_id)
         .gc(Some(cache), &options(), &context(now_ms).clock())
         .await
-        .expect("gc pass");
+        .expect("collection");
     let mut reads = BTreeMap::new();
     for key in store.take_get_keys() {
         *reads.entry(key).or_default() += 1;
@@ -55,10 +55,10 @@ async fn collect(
     (report, reads)
 }
 
-/// Checks that a second pass over a namespace with completed upload sessions
-/// reads none of their records, after the first pass read each record once.
+/// Checks that a second collection over a namespace with completed upload sessions
+/// reads none of their records, after the first collection read each record once.
 #[tokio::test]
-async fn a_second_pass_reads_no_completed_session_record() {
+async fn a_second_collection_reads_no_completed_session_record() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let store = session_recording_store(temp_dir.path(), &namespace_id);
@@ -79,19 +79,23 @@ async fn a_second_pass_reads_no_completed_session_record() {
         .collect();
     assert_eq!(
         first_reads, expected,
-        "the first pass reads each outcome record once"
+        "the first collection reads each outcome record once"
     );
-    assert_eq!(second_reads, BTreeMap::new(), "the second pass reads none");
+    assert_eq!(
+        second_reads,
+        BTreeMap::new(),
+        "the second collection reads none"
+    );
     assert_eq!(first.retained.upload_session_window, 20);
     assert_eq!(second.retained.upload_session_window, 20);
     assert_eq!(cache.len(), 20);
 }
 
 /// Checks that when the cache can't keep every completed session, a second
-/// pass still deletes and keeps the right records, and reads only the records
+/// collection still deletes and keeps the right records, and reads only the records
 /// of the sessions that the cache dropped.
 #[tokio::test]
-async fn a_pass_reads_only_the_sessions_that_the_cache_dropped() {
+async fn a_collection_reads_only_the_sessions_that_the_cache_dropped() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let store = session_recording_store(temp_dir.path(), &namespace_id);
@@ -124,7 +128,7 @@ async fn a_pass_reads_only_the_sessions_that_the_cache_dropped() {
     let (second, second_reads) = collect(&store, &cache, &namespace_id, past_early_grace).await;
     assert_eq!(
         second_reads, dropped,
-        "the pass reads each dropped record once"
+        "the collection reads each dropped record once"
     );
     assert_eq!(second.deleted.upload_sessions, 20);
     assert_eq!(second.retained.upload_session_window, 20);
@@ -152,10 +156,10 @@ async fn put_session(
     session.upload_id
 }
 
-/// Checks that every pass reads the records of open and aborted sessions,
+/// Checks that every collection reads the records of open and aborted sessions,
 /// once to list the sessions and once to sweep them.
 #[tokio::test]
-async fn open_and_aborted_session_records_are_read_on_every_pass() {
+async fn open_and_aborted_session_records_are_read_on_every_collection() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let store = session_recording_store(temp_dir.path(), &namespace_id);
@@ -185,21 +189,21 @@ async fn open_and_aborted_session_records_are_read_on_every_pass() {
     // The listing shows that the open session has no outcome record, so only
     // its session record is read, once to root its content and once to
     // sweep it. An aborted session's two records are each read twice.
-    let every_pass = BTreeMap::from([
+    let every_collection = BTreeMap::from([
         (upload_session(&namespace_id, &open), 2),
         (upload_session(&namespace_id, &aborted), 2),
         (upload_outcome(&namespace_id, &aborted), 2),
     ]);
-    let mut first_expected = every_pass.clone();
+    let mut first_expected = every_collection.clone();
     first_expected.insert(completed, 1);
     assert_eq!(first_reads, first_expected);
-    assert_eq!(second_reads, every_pass);
+    assert_eq!(second_reads, every_collection);
     assert_eq!(first.retained.upload_session_window, 3);
     assert_eq!(second.retained.upload_session_window, 3);
     assert_eq!(cache.len(), 1, "the cache keeps only the completed session");
 }
 
-/// Checks that a pass protects the content of the completed sessions it found
+/// Checks that a collection protects the content of the completed sessions it found
 /// in the cache, and that the sweep removes a session from the cache when it
 /// deletes the session's record.
 #[tokio::test]
@@ -222,12 +226,12 @@ async fn a_session_the_sweep_deletes_leaves_the_cache() {
     assert_eq!(
         reads,
         BTreeMap::new(),
-        "the pass found every session cached"
+        "the collection found every session cached"
     );
     assert_eq!(deleted.deleted.upload_sessions, 3);
     assert_eq!(
         deleted.deleted.content_objects, 0,
-        "the cached content IDs protect the content in the pass that deletes the records"
+        "the cached content IDs protect the content in the collection that deletes the records"
     );
     assert_eq!(cache.len(), 0);
     assert!(upload_ids

@@ -1,5 +1,5 @@
 //! [`MetadataView`]: seq-scoped metadata lookups over manifest segments
-//! merged with the WAL tail.
+//! combined with the WAL tail.
 
 use super::durable_cache::{DurableVisibilityCache, DurableVisibilityCacheInner, SharedRows};
 use super::manifest_index;
@@ -123,17 +123,17 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         }
     }
 
-    /// Creates a view containing only one manifest at its materialized sequence.
+    /// Creates a view containing only one manifest, at its folded head.
     ///
     /// Unlike [`Self::from_loaded_head`], this view does not replay the current
-    /// WAL tail. It is used for pinned manifests such as checkpoints, so later
+    /// WAL tail. It is used for pinned manifests such as snapshots, so later
     /// commits cannot affect the result.
     pub(crate) fn over_manifest_segments(
         segments: &'a VerifiedMetadataSegments<'store, S>,
-        materialized_seq: ChangeSeq,
+        folded_head_seq: ChangeSeq,
     ) -> Self {
         Self {
-            visible_seq: materialized_seq,
+            visible_seq: folded_head_seq,
             sources: MetadataSourceStack {
                 overlay: None,
                 batch_accepted: None,
@@ -467,7 +467,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
 }
 
 /// [`MetadataView`] as a [`MetadataVisibilityReads`] source: it serves only
-/// the primitive lookups (over the manifest segments merged with the row-state
+/// the primitive lookups (over the manifest segments combined with the row-state
 /// tail) and takes every composite rule from the provided trait methods, so
 /// the object-store-backed view determines visibility through the exact same
 /// bodies as the in-memory state.

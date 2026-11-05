@@ -41,7 +41,7 @@ pub struct DirectDownloadTarget {
     /// `[start_offset, content_ref.size_bytes)`.
     pub start_offset: u64,
     /// Consecutive object ranges starting at `start_offset`.
-    pub ranges: Vec<GrantedRange>,
+    pub ranges: Vec<ObjectRange>,
 }
 
 /// Content information needed to authorize an inode download.
@@ -57,17 +57,20 @@ pub struct DirectDownloadByInodeTarget {
     /// `[start_offset, content_ref.size_bytes)`.
     pub start_offset: u64,
     /// Consecutive object ranges starting at `start_offset`.
-    pub ranges: Vec<GrantedRange>,
+    pub ranges: Vec<ObjectRange>,
 }
 
-/// Object bytes for a host to sign without proxying them.
+/// A range of one object for the host to sign.
+///
+/// The host returns a presigned URL for the range, so the client reads the
+/// bytes without the host proxying them.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GrantedRange {
+pub struct ObjectRange {
     /// Logical unscoped key passed to the object-store signer.
     pub object_key: String,
     /// Offset within the object, which may differ from the revision offset.
     pub object_start: u64,
-    /// Number of object bytes authorized.
+    /// Number of object bytes in the range.
     pub length: u64,
 }
 
@@ -219,7 +222,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         content_ref: &ContentRef,
         start_offset: u64,
         content_writes: &PermitPool,
-    ) -> Result<Vec<GrantedRange>> {
+    ) -> Result<Vec<ObjectRange>> {
         let store = self.segments.store();
         if start_offset != 0 && start_offset >= content_ref.size_bytes {
             return Err(CoreError::ResumeOffsetOutOfRange {
@@ -251,7 +254,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                     .await
                     .map_err(|error| cannot_write(CoreError::store(key, &error)))?;
             }
-            return Ok(vec![GrantedRange {
+            return Ok(vec![ObjectRange {
                 object_key: key.to_owned(),
                 object_start: 0,
                 length: 0,
@@ -265,7 +268,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 .map_err(|error| CoreError::store(key, &error))?
                 .is_some_and(|metadata| metadata.size_bytes >= content_ref.size_bytes)
             {
-                return Ok(vec![GrantedRange {
+                return Ok(vec![ObjectRange {
                     object_key: key.to_owned(),
                     object_start: start_offset,
                     length: content_ref.size_bytes - start_offset,
@@ -294,7 +297,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 .map(|located| located.extent)
                 .collect()
         };
-        Ok(granted_ranges(
+        Ok(object_ranges(
             &self.head.family_root_id,
             extents,
             start_offset,
@@ -397,12 +400,12 @@ pub(crate) fn file_content_ref(entry: &PathEntry) -> Result<ContentRef> {
 
 /// Returns the ranges of `extents`, under the prefix of `family_root_id`, that
 /// store the bytes of a `size_bytes`-byte file from `start_offset` to its end.
-fn granted_ranges(
+fn object_ranges(
     family_root_id: &NamespaceId,
     extents: Vec<ContentExtent>,
     start_offset: u64,
     size_bytes: u64,
-) -> Vec<GrantedRange> {
+) -> Vec<ObjectRange> {
     let mut ranges = Vec::new();
     let mut offset = 0;
     for extent in extents {
@@ -410,7 +413,7 @@ fn granted_ranges(
         let first = offset.max(start_offset);
         let last = end.min(size_bytes);
         if first < last {
-            ranges.push(GrantedRange {
+            ranges.push(ObjectRange {
                 object_key: extent_object_key(family_root_id, &extent),
                 object_start: extent.offset + (first - offset),
                 length: last - first,

@@ -1,4 +1,4 @@
-//! What a metadata maintenance pass and a compaction unit report.
+//! What a metadata maintenance step and a compaction unit report.
 
 use crate::{FoldWalResponse, ManifestNo, MetadataMaintenanceResponse, NamespaceId};
 
@@ -18,10 +18,10 @@ pub struct MetadataMaintenanceReport {
 }
 
 /// What the WAL fold and the compaction unit of one metadata maintenance
-/// pass did.
+/// step did.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MetadataPassReport {
-    /// The namespace that this pass maintained.
+pub struct MaintainMetadataReport {
+    /// The namespace that this step maintained.
     pub namespace_id: NamespaceId,
     /// The fold's response, or `None` when no fold was due.
     pub wal_fold: Option<FoldWalResponse>,

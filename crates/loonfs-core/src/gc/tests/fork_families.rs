@@ -1,4 +1,4 @@
-//! The pass on a family root, which protects content with the roots of every
+//! The collection on a family root, which protects content with the roots of every
 //! member of its fork family.
 
 use super::*;
@@ -135,12 +135,12 @@ async fn exists<S: ObjectStore>(store: &S, key: &str) -> bool {
     store.head(key).await.expect("head").is_some()
 }
 
-/// Runs the pass of `namespace_id` at `now_ms`.
+/// Runs the collection of `namespace_id` at `now_ms`.
 async fn collect<S: ObjectStore>(store: &S, namespace_id: &NamespaceId, now_ms: u64) -> GcResponse {
     crate::test_support::namespace_store(store, namespace_id)
         .gc(None, &options(), &context(now_ms).clock())
         .await
-        .expect("gc pass")
+        .expect("collection")
 }
 
 async fn delete_namespace<S: ObjectStore>(store: &S, namespace_id: &NamespaceId, now_ms: u64) {
@@ -184,8 +184,8 @@ async fn session_exists<S: ObjectStore>(
     exists(store, &upload_session(family_root, &session.upload_id)).await
 }
 
-/// Runs the pass of `namespace_id` with a read working memory of
-/// `limit_bytes`, and checks that the pass releases the memory it held.
+/// Runs the collection of `namespace_id` with a read working memory of
+/// `limit_bytes`, and checks that the collection releases the memory it held.
 async fn gc_within<S: ObjectStore>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -199,7 +199,7 @@ async fn gc_within<S: ObjectStore>(
     }
     .gc(None, &options(), clock)
     .await;
-    assert_eq!(memory.in_use(), 0, "the pass released what it held");
+    assert_eq!(memory.in_use(), 0, "the collection released what it held");
     report
 }
 
@@ -224,9 +224,9 @@ async fn content_that_only_a_member_view_refers_to_stays_through_every_generatio
     let report = crate::test_support::namespace_store(&store, root)
         .gc(None, &options(), &aged.clock())
         .await
-        .expect("the root's pass");
+        .expect("the root's collection");
     // A member's roots cost one pin listing and one manifest listing, and the
-    // root's pass lists nothing else under the member's prefix.
+    // root's collection lists nothing else under the member's prefix.
     let listings = store
         .take()
         .into_iter()
@@ -261,7 +261,7 @@ async fn content_that_only_a_fork_tail_refers_to_stays() {
     let report = crate::test_support::namespace_store(&store, root)
         .gc(None, &options(), &aged.clock())
         .await
-        .expect("the root's pass");
+        .expect("the root's collection");
     assert_eq!(report.deleted.content_objects, 1);
     assert!(!exists(&store, &unreferenced).await);
     assert!(exists(&store, &referenced).await);
@@ -285,7 +285,7 @@ async fn content_that_only_a_deleted_fork_refers_to_stays_until_the_fork_is_reti
     let report = crate::test_support::namespace_store(&store, root)
         .gc(None, &options(), &aged.clock())
         .await
-        .expect("the root's pass before the fork retires");
+        .expect("the root's collection before the fork retires");
     assert_eq!(report.deleted.content_objects, 0);
     assert!(exists(&store, &referenced).await);
     let retired = crate::test_support::namespace_store(&store, fork)
@@ -296,7 +296,7 @@ async fn content_that_only_a_deleted_fork_refers_to_stays_until_the_fork_is_reti
     let report = crate::test_support::namespace_store(&store, root)
         .gc(None, &options(), &aged.clock())
         .await
-        .expect("the root's pass after the fork retires");
+        .expect("the root's collection after the fork retires");
     assert_eq!(report.deleted.content_objects, 1);
     assert!(!exists(&store, &referenced).await);
 }
@@ -327,13 +327,14 @@ async fn a_fork_pin_whose_target_has_no_manifest_is_skipped() {
     let report = crate::test_support::namespace_store(&store, root)
         .gc(None, &options(), &aged.clock())
         .await
-        .expect("the root's pass");
+        .expect("the root's collection");
     assert_eq!(report.deleted.content_objects, 1);
     assert!(!exists(&store, &unreferenced).await);
 }
 
 #[tokio::test]
-async fn an_unreadable_member_skips_the_content_sweep_and_the_pass_sweeps_the_other_families() {
+async fn an_unreadable_member_skips_the_content_sweep_and_the_collection_sweeps_the_other_families()
+{
     // The fork's pin is on the root, so the root's pin cleanup reads the
     // fork's manifest too. The grandchild's pin is on the fork.
     for corrupt in [1, 2] {
@@ -358,7 +359,7 @@ async fn an_unreadable_member_skips_the_content_sweep_and_the_pass_sweeps_the_ot
         let report = crate::test_support::namespace_store(&store, root)
             .gc(None, &options(), &aged.clock())
             .await
-            .expect("the root's pass continues");
+            .expect("the root's collection continues");
         assert_eq!(report.deleted.content_objects, 0, "`{}`", family[corrupt]);
         assert!(exists(&store, &unreferenced).await);
         assert_eq!(report.deleted.temporary_objects, 1);
@@ -368,7 +369,7 @@ async fn an_unreadable_member_skips_the_content_sweep_and_the_pass_sweeps_the_ot
 }
 
 #[tokio::test]
-async fn a_pass_past_the_family_roots_budget_skips_the_content_sweep() {
+async fn a_collection_past_the_family_roots_budget_skips_the_content_sweep() {
     let directory = tempdir().expect("directory");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let family = family(&store, &["root", "fork"]).await;
@@ -381,19 +382,19 @@ async fn a_pass_past_the_family_roots_budget_skips_the_content_sweep() {
     let report = crate::test_support::namespace_store(&store, root)
         .gc(None, &options(), &late)
         .await
-        .expect("the late pass");
+        .expect("the late collection");
     assert_eq!(report.deleted.content_objects, 0);
     assert!(exists(&store, &unreferenced).await);
     let report = crate::test_support::namespace_store(&store, root)
         .gc(None, &options(), &aged.clock())
         .await
-        .expect("a pass within the budget");
+        .expect("a collection within the budget");
     assert_eq!(report.deleted.content_objects, 1);
     assert!(!exists(&store, &unreferenced).await);
 }
 
 #[tokio::test]
-async fn a_pass_fails_when_a_members_fork_targets_do_not_fit_the_read_memory() {
+async fn a_collection_fails_when_a_members_fork_targets_do_not_fit_the_read_memory() {
     let directory = tempdir().expect("directory");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let family = family(&store, &["root", "fork"]).await;
@@ -439,7 +440,7 @@ async fn a_pass_fails_when_a_members_fork_targets_do_not_fit_the_read_memory() {
     assert!(exists(&store, &unreferenced).await);
     let report = gc_within(&store, root, 64 * 1024 * 1024, &aged.clock())
         .await
-        .expect("a pass with enough read memory");
+        .expect("a collection with enough read memory");
     assert_eq!(report.deleted.content_objects, 1);
     assert!(!exists(&store, &unreferenced).await);
 }
@@ -463,7 +464,7 @@ async fn a_deleted_root_with_a_live_fork_sweeps_unreferenced_content() {
     let report = crate::test_support::namespace_store(&store, root)
         .gc(None, &options(), &aged.clock())
         .await
-        .expect("the deleted root's pass");
+        .expect("the deleted root's collection");
     assert_eq!(report.deleted.content_objects, 1);
     assert!(!exists(&store, &unreferenced).await);
     assert!(exists(&store, &content_blob(root, &shared.content_id)).await);
@@ -482,7 +483,7 @@ async fn a_deleted_root_with_a_live_fork_sweeps_unreferenced_content() {
 }
 
 #[tokio::test]
-async fn a_fork_pass_lists_no_content_and_no_upload_sessions() {
+async fn a_fork_collection_lists_no_content_and_no_upload_sessions() {
     let directory = tempdir().expect("directory");
     let store = RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
@@ -513,20 +514,20 @@ async fn a_fork_pass_lists_no_content_and_no_upload_sessions() {
     let report = crate::test_support::namespace_store(&store, fork)
         .gc(None, &options(), &aged.clock())
         .await
-        .expect("the fork's pass");
+        .expect("the fork's collection");
     assert_eq!(store.take(), []);
     assert_eq!(report.deleted.content_objects, 0);
     assert_eq!(report.deleted.upload_sessions, 0);
     let report = crate::test_support::namespace_store(&store, root)
         .gc(None, &options(), &aged.clock())
         .await
-        .expect("the root's pass");
+        .expect("the root's collection");
     assert_eq!(report.deleted.content_objects, 0);
     assert!(exists(&store, &content_blob(root, &content_ref.content_id)).await);
 }
 
 #[tokio::test]
-async fn a_deleted_roots_pass_sweeps_a_live_forks_sessions_by_the_forks_status() {
+async fn a_deleted_roots_collection_sweeps_a_live_forks_sessions_by_the_forks_status() {
     let directory = tempdir().expect("directory");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let family = family(&store, &["root", "fork"]).await;
@@ -649,12 +650,12 @@ async fn an_unreadable_member_leaves_the_sessions_of_unread_namespaces_undecided
 }
 
 #[tokio::test]
-async fn a_session_completed_in_a_fork_installed_during_the_pass_keeps_its_grace() {
+async fn a_session_completed_in_a_fork_installed_during_the_collection_keeps_its_grace() {
     let directory = tempdir().expect("directory");
     let inner = LocalFsStore::new(directory.path()).expect("store");
     let root = family(&inner, &["root"]).await.remove(0);
     let fork_id = NamespaceId::parse("fork").expect("namespace");
-    // The pass lists the temporary objects after it lists the upload sessions
+    // The collection lists the temporary objects after it lists the upload sessions
     // and walks the fork family.
     let store = BlockingStore::new(
         inner,
@@ -670,12 +671,12 @@ async fn a_session_completed_in_a_fork_installed_during_the_pass_keeps_its_grace
         store.release();
         upload_id
     });
-    // The pass listed the sessions before the session existed, so it leaves
-    // the session to the next pass.
+    // The collection listed the sessions before the session existed, so it leaves
+    // the session to the next collection.
     assert_eq!(report.deleted.upload_sessions, 0);
     assert_eq!(report.retained.upload_session_window, 0);
     assert!(exists(store.inner(), &upload_session(&root, &upload_id)).await);
-    // The fork can still commit the session's content, so the next pass keeps
+    // The fork can still commit the session's content, so the next collection keeps
     // the session for its completed-content grace.
     let report = collect(store.inner(), &root, 1_000).await;
     assert_eq!(report.deleted.upload_sessions, 0);
@@ -699,7 +700,7 @@ async fn a_cached_completed_session_follows_its_members_status() {
         crate::test_support::namespace_store(&store, root)
             .gc(Some(&cache), &options(), &context(now_ms).clock())
             .await
-            .expect("the pass that caches the session");
+            .expect("the collection that caches the session");
         assert!(cache.get(&session.upload_id).is_some());
         // A retired fork's session is deleted at once. A live fork's session
         // is deleted after its completed-content grace, although the deleted
@@ -716,7 +717,7 @@ async fn a_cached_completed_session_follows_its_members_status() {
         let report = crate::test_support::namespace_store(&store, root)
             .gc(Some(&cache), &options(), &context(later_ms).clock())
             .await
-            .expect("the pass that decides the session");
+            .expect("the collection that decides the session");
         assert_eq!(
             report.deleted.upload_sessions, 1,
             "retired: {retire_the_fork}"

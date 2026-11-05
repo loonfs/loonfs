@@ -57,10 +57,10 @@ async fn collect(store: &LocalFsStore, namespace_id: &NamespaceId) -> GcResponse
             &context(UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1).clock(),
         )
         .await
-        .expect("gc pass")
+        .expect("collection")
 }
 
-/// Checks that a pass keeps the extension segments that the current
+/// Checks that a collection keeps the extension segments that the current
 /// manifest or a pinned manifest lists, and an unrecognized key under the
 /// extension's prefix, and deletes an aged segment once no root lists it,
 /// including the segments of a tombstone, which lists none.

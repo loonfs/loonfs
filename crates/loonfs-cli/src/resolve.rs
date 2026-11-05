@@ -12,7 +12,7 @@ use loonfs::engine::DecodedBlockCacheConfig;
 use loonfs::{LoonFs, SharedObjectStore, WriterId};
 use loonfs_client::Client;
 use loonfs_grep::{
-    GrepBlockCache, GrepPassBudget, GrepService, GrepWorker, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
+    GrepBlockCache, GrepService, GrepStepBudget, GrepWorker, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
 };
 use loonfs_types::{
     ActorId, NamespaceId, PrincipalId, PrincipalScope, SecretString, Subject, SubjectId,
@@ -336,7 +336,7 @@ impl ResolvedTarget {
             runtime.read_only(),
             runtime.clone(),
             maintenance.clone(),
-            GrepPassBudget::default(),
+            GrepStepBudget::default(),
         );
         let host = MaintenanceHost {
             runtime,

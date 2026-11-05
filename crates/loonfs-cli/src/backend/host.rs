@@ -1,4 +1,4 @@
-//! Hosts the HTTP binding over the CLI's runtime without a listener.
+//! Hosts the HTTP API over the CLI's runtime without a listener.
 
 use crate::args::TransientRetry;
 use crate::error::Result;
@@ -8,7 +8,7 @@ use loonfs::{LoonFs, Maintenance, SharedObjectStore, Writable};
 use loonfs_client::{Body, Client, ClientConfig, TransportError};
 use loonfs_grep::{GrepService, GrepWorker};
 use loonfs_http::{
-    AuthPolicy, BindingConfig, BindingHandles, BindingState, GrepBinding, HttpMetrics, Namespaces,
+    AuthPolicy, GrepMode, HttpConfig, HttpHandles, HttpMetrics, HttpState, Namespaces,
     DEFAULT_MAX_CONCURRENT_DOWNLOADS, DEFAULT_MAX_CONCURRENT_UPLOADS, DEFAULT_REQUEST_DEADLINE_MS,
 };
 use loonfs_types::SecretString;
@@ -49,7 +49,7 @@ pub(crate) async fn run_then_drain<T>(command: impl Future<Output = T>) -> T {
 }
 
 /// The runtime an embedded profile opens, and the maintenance and grep
-/// worker its binding serves.
+/// worker its HTTP API serves.
 pub(crate) struct MaintenanceHost {
     pub(crate) runtime: LoonFs<Writable>,
     pub(crate) maintenance: Maintenance,
@@ -61,8 +61,8 @@ pub(crate) fn client(
     grep_service: GrepService,
     transient_retry: TransientRetry,
 ) -> Result<Client> {
-    let state = BindingState::new(
-        BindingConfig {
+    let state = HttpState::new(
+        HttpConfig {
             serves_maintenance: true,
             max_download_bytes: None,
             max_upload_bytes: None,
@@ -73,14 +73,14 @@ pub(crate) fn client(
                 .get_or_init(|| loonfs_types::generated_id("content-token").into())
                 .clone(),
             request_deadline_ms: DEFAULT_REQUEST_DEADLINE_MS,
-            auth_policy: AuthPolicy::Unauthenticated,
+            auth_policy: AuthPolicy::Open,
         },
-        BindingHandles {
+        HttpHandles {
             runtime: host.runtime.clone(),
             namespaces: Arc::new(Namespaces::<()>::new(host.runtime.clone())),
             maintenance: host.maintenance.clone(),
             direct_transfers: None,
-            grep: GrepBinding::ServeAndMaintain {
+            grep: GrepMode::ServeAndMaintain {
                 service: Arc::new(grep_service),
                 worker: host.grep_worker.clone(),
             },

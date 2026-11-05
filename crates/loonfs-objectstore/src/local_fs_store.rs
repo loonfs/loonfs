@@ -408,7 +408,7 @@ impl ObjectStore for LocalFsStore {
     /// A ranged read seeks to its start and reads only its length, so it
     /// keeps the range and never the object in memory. That is what a caller reading a
     /// large object in bounded chunks is promised, and a store that
-    /// materialized the whole object to return each chunk would break the
+    /// buffered the whole object to return each chunk would break the
     /// promise on this provider alone.
     async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Option<Bytes>> {
         let path = self.resolve_key(key)?;

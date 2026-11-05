@@ -461,7 +461,7 @@ fn ensure_range_start_retained<S: ObjectStore + ?Sized>(
 }
 
 /// Returns the fork point of the fork whose head is `fork_head`, which is the
-/// sequence of `namespace_id` that the fork's basis manifest materializes. A
+/// folded head of the fork's basis manifest, a sequence of `namespace_id`. A
 /// namespace whose basis manifest belongs to another namespace isn't a fork
 /// of `namespace_id`.
 fn fork_point(fork_head: &NamespaceReadState, namespace_id: &NamespaceId) -> Result<ChangeSeq> {

@@ -1,7 +1,7 @@
 //! Snapshot expiry must include time spent loading and retrying its pin.
 
 use super::*;
-use crate::pin::snapshot::ensure_unexpired;
+use crate::snapshot::lifecycle::ensure_unexpired;
 use loonfs_objectstore::keys;
 use loonfs_test_support::clock::ManualClock;
 use loonfs_types::format::control::PinOwner;

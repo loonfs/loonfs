@@ -6,12 +6,12 @@
 //! `loonfs` directly.
 //!
 //! Route handlers don't belong here: they're in `loonfs-http`, and this crate
-//! adds configuration, TLS listeners, and the maintenance sweep.
+//! adds configuration, TLS listeners, and the maintenance scheduler.
 
 mod config;
 mod error;
 mod http;
-mod sweep;
+mod scheduler;
 mod trace;
 
 pub use config::{
@@ -21,5 +21,5 @@ pub use config::{
 };
 pub use error::{Result, ServerError};
 pub use http::{app, check_config, probe_store, serve, serve_with_shutdown, AppConfig, AppState};
-pub use sweep::{GarbageCollection, Sweep};
+pub use scheduler::{GarbageCollection, Scheduler};
 pub use trace::init_tracing_from_env;

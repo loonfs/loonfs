@@ -16,7 +16,7 @@ pub use steps::{
 use crate::cache::GrepBlockCache;
 use crate::entry::{GrepEntry, GrepIndexStatus};
 use crate::reads::NamespaceReads;
-use crate::{GrepError, GrepPassBudget, Result};
+use crate::{GrepError, GrepStepBudget, Result};
 use loonfs::engine::{next_run_no_after, DecodedBlockCacheConfig, DecodedBlockCacheStats};
 use loonfs::{CoreError, CreateSnapshotOptions, LoonFs, Maintenance, ReadOnly, Writable};
 use loonfs_objectstore::ObjectStore;
@@ -148,7 +148,7 @@ pub enum GrepReorganizeOutcome {
     /// The step wrote one bounded unit of the reorganization's output, and
     /// its change to grep's entry is pending or published.
     UnitWritten {
-        merged_rows: u64,
+        combined_rows: u64,
         segments_written: u64,
         completed: bool,
     },
@@ -170,7 +170,7 @@ pub enum GrepReorganizeOutcome {
 /// namespace state through a read-only `LoonFs`, and creates or deletes
 /// backfill snapshots through a writable `LoonFs`. Scheduling is external to
 /// this type. A build or reorganize step that finds work waits for a permit
-/// of the worker's [`GrepPassBudget`] before it reads file content or index
+/// of the worker's [`GrepStepBudget`] before it reads file content or index
 /// segments.
 #[derive(Clone)]
 pub struct GrepWorker<S> {
@@ -178,7 +178,7 @@ pub struct GrepWorker<S> {
     reader: LoonFs<ReadOnly>,
     writer: LoonFs<Writable>,
     maintenance: Maintenance,
-    step_budget: GrepPassBudget,
+    step_budget: GrepStepBudget,
     /// The index blocks that build and reorganize steps read, which keeps
     /// the `texts` blocks that later build steps look up again, and the value
     /// table blocks that the steps of one reorganization read again, within
@@ -209,7 +209,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         reader: LoonFs<ReadOnly>,
         writer: LoonFs<Writable>,
         maintenance: Maintenance,
-        step_budget: GrepPassBudget,
+        step_budget: GrepStepBudget,
     ) -> Self {
         Self {
             store,
@@ -225,7 +225,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     }
 
     /// The budget this worker's build and reorganize steps draw from.
-    pub fn step_budget(&self) -> &GrepPassBudget {
+    pub fn step_budget(&self) -> &GrepStepBudget {
         &self.step_budget
     }
 

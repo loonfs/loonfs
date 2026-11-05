@@ -66,7 +66,7 @@ struct RuntimeCoreInner {
     metadata_segment_cache: Arc<MetadataSegmentCache>,
     head_and_wal_tail_cache: Arc<HeadAndWalTailCache>,
     /// The completed upload sessions that garbage collection keeps between
-    /// passes, under the same scope as the head and WAL-tail view.
+    /// collections, under the same scope as the head and WAL-tail view.
     completed_upload_sessions: CompletedUploadSessionCache,
     object_cache: Arc<ObjectCache>,
     /// Publication, collection, completed-compaction, and view-read metrics.
@@ -244,7 +244,7 @@ impl RuntimeCore {
     }
 
     /// Returns the completed upload sessions that garbage collection keeps
-    /// between passes.
+    /// between collections.
     pub(crate) fn completed_upload_sessions(&self) -> &CompletedUploadSessionCache {
         &self.inner.completed_upload_sessions
     }

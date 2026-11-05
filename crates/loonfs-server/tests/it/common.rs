@@ -132,8 +132,9 @@ pub(crate) struct TestServer {
 // with `flavor = "multi_thread"` to give the server a second worker.
 //
 // The server never shuts down gracefully; a test stops it by aborting its
-// task. It runs no maintenance sweep: a config that serves and maintains
-// serves only, so sweep traffic never reaches a test's request counts.
+// task. It runs no maintenance scheduler: a config that serves and
+// maintains serves only, so maintenance traffic never reaches a test's
+// request counts.
 pub(crate) async fn start_server(mut config: ServerConfig) -> TestServer {
     if config.maintenance == JobMode::ServeAndMaintain {
         config.maintenance = JobMode::ServeOnly;

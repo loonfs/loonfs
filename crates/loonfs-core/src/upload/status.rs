@@ -66,7 +66,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     }
 }
 
-/// A session with the server-side details needed for fresh capabilities.
+/// A session with the server-side details needed for fresh presigned URLs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UploadSessionView {
     pub session: UploadSession,

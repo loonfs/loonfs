@@ -91,7 +91,7 @@ pub struct ManifestRef {
     pub owner_namespace_id: NamespaceId,
     /// Monotonic logical position of the referenced manifest.
     pub manifest_no: ManifestNo,
-    /// Greatest owner-namespace sequence the referenced manifest materializes.
+    /// The referenced manifest's folded head, a sequence of the owner namespace.
     pub head_seq: ChangeSeq,
     /// Must equal `payload_checksum` in the referenced manifest envelope.
     pub payload_checksum: PayloadChecksum,

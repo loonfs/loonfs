@@ -168,7 +168,7 @@ impl MetadataFamilyGroup {
     }
 }
 
-/// One materialized metadata row stored in a segment.
+/// One metadata row stored in a segment.
 ///
 /// See [metadata rows and row keys](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a6-metadata-rows-and-row-keys).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -184,7 +184,7 @@ pub enum MetadataRow {
     Tombstone(SubtreeTombstoneRecord),
     /// Derived row used to list recoverable deletions.
     ///
-    /// Materialization writes `listed` for each tombstone set and `removed` for
+    /// Applying a commit writes `listed` for each tombstone set and `removed` for
     /// each revoke. This lets trash listing use an ordered range scan
     /// instead of replaying all historical deletion events.
     ActiveDeletion(ActiveDeletionRecord),
@@ -195,7 +195,7 @@ pub enum MetadataRow {
     Commit(WalCommitPayload),
     /// Derived row that indexes one merge by the fork it applied.
     ///
-    /// Materialization writes one for each commit that includes a merge
+    /// Applying a commit writes one for each commit that includes a merge
     /// record, so a lookup finds a fork's newest merge without reading commit
     /// rows.
     Merge(MergeIndexRecord),

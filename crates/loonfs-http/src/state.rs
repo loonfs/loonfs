@@ -20,7 +20,7 @@ use tokio::sync::Semaphore;
 
 #[derive(Clone, Debug)]
 pub enum AuthPolicy {
-    Unauthenticated,
+    Open,
     BearerToken(SecretString),
 }
 
@@ -73,8 +73,8 @@ impl JobMode {
 }
 
 #[derive(Clone, Debug)]
-pub struct BindingConfig {
-    /// Whether this binding serves the maintenance API group. The host runs
+pub struct HttpConfig {
+    /// Whether the HTTP API serves the maintenance API group. The host runs
     /// any background maintenance itself.
     pub serves_maintenance: bool,
     /// Largest content a service-proxied read returns, or `None` for no limit.
@@ -83,18 +83,18 @@ pub struct BindingConfig {
     pub max_upload_bytes: Option<u64>,
     pub max_concurrent_uploads: usize,
     pub max_concurrent_downloads: usize,
-    /// Most requests the binding serves at once, or `None` for no limit.
+    /// Most requests the HTTP API serves at once, or `None` for no limit.
     pub max_in_flight_requests: Option<NonZeroUsize>,
     pub content_token_secret: SecretString,
     pub request_deadline_ms: u64,
     pub auth_policy: AuthPolicy,
 }
 
-/// The grep handles this binding has, by job: a binding serves
-/// queries only with a service, and maintains the index only with a
-/// worker, so a capability it advertises always has its handle.
+/// The grep handles of the HTTP API, by job: the HTTP API serves queries
+/// only with a service, and maintains the index only with a worker, so an
+/// advertised capability always has its handle.
 #[derive(Clone)]
-pub enum GrepBinding {
+pub enum GrepMode {
     Disabled,
     ServeOnly {
         service: Arc<GrepService>,
@@ -108,8 +108,8 @@ pub enum GrepBinding {
     },
 }
 
-impl GrepBinding {
-    /// The service that serves grep queries, where this binding serves them.
+impl GrepMode {
+    /// The service that serves grep queries, or `None` when the HTTP API doesn't serve grep.
     pub fn service(&self) -> Option<&Arc<GrepService>> {
         match self {
             Self::ServeOnly { service } | Self::ServeAndMaintain { service, .. } => Some(service),
@@ -117,7 +117,7 @@ impl GrepBinding {
         }
     }
 
-    /// The worker that maintains the grep index, where this binding maintains it.
+    /// The worker that maintains the grep index, or `None` when the HTTP API doesn't maintain grep.
     pub fn worker(&self) -> Option<&GrepWorker<SharedObjectStore>> {
         match self {
             Self::MaintainOnly { worker } | Self::ServeAndMaintain { worker, .. } => Some(worker),
@@ -125,40 +125,40 @@ impl GrepBinding {
         }
     }
 
-    /// Whether this binding serves grep queries.
+    /// Whether the HTTP API serves grep queries.
     pub fn serves(&self) -> bool {
         self.service().is_some()
     }
 
-    /// Whether this binding maintains the grep index.
+    /// Whether the HTTP API maintains the grep index.
     pub fn maintains(&self) -> bool {
         self.worker().is_some()
     }
 }
 
-/// The handles that a host supplies to a binding: one runtime over one
+/// The handles that a host supplies to the HTTP API: one runtime over one
 /// store, and the grep handles in `grep`.
-pub struct BindingHandles {
+pub struct HttpHandles {
     pub runtime: LoonFs<Writable>,
     pub namespaces: Arc<dyn WriterSessions>,
     pub maintenance: Maintenance,
     pub direct_transfers: Option<DirectTransferIssuers>,
-    pub grep: GrepBinding,
+    pub grep: GrepMode,
     pub metrics: Arc<HttpMetrics>,
     /// The recorder of one usage report for each namespace request, or `None` to record none.
     pub usage_recorder: Option<Arc<dyn UsageRecorder>>,
 }
 
-/// A binding's options and handles, and the permits that enforce the
+/// The HTTP API's options and handles, and the permits that enforce the
 /// concurrency limits in its options.
 #[derive(Clone)]
-pub struct BindingState {
-    pub options: Arc<BindingConfig>,
+pub struct HttpState {
+    pub options: Arc<HttpConfig>,
     pub runtime: LoonFs<Writable>,
     pub namespaces: Arc<dyn WriterSessions>,
     pub maintenance: Maintenance,
     pub direct_transfers: Option<DirectTransferIssuers>,
-    pub grep: GrepBinding,
+    pub grep: GrepMode,
     pub metrics: Arc<HttpMetrics>,
     pub usage_recorder: Option<Arc<dyn UsageRecorder>>,
     request_limit: Option<RequestLimit>,
@@ -166,11 +166,11 @@ pub struct BindingState {
     download_permits: Arc<Semaphore>,
 }
 
-impl BindingState {
-    /// Builds a binding whose permits admit the concurrency that `config`
+impl HttpState {
+    /// Builds the HTTP API state, with permits that admit the concurrency that `config`
     /// advertises.
-    pub fn new(config: BindingConfig, handles: BindingHandles) -> Self {
-        let BindingHandles {
+    pub fn new(config: HttpConfig, handles: HttpHandles) -> Self {
+        let HttpHandles {
             runtime,
             namespaces,
             maintenance,
@@ -205,7 +205,7 @@ impl BindingState {
         &self.download_permits
     }
 
-    /// Returns the cap on requests in flight, or `None` when the binding has
+    /// Returns the cap on requests in flight, or `None` when the HTTP API has
     /// no cap.
     pub fn request_limit(&self) -> Option<&RequestLimit> {
         self.request_limit.as_ref()
@@ -282,7 +282,7 @@ impl HostState for () {
 /// The host sets which writer sessions stay open and for how long: a
 /// session stays open while the host keeps its handle. This reference host keeps a
 /// handle only for a namespace that existed when the handle was first
-/// opened. A sweep can close a caught-up session after its last open is old enough
+/// opened. The host's maintenance scheduler can close a caught-up session after its last open is old enough
 /// and no caller has a clone. A later write opens a new session and acquires
 /// a new writer epoch. Deletion or a request that finds the namespace gone
 /// also drops the handle.
@@ -437,7 +437,8 @@ impl<S: HostState> Namespaces<S> {
         .map(|(namespace_id, _)| namespace_id.clone())
     }
 
-    /// Keeps a visit's facts attached to its original entry through a concurrent close.
+    /// Keeps the facts of one run of a host's maintenance steps attached to
+    /// its original entry through a concurrent close.
     pub fn entry(&self, namespace_id: &NamespaceId) -> Option<Arc<Mutex<HeldNamespace<S>>>> {
         self.lock().get(namespace_id).cloned()
     }

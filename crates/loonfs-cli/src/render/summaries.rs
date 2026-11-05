@@ -180,7 +180,7 @@ pub(super) fn gc_summary(report: &GcResponse) -> String {
     push_top_retention_reason(&mut summary, report);
     if let Some(deadline) = report.reclaimable_at_ms {
         summary.push_str(&format!(
-            "\nnamespace can be reclaimed at or after {} after pin cleanup; only fork pins can hold it beyond this deadline",
+            "\nnamespace can be retired at or after {} after pin cleanup; only fork pins can hold it beyond this deadline",
             format_utc_ms(deadline)
         ));
     }

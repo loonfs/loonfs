@@ -1,4 +1,4 @@
-//! Bounded concurrent deletes for one collection pass.
+//! Bounded concurrent deletes for one collection.
 
 use super::sweep::Decision;
 use crate::error::{CoreError, Result};
@@ -29,7 +29,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                         .await
                         .map_err(|error| CoreError::store(key, &error))?,
                     Decision::DeleteUploadSession { upload_id } => {
-                        // Only a family root's pass sweeps upload records.
+                        // Only a family root's collection sweeps upload records.
                         self.delete_upload_session_records(&self.namespace_id, upload_id)
                             .await?
                     }

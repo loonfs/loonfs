@@ -1,10 +1,12 @@
-//! The retention advance that full passes make under each namespace's
+//! The retention advance that sweeps make under each namespace's
 //! retention window, or the server's.
 
-use super::{idle_fold_after_ms, local_store, seed_writer, sweep_config, SweepServer, DAY_MS};
+use super::{
+    idle_fold_after_ms, local_store, scheduler_config, seed_writer, SchedulerServer, DAY_MS,
+};
 use crate::config::ServerConfig;
-use crate::sweep::retries::SweepCall;
-use crate::sweep::{lock, GarbageCollection};
+use crate::scheduler::retries::MaintenanceCall;
+use crate::scheduler::{lock, GarbageCollection};
 use loonfs::{
     AdvanceRetentionFloorOptions, ChangeSeq, CreateNamespaceOptions, NamespaceDiagnostics,
     NamespaceId, RetentionTarget, SharedObjectStore,
@@ -31,25 +33,25 @@ pub(super) const WINDOW_MS: u64 = 30 * DAY_MS;
 /// A namespace's own window, shorter than the server's.
 const NAMESPACE_WINDOW_MS: u64 = 15 * DAY_MS;
 
-/// Requests the advance costs on the visit of an idle namespace whose floor
+/// Requests the advance costs in a sweep of an idle namespace whose floor
 /// already reached its cutoff, or that has no window: one load of the
 /// current manifest. The docs quote this number.
 const IDLE_ADVANCE_REQUESTS: usize = 4;
 
-/// Requests the acknowledgment of the floor costs on the visit of a
+/// Requests the acknowledgment of the floor costs in a sweep of a
 /// namespace whose acknowledged floor is at its retention floor: one load
 /// of the current manifest. The docs quote this number.
 const IDLE_ACKNOWLEDGMENT_REQUESTS: usize = 4;
 
 /// A config with every default, and `window_ms` as its retention window.
 pub(super) fn retention_config(window_ms: Option<u64>) -> ServerConfig {
-    let mut config = sweep_config(None);
+    let mut config = scheduler_config(None);
     config.retention_window_ms =
         window_ms.map(|window_ms| NonZeroU64::new(window_ms).expect("a positive window"));
     config
 }
 
-impl SweepServer {
+impl SchedulerServer {
     pub(super) async fn diagnostics(&self, namespace_id: &NamespaceId) -> NamespaceDiagnostics {
         self.maintenance
             .diagnostics(namespace_id)
@@ -58,7 +60,7 @@ impl SweepServer {
     }
 
     fn retention_failures(&self) -> u64 {
-        self.visit_failures(SweepCall::Retention)
+        self.call_failures(MaintenanceCall::Retention)
     }
 
     /// Creates a namespace with `window_ms` as its own retention window.
@@ -94,7 +96,7 @@ impl SweepServer {
 }
 
 /// Namespaces whose history spans the retention window, beside a deleted
-/// namespace that the pass also lists.
+/// namespace that the sweep also lists.
 struct History {
     /// A namespace with two commits older than the window and one inside it.
     aged: NamespaceId,
@@ -107,7 +109,7 @@ struct History {
 /// Commits and folds the history on the server's clock, which then reads
 /// 40 days after `START_MS`. With a 30-day window, the cutoff is 10 days
 /// after `START_MS`.
-async fn seed_history(server: &SweepServer) -> History {
+async fn seed_history(server: &SchedulerServer) -> History {
     let [aged, recent, deleted] = ["aged", "recent", "deleted"].map(namespace_id);
     for namespace_id in [&aged, &deleted] {
         server
@@ -149,10 +151,10 @@ async fn seed_history(server: &SweepServer) -> History {
 }
 
 #[tokio::test]
-async fn a_full_pass_advances_each_floor_to_the_last_commit_before_the_window() {
+async fn a_sweep_advances_each_floor_to_the_last_commit_before_the_window() {
     for window_ms in [None, Some(WINDOW_MS)] {
         let directory = tempdir().expect("tempdir");
-        let server = SweepServer::start(
+        let server = SchedulerServer::start(
             local_store(directory.path()),
             &retention_config(window_ms),
             START_MS,
@@ -165,8 +167,8 @@ async fn a_full_pass_advances_each_floor_to_the_last_commit_before_the_window() 
         assert!(history.aged_cutoff_seq < aged.head_seq);
 
         server
-            .sweep
-            .run_pass(GarbageCollection::Collect)
+            .scheduler
+            .run_sweep(GarbageCollection::Collect)
             .await
             .expect("list namespaces");
         let expected_floor = match window_ms {
@@ -199,7 +201,7 @@ async fn a_full_pass_advances_each_floor_to_the_last_commit_before_the_window() 
 /// then reads 40 days after `START_MS`, so the server's 30-day window passes
 /// the first commit, and a namespace's 15-day window passes both.
 async fn seed_two_commits(
-    server: &SweepServer,
+    server: &SchedulerServer,
     namespaces: &[&NamespaceId],
 ) -> Vec<[ChangeSeq; 2]> {
     let mut first = Vec::new();
@@ -222,10 +224,10 @@ async fn seed_two_commits(
 }
 
 #[tokio::test]
-async fn a_full_pass_advances_a_namespace_by_its_own_window_and_a_sibling_by_the_servers() {
+async fn a_sweep_advances_a_namespace_by_its_own_window_and_a_sibling_by_the_servers() {
     for server_window_ms in [None, Some(WINDOW_MS)] {
         let directory = tempdir().expect("tempdir");
-        let server = SweepServer::start(
+        let server = SchedulerServer::start(
             local_store(directory.path()),
             &retention_config(server_window_ms),
             START_MS,
@@ -239,8 +241,8 @@ async fn a_full_pass_advances_a_namespace_by_its_own_window_and_a_sibling_by_the
         let seqs = seed_two_commits(&server, &[&windowed, &sibling]).await;
 
         server
-            .sweep
-            .run_pass(GarbageCollection::Skip)
+            .scheduler
+            .run_sweep(GarbageCollection::Skip)
             .await
             .expect("list namespaces");
         assert_eq!(
@@ -263,9 +265,9 @@ async fn a_full_pass_advances_a_namespace_by_its_own_window_and_a_sibling_by_the
 }
 
 #[tokio::test]
-async fn each_pass_uses_the_window_that_the_namespace_has_when_the_pass_runs() {
+async fn each_sweep_uses_the_window_that_the_namespace_has_when_the_sweep_runs() {
     let directory = tempdir().expect("tempdir");
-    let server = SweepServer::start(
+    let server = SchedulerServer::start(
         local_store(directory.path()),
         &retention_config(Some(WINDOW_MS)),
         START_MS,
@@ -288,8 +290,8 @@ async fn each_pass_uses_the_window_that_the_namespace_has_when_the_pass_runs() {
             .await
             .expect("set the namespace's window");
         server
-            .sweep
-            .run_pass(GarbageCollection::Skip)
+            .scheduler
+            .run_sweep(GarbageCollection::Skip)
             .await
             .expect("list namespaces");
         assert_eq!(
@@ -301,10 +303,10 @@ async fn each_pass_uses_the_window_that_the_namespace_has_when_the_pass_runs() {
 }
 
 #[tokio::test]
-async fn ticks_never_advance_the_floor_and_the_next_full_pass_does() {
+async fn session_steps_never_advance_the_floor_and_the_next_sweep_does() {
     let directory = tempdir().expect("tempdir");
     let config = retention_config(Some(WINDOW_MS));
-    let server = SweepServer::start(local_store(directory.path()), &config, START_MS).await;
+    let server = SchedulerServer::start(local_store(directory.path()), &config, START_MS).await;
     let namespace_id = namespace_id("held");
     server
         .runtime
@@ -312,7 +314,7 @@ async fn ticks_never_advance_the_floor_and_the_next_full_pass_does() {
         .await
         .expect("create the namespace");
     let held = server
-        .sweep
+        .scheduler
         .inner
         .namespaces
         .open(&namespace_id)
@@ -325,18 +327,20 @@ async fn ticks_never_advance_the_floor_and_the_next_full_pass_does() {
         .committed_seq;
     let floor = server.diagnostics(&namespace_id).await.retention_floor_seq;
 
-    server.tick_after(idle_fold_after_ms(&config)).await;
+    server.run_steps_after(idle_fold_after_ms(&config)).await;
     assert_eq!(
         server.wal_tail_objects(&namespace_id).await,
         0,
-        "a tick folded the tail"
+        "a metadata step folded the tail"
     );
-    server.tick_after(2 * WINDOW_MS).await;
+    server.run_steps_after(2 * WINDOW_MS).await;
     for _ in 0..3 {
-        server.tick_after(config.tick_interval_ms.get()).await;
+        server
+            .run_steps_after(config.maintenance_interval_ms.get())
+            .await;
     }
     let entry = server
-        .sweep
+        .scheduler
         .inner
         .namespaces
         .entry(&namespace_id)
@@ -344,29 +348,29 @@ async fn ticks_never_advance_the_floor_and_the_next_full_pass_does() {
     assert_eq!(
         lock(&entry).host_state.collected_seq,
         Some(seq),
-        "a tick on the collection interval visited the namespace"
+        "the session steps on the collection interval collected the namespace"
     );
     assert_eq!(
         server.diagnostics(&namespace_id).await.retention_floor_seq,
         floor,
-        "no tick advances the floor"
+        "no session step advances the floor"
     );
 
     server
-        .sweep
-        .run_pass(GarbageCollection::Skip)
+        .scheduler
+        .run_sweep(GarbageCollection::Skip)
         .await
         .expect("list namespaces");
     assert_eq!(
         server.diagnostics(&namespace_id).await.retention_floor_seq,
         seq,
-        "the full pass advances it"
+        "the sweep advances it"
     );
     drop(held);
 }
 
 #[tokio::test]
-async fn a_pass_that_finds_a_tick_visiting_leaves_its_advance_to_that_visit() {
+async fn a_sweep_that_finds_session_steps_running_leaves_its_advance_to_those_steps() {
     let directory = tempdir().expect("tempdir");
     let namespace_id = namespace_id("busy");
     // The runtime raises the hint in the background after each publication,
@@ -378,14 +382,14 @@ async fn a_pass_that_finds_a_tick_visiting_leaves_its_advance_to_that_visit() {
         OperationSelector::Any,
     ));
     let config = retention_config(Some(WINDOW_MS));
-    let server = SweepServer::start(store.clone(), &config, START_MS).await;
+    let server = SchedulerServer::start(store.clone(), &config, START_MS).await;
     server
         .runtime
         .create_namespace(&namespace_id, &test_actor())
         .await
         .expect("create the namespace");
     let held = server
-        .sweep
+        .scheduler
         .inner
         .namespaces
         .open(&namespace_id)
@@ -397,56 +401,56 @@ async fn a_pass_that_finds_a_tick_visiting_leaves_its_advance_to_that_visit() {
         .expect("write a file")
         .committed_seq;
     let floor = server.diagnostics(&namespace_id).await.retention_floor_seq;
-    server.tick_after(idle_fold_after_ms(&config)).await;
+    server.run_steps_after(idle_fold_after_ms(&config)).await;
     assert_eq!(server.wal_tail_objects(&namespace_id).await, 0);
     server.clock.advance_ms(2 * WINDOW_MS);
 
-    // The tick's collection parks on its first request, so the tick has the
-    // namespace for the whole pass.
+    // The session's collection parks on its first request, so the session
+    // steps have the namespace for the whole sweep.
     store.block_next();
-    let tick = tokio::spawn({
-        let sweep = server.sweep.clone();
-        async move { sweep.tick().await }
+    let steps = tokio::spawn({
+        let scheduler = server.scheduler.clone();
+        async move { scheduler.run_due_steps().await }
     });
     store.wait_until_blocked().await;
-    let pass_counts = || {
+    let sweep_counts = || {
         (
-            server.counter("loonfs.maintenance.sweep_passes", &[("result", "ok")]),
+            server.counter("loonfs.maintenance.sweeps", &[("result", "ok")]),
             server.retention_failures(),
         )
     };
     assert_eq!(
         server
-            .sweep
-            .run_pass(GarbageCollection::Skip)
+            .scheduler
+            .run_sweep(GarbageCollection::Skip)
             .await
             .expect("list namespaces"),
         1,
-        "the pass lists the namespace that the tick has"
+        "the sweep lists the namespace that the session steps have"
     );
-    assert_eq!(pass_counts(), (1, 0));
+    assert_eq!(sweep_counts(), (1, 0));
     assert_eq!(
         server.diagnostics(&namespace_id).await.retention_floor_seq,
         floor,
-        "the pass doesn't wait for the tick's visit"
+        "the sweep doesn't wait for the session steps"
     );
 
     store.release();
-    tick.await.expect("finish the tick");
+    steps.await.expect("finish the session steps");
     assert_eq!(
         server.diagnostics(&namespace_id).await.retention_floor_seq,
         seq,
-        "the tick's visit makes the advance that the pass left to it"
+        "the session steps make the advance that the sweep left to them"
     );
-    assert_eq!(pass_counts(), (1, 0), "the pass's counts don't change");
+    assert_eq!(sweep_counts(), (1, 0), "the sweep's counts don't change");
     drop(held);
 }
 
 #[tokio::test]
-async fn a_failing_advance_fails_once_per_full_pass_until_it_succeeds() {
+async fn a_failing_advance_fails_once_per_sweep_until_it_succeeds() {
     let directory = tempdir().expect("tempdir");
     // The advance sends a HEAD request for each segment before it publishes,
-    // and no other call on a pass that doesn't collect sends one.
+    // and no other call in a sweep that doesn't collect sends one.
     let store = Arc::new(FailStore::new(
         LocalFsStore::new(directory.path()).expect("local store"),
         KeyPredicate::metadata_segment(),
@@ -454,7 +458,7 @@ async fn a_failing_advance_fails_once_per_full_pass_until_it_succeeds() {
         InjectedError::PermissionDenied("expired credentials".to_owned()),
     ));
     let config = retention_config(Some(WINDOW_MS));
-    let server = SweepServer::start(store.clone(), &config, START_MS).await;
+    let server = SchedulerServer::start(store.clone(), &config, START_MS).await;
     let namespace_id = namespace_id("failing");
     server
         .runtime
@@ -471,12 +475,12 @@ async fn a_failing_advance_fails_once_per_full_pass_until_it_succeeds() {
     server.clock.advance_ms(2 * WINDOW_MS);
     store.fail_all();
 
-    for passes in 1..=3 {
-        server.pass_after(config.full_sweep_interval_ms.get()).await;
+    for sweeps in 1..=3 {
+        server.sweep_after(config.sweep_interval_ms.get()).await;
         assert_eq!(
             server.retention_failures(),
-            passes,
-            "each full pass makes the advance once, so it records and logs one failure"
+            sweeps,
+            "each sweep makes the advance once, so it records and logs one failure"
         );
         assert_eq!(
             server.diagnostics(&namespace_id).await.retention_floor_seq,
@@ -484,24 +488,24 @@ async fn a_failing_advance_fails_once_per_full_pass_until_it_succeeds() {
         );
     }
     assert_eq!(
-        server.visit_failures(SweepCall::Metadata),
+        server.call_failures(MaintenanceCall::Metadata),
         0,
         "only the advance failed"
     );
 
     store.clear();
-    server.pass_after(config.full_sweep_interval_ms.get()).await;
+    server.sweep_after(config.sweep_interval_ms.get()).await;
     assert_eq!(
         server.diagnostics(&namespace_id).await.retention_floor_seq,
         seq,
-        "the next full pass retries the advance"
+        "the next sweep retries the advance"
     );
     assert_eq!(server.retention_failures(), 3);
 }
 
 #[tokio::test]
-async fn an_idle_visit_costs_the_same_requests_whichever_window_applies() {
-    let mut visits = Vec::new();
+async fn an_idle_sweep_costs_the_same_requests_whichever_window_applies() {
+    let mut sweeps = Vec::new();
     for (server_window_ms, namespace_window_ms) in [
         (None, None),
         (Some(WINDOW_MS), None),
@@ -540,23 +544,23 @@ async fn an_idle_visit_costs_the_same_requests_whichever_window_applies() {
             LocalFsStore::new(directory.path()).expect("local store"),
             KeyPredicate::any(),
         ));
-        let server = SweepServer::start(
+        let server = SchedulerServer::start(
             store.clone(),
             &retention_config(server_window_ms),
             now_ms + 2 * WINDOW_MS,
         )
         .await;
-        // The first pass moves the floor to the head when a window applies,
+        // The first sweep moves the floor to the head when a window applies,
         // and collects what the seed left behind. Nobody writes to the
-        // namespace, so the second pass acknowledges that floor with a fence
+        // namespace, so the second sweep acknowledges that floor with a fence
         // and a fold. The runtime skips a hint raise less than a second after
         // its last one, so the test raises the hint to the current manifest
-        // after each pass, and each pass collects the manifests that the
-        // previous pass replaced.
+        // after each sweep, and each sweep collects the manifests that the
+        // previous sweep replaced.
         for _ in 0..3 {
             server
-                .sweep
-                .run_pass(GarbageCollection::Collect)
+                .scheduler
+                .run_sweep(GarbageCollection::Collect)
                 .await
                 .expect("list namespaces");
             super::raise_hint_to_current_manifest(store.as_ref(), &namespace_id).await;
@@ -566,29 +570,29 @@ async fn an_idle_visit_costs_the_same_requests_whichever_window_applies() {
         for garbage in [GarbageCollection::Skip, GarbageCollection::Collect] {
             store.reset();
             server
-                .sweep
-                .run_pass(garbage)
+                .scheduler
+                .run_sweep(garbage)
                 .await
                 .expect("list namespaces");
-            let visit: Vec<_> = store
+            let sweep: Vec<_> = store
                 .take()
                 .into_iter()
                 .filter(|operation| operation.key().starts_with(&prefix))
                 .collect();
             assert!(
-                visit.iter().all(|operation| matches!(
+                sweep.iter().all(|operation| matches!(
                     operation,
                     RecordedOperation::Get { .. }
                         | RecordedOperation::GetWithMetadata { .. }
                         | RecordedOperation::Head { .. }
                         | RecordedOperation::List { .. }
                 )),
-                "{windows}, garbage {garbage:?}: an idle visit writes nothing: {visit:?}"
+                "{windows}, garbage {garbage:?}: an idle sweep writes nothing: {sweep:?}"
             );
-            requests.push(visit.len());
+            requests.push(sweep.len());
         }
 
-        // The visit's share is one load of the current manifest for the
+        // The sweep's share is one load of the current manifest for the
         // acknowledgment and one for the advance.
         store.reset();
         server
@@ -621,10 +625,10 @@ async fn an_idle_visit_costs_the_same_requests_whichever_window_applies() {
             .iter()
             .all(|operation| operation.key().starts_with(&prefix)));
         assert_eq!(advance.len(), IDLE_ADVANCE_REQUESTS, "{windows}");
-        visits.push(requests);
+        sweeps.push(requests);
     }
     assert!(
-        visits.windows(2).all(|pair| pair[0] == pair[1]),
-        "every visit makes the advance, whichever window applies: {visits:?}"
+        sweeps.windows(2).all(|pair| pair[0] == pair[1]),
+        "every sweep makes the advance, whichever window applies: {sweeps:?}"
     );
 }

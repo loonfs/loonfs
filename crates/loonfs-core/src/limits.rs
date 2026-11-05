@@ -65,7 +65,7 @@ pub const MAX_SCAN_REFILL_BYTES: u64 = 1024 * 1024;
 
 /// Maximum semantic operations in one explicit commit, bounding how long one
 /// request can occupy the serialized publisher during planning and
-/// materialization.
+/// content writes.
 pub const MAX_COMMIT_OPERATIONS: usize = 4096;
 
 /// Four MiB of event heap keeps ordinary change pages small while allowing several large commits per page.
@@ -228,8 +228,8 @@ const fn max_u64(left: u64, right: u64) -> u64 {
 /// The value covers the longer of two spans, then provider operation time and
 /// the combined clock-error and scheduling allowance. The first span is the
 /// longest publication budget. The second is the revalidation bound plus the
-/// lifetime of a direct transfer capability: a view up to the bound old can
-/// still issue a capability, and the capability outlives the view.
+/// lifetime of a direct transfer presigned URL: a view up to the bound old can
+/// still issue a presigned URL, and the presigned URL outlives the view.
 pub const GC_MIN_GRACE_WINDOW_MS: u64 = max_u64(
     max_u64(WAL_PUBLISH_BUDGET_MS, METADATA_PUBLICATION_BUDGET_MS),
     READ_REVALIDATION_BOUND_MS + DIRECT_TRANSFER_URL_TTL_MS,
@@ -301,9 +301,9 @@ pub const UNREFERENCED_SEGMENT_GRACE_WINDOW_MS: u64 = 24 * 60 * 60 * 1000;
 pub const METADATA_COMPACTION_BUDGET_MS: u64 =
     UNREFERENCED_SEGMENT_GRACE_WINDOW_MS - GC_MIN_GRACE_WINDOW_MS;
 
-/// Lifetime of a direct download or direct put capability.
+/// Lifetime of a direct download or direct put presigned URL.
 ///
-/// A part capability writes no object, so the grace window does not need to
+/// A part presigned URL writes no object, so the grace window does not need to
 /// cover it.
 pub const DIRECT_TRANSFER_URL_TTL_MS: u64 = 15 * 60 * 1000;
 
@@ -311,18 +311,18 @@ pub const DIRECT_TRANSFER_URL_TTL_MS: u64 = 15 * 60 * 1000;
 ///
 /// The tombstone put starts within the publication budget, and the provider
 /// applies it within its request bound. Outstanding reads and direct
-/// capabilities run from that write, and the minimum grace window covers
+/// presigned URLs run from that write, and the minimum grace window covers
 /// them.
 pub const NAMESPACE_RETIREMENT_GRACE_WINDOW_MS: u64 =
     METADATA_PUBLICATION_BUDGET_MS + PROVIDER_PUBLICATION_REQUEST_BOUND_MS + GC_MIN_GRACE_WINDOW_MS;
 
-/// Elapsed monotonic time, from the start of a family root's collection
-/// pass, within which the pass reads the roots of every member of its fork
+/// Elapsed monotonic time, from the start of a family root's collection,
+/// within which the collection reads the roots of every member of its fork
 /// family, or skips the family's content sweep.
 ///
-/// A member that the pass hasn't read yet can't be retired until the
+/// A member that the collection hasn't read yet can't be retired until the
 /// retirement grace, less the clock allowance between the deleting host and
-/// the collector, has passed since the pass started, so its fork pin keeps
+/// the collector, has passed since the collection started, so its fork pin keeps
 /// it in the walk until then (format spec, "Content roots").
 pub const FAMILY_ROOTS_READ_BUDGET_MS: u64 =
     NAMESPACE_RETIREMENT_GRACE_WINDOW_MS - GC_SAFETY_MARGIN_MS;
@@ -344,7 +344,7 @@ pub const MIN_MULTIPART_PART_BYTES: u64 = PROVIDER_MIN_MULTIPART_PART_BYTES;
 /// Every supported provider refuses a part above 5 GiB.
 pub const MAX_MULTIPART_PART_BYTES: u64 = PROVIDER_MAX_MULTIPART_PART_BYTES;
 
-/// Most part-upload capabilities one request may ask for. A client asks in
+/// Most part-upload presigned URLs one request may ask for. A client asks in
 /// waves as it works through a file, so this bounds one response rather than
 /// one upload.
 pub const MAX_SIGNED_PARTS_PER_REQUEST: usize = 1_000;
@@ -405,7 +405,7 @@ mod tests {
 
     #[test]
     fn derived_minimum_grace_window_sits_below_the_default() {
-        // 19 min 15 s revalidation bound + 15 min capability lifetime
+        // 19 min 15 s revalidation bound + 15 min presigned URL lifetime
         // + 4 min 15 s request bound + 3 min margin = 41 min 30 s.
         assert_eq!(GC_MIN_GRACE_WINDOW_MS, 2_490_000);
         assert!(

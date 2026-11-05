@@ -12,7 +12,7 @@ use loonfs_http::{authenticate_routes, error_response, observe_routes};
 use loonfs_types::{ErrorCode, ErrorResponse};
 
 pub(super) fn router(state: AppState) -> Router {
-    let binding = loonfs_http::router(state.binding.clone());
+    let http = loonfs_http::router(state.http.clone());
     let public = Router::new()
         .route("/health", get(get_health))
         .route("/readiness", get(get_readiness))
@@ -21,9 +21,9 @@ pub(super) fn router(state: AppState) -> Router {
         Router::new()
             .route("/metrics", get(get_metrics))
             .with_state(state.clone()),
-        &state.binding,
+        &state.http,
     );
-    binding.merge(observe_routes(public.merge(authenticated), &state.binding))
+    http.merge(observe_routes(public.merge(authenticated), &state.http))
 }
 
 async fn get_health() -> &'static str {
@@ -31,7 +31,7 @@ async fn get_health() -> &'static str {
 }
 
 async fn get_readiness(State(state): State<AppState>) -> Response {
-    if state.binding.runtime.is_shutting_down() {
+    if state.http.runtime.is_shutting_down() {
         return error_response(
             ErrorCode::ShuttingDown,
             ErrorResponse::new(

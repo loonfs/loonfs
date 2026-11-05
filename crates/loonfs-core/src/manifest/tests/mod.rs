@@ -15,7 +15,7 @@ pub(crate) mod extensions;
 mod family_roots;
 mod fold_races;
 mod index_parity;
-pub(crate) mod inspection_materialization;
+pub(crate) mod inspection_state;
 mod manifest_gc_races;
 mod manifest_round_trips;
 mod merges;
@@ -26,9 +26,9 @@ mod views_below_the_head;
 
 use super::error::ManifestLoadError;
 use super::load::{
-    append_rows_to_metadata, head_from_manifest, load_manifest_materialization_for_inspection,
+    append_rows_to_metadata, head_from_manifest,
     load_manifest_metadata_state_for_inspection_from_manifest,
-    load_manifest_segments_for_inspection,
+    load_manifest_segments_for_inspection, load_manifest_state_for_inspection,
 };
 use super::publish::{encode_manifest, ManifestPublicationOutcome};
 use super::retention::RetentionTarget;
@@ -36,11 +36,11 @@ use super::{fold, load};
 use crate::block_cache::ObjectStoreScope;
 use crate::changes::list_changes_after;
 use crate::compaction::group_compaction::run_metadata_compaction;
-use crate::compaction::merge_iterator::locality_of;
 use crate::compaction::plan;
 use crate::compaction::plan::MetadataCompactionSpec;
 use crate::compaction::publication::{input_segment_keys, CompactionPublication};
 use crate::compaction::retention::retention_clusters;
+use crate::compaction::run_iterator::locality_of;
 use crate::compaction::step::MetadataCompactionCancellation;
 use crate::compaction::{CompactionUnitOutcome, MetadataCompactionPolicy};
 use crate::error::{CoreError, ErrorCode, MetadataProjectionLoadError};
@@ -52,9 +52,8 @@ use crate::segment::cache::SegmentBlockKind;
 use crate::segment::cache::{MetadataSegmentCache, SharedSegmentBlocks};
 use crate::segment::row::{manifest_rows_for_family, metadata_states_equivalent};
 use crate::segment::runs::{
-    flatten_manifest_segments, runs_in_materialization_order, runs_newest_first,
-    MetadataFamilyGroup, MetadataFamilySegments, MetadataRunManifest, MetadataRunPolicy,
-    DEFAULT_MAX_DELTA_RUNS,
+    flatten_manifest_segments, runs_newest_first, runs_oldest_first, MetadataFamilyGroup,
+    MetadataFamilySegments, MetadataRunManifest, MetadataRunPolicy, DEFAULT_MAX_DELTA_RUNS,
 };
 use crate::segment::{data_block_load, index_block_load, row, scan};
 use crate::storage::content::prepare_stored_content;
@@ -111,7 +110,7 @@ async fn load_manifest_projection_metadata_state<S: ObjectStore + ?Sized>(
     let projection = namespace
         .load_manifest_projection(crate::test_support::observed_now())
         .await?;
-    let tail_rows = projection.tail_state.merged_rows();
+    let tail_rows = projection.tail_state.combined_rows();
     let mut metadata_state = MetadataStateBuilder::default();
     for family in ApiMetadataRowFamily::ALL {
         let mut rows = projection
@@ -155,7 +154,7 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
             &context.clock(),
         )
         .await
-        .map(crate::pin::checkpoint_summary)
+        .map(crate::snapshot::checkpoint_summary)
 }
 
 pub(crate) use crate::test_support::writer_at;
@@ -586,8 +585,8 @@ pub(crate) async fn compact_a_family_group<S: ObjectStore + ?Sized>(
 /// Plans one family group's compaction unit without running it.
 ///
 /// For a caller that has to do something between the plan and the
-/// publication, such as the collector's tests, which run a pass across that
-/// gap.
+/// publication, such as the collector's tests, which run a collection across
+/// that gap.
 pub(crate) async fn plan_a_family_group_compaction<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -719,7 +718,7 @@ fn base_tier(manifest: &NamespaceManifestEnvelope) -> Vec<MetadataFamilySegments
 }
 
 fn delta_runs(manifest: &NamespaceManifestEnvelope) -> Vec<MetadataRunManifest> {
-    runs_in_materialization_order(manifest.payload())
+    runs_oldest_first(manifest.payload())
         .into_iter()
         .filter(|run| run.tier == RunTier::Delta)
         .collect()
@@ -864,9 +863,9 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
     let metadata_state = source.metadata_state;
     let head_seq = head.seq;
     let previous_manifest = match source.basis_manifest_no {
-        Some(previous_id) => Some(
-            load_manifest_materialization_for_inspection(store, namespace_id, previous_id).await?,
-        ),
+        Some(previous_id) => {
+            Some(load_manifest_state_for_inspection(store, namespace_id, previous_id).await?)
+        }
         _ => None,
     };
 

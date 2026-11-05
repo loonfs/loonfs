@@ -276,7 +276,7 @@ async fn wide_attribute_rows_roll_segments_by_bytes_and_preserve_every_row() {
         let mut actual = Vec::new();
         for descriptor in &family.segments {
             assert!(descriptor.row_count > 0 && descriptor.row_count <= 3);
-            let rows = super::inspection_materialization::load_manifest_segment_rows(
+            let rows = super::inspection_state::load_manifest_segment_rows(
                 &store,
                 ChangeSeq(1),
                 descriptor,

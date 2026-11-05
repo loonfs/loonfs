@@ -68,7 +68,7 @@ pub(super) struct CandidateValue {
 ///
 /// Each run's ordinals map to values a batch at a time, as the walk reaches
 /// them, so a page reads the table rows of the values it walks rather than
-/// those of every candidate. The runs' values merge with the values of the
+/// those of every candidate. The runs' values combine with the values of the
 /// tail and scan files in content order, and a value that two runs produce
 /// is walked once. The position refers to its candidates by index, so a
 /// stream can own it.

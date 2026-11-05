@@ -15,7 +15,7 @@ use tower::ServiceExt;
 
 struct Harness {
     router: axum::Router,
-    state: BindingState,
+    state: HttpState,
     store: Arc<RecordingStore<LocalFsStore>>,
     namespace: NamespaceId,
     _directory: tempfile::TempDir,
@@ -41,7 +41,7 @@ impl Harness {
         ));
         let mut config = test_options(directory.path(), "inline-host");
         config.inline_content = inline_content;
-        config.binding.serves_maintenance = false;
+        config.http.serves_maintenance = false;
         config.grep = JobMode::Disabled;
         let (router, state) = test_app(config, options_with_store(store.clone()))
             .await

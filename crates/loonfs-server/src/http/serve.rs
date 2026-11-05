@@ -4,7 +4,7 @@
 use super::host_routes::router;
 use super::tls::{self, TlsListener};
 use crate::config::{JobMode, MemorySizing, ServerConfig, TransportConfig, ValidatedServerConfig};
-use crate::sweep::{GrepIndexing, Sweep, SweepState};
+use crate::scheduler::{GrepIndexing, Scheduler, SchedulerState};
 use crate::{Result, ServerError};
 use axum::serve::ListenerExt as _;
 use axum::Router;
@@ -12,7 +12,7 @@ use loonfs::metrics::{JsonlObjectStoreMetricsRecorder, ObjectStoreMetricsRecorde
 use loonfs::{LoonFs, Maintenance, SharedObjectStore, Writable, WriterId};
 use loonfs_grep::{GrepBlockCache, GrepService, GrepWorker};
 use loonfs_http::{
-    BindingConfig, BindingHandles, BindingState, GrepBinding, HttpMetrics, Namespaces, RequestLimit,
+    GrepMode, HttpConfig, HttpHandles, HttpMetrics, HttpState, Namespaces, RequestLimit,
 };
 use loonfs_objectstore::presign::DirectTransferIssuers;
 use loonfs_objectstore::{run_store_contract_probe, StoreProbeReport};
@@ -30,10 +30,10 @@ const OBJECT_STORE_METRICS_JSONL_ENV: &str = "LOONFS_OBJECT_STORE_METRICS_JSONL"
 /// Handles and resources whose shutdown belongs to this host.
 #[derive(Clone)]
 pub struct AppState {
-    pub binding: BindingState,
-    /// The maintenance sweep of a config that maintains. [`app`] does not
+    pub http: HttpState,
+    /// The maintenance scheduler of a config that maintains. [`app`] does not
     /// start it.
-    pub sweep: Option<Sweep>,
+    pub scheduler: Option<Scheduler>,
 }
 
 /// Optional inputs for building the HTTP application.
@@ -47,9 +47,9 @@ pub struct AppConfig {
 
 /// Builds the router and returns its state.
 ///
-/// The state contains the maintenance sweep when the config maintains, and
-/// this does not start it. [`serve_with_shutdown`] starts it. After an
-/// embedded listener drains, the host must shut down the binding's runtime,
+/// The state contains the maintenance scheduler when the config maintains,
+/// and this does not start it. [`serve_with_shutdown`] starts it. After an
+/// embedded listener drains, the host must shut down the HTTP API's runtime,
 /// which [`serve_with_shutdown`] does automatically.
 pub async fn app(config: ValidatedServerConfig, options: AppConfig) -> Result<(Router, AppState)> {
     let ValidatedServerConfig {
@@ -97,7 +97,7 @@ pub async fn app(config: ValidatedServerConfig, options: AppConfig) -> Result<(R
             runtime.read_only(),
             runtime.clone(),
             maintenance.clone(),
-            loonfs_grep::GrepPassBudget::new(
+            loonfs_grep::GrepStepBudget::new(
                 std::num::NonZeroUsize::new(config.grep.worker.max_concurrent_steps)
                     .expect("validated grep step limit should be nonzero"),
             ),
@@ -109,22 +109,22 @@ pub async fn app(config: ValidatedServerConfig, options: AppConfig) -> Result<(R
         ))))
     };
     let grep = match config.grep.mode {
-        JobMode::Disabled => GrepBinding::Disabled,
-        JobMode::ServeOnly => GrepBinding::ServeOnly {
+        JobMode::Disabled => GrepMode::Disabled,
+        JobMode::ServeOnly => GrepMode::ServeOnly {
             service: grep_service(),
         },
-        JobMode::MaintainOnly => GrepBinding::MaintainOnly {
+        JobMode::MaintainOnly => GrepMode::MaintainOnly {
             worker: grep_worker(),
         },
-        JobMode::ServeAndMaintain => GrepBinding::ServeAndMaintain {
+        JobMode::ServeAndMaintain => GrepMode::ServeAndMaintain {
             service: grep_service(),
             worker: grep_worker(),
         },
     };
-    let namespaces = Arc::new(Namespaces::<SweepState>::new(runtime.clone()));
-    let sweep = config.maintenance.maintains().then(|| {
-        Sweep::new(
-            config.sweep_config(),
+    let namespaces = Arc::new(Namespaces::<SchedulerState>::new(runtime.clone()));
+    let scheduler = config.maintenance.maintains().then(|| {
+        Scheduler::new(
+            config.scheduler_config(),
             runtime.object_store(),
             maintenance.clone(),
             Arc::clone(&namespaces),
@@ -134,8 +134,8 @@ pub async fn app(config: ValidatedServerConfig, options: AppConfig) -> Result<(R
             metrics.recorder().as_ref(),
         )
     });
-    let binding = BindingState::new(
-        BindingConfig {
+    let http = HttpState::new(
+        HttpConfig {
             serves_maintenance: config.maintenance.serves(),
             max_download_bytes: Some(config.runtime_config().max_read_content_bytes),
             max_upload_bytes: Some(config.max_upload_bytes.get()),
@@ -146,7 +146,7 @@ pub async fn app(config: ValidatedServerConfig, options: AppConfig) -> Result<(R
             request_deadline_ms: config.request_deadline_ms.get(),
             auth_policy,
         },
-        BindingHandles {
+        HttpHandles {
             runtime,
             namespaces,
             maintenance,
@@ -156,7 +156,7 @@ pub async fn app(config: ValidatedServerConfig, options: AppConfig) -> Result<(R
             usage_recorder: None,
         },
     );
-    let state = AppState { binding, sweep };
+    let state = AppState { http, scheduler };
     Ok((router(state.clone()), state))
 }
 
@@ -340,8 +340,8 @@ pub(super) fn set_nodelay(stream: &mut TcpStream) {
 
 /// The one serving body, over whichever listener the deployment configured.
 /// Plaintext and TLS differ in what `accept` returns and in nothing else.
-/// Both start the maintenance sweep when the config maintains, close
-/// admission, drain requests, close the listener, stop the sweep, and settle
+/// Both start the maintenance scheduler when the config maintains, close
+/// admission, drain requests, close the listener, stop the scheduler, and settle
 /// the runtime in the same order.
 async fn serve_on<L>(
     listener: L,
@@ -358,29 +358,29 @@ where
     let listener = super::connection_limit::ConnectionLimit::new(
         listener,
         max_connections,
-        state.binding.metrics.recorder().as_ref(),
+        state.http.metrics.recorder().as_ref(),
     );
     let settlement = Settlement {
-        requests: state.binding.request_limit().cloned(),
-        runtime: state.binding.runtime,
-        sweep: state.sweep,
+        requests: state.http.request_limit().cloned(),
+        runtime: state.http.runtime,
+        scheduler: state.scheduler,
         deadline_ms,
     };
     serve_and_settle(listener, router, settlement, shutdown).await
 }
 
 /// What a server settles after it stops serving, and how long the drain and
-/// the sweep's stop may take, counted from the shutdown signal.
+/// the scheduler's stop may take, counted from the shutdown signal.
 pub(super) struct Settlement {
-    /// The admitted requests the drain waits for. A binding without a request
+    /// The admitted requests the drain waits for. An HTTP API without a request
     /// limit drains nothing before the listener closes.
     pub(super) requests: Option<RequestLimit>,
     pub(super) runtime: LoonFs<Writable>,
-    pub(super) sweep: Option<Sweep>,
+    pub(super) scheduler: Option<Scheduler>,
     pub(super) deadline_ms: u64,
 }
 
-/// Starts `sweep`, serves until the shutdown trigger fires, then settles
+/// Starts `scheduler`, serves until the shutdown trigger fires, then settles
 /// what this process owns, in the order it has to be settled in.
 ///
 /// Kept apart from [`serve_on`] so the settling order is a thing a test can
@@ -401,10 +401,10 @@ where
     let Settlement {
         requests,
         runtime,
-        sweep,
+        scheduler,
         deadline_ms,
     } = settlement;
-    let sweep = sweep.map(|sweep| sweep.start());
+    let scheduler = scheduler.map(|scheduler| scheduler.start());
     let (listener_close_tx, listener_close_rx) = tokio::sync::oneshot::channel();
     let mut server = Box::pin(
         axum::serve(listener, router)
@@ -424,10 +424,10 @@ where
         result = server.as_mut() => (result, deadline_from_now()),
         () = shutdown.as_mut() => {
             // This is synchronous so readiness changes before the drain waits.
-            // The sweep stops first, so no tick finds the sessions closed by
-            // the admission close and tries to close them itself.
-            if let Some(sweep) = &sweep {
-                sweep.cancel();
+            // The scheduler stops first, so none of its runs finds the sessions
+            // closed by the admission close and tries to close them itself.
+            if let Some(scheduler) = &scheduler {
+                scheduler.cancel();
             }
             runtime.close_admission();
             let mut deadline = deadline_from_now();
@@ -444,9 +444,10 @@ where
     };
     // Dropping the server cancels requests left behind by an expired drain.
     drop(server);
-    // The sweep waits under the same deadline, and is aborted when it passes.
-    let swept = match sweep {
-        Some(sweep) => sweep.stop(deadline.as_mut(), deadline_ms).await,
+    // The scheduler waits under the same deadline, and is aborted when the
+    // deadline ends.
+    let stopped = match scheduler {
+        Some(scheduler) => scheduler.stop(deadline.as_mut(), deadline_ms).await,
         None => Ok(()),
     };
     served.map_err(ServerError::Serve)?;
@@ -454,7 +455,7 @@ where
     // Nothing reads through the cache any more, so the SSD tier can write
     // the blocks it queued and stop.
     runtime.metadata_cache().close().await;
-    runtime_settled.and(swept).map_err(ServerError::Shutdown)
+    runtime_settled.and(stopped).map_err(ServerError::Shutdown)
 }
 
 async fn drain_with_deadline<S>(

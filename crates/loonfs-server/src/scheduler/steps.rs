@@ -1,9 +1,9 @@
-//! The steps that a tick runs for each held session, and the two host
-//! intervals.
+//! The steps that the scheduler runs for each held session, and the two
+//! host intervals.
 
-use super::retries::SweepCall;
-use super::visit::Overlap;
-use super::{index_pending, lock, GarbageCollection, RunningSweep, Sweep, SweepState};
+use super::calls::Overlap;
+use super::retries::MaintenanceCall;
+use super::{index_pending, lock, GarbageCollection, RunningScheduler, Scheduler, SchedulerState};
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt as _, StreamExt as _};
 use loonfs::{ChangeSeq, MetadataMaintenanceOutcome, NamespaceId, NamespaceSessionStatus};
@@ -13,38 +13,38 @@ use std::panic::AssertUnwindSafe;
 use std::time::Duration;
 use tokio::time::MissedTickBehavior;
 
-/// The step that a tick runs after the session's metadata step.
+/// The step that the scheduler runs after the session's metadata step.
 enum Due {
     Collection,
     Index,
     Close(Close),
 }
 
-/// Why a tick closes a session.
+/// Why the scheduler closes a session.
 #[derive(Debug, Clone, Copy)]
 enum Close {
     /// The session is idle, and nothing else is due. `metadata_settled` is
-    /// whether the session's metadata needs no more ticks: this tick's
-    /// metadata step found it caught up, or the session has no current
-    /// writer position, so the daily pass maintains its metadata.
+    /// whether the session's metadata needs no more steps: the metadata step
+    /// in the same run found it caught up, or the session has no current
+    /// writer position, so the sweep maintains its metadata.
     Idle { metadata_settled: bool },
     /// The session can't maintain its namespace any more, because it was
     /// closed or fenced, or its namespace is gone.
     Ended,
 }
 
-impl Sweep {
-    /// Runs one tick: the due steps of each held session, without cloning
-    /// writer handles. Returns when the tick's last visit ends. The sweep's
-    /// own tick loop doesn't wait for a tick's visits before it starts the
-    /// next tick's.
-    pub async fn tick(&self) {
+impl Scheduler {
+    /// Runs the due steps of each held session once, without cloning writer
+    /// handles. Returns when the last session's steps end. The scheduler's
+    /// own loop doesn't wait for one interval's steps before it starts the
+    /// next interval's.
+    pub async fn run_due_steps(&self) {
         let inner = &self.inner;
         futures::stream::iter(self.held_ids())
             .take_until(inner.stop.cancelled())
             .for_each_concurrent(
                 inner.config.max_concurrent_maintenance.get(),
-                |namespace_id| self.tick_session(namespace_id).boxed(),
+                |namespace_id| self.run_session(namespace_id).boxed(),
             )
             .await;
     }
@@ -60,17 +60,17 @@ impl Sweep {
         })
     }
 
-    /// Runs the session's due steps, then the retention advance that a full
-    /// pass left to this visit, if it left one.
-    async fn tick_session(&self, namespace_id: NamespaceId) {
-        let Some((visit, _permit)) = self.claim(&namespace_id, Overlap::Skip).await else {
+    /// Runs the session's due steps, then the retention advance that a sweep
+    /// left to these steps, if it left one.
+    async fn run_session(&self, namespace_id: NamespaceId) {
+        let Some((claim, _permit)) = self.claim(&namespace_id, Overlap::Skip).await else {
             return;
         };
         // Boxed for the same reason as the retention advance: the spawned
-        // sweep's `Send` check overflows on the unboxed due step inside this
-        // future.
-        self.run_due_step(&namespace_id).boxed().await;
-        self.finish_visit(visit).await;
+        // scheduler's `Send` check overflows on the unboxed due step inside
+        // this future.
+        self.run_session_steps(&namespace_id).boxed().await;
+        self.finish_claim(claim).await;
     }
 
     /// Runs the session's metadata step, and then the first due step of
@@ -80,13 +80,13 @@ impl Sweep {
     /// a current writer position, and once when the session's tail reaches the
     /// idle fold age that its last step reported, whatever the position (see
     /// [`metadata_due`]). A session without a current position isn't writing,
-    /// so otherwise the daily pass maintains its namespace's metadata, as it
-    /// does for a namespace without a session. Collection comes before the
-    /// index step because it's due at most once per `gc_interval_ms`, and a
-    /// session with a commit on every tick has index work on every tick. A
+    /// so otherwise the sweep maintains its namespace's metadata, as it does
+    /// for a namespace without a session. Collection comes before the index
+    /// step because it's due at most once per `gc_interval_ms`, and a session
+    /// with a commit at every interval has index work at every interval. A
     /// session that was closed or fenced, or whose namespace is gone, closes as
     /// soon as no caller has its handle.
-    async fn run_due_step(&self, namespace_id: &NamespaceId) {
+    async fn run_session_steps(&self, namespace_id: &NamespaceId) {
         let inner = &self.inner;
         let Some(entry) = inner.namespaces.entry(namespace_id) else {
             return;
@@ -158,7 +158,7 @@ impl Sweep {
                     namespace_id = %namespace_id,
                     call = "close",
                     panic = panic_message(payload.as_ref()),
-                    "closing a session panicked; the next tick tries again"
+                    "closing a session panicked; the next maintenance interval tries again"
                 );
             }
         }
@@ -191,23 +191,24 @@ impl Sweep {
                         seq,
                         inner.config.idle_session_close_after_ms,
                         |held| {
-                            // A failing call keeps an idle session held, so
-                            // ticks retry it on its backoff, until its
-                            // backoff reaches the cap. Then the session
-                            // closes and the next full pass retries the call.
-                            let at_cap = |call: SweepCall| {
+                            // A failing step keeps an idle session held, so
+                            // the scheduler retries the step on its backoff,
+                            // until its backoff reaches the cap. Then the
+                            // session closes and the next sweep retries the
+                            // step.
+                            let at_cap = |call: MaintenanceCall| {
                                 call.retry(&held.host_state)
                                     .is_some_and(|retry| self.backoff_at_cap(retry))
                             };
-                            (metadata_settled || at_cap(SweepCall::Metadata))
+                            (metadata_settled || at_cap(MaintenanceCall::Metadata))
                                 && (inner.grep.is_none()
                                     || !index_pending(held, seq)
-                                    || at_cap(SweepCall::GrepIndex))
+                                    || at_cap(MaintenanceCall::GrepIndex))
                                 && (!held.host_state.collection_pending(
                                     seq,
                                     inner.timer.monotonic_now_ms(),
                                     inner.config.gc_interval_ms,
-                                ) || at_cap(SweepCall::Gc))
+                                ) || at_cap(MaintenanceCall::Gc))
                         },
                     )
                     .await
@@ -218,81 +219,82 @@ impl Sweep {
         }
     }
 
-    pub(crate) fn start(&self) -> RunningSweep {
+    pub(crate) fn start(&self) -> RunningScheduler {
         let inner = &self.inner;
         let config = &inner.config;
         tracing::info!(
-            tick_interval_ms = config.tick_interval_ms,
             maintenance_interval_ms = config.maintenance_interval_ms,
+            metadata_retry_interval_ms = config.metadata_retry_interval_ms,
             gc_interval_ms = config.gc_interval_ms,
-            full_sweep_interval_ms = config.full_sweep_interval_ms,
+            sweep_interval_ms = config.sweep_interval_ms,
             retention_window_ms = config.retention_window_ms.map(std::num::NonZeroU64::get),
             max_concurrent_maintenance = config.max_concurrent_maintenance.get(),
             maintains_grep_index = inner.grep.is_some(),
-            "maintenance sweep started"
+            "maintenance scheduler started"
         );
-        let sweep = self.clone();
-        RunningSweep {
+        let scheduler = self.clone();
+        RunningScheduler {
             stop: inner.stop.clone(),
             task: tokio::spawn(async move {
-                tokio::join!(sweep.run_passes(), sweep.run_ticks());
+                tokio::join!(scheduler.run_sweeps(), scheduler.run_sessions());
             }),
         }
     }
 
     #[expect(
         clippy::disallowed_methods,
-        reason = "the configured full-pass interval, so time paces collection passes and decides no outcome"
+        reason = "the configured sweep interval, so time paces sweeps and decides no outcome"
     )]
-    async fn run_passes(&self) {
+    async fn run_sweeps(&self) {
         let inner = &self.inner;
-        let mut ticks =
-            tokio::time::interval(Duration::from_millis(inner.config.full_sweep_interval_ms));
-        ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let mut interval =
+            tokio::time::interval(Duration::from_millis(inner.config.sweep_interval_ms));
+        interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 biased;
                 () = inner.stop.cancelled() => return,
-                _ = ticks.tick() => {}
+                _ = interval.tick() => {}
             }
-            let _ = self.run_pass(GarbageCollection::Collect).await;
+            let _ = self.run_sweep(GarbageCollection::Collect).await;
         }
     }
 
     #[expect(
         clippy::disallowed_methods,
-        reason = "the configured session tick interval, so time paces session ticks and decides no outcome"
+        reason = "the configured maintenance interval, so time paces session steps and decides no outcome"
     )]
-    async fn run_ticks(&self) {
+    async fn run_sessions(&self) {
         let inner = &self.inner;
-        let mut ticks = tokio::time::interval(Duration::from_millis(inner.config.tick_interval_ms));
-        ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        // Each interval starts a visit to every held session that has no
-        // visit still pending or running, so a session has one visit at a
-        // time and the pending visits never outnumber the held sessions. The
-        // pending visits are polled before an interval starts more. The claim
-        // skips a session that a maintenance call or a pass has.
-        let mut visits = FuturesUnordered::new();
-        let mut visiting = HashSet::new();
+        let mut interval =
+            tokio::time::interval(Duration::from_millis(inner.config.maintenance_interval_ms));
+        interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        // Each interval starts the steps of every held session that has no
+        // steps still pending or running, so a session runs one set of steps
+        // at a time and the pending runs never outnumber the held sessions.
+        // The pending runs are polled before an interval starts more. The
+        // claim skips a session that a maintenance call or a sweep has.
+        let mut runs = FuturesUnordered::new();
+        let mut running = HashSet::new();
         loop {
             tokio::select! {
                 biased;
                 () = inner.stop.cancelled() => break,
-                Some(namespace_id) = visits.next() => {
-                    visiting.remove(&namespace_id);
+                Some(namespace_id) = runs.next() => {
+                    running.remove(&namespace_id);
                 }
-                _ = ticks.tick() => {
+                _ = interval.tick() => {
                     for namespace_id in self.held_ids() {
-                        if visiting.insert(namespace_id.clone()) {
-                            let visit = self.tick_session(namespace_id.clone());
-                            visits.push(visit.map(move |()| namespace_id).boxed());
+                        if running.insert(namespace_id.clone()) {
+                            let run = self.run_session(namespace_id.clone());
+                            runs.push(run.map(move |()| namespace_id).boxed());
                         }
                     }
                 }
             }
         }
-        // The running visits see the stop at their next check and return.
-        while visits.next().await.is_some() {}
+        // The running steps see the stop at their next check and return.
+        while runs.next().await.is_some() {}
     }
 }
 
@@ -302,7 +304,7 @@ impl Sweep {
 /// the session has committed since its last step. A step without a position
 /// reads the store, so it runs only for that idle fold, or once to date a
 /// tail that no step has seen, and its own report replaces the due time.
-fn metadata_due(held: &HeldNamespace<SweepState>, positioned: bool, now_ms: u64) -> bool {
+fn metadata_due(held: &HeldNamespace<SchedulerState>, positioned: bool, now_ms: u64) -> bool {
     let state = &held.host_state;
     now_ms >= state.metadata_retry.retry_at_ms
         && (positioned

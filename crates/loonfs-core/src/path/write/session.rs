@@ -24,7 +24,7 @@ use std::num::NonZeroU32;
 /// The session keeps the batch's constants (the publish view, where content
 /// writes go, and the commit time), and the accepted rows and resident
 /// pieces so later candidates can resolve earlier candidates and
-/// materialize references to them.
+/// write references to the earlier candidates' content.
 pub(crate) struct PublishPlanningSession<'a, S: ObjectStore + ?Sized> {
     /// The head after the batch's accepted candidates.
     head: NamespaceReadState,

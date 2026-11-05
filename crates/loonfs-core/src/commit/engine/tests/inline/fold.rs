@@ -608,7 +608,7 @@ async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
         .writer_position()
         .expect("the moved position keeps its tail")
         .tail;
-    assert_eq!(reanchored.merged_rows(), expected.merged_rows());
+    assert_eq!(reanchored.combined_rows(), expected.combined_rows());
     assert_eq!(reanchored.contents(), expected.contents());
     assert!(
         reanchored.chunks().len() == 2

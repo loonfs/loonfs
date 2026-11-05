@@ -135,7 +135,7 @@ async fn a_fold_puts_segments_in_a_bounded_wave_before_publishing_in_builder_ord
             .load_manifest_projection(crate::test_support::observed_now())
             .await
             .expect("projection");
-        let tail_rows = projection.tail_state.merged_rows();
+        let tail_rows = projection.tail_state.combined_rows();
         let expected = MetadataRowFamily::ALL
             .into_iter()
             .flat_map(|family| {

@@ -134,7 +134,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// Folds the WAL tail and publishes the next manifest as the maintainer.
     ///
     /// The manifest copies both epochs from its predecessor (format spec,
-    /// "Publishing a materialized file set"). A writer session passes the tail
+    /// "Publishing a manifest"). A writer session passes the tail
     /// it keeps as `held`, and every other caller passes `None`, which loads the
     /// tail from the store. A tail passed as `held` whose last check is at the revalidation
     /// bound is discarded, and the tail is loaded from the store too: garbage
@@ -256,7 +256,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 )
             })?;
         let head_seq = projection.head.seq;
-        let tail_state = projection.tail_state.merged_rows();
+        let tail_state = projection.tail_state.combined_rows();
         // A WAL fold keeps existing runs and writes the WAL delta as one new delta
         // run. Compaction rewrites delta runs into the base separately. The
         // manifest that first lists a run allocates its number, and an

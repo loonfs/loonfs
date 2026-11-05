@@ -9,7 +9,7 @@ pub(super) enum PagedListing<P> {
     Collected(P),
 }
 
-/// Visits and releases each page before loading the next one.
+/// Hands each page to `each_page` and releases it before loading the next one.
 ///
 /// `--page-size` and `--limit` size the pager's requests. The listing
 /// follows every page with `--all`, `--jsonl`, or `--limit`, and stops after
@@ -17,7 +17,7 @@ pub(super) enum PagedListing<P> {
 pub(super) async fn visit_pages<P, E, V>(
     mut pager: Pager<P, E>,
     args: &PageLimitArgs,
-    mut visit: V,
+    mut each_page: V,
 ) -> Result<()>
 where
     P: PagedResponse,
@@ -38,7 +38,7 @@ where
     }
     let follows = args.all || args.jsonl || args.limit.is_some();
     while let Some(page) = pager.next().await {
-        visit(page?)?;
+        each_page(page?)?;
         if !follows {
             break;
         }

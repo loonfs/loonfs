@@ -58,7 +58,7 @@ async fn pin_named<S: ObjectStore + ?Sized>(
             &context.clock(),
         )
         .await
-        .map(crate::pin::checkpoint_summary)
+        .map(crate::snapshot::checkpoint_summary)
         .expect("create checkpoint")
         .checkpoint_id
 }
@@ -578,7 +578,7 @@ async fn a_refused_owner_writes_no_record_to_find() {
                 &context.clock(),
             )
             .await
-            .map(crate::pin::checkpoint_summary)
+            .map(crate::snapshot::checkpoint_summary)
             .expect_err("the owner is not creatable");
         assert_eq!(error.code(), ErrorCode::InvalidRequest, "owner: {owner:?}");
     }
@@ -646,7 +646,7 @@ async fn a_pin_read_by_id_matches_its_listed_row_and_a_read_through_it_checks_ex
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let namespace = &namespace;
     let read_at = |pin_id, now_ms| async move {
-        crate::pin::ensure_unexpired(namespace.load_user_pin(pin_id).await?, now_ms)
+        crate::snapshot::ensure_unexpired(namespace.load_user_pin(pin_id).await?, now_ms)
     };
     read_at(&expiring, expires_at_ms - 1)
         .await

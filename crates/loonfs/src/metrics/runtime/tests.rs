@@ -4,7 +4,7 @@ use super::*;
 use crate::metrics::object_store::fan_out_object_store_recorder;
 use crate::metrics::{
     DefaultMetricsRecorder, MetricValue, MetricsSnapshot, ObjectKeyKind, ObjectStoreMetricSample,
-    ObjectStoreOperation, ObjectStoreResultKind, PutModeKind, VecObjectStoreMetricsRecorder,
+    ObjectStoreOperation, ObjectStoreOutcomeKind, PutModeKind, VecObjectStoreMetricsRecorder,
 };
 use crate::publisher::metrics::PublishOutcome;
 use crate::GcResponse;
@@ -13,15 +13,15 @@ use std::assert_matches;
 
 fn sample(
     operation: ObjectStoreOperation,
-    result: ObjectStoreResultKind,
+    outcome: ObjectStoreOutcomeKind,
     attempts: u32,
 ) -> ObjectStoreMetricSample {
-    classified_sample(operation, result, ObjectKeyKind::Content, attempts)
+    classified_sample(operation, outcome, ObjectKeyKind::Content, attempts)
 }
 
 fn classified_sample(
     operation: ObjectStoreOperation,
-    result: ObjectStoreResultKind,
+    outcome: ObjectStoreOutcomeKind,
     key_class: ObjectKeyKind,
     attempts: u32,
 ) -> ObjectStoreMetricSample {
@@ -29,7 +29,7 @@ fn classified_sample(
         operation,
         elapsed_micros: 250_000,
         attempts,
-        result,
+        outcome,
         bytes_in: Some(64),
         bytes_out: Some(16),
         item_count: None,
@@ -130,7 +130,7 @@ fn a_bridged_sample_moves_every_object_store_instrument() {
 
     bridge.record(sample(
         ObjectStoreOperation::Put,
-        ObjectStoreResultKind::Ok,
+        ObjectStoreOutcomeKind::Ok,
         3,
     ));
 
@@ -192,10 +192,10 @@ fn outcomes_and_key_classes_of_one_operation_count_separately() {
     let bridge = instruments.object_store_recorder().expect("bridge");
 
     for (result, key_class) in [
-        (ObjectStoreResultKind::Ok, ObjectKeyKind::WalObject),
-        (ObjectStoreResultKind::NotFound, ObjectKeyKind::WalObject),
-        (ObjectStoreResultKind::NotFound, ObjectKeyKind::WalObject),
-        (ObjectStoreResultKind::Ok, ObjectKeyKind::NamespaceManifest),
+        (ObjectStoreOutcomeKind::Ok, ObjectKeyKind::WalObject),
+        (ObjectStoreOutcomeKind::NotFound, ObjectKeyKind::WalObject),
+        (ObjectStoreOutcomeKind::NotFound, ObjectKeyKind::WalObject),
+        (ObjectStoreOutcomeKind::Ok, ObjectKeyKind::NamespaceManifest),
     ] {
         bridge.record(classified_sample(
             ObjectStoreOperation::Get,
@@ -245,7 +245,7 @@ fn a_handle_with_both_recorders_delivers_each_sample_to_both() {
 
     composed.record(sample(
         ObjectStoreOperation::Delete,
-        ObjectStoreResultKind::Ok,
+        ObjectStoreOutcomeKind::Ok,
         1,
     ));
 
@@ -384,7 +384,7 @@ fn compaction_instruments_register_the_closed_vocabularies() {
 }
 
 #[test]
-fn a_collection_pass_counts_what_it_reclaimed_and_retained() {
+fn a_collection_counts_what_it_reclaimed_and_retained() {
     let recorder = Arc::new(DefaultMetricsRecorder::new());
     let instruments = RuntimeInstruments::new(Some(recorder.clone()));
     let mut gc = GcResponse {
@@ -406,9 +406,9 @@ fn a_collection_pass_counts_what_it_reclaimed_and_retained() {
         reclaimable_at_ms: None,
     };
 
-    instruments.gc.pass(&gc);
+    instruments.gc.record_collection(&gc);
     gc.deleted.wal_objects = 1;
-    instruments.gc.pass(&gc);
+    instruments.gc.record_collection(&gc);
 
     let snapshot = recorder.snapshot();
     assert_eq!(

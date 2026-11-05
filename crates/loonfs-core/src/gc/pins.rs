@@ -5,7 +5,7 @@ use super::live_set::LiveSet;
 use crate::control_object::ControlObjectLoadError;
 use crate::error::{CoreError, Result};
 use crate::namespace::store::NamespaceStore;
-use crate::pin::record::load_pin_at_key;
+use crate::snapshot::record::load_pin_at_key;
 use crate::time::OperationClock;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::{ForkBasis, PinOwner, PinPayload};
@@ -106,7 +106,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         }
         // A target whose current manifest can't be loaded, whether the store
         // failed or the manifest is invalid, is a member whose roots the
-        // family root's pass can't read. That stops only the family's content
+        // family root's collection can't read. That stops only the family's content
         // sweep (format spec, "One complete pass"), and keeping the pin
         // protects more, never less.
         match self
@@ -155,7 +155,7 @@ pub(crate) enum GraceAge {
 }
 
 impl GraceAge {
-    /// Compares a listed modification time with the pass's grace window.
+    /// Compares a listed modification time with the collection's grace window.
     pub(crate) fn of(last_modified_at_ms: Option<u64>, grace_window_ms: u64, now_ms: u64) -> Self {
         match last_modified_at_ms {
             None => Self::Unknown,
@@ -165,7 +165,7 @@ impl GraceAge {
     }
 
     /// The retention reason this outcome is, for a caller reporting why a
-    /// pass kept what it kept. `None` for the outcome that retained nothing.
+    /// collection kept what it kept. `None` for the outcome that retained nothing.
     pub(crate) fn retained_reason(self) -> Option<RetainedReason> {
         match self {
             Self::Aged => None,

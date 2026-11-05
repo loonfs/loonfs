@@ -5,7 +5,7 @@ use crate::authorize::{Authorizer, ReadAccess};
 use crate::storage::content::DurableContentValidationError;
 use crate::storage::tail_content::{assemble_tail_content, write_tail_content, ContentWrites};
 use crate::test_support::WriterAt;
-use crate::GrantedRange;
+use crate::ObjectRange;
 use loonfs_objectstore::keys::{content_blob, content_span};
 use loonfs_test_support::stores::MetadataMapStore;
 use loonfs_types::format::manifest::ContentLayoutRecord;
@@ -91,7 +91,7 @@ async fn upload_evidence_carries_a_layout_on_every_reference() {
 }
 
 #[tokio::test]
-async fn folds_write_whole_then_spans_and_merge_small_tail_extents() {
+async fn folds_write_whole_then_spans_and_combine_small_tail_extents() {
     let (_directory, store, mut engine, context) = setup().await;
     let namespace_id = engine.namespace.namespace_id.clone();
     let mut bytes = vec![b'a'; 100];
@@ -232,7 +232,7 @@ async fn three_extents_read_three_ranges_and_older_references_take_a_prefix() {
 }
 
 #[tokio::test]
-async fn a_merged_span_must_match_its_objects_stored_checksum() {
+async fn a_combined_span_must_match_its_objects_stored_checksum() {
     let (_directory, store, mut engine, context) = setup().await;
     let namespace_id = engine.namespace.namespace_id.clone();
     let mut bytes = vec![b'a'; 100];
@@ -578,12 +578,12 @@ async fn downloads_cover_three_extents_from_inside_the_second_and_create_empty_o
     assert_eq!(
         target.ranges,
         vec![
-            GrantedRange {
+            ObjectRange {
                 object_key: content_span(&namespace_id, &original.content_id, 100, 110),
                 object_start: 5,
                 length: 5,
             },
-            GrantedRange {
+            ObjectRange {
                 object_key: content_span(&namespace_id, &original.content_id, 110, 113),
                 object_start: 0,
                 length: 3,

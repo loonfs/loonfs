@@ -635,19 +635,19 @@ mod tests {
             head_confirmed: late.clone(),
             ..head_at(5, 1, &early)
         });
-        let merged = cache.replace_head(CachedHead {
+        let replaced = cache.replace_head(CachedHead {
             basis_checked: late.clone(),
             ..head_at(5, 1, &early)
         });
-        assert_eq!(merged.basis_checked.age_ms(), 0);
-        assert_eq!(merged.head_confirmed.age_ms(), 0);
+        assert_eq!(replaced.basis_checked.age_ms(), 0);
+        assert_eq!(replaced.head_confirmed.age_ms(), 0);
         let cached = cache.get_head(&namespace("demo")).expect("a cached head");
-        assert!(Arc::ptr_eq(&cached, &merged));
+        assert!(Arc::ptr_eq(&cached, &replaced));
         let unchanged = cache.replace_head(head_at(5, 1, &early));
-        assert!(Arc::ptr_eq(&unchanged, &merged));
+        assert!(Arc::ptr_eq(&unchanged, &replaced));
         let same_millisecond = cache.replace_head(head_at(5, 1, &late));
         assert!(
-            Arc::ptr_eq(&same_millisecond, &merged),
+            Arc::ptr_eq(&same_millisecond, &replaced),
             "a confirmation in the same millisecond doesn't move"
         );
     }

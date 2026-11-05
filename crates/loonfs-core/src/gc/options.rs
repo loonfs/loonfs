@@ -4,7 +4,7 @@ use crate::error::{CoreError, Result};
 use crate::limits::GC_MIN_GRACE_WINDOW_MS;
 pub use loonfs_types::options::GcOptions;
 
-/// Rejects options that would let a pass delete an object that a publication
+/// Rejects options that would let a collection delete an object that a publication
 /// still in flight wrote.
 pub(super) fn validate_gc_options(options: &GcOptions) -> Result<()> {
     // The minimum grace window is derived from the publication budgets and

@@ -16,11 +16,11 @@ pub const DEFAULT_MAX_CONCURRENT_GREP_STEPS: NonZeroUsize = NonZeroUsize::new(2)
 /// to every grep worker keeps one ceiling for all of them, however many
 /// runtimes or stores those workers serve.
 #[derive(Debug, Clone)]
-pub struct GrepPassBudget {
+pub struct GrepStepBudget {
     permits: Arc<PermitPool>,
 }
 
-impl GrepPassBudget {
+impl GrepStepBudget {
     /// Creates a budget that lets `max_concurrent_steps` steps keep file
     /// content or index segments at once.
     pub fn new(max_concurrent_steps: NonZeroUsize) -> Self {
@@ -42,7 +42,7 @@ impl GrepPassBudget {
     }
 }
 
-impl Default for GrepPassBudget {
+impl Default for GrepStepBudget {
     fn default() -> Self {
         Self::new(DEFAULT_MAX_CONCURRENT_GREP_STEPS)
     }

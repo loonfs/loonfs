@@ -131,13 +131,13 @@ async fn a_cold_checkpoint_files_page_bounds_its_parent_binding_reads() {
         KeyPredicate::new(move |key| binding_segments.contains(key)),
     );
     let page = crate::test_support::namespace_store(&store, &namespace_id)
-        .list_checkpoint_files_page(
+        .list_snapshot_files_page(
             &checkpoint.checkpoint_id,
             PageRequest {
                 cursor: None,
                 limit: EffectiveLimit::new(NonZeroU32::new(1000).expect("nonzero limit")),
             },
-            crate::pin::ListCheckpointFilesOptions::default(),
+            crate::snapshot::ListSnapshotFilesOptions::default(),
         )
         .await
         .expect("checkpoint files page");
@@ -284,7 +284,7 @@ async fn slot_versions_preserve_moves_name_reuse_and_pinned_reads() {
         },
     )
     .await;
-    let rebuilt = load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_no)
+    let rebuilt = load_manifest_state_for_inspection(&store, &namespace_id, manifest_no)
         .await
         .expect("index row counts and digests agree");
     let forward =
@@ -423,7 +423,7 @@ async fn a_lower_numbered_child_reusing_a_slot_survives_a_base_compaction() {
     )
     .await;
 
-    let rebuilt = load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_no)
+    let rebuilt = load_manifest_state_for_inspection(&store, &namespace_id, manifest_no)
         .await
         .expect("index row counts and digests agree");
     let forward =
@@ -544,7 +544,7 @@ async fn a_child_moved_through_several_parents_keeps_its_current_edge_after_a_ba
     )
     .await;
 
-    let rebuilt = load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_no)
+    let rebuilt = load_manifest_state_for_inspection(&store, &namespace_id, manifest_no)
         .await
         .expect("index row counts and digests agree");
     let forward =

@@ -19,16 +19,16 @@ use std::sync::atomic::AtomicU64;
 impl<S: ObjectStore> NamespaceStore<S> {
     /// Collects one namespace.
     ///
-    /// On a family root, the pass also reads the roots of every other member
+    /// On a family root, the collection also reads the roots of every other member
     /// of its fork family, which it finds through fork pins, and protects the
-    /// content that any member refers to. A pass on a fork lists and sweeps no
+    /// content that any member refers to. A collection on a fork lists and sweeps no
     /// content and no upload records, because the family root's prefix stores
     /// them.
     ///
     /// The content sweep reads the extent filter of each distinct layout
     /// segment of the rooted manifests through the segment cache, charges the
     /// filters to that cache's read working memory, and lists the content
-    /// prefix once. The pass doesn't read the record of a completed upload
+    /// prefix once. The collection doesn't read the record of a completed upload
     /// session that `session_cache` has, and it adds each completed session that
     /// it keeps to `session_cache`.
     pub async fn gc(
@@ -65,7 +65,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 continue;
             }
             let prefix = family.prefix(&self.namespace_id);
-            // Unboxed, rustc cannot prove the pass future `Send` through this stream.
+            // Unboxed, rustc cannot prove the collection future `Send` through this stream.
             let decisions = self
                 .store
                 .list_entries_from_stream(&prefix, None)
@@ -82,7 +82,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 .boxed();
             self.apply_decisions(decisions, &mut report).await?;
         }
-        let content_listed = self.reclaim_namespace(&live, &mut report).await? || content.is_some();
+        let content_listed = self.retire_namespace(&live, &mut report).await? || content.is_some();
         // A skipped content sweep or a retained tombstone leaves the family's
         // content unlisted, but the content still occupies storage.
         if !content_listed && live.collects_family_content() {

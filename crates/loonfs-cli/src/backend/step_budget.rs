@@ -73,7 +73,8 @@ impl ResolvedTarget {
             },
         )
         .await;
-        // A one-shot run has no later tick to publish what's pending. A step
+        // A one-shot run has no later maintenance interval to publish what's
+        // pending. A step
         // changes the pending entry only once it succeeds, so the run
         // publishes the steps before a failed one, and then reports the
         // failure.
@@ -112,7 +113,7 @@ impl StepBudget {
 /// Result of waiting for a grep index.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GrepWaitProgress {
-    /// Number of polling intervals or maintenance passes completed.
+    /// Number of polling intervals or maintenance steps completed.
     pub steps: u64,
     /// True when the index reached the target sequence.
     pub reached: bool,

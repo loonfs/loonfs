@@ -175,7 +175,7 @@ async fn a_stale_search_keeps_its_first_pages_cut_after_the_index_moves() {
         .expect("first page");
     assert!(!page_one.tail_scanned);
     assert_eq!(paths(&page_one), [first]);
-    // A tick brings the index past the first page's sequence, and a new
+    // A run of index steps brings the index past the first page's sequence, and a new
     // service loads the index as it stands then.
     fixture
         .host
@@ -300,7 +300,7 @@ async fn a_page_after_the_floor_passes_its_cursor_returns_rebootstrap_required()
 }
 
 #[tokio::test]
-async fn pages_merge_the_runs_values_in_content_order_as_they_walk_them() {
+async fn pages_combine_the_runs_values_in_content_order_as_they_walk_them() {
     let fixture = ContentFixture::new("content-order-runs").await;
     // The backfill's run has more values than one read of its value table
     // maps, and a build step adds a second run.

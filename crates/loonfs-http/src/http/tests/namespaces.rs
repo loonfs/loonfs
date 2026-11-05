@@ -67,7 +67,7 @@ async fn host(
 ) -> (
     tempfile::TempDir,
     axum::Router,
-    BindingState,
+    HttpState,
     Arc<Namespaces<()>>,
 ) {
     let directory = tempdir().expect("tempdir");
@@ -80,7 +80,7 @@ async fn host(
     (directory, router, state, namespaces)
 }
 
-async fn create_namespace(state: &BindingState, namespace_id: &NamespaceId) {
+async fn create_namespace(state: &HttpState, namespace_id: &NamespaceId) {
     state
         .runtime
         .create_namespace(namespace_id, &loonfs_test_support::test_actor())
@@ -88,7 +88,7 @@ async fn create_namespace(state: &BindingState, namespace_id: &NamespaceId) {
         .expect("create namespace");
 }
 
-async fn writer_epoch(state: &BindingState, namespace_id: &NamespaceId) -> u64 {
+async fn writer_epoch(state: &HttpState, namespace_id: &NamespaceId) -> u64 {
     loonfs_core::test_support::namespace_store(state.runtime.object_store().as_ref(), namespace_id)
         .load_read_state()
         .await

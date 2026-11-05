@@ -1,5 +1,5 @@
 //! The files of one candidate value that a page examines: the index's
-//! `content_revisions` rows for the value, merged with the value's tail and
+//! `content_revisions` rows for the value, combined with the value's tail and
 //! scan files.
 
 use super::candidates::CandidateValue;
@@ -22,7 +22,7 @@ const CONTENT_REVISION_READ_BLOCKS: usize = 4;
 
 /// The files of one candidate value in inode order: the newest revision at
 /// or below the query's cut that the index's `content_revisions` rows record
-/// for each inode, merged with the value's tail and scan files.
+/// for each inode, combined with the value's tail and scan files.
 pub(super) struct ValueFiles {
     pub(super) value: ContentValue,
     /// Where the next read of the value's rows starts, or `None` once the

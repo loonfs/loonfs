@@ -1,13 +1,13 @@
 //! Whole-namespace reads for a consumer that derives its own data from the
-//! filesystem: enumerating the files a checkpoint pinned, asking where those
+//! filesystem: enumerating the files a snapshot pinned, asking where those
 //! files are now, and reading one content object by reference.
 
 use crate::common::*;
 use loonfs::{
-    CheckpointFile, CheckpointFilesPageCursor, ContentRef, CurrentFile, CurrentFileState,
-    DeleteDirectoryBehavior, DeleteOptions, DestinationBehavior, Error, ErrorCode, InodeId,
-    ListCheckpointFilesOptions, LoonFs, NamespaceId, PutFileOptions, ReadOnly, RevisionNo,
-    SharedObjectStore, StoreConfig,
+    ContentRef, CurrentFile, CurrentFileState, DeleteDirectoryBehavior, DeleteOptions,
+    DestinationBehavior, Error, ErrorCode, InodeId, ListSnapshotFilesOptions, LoonFs, NamespaceId,
+    PutFileOptions, ReadOnly, RevisionNo, SharedObjectStore, SnapshotFile, SnapshotFilesPageCursor,
+    StoreConfig,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
 use loonfs_test_support::ids::{namespace_id, page_limit};
@@ -88,26 +88,26 @@ async fn listed_files(
     found
 }
 
-/// Every file a checkpoint pins, read one page at a time so the paging path
+/// Every file a snapshot pins, read one page at a time so the paging path
 /// carries every assertion.
-async fn checkpoint_files(
+async fn snapshot_files(
     reader: &LoonFs<ReadOnly>,
     namespace_id: &NamespaceId,
-    checkpoint_id: &loonfs::PinId,
+    snapshot_id: &loonfs::PinId,
     limit: usize,
-) -> Vec<CheckpointFile> {
+) -> Vec<SnapshotFile> {
     let namespace = reader.namespace(namespace_id);
     let mut files = Vec::new();
     let mut cursor = None;
     let mut seen: BTreeSet<InodeId> = BTreeSet::new();
     loop {
         let page = namespace
-            .list_checkpoint_files(checkpoint_id)
+            .list_snapshot_files(snapshot_id)
             .page_limit(page_limit(limit))
             .cursor(cursor)
             .page()
             .await
-            .expect("read a checkpoint files page");
+            .expect("read a snapshot files page");
         assert!(
             page.files.len() <= limit,
             "a page returned {} files over the {limit} limit",
@@ -275,8 +275,8 @@ async fn checkpoint_enumeration_answers_the_state_it_pinned() {
         .await
         .expect("move a file after the checkpoint");
 
-    let enumerated = checkpoint_files(&fs.reader, &namespace_id, &checkpoint.snapshot_id, 2).await;
-    let by_inode: BTreeMap<InodeId, CheckpointFile> = enumerated
+    let enumerated = snapshot_files(&fs.reader, &namespace_id, &checkpoint.snapshot_id, 2).await;
+    let by_inode: BTreeMap<InodeId, SnapshotFile> = enumerated
         .iter()
         .map(|file| (file.inode_id, file.clone()))
         .collect();
@@ -315,9 +315,9 @@ async fn checkpoint_enumeration_answers_the_state_it_pinned() {
     );
 
     let retained = namespace
-        .list_checkpoint_files_with_options(
+        .list_snapshot_files_with_options(
             &checkpoint.snapshot_id,
-            &ListCheckpointFilesOptions {
+            &ListSnapshotFilesOptions {
                 include_deleted: true,
             },
         )
@@ -394,10 +394,9 @@ async fn checkpoint_files_page_without_gaps_or_duplicates() {
         .await
         .expect("create checkpoint");
 
-    let whole = checkpoint_files(&fs.reader, &namespace_id, &checkpoint.snapshot_id, 100).await;
+    let whole = snapshot_files(&fs.reader, &namespace_id, &checkpoint.snapshot_id, 100).await;
     assert_eq!(whole.len(), 5);
-    let one_at_a_time =
-        checkpoint_files(&fs.reader, &namespace_id, &checkpoint.snapshot_id, 1).await;
+    let one_at_a_time = snapshot_files(&fs.reader, &namespace_id, &checkpoint.snapshot_id, 1).await;
     assert_eq!(
         one_at_a_time, whole,
         "paging one file at a time must produce the same sequence as one page"
@@ -407,9 +406,9 @@ async fn checkpoint_files_page_without_gaps_or_duplicates() {
     // tail: no row is re-read, and none is skipped.
     for (index, file) in whole.iter().enumerate() {
         let resumed = namespace
-            .list_checkpoint_files(&checkpoint.snapshot_id)
+            .list_snapshot_files(&checkpoint.snapshot_id)
             .page_limit(page_limit(100))
-            .cursor(Some(CheckpointFilesPageCursor {
+            .cursor(Some(SnapshotFilesPageCursor {
                 after_inode_id: file.inode_id,
             }))
             .page()
@@ -436,7 +435,7 @@ async fn an_empty_namespace_answers_one_empty_page() {
         .expect("create checkpoint");
 
     let page = namespace
-        .list_checkpoint_files(&checkpoint.snapshot_id)
+        .list_snapshot_files(&checkpoint.snapshot_id)
         .page_limit(page_limit(10))
         .page()
         .await
@@ -484,7 +483,7 @@ async fn a_fork_targets_checkpoint_enumerates_the_source_state() {
         "the fork target's basis manifest should still name source-owned metadata files"
     );
 
-    let enumerated = checkpoint_files(&fs.reader, &target, &checkpoint.snapshot_id, 1).await;
+    let enumerated = snapshot_files(&fs.reader, &target, &checkpoint.snapshot_id, 1).await;
     assert_eq!(
         enumerated
             .iter()
@@ -555,7 +554,7 @@ async fn a_deleted_checkpoint_refuses_enumeration_instead_of_answering_current_s
         .expect("release checkpoint");
 
     let error = namespace
-        .list_checkpoint_files(&checkpoint.snapshot_id)
+        .list_snapshot_files(&checkpoint.snapshot_id)
         .page_limit(page_limit(10))
         .page()
         .await
@@ -565,7 +564,7 @@ async fn a_deleted_checkpoint_refuses_enumeration_instead_of_answering_current_s
     let missing = loonfs::PinId::parse("pin_00000000000000000001-0123456789abcdef")
         .expect("valid checkpoint id");
     let error = namespace
-        .list_checkpoint_files(&missing)
+        .list_snapshot_files(&missing)
         .page_limit(page_limit(10))
         .page()
         .await
@@ -947,7 +946,7 @@ async fn a_standalone_reader_serves_every_operation() {
         .expect("build a standalone reader");
     let namespace = reader.namespace(&namespace_id);
 
-    let files = checkpoint_files(&reader, &namespace_id, &checkpoint.snapshot_id, 2).await;
+    let files = snapshot_files(&reader, &namespace_id, &checkpoint.snapshot_id, 2).await;
     assert_eq!(files.len(), 4);
 
     let states = namespace

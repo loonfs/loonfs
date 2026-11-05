@@ -195,11 +195,11 @@ pub(crate) async fn active_child_binding<R: MetadataVisibilityReads>(
 /// revisited inode as a parent-binding cycle.
 ///
 /// Stored bindings form a tree, so a walk that revisits an inode found
-/// corrupt stored metadata. The visited set bounds the walk by the
+/// corrupt stored metadata. The seen set bounds the walk by the
 /// namespace's inode count.
 pub(crate) struct AncestorWalk {
     next: Option<NextAncestor>,
-    visited: BTreeSet<InodeId>,
+    seen: BTreeSet<InodeId>,
     followed: Option<DirentryBindingRecord>,
 }
 
@@ -213,7 +213,7 @@ impl AncestorWalk {
     pub(crate) fn new(inode_id: InodeId) -> Self {
         Self {
             next: Some(NextAncestor::Inode(inode_id)),
-            visited: BTreeSet::new(),
+            seen: BTreeSet::new(),
             followed: None,
         }
     }
@@ -244,7 +244,7 @@ impl AncestorWalk {
                 parent_inode_id
             }
         };
-        if !self.visited.insert(inode_id) {
+        if !self.seen.insert(inode_id) {
             return Err(VisiblePathError::ParentBindingCycle { inode_id }.into());
         }
         self.next = Some(NextAncestor::ParentOf(inode_id));

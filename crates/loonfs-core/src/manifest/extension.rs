@@ -19,7 +19,7 @@ use loonfs_types::{ExtensionName, RunNo};
 ///
 /// The clock starts before the manifest is loaded, so the publication budget
 /// covers every segment that the change writes before its publication
-/// (format spec, "Publishing a materialized file set").
+/// (format spec, "Publishing a manifest").
 #[derive(Debug, Clone)]
 pub struct ExtensionBasis {
     basis: PublicationBasis,

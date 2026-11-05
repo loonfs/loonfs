@@ -2,7 +2,7 @@
 
 use super::extractors::SubjectHeaders;
 use super::query_params::{effective_page_limit, required_query_param};
-use super::{AppQuery, BindingState, NamespaceIdPath, NoBody, NoQuery};
+use super::{AppQuery, HttpState, NamespaceIdPath, NoBody, NoQuery};
 use crate::http::error::ApiResponseError;
 use axum::extract::State;
 use axum::{Extension, Json};
@@ -93,7 +93,7 @@ pub(super) struct GrepQuery {
     )
 )]
 pub(super) async fn grep(
-    State(state): State<Arc<BindingState>>,
+    State(state): State<Arc<HttpState>>,
     Extension(service): Extension<Arc<GrepService>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
@@ -186,7 +186,7 @@ pub(super) async fn grep_index_not_maintained() -> ApiResponseError {
     )
 )]
 pub(super) async fn enable_grep_index(
-    State(state): State<Arc<BindingState>>,
+    State(state): State<Arc<HttpState>>,
     Extension(worker): Extension<GrepWorker<SharedObjectStore>>,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
@@ -270,7 +270,7 @@ async fn read_grep_index_status(
     )
 )]
 pub(super) async fn disable_grep_index(
-    State(state): State<Arc<BindingState>>,
+    State(state): State<Arc<HttpState>>,
     Extension(worker): Extension<GrepWorker<SharedObjectStore>>,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,

@@ -279,7 +279,7 @@ impl NamespacePublisher {
     /// engine.
     pub(super) fn record_publication(
         &self,
-        publish: &loonfs_core::publish::NamespaceCommitEnginePublishResult,
+        publish: &loonfs_core::publish::NamespaceCommitEnginePublishOutcome,
     ) -> Option<oneshot::Sender<()>> {
         if publish
             .wal_tail

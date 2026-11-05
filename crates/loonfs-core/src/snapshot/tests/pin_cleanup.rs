@@ -121,7 +121,7 @@ async fn abandoned_pins_with_collected_bases_can_be_reaped_after_failed_cleanup(
                 .clock(),
             )
             .await
-            .expect("next pass also succeeds");
+            .expect("next collection also succeeds");
         crate::test_support::namespace_store(&store, &namespace_id)
             .load_current_metadata_view()
             .await

@@ -14,7 +14,7 @@ const DEFAULT_MANIFEST_REVALIDATION_INTERVAL_MS: u64 = 1000;
 /// reader's last confirmation of the head can be for the read to start from
 /// that head without a request to confirm it.
 const DEFAULT_MAX_STALENESS_MS: u64 = 1000;
-/// Default largest file content that one buffered read materializes.
+/// Default largest file content that one buffered read returns.
 ///
 /// With the default of
 /// [`DEFAULT_MAX_CONCURRENT_READS`](crate::DEFAULT_MAX_CONCURRENT_READS) reads
@@ -195,7 +195,7 @@ impl InlineContentPolicy {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RuntimeConfig {
-    /// Largest file content that the buffered read APIs materialize for one
+    /// Largest file content that the buffered read APIs return for one
     /// call, checked against resolved metadata before any content fetch.
     /// An over-limit read fails with `content_too_large`. Defaults to
     /// [`DEFAULT_MAX_READ_CONTENT_BYTES`], 256 MiB. A caller that reads larger

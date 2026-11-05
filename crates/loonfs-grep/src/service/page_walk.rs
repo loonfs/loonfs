@@ -29,7 +29,7 @@ struct LineMatch {
 }
 
 /// Runs the pattern over content, one match per line, in offset order.
-/// One forward pass: matches arrive in offset order, so the current line's
+/// One forward walk: matches arrive in offset order, so the current line's
 /// bounds and number advance monotonically — a file full of matches costs
 /// one scan of its bytes, never a repeated scan per match.
 fn line_matches(content: &[u8], pattern: &regex::bytes::Regex) -> Vec<LineMatch> {

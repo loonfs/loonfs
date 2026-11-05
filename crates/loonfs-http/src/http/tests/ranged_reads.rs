@@ -336,7 +336,7 @@ async fn unranged_reads_advertise_byte_ranges() {
 /// returns `content_too_large`.
 #[tokio::test]
 async fn the_download_limit_applies_to_the_length_of_a_range() {
-    let fixture = fixture(|options| options.binding.max_download_bytes = Some(64)).await;
+    let fixture = fixture(|options| options.http.max_download_bytes = Some(64)).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind listener");

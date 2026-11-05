@@ -101,7 +101,7 @@ async fn grep_allow_stale_serves_indexed_results_and_warns_for_jsonl() {
 }
 
 #[test]
-fn maintenance_gc_reclaims_a_deleted_namespace_instead_of_refusing() {
+fn maintenance_gc_retires_a_deleted_namespace_instead_of_refusing() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
     assert_success(&harness.run(&["namespace", "create", "demo"]));
@@ -110,11 +110,11 @@ fn maintenance_gc_reclaims_a_deleted_namespace_instead_of_refusing() {
     let payload = harness.temp_dir.path().join("payload.txt");
     fs::write(&payload, b"body").expect("write payload");
     assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), "/doc.txt"]));
-    // Materialize derived state so the tombstone has something reclaimable.
+    // Fold the WAL so the deleted namespace has segments to retire.
     assert_success(&harness.run(&["maintenance", "fold"]));
     assert_success(&harness.run(&["--json", "namespace", "delete", "demo", "--yes"]));
 
-    // GC is the reclamation path for a tombstoned namespace: it must run
+    // GC is the retirement path for a tombstoned namespace: it must run
     // and report, not refuse. (Fresh objects sit inside the grace window,
     // so this pins reachability, not byte counts.)
     let gc = harness.run(&["--json", "maintenance", "gc"]);

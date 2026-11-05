@@ -1,4 +1,4 @@
-//! Asserts a metadata maintenance pass is observable at debug level.
+//! Asserts a metadata maintenance step is observable at debug level.
 //!
 //! This stays out of the crate's `tests/it` harness and keeps its own test
 //! binary — its own process — on purpose.
@@ -80,7 +80,7 @@ impl std::io::Write for CaptureWriter {
 }
 
 #[test]
-fn a_metadata_maintenance_pass_emits_debug_events() {
+fn a_metadata_maintenance_step_emits_debug_events() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     let captured: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
@@ -117,7 +117,7 @@ fn a_metadata_maintenance_pass_emits_debug_events() {
         .expect("captured log is utf8");
     // Fields are matched with their `=` so a span carrying the same word
     // cannot satisfy the assertion.
-    let step = find_event(&log, "metadata maintenance pass concluded");
+    let step = find_event(&log, "metadata maintenance step concluded");
     for field in ["wal_fold=", "compaction="] {
         assert!(step.contains(field), "missing `{field}` in: {step}");
     }

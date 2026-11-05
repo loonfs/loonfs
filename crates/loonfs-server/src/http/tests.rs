@@ -68,7 +68,7 @@ async fn runtime_and_grep_cache_metrics_render_from_the_cache_stats() {
     )
     .await
     .expect("build app");
-    assert!(state.binding.grep.serves(), "the test config serves grep");
+    assert!(state.http.grep.serves(), "the test config serves grep");
     let rendered = super::metrics::render(&state);
 
     for name in [
@@ -161,7 +161,7 @@ async fn graceful_shutdown_abandons_requests_at_the_deadline_and_settles_the_wri
         Settlement {
             requests: None,
             runtime: writer.clone(),
-            sweep: None,
+            scheduler: None,
             deadline_ms: shutdown_deadline_ms,
         },
         async move {
@@ -310,9 +310,9 @@ async fn a_sweep_stops_between_namespaces_and_cancels_streaming_on_shutdown() {
         listener,
         router,
         Settlement {
-            requests: state.binding.request_limit().cloned(),
-            runtime: state.binding.runtime.clone(),
-            sweep: state.sweep.clone(),
+            requests: state.http.request_limit().cloned(),
+            runtime: state.http.runtime.clone(),
+            scheduler: state.scheduler.clone(),
             deadline_ms: 60_000,
         },
         async move {
@@ -327,7 +327,7 @@ async fn a_sweep_stops_between_namespaces_and_cancels_streaming_on_shutdown() {
     .expect("the sweep's compaction unit reaches its first segment write");
 
     shutdown_tx.send(()).expect("trigger shutdown");
-    while !state.binding.runtime.is_shutting_down() {
+    while !state.http.runtime.is_shutting_down() {
         tokio::task::yield_now().await;
     }
     store.inner().release();
@@ -337,7 +337,7 @@ async fn a_sweep_stops_between_namespaces_and_cancels_streaming_on_shutdown() {
         .expect("join the server task")
         .expect("shutdown settles the sweep and the runtime");
 
-    let snapshot = state.binding.metrics.snapshot();
+    let snapshot = state.http.metrics.snapshot();
     let cancelled = snapshot
         .by_name("loonfs.maintenance.compactions")
         .find(|entry| entry.labels == [("outcome", "cancelled")])
@@ -350,16 +350,16 @@ async fn a_sweep_stops_between_namespaces_and_cancels_streaming_on_shutdown() {
                 .snapshot()
                 .iter()
                 .any(|operation| operation.key().starts_with(&prefix)),
-            "no visit starts after shutdown, so `{namespace_id}` is never read"
+            "no namespace starts its steps after shutdown, so `{namespace_id}` is never read"
         );
     }
 }
 
 #[tokio::test]
-async fn shutdown_abandons_a_parked_sweep_visit_at_its_deadline_and_settles_the_runtime() {
+async fn shutdown_abandons_a_parked_sweep_at_its_deadline_and_settles_the_runtime() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("parked-collection");
-    // The first pass collects garbage, and collection lists pins first.
+    // The first sweep collects garbage, and collection lists pins first.
     let store = Arc::new(BlockingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
         KeyPredicate::exact(loonfs_objectstore::keys::pin_prefix(&namespace_id)),
@@ -375,7 +375,7 @@ async fn shutdown_abandons_a_parked_sweep_visit_at_its_deadline_and_settles_the_
     .await
     .expect("build app");
     state
-        .binding
+        .http
         .runtime
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
@@ -389,9 +389,9 @@ async fn shutdown_abandons_a_parked_sweep_visit_at_its_deadline_and_settles_the_
         listener,
         router,
         Settlement {
-            requests: state.binding.request_limit().cloned(),
-            runtime: state.binding.runtime.clone(),
-            sweep: state.sweep.clone(),
+            requests: state.http.request_limit().cloned(),
+            runtime: state.http.runtime.clone(),
+            scheduler: state.scheduler.clone(),
             deadline_ms: shutdown_deadline_ms,
         },
         async move {
@@ -408,10 +408,10 @@ async fn shutdown_abandons_a_parked_sweep_visit_at_its_deadline_and_settles_the_
     shutdown_tx.send(()).expect("trigger shutdown");
     loonfs_test_support::clock::bounded(std::time::Duration::from_secs(10), server)
         .await
-        .expect("shutdown does not wait for a parked visit past its deadline")
+        .expect("shutdown does not wait for a parked step past its deadline")
         .expect("join the server task")
-        .expect("an abandoned visit does not fail the shutdown");
-    assert!(state.binding.runtime.is_shutting_down());
+        .expect("an abandoned step does not fail the shutdown");
+    assert!(state.http.runtime.is_shutting_down());
     store.release();
 }
 
@@ -537,7 +537,7 @@ async fn hidden_maintenance_surface_keeps_filesystem_and_query_routes_served() {
     )
     .await
     .expect("build app");
-    assert!(state.sweep.is_some());
+    assert!(state.scheduler.is_some());
 
     let capabilities_response = router
         .clone()
@@ -595,7 +595,7 @@ async fn hidden_maintenance_surface_keeps_filesystem_and_query_routes_served() {
 
     let namespace_id = namespace_id("hidden");
     state
-        .binding
+        .http
         .runtime
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
@@ -673,9 +673,9 @@ async fn shutdown_refuses_new_requests_and_keeps_readiness_reachable_until_an_ac
         listener,
         router,
         Settlement {
-            requests: state.binding.request_limit().cloned(),
-            runtime: state.binding.runtime.clone(),
-            sweep: state.sweep.clone(),
+            requests: state.http.request_limit().cloned(),
+            runtime: state.http.runtime.clone(),
+            scheduler: state.scheduler.clone(),
             deadline_ms: shutdown_deadline_ms,
         },
         async move {
@@ -694,7 +694,7 @@ async fn shutdown_refuses_new_requests_and_keeps_readiness_reachable_until_an_ac
     let shutdown_started = tokio::time::Instant::now();
     shutdown_tx.send(()).expect("trigger shutdown");
     loonfs_test_support::clock::bounded(std::time::Duration::from_secs(1), async {
-        while !state.binding.runtime.is_shutting_down() {
+        while !state.http.runtime.is_shutting_down() {
             tokio::task::yield_now().await;
         }
     })

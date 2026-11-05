@@ -4,7 +4,7 @@ use crate::common::GrepHost;
 use loonfs::engine::PoolCounts;
 use loonfs::{InlineContentPolicy, LoonFs, NamespaceId, SharedObjectStore, Writable};
 use loonfs_grep::{
-    GramIndexBuildPolicy, GrepBuildOutcome, GrepPassBudget, GrepReorganizeOutcome, GrepWorker,
+    GramIndexBuildPolicy, GrepBuildOutcome, GrepReorganizeOutcome, GrepStepBudget, GrepWorker,
 };
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -87,7 +87,7 @@ async fn namespace_with_files(writer: &LoonFs<Writable>, name: &str) -> Namespac
     namespace_id
 }
 
-fn worker_with(host: &GrepHost, budget: &GrepPassBudget) -> GrepWorker<SharedObjectStore> {
+fn worker_with(host: &GrepHost, budget: &GrepStepBudget) -> GrepWorker<SharedObjectStore> {
     GrepWorker::new(
         host.store.clone(),
         host.reader.clone(),
@@ -136,7 +136,7 @@ async fn parked_build_step<'a>(
 /// first.
 async fn drive_until_reported(
     step: &mut (impl Future<Output = loonfs_grep::Result<GrepBuildOutcome>> + Unpin),
-    budget: &GrepPassBudget,
+    budget: &GrepStepBudget,
     expected: PoolCounts,
 ) {
     let reported = async {
@@ -163,7 +163,7 @@ async fn no_more_grep_steps_hold_content_than_the_limit() {
     let store: SharedObjectStore = watch.clone();
     let writer = content_object_writer(&store).await;
     let host = GrepHost::new(&store, "grep-step-permits").await;
-    let worker = &worker_with(&host, &GrepPassBudget::new(NonZeroUsize::MIN));
+    let worker = &worker_with(&host, &GrepStepBudget::new(NonZeroUsize::MIN));
     let mut namespaces = Vec::new();
     for index in 0..3 {
         let namespace_id = namespace_with_files(&writer, &format!("permits-{index}")).await;
@@ -218,7 +218,7 @@ async fn workers_over_two_stores_share_one_step_permit() {
     let second_directory = tempdir().expect("directory");
     let (blocking, first_writer, first_host) = blocking_setup(&first_directory).await;
     let (_, second_writer, second_host) = blocking_setup(&second_directory).await;
-    let budget = GrepPassBudget::new(NonZeroUsize::MIN);
+    let budget = GrepStepBudget::new(NonZeroUsize::MIN);
     let first_worker = worker_with(&first_host, &budget);
     let second_worker = worker_with(&second_host, &budget);
     let first = namespace_with_files(&first_writer, "first").await;
@@ -267,7 +267,7 @@ async fn an_up_to_date_step_on_either_worker_takes_no_permit() {
     let second_directory = tempdir().expect("directory");
     let (blocking, first_writer, first_host) = blocking_setup(&first_directory).await;
     let (_, second_writer, second_host) = blocking_setup(&second_directory).await;
-    let budget = GrepPassBudget::new(NonZeroUsize::MIN);
+    let budget = GrepStepBudget::new(NonZeroUsize::MIN);
     let first_worker = worker_with(&first_host, &budget);
     let second_worker = worker_with(&second_host, &budget);
     let mut current = Vec::new();
@@ -314,7 +314,7 @@ async fn an_up_to_date_step_on_either_worker_takes_no_permit() {
 async fn a_dropped_step_returns_its_permit() {
     let directory = tempdir().expect("directory");
     let (blocking, writer, host) = blocking_setup(&directory).await;
-    let worker = worker_with(&host, &GrepPassBudget::new(NonZeroUsize::MIN));
+    let worker = worker_with(&host, &GrepStepBudget::new(NonZeroUsize::MIN));
     let holding = namespace_with_files(&writer, "holding").await;
     let waiting = namespace_with_files(&writer, "waiting").await;
     for namespace_id in [&holding, &waiting] {
@@ -352,7 +352,7 @@ async fn a_dropped_step_returns_its_permit() {
 async fn a_step_dropped_while_waiting_leaves_the_counts_at_zero() {
     let directory = tempdir().expect("directory");
     let (blocking, writer, host) = blocking_setup(&directory).await;
-    let budget = GrepPassBudget::new(NonZeroUsize::MIN);
+    let budget = GrepStepBudget::new(NonZeroUsize::MIN);
     let worker = worker_with(&host, &budget);
     let holding = namespace_with_files(&writer, "holding").await;
     let waiting = namespace_with_files(&writer, "waiting").await;

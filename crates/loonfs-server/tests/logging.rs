@@ -225,7 +225,7 @@ async fn missing_path_has_one_debug_completion_and_no_errors() {
     )
     .await
     .expect("build app");
-    let writer = state.binding.runtime;
+    let writer = state.http.runtime;
     writer
         .create_namespace(&namespace_id("demo"), &loonfs_test_support::test_actor())
         .await
@@ -274,7 +274,7 @@ async fn expected_typed_errors_use_debug_or_warn_and_keep_completion_fields() {
     )
     .await
     .expect("build app");
-    let writer = state.binding.runtime;
+    let writer = state.http.runtime;
     let namespace = namespace_id("demo");
     writer
         .create_namespace(&namespace, &loonfs_test_support::test_actor())

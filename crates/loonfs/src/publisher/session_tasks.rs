@@ -75,8 +75,8 @@ impl NamespacePublisher {
             }
             // A fold frees the tail up to where it began, and a publish while
             // it runs starts no fold, so the task checks the trigger again
-            // after each fold that published. Each pass after the first folds
-            // commits published during the pass before it.
+            // after each fold that published. Each fold after the first folds
+            // commits published during the fold before it.
             loop {
                 match AssertUnwindSafe(publisher.run_fold()).catch_unwind().await {
                     Ok(true) => publisher.start_compaction(),

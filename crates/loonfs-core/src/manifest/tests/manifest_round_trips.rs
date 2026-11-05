@@ -97,7 +97,7 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
         .response;
     assert_eq!(response.outcome, crate::FoldWalOutcome::Published);
     let materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, response.manifest_no)
+        load_manifest_state_for_inspection(&store, &namespace_id, response.manifest_no)
             .await
             .expect("load folded manifest");
     let delta = materialized
@@ -107,14 +107,14 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
         .last()
         .expect("folded manifest has a delta run");
     assert_eq!(delta.tier, RunTier::Delta);
-    let delta_manifest = runs_in_materialization_order(materialized.manifest.payload())
+    let delta_manifest = runs_oldest_first(materialized.manifest.payload())
         .into_iter()
         .find(|run| run.run_no == delta.run_no)
         .expect("folded delta run is valid");
     let manifest_key =
         metadata_manifest_object(&namespace_id, &materialized.manifest.payload().manifest_no);
     let mut actual_tail = MetadataStateBuilder::default();
-    inspection_materialization::append_manifest_segments_to_metadata(
+    inspection_state::append_manifest_segments_to_metadata(
         &store,
         &namespace_id,
         &manifest_key,
@@ -125,7 +125,7 @@ async fn a_publish_projection_fold_writes_the_replayed_tail_rows() {
     .await
     .expect("load delta run");
     assert!(metadata_states_equivalent(
-        &expected_tail.merged_rows(),
+        &expected_tail.combined_rows(),
         &actual_tail.build()
     ));
 }
@@ -445,7 +445,7 @@ async fn manifest_materialization_uses_written_segments() {
     .0;
 
     let materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, compacted_manifest_no)
+        load_manifest_state_for_inspection(&store, &namespace_id, compacted_manifest_no)
             .await
             .expect("load materialized manifest");
     let current = load_current_projection(&store, &namespace_id)
@@ -489,7 +489,7 @@ async fn manifest_delta_run_materialization_matches_checkpoint_projection() {
         .await
         .expect("first checkpoint");
     let first_materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, first.manifest_no)
+        load_manifest_state_for_inspection(&store, &namespace_id, first.manifest_no)
             .await
             .expect("load first manifest");
 
@@ -504,7 +504,7 @@ async fn manifest_delta_run_materialization_matches_checkpoint_projection() {
         .await
         .expect("materialization");
     let second_materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, second.manifest_no)
+        load_manifest_state_for_inspection(&store, &namespace_id, second.manifest_no)
             .await
             .expect("load second manifest");
 
@@ -554,7 +554,7 @@ async fn manifest_delta_run_materialization_matches_checkpoint_projection() {
         captured_seqs.push(latest.captured_seq);
     }
     let latest_materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, latest.manifest_no)
+        load_manifest_state_for_inspection(&store, &namespace_id, latest.manifest_no)
             .await
             .expect("load chained manifest");
     assert_eq!(
@@ -594,7 +594,7 @@ async fn manifest_delta_run_missing_segment_fails_load() {
         .await
         .expect("second checkpoint");
     let materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, second.manifest_no)
+        load_manifest_state_for_inspection(&store, &namespace_id, second.manifest_no)
             .await
             .expect("load materialized manifest");
     let deleted_key = metadata_segment_object_key(
@@ -610,9 +610,7 @@ async fn manifest_delta_run_missing_segment_fails_load() {
         .await
         .expect("delete delta segment");
 
-    match load_manifest_materialization_for_inspection(&store, &namespace_id, second.manifest_no)
-        .await
-    {
+    match load_manifest_state_for_inspection(&store, &namespace_id, second.manifest_no).await {
         Err(ManifestLoadError::MissingSegment { object_key }) => {
             assert_eq!(object_key, deleted_key);
         }
@@ -745,10 +743,9 @@ async fn manifest_base_run_segments_have_sorted_segment_coverage() {
         .expect("materialization before checkpoint");
 
     let manifest_no = checkpoint_then_compact(&store, &namespace_id, &context, policy).await;
-    let materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, manifest_no)
-            .await
-            .expect("load manifest");
+    let materialized = load_manifest_state_for_inspection(&store, &namespace_id, manifest_no)
+        .await
+        .expect("load manifest");
 
     let base = base_tier(&materialized.manifest);
     let revisions = base

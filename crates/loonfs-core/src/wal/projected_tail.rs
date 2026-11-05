@@ -82,7 +82,7 @@ impl ProjectedContent {
         }
     }
 
-    fn merge(&mut self, later: &ProjectedContent) {
+    fn combine(&mut self, later: &ProjectedContent) {
         for piece in &later.pieces {
             self.insert_piece(&later.content_ref, piece.clone(), later.committed_seq);
         }
@@ -179,30 +179,30 @@ impl ProjectedWalTail {
             .chunks
             .iter()
             .filter_map(|chunk| chunk.content(content_ref));
-        let mut merged = found.next()?.clone();
+        let mut combined = found.next()?.clone();
         for later in found {
-            merged.merge(later);
+            combined.combine(later);
         }
-        Some(merged)
+        Some(combined)
     }
 
     /// Contents with pieces, in the order the tail first named them.
     pub(crate) fn contents(&self) -> Vec<ProjectedContent> {
         let mut positions: HashMap<&ContentId, usize> = HashMap::new();
-        let mut merged: Vec<ProjectedContent> = Vec::new();
+        let mut combined: Vec<ProjectedContent> = Vec::new();
         for content in self.chunks.iter().flat_map(|chunk| &chunk.contents) {
             match positions.entry(&content.content_ref.content_id) {
-                Entry::Occupied(position) => merged[*position.get()].merge(content),
+                Entry::Occupied(position) => combined[*position.get()].combine(content),
                 Entry::Vacant(vacant) => {
-                    vacant.insert(merged.len());
-                    merged.push(content.clone());
+                    vacant.insert(combined.len());
+                    combined.push(content.clone());
                 }
             }
         }
-        merged
+        combined
     }
 
-    pub(crate) fn merged_rows(&self) -> MetadataState {
+    pub(crate) fn combined_rows(&self) -> MetadataState {
         let rows = || self.chunks.iter().map(|chunk| &chunk.rows);
         MetadataState::from_rows(
             rows().flat_map(MetadataState::inodes).cloned().collect(),
@@ -483,7 +483,7 @@ mod tests {
     }
 
     #[test]
-    fn appended_pieces_merge_across_chunks_and_an_earlier_view_skips_later_chunks() {
+    fn appended_pieces_combine_across_chunks_and_an_earlier_view_skips_later_chunks() {
         let content_id = ContentId::parse(format!("con_{:026}", 1)).expect("content id");
         let mut tail = ProjectedWalTail::default();
         for (seq, whole, offset) in [
@@ -500,7 +500,7 @@ mod tests {
             loonfs_types::ChecksumAlgorithm::Crc64nvme,
         );
 
-        let content = tail.content(&newest).expect("merged content");
+        let content = tail.content(&newest).expect("combined content");
         assert_eq!(content.content_ref, newest);
         assert_eq!(content.committed_seq, ChangeSeq(3));
         assert_eq!(

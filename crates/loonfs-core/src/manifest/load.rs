@@ -1,8 +1,8 @@
 //! Manifest-envelope loading and descriptor verification.
 //!
 //! This module validates manifest framing and segment descriptors without
-//! fetching row data. Other manifest modules load blocks. Full
-//! materialization is available only in tests.
+//! fetching row data. Other manifest modules load blocks. Loading every row
+//! of a manifest into memory is available only in tests.
 
 use super::error::ManifestLoadError;
 use super::validate::{validate_manifest, validate_namespace_manifest};
@@ -29,11 +29,10 @@ use std::sync::Arc;
 use tracing::Instrument;
 
 #[cfg(test)]
-pub(super) use super::tests::inspection_materialization::append_rows_to_metadata;
+pub(super) use super::tests::inspection_state::append_rows_to_metadata;
 #[cfg(test)]
-pub(crate) use super::tests::inspection_materialization::{
-    load_manifest_materialization_for_inspection,
-    load_manifest_metadata_state_for_inspection_from_manifest,
+pub(crate) use super::tests::inspection_state::{
+    load_manifest_metadata_state_for_inspection_from_manifest, load_manifest_state_for_inspection,
 };
 
 /// Verifies every coordinate by which a durable control object binds one

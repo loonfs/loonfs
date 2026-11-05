@@ -396,6 +396,6 @@ async fn validation_materialization_holds_a_write_permit() {
         store.release();
     };
     let (written, ()) = tokio::join!(write, check);
-    assert_eq!(written.expect("merged").extents[0].length, 10);
+    assert_eq!(written.expect("combined").extents[0].length, 10);
     assert_eq!(pool.counts(), crate::PoolCounts::default());
 }

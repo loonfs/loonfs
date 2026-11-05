@@ -1,7 +1,7 @@
-//! Daily listing, session ticks, and their store request costs.
+//! Sweeps, session steps, and their store request costs.
 
-use super::retries::SweepCall;
-use super::{GarbageCollection, GrepIndexing, Sweep, SweepRetry, SweepState};
+use super::retries::MaintenanceCall;
+use super::{GarbageCollection, GrepIndexing, Scheduler, SchedulerState, StepRetry};
 use crate::config::{GrepConfig, JobMode, ServerConfig};
 use futures::TryStreamExt as _;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue, MetricsRecorder};
@@ -31,7 +31,7 @@ use tempfile::tempdir;
 const MINUTE_MS: u64 = 60 * 1_000;
 
 /// Lists the ids of the sessions that `namespaces` holds.
-fn held_ids(namespaces: &Namespaces<SweepState>) -> Vec<NamespaceId> {
+fn held_ids(namespaces: &Namespaces<SchedulerState>) -> Vec<NamespaceId> {
     std::iter::successors(namespaces.next_held_id(None), |after| {
         namespaces.next_held_id(Some(after))
     })
@@ -47,14 +47,14 @@ fn list_count(operations: &[RecordedOperation]) -> usize {
 }
 
 /// Reads or updates the held entry of `namespace_id` in `namespaces`.
-fn visit_held<T>(
-    namespaces: &Namespaces<SweepState>,
+fn with_held<T>(
+    namespaces: &Namespaces<SchedulerState>,
     namespace_id: &NamespaceId,
-    visit: impl FnOnce(&mut HeldNamespace<SweepState>) -> T,
+    with: impl FnOnce(&mut HeldNamespace<SchedulerState>) -> T,
 ) -> Option<T> {
     namespaces
         .entry(namespace_id)
-        .map(|entry| visit(&mut super::lock(&entry)))
+        .map(|entry| with(&mut super::lock(&entry)))
 }
 const DAY_MS: u64 = 24 * 60 * MINUTE_MS;
 
@@ -67,17 +67,17 @@ fn idle_fold_after_ms(config: &ServerConfig) -> u64 {
         .map_or(0, std::num::NonZeroU64::get)
 }
 
-/// A server's runtime and sweep over `store`, reading `clock`.
-struct SweepServer {
+/// A server's runtime and scheduler over `store`, reading `clock`.
+struct SchedulerServer {
     clock: Arc<ManualClock>,
     recorder: Arc<DefaultMetricsRecorder>,
     runtime: LoonFs<Writable>,
     maintenance: Maintenance,
     grep_worker: Option<GrepWorker<SharedObjectStore>>,
-    sweep: Sweep,
+    scheduler: Scheduler,
 }
 
-impl SweepServer {
+impl SchedulerServer {
     async fn start(store: SharedObjectStore, config: &ServerConfig, now_ms: u64) -> Self {
         let clock = Arc::new(ManualClock::new(now_ms));
         let recorder = Arc::new(DefaultMetricsRecorder::new());
@@ -100,7 +100,7 @@ impl SweepServer {
                 runtime.read_only(),
                 runtime.clone(),
                 maintenance.clone(),
-                loonfs_grep::GrepPassBudget::default(),
+                loonfs_grep::GrepStepBudget::default(),
             )
         });
         let grep = grep_worker.clone().map(|worker| {
@@ -113,8 +113,8 @@ impl SweepServer {
                     .expect("build the grep policy"),
             )
         });
-        let sweep = Sweep::new(
-            config.sweep_config(),
+        let scheduler = Scheduler::new(
+            config.scheduler_config(),
             runtime.object_store(),
             maintenance.clone(),
             Arc::new(Namespaces::new(runtime.clone())),
@@ -128,18 +128,18 @@ impl SweepServer {
             runtime,
             maintenance,
             grep_worker,
-            sweep,
+            scheduler,
         }
     }
 
-    async fn tick_after(&self, elapsed_ms: u64) {
+    async fn run_steps_after(&self, elapsed_ms: u64) {
         self.clock.advance_ms(elapsed_ms);
-        self.sweep.tick().await;
+        self.scheduler.run_due_steps().await;
     }
 
     async fn enable_index(&self, namespace_id: &NamespaceId) {
         let _handle = self
-            .sweep
+            .scheduler
             .inner
             .namespaces
             .open(namespace_id)
@@ -151,12 +151,15 @@ impl SweepServer {
             .enable(namespace_id)
             .await
             .expect("enable grep");
-        self.sweep.inner.namespaces.mark_index_dirty(namespace_id);
+        self.scheduler
+            .inner
+            .namespaces
+            .mark_index_dirty(namespace_id);
     }
 
     async fn disable_index(&self, namespace_id: &NamespaceId) {
         let _handle = self
-            .sweep
+            .scheduler
             .inner
             .namespaces
             .open(namespace_id)
@@ -168,11 +171,14 @@ impl SweepServer {
             .disable(namespace_id)
             .await
             .expect("disable grep");
-        self.sweep.inner.namespaces.mark_index_dirty(namespace_id);
+        self.scheduler
+            .inner
+            .namespaces
+            .mark_index_dirty(namespace_id);
     }
 
     fn page_limit(mut self, page_limit: EffectiveLimit) -> Self {
-        self.sweep = self.sweep.page_limit(page_limit);
+        self.scheduler = self.scheduler.page_limit(page_limit);
         self
     }
 
@@ -209,7 +215,7 @@ impl SweepServer {
 }
 
 /// A config with every default, and `grep` maintained when asked.
-fn sweep_config(grep: Option<GrepWorkerConfig>) -> ServerConfig {
+fn scheduler_config(grep: Option<GrepWorkerConfig>) -> ServerConfig {
     let mut config: ServerConfig = toml::from_str(
         r#"
 bind = "127.0.0.1:0"
@@ -221,7 +227,7 @@ kind = "local_fs"
 root = "unused"
 "#,
     )
-    .expect("parse the sweep test config");
+    .expect("parse the scheduler test config");
     if let Some(worker) = grep {
         config.grep = GrepConfig {
             mode: JobMode::ServeAndMaintain,
@@ -344,12 +350,12 @@ async fn a_restart_then_one_sweep_folds_an_idle_tail_and_collects_garbage() {
     writer.shutdown().await.expect("stop the writer");
     drop(writer);
 
-    let server = SweepServer::start(store.clone(), &sweep_config(None), now_ms).await;
+    let server = SchedulerServer::start(store.clone(), &scheduler_config(None), now_ms).await;
     let tail = server.wal_tail_objects(&namespace_id).await;
     assert!(tail > 0);
     server
-        .sweep
-        .run_pass(GarbageCollection::Collect)
+        .scheduler
+        .run_sweep(GarbageCollection::Collect)
         .await
         .expect("list namespaces");
     assert_eq!(
@@ -365,8 +371,8 @@ async fn a_restart_then_one_sweep_folds_an_idle_tail_and_collects_garbage() {
 
     server.clock.advance_ms(2 * DAY_MS);
     server
-        .sweep
-        .run_pass(GarbageCollection::Collect)
+        .scheduler
+        .run_sweep(GarbageCollection::Collect)
         .await
         .expect("list namespaces");
     assert_eq!(server.wal_tail_objects(&namespace_id).await, 0);
@@ -403,10 +409,10 @@ async fn a_sweep_retires_a_deleted_namespace_after_its_grace() {
     let content_prefix = loonfs_objectstore::keys::content_prefix(&namespace_id);
     assert!(!keys_under(store.as_ref(), &content_prefix).await.is_empty());
 
-    let server = SweepServer::start(store.clone(), &sweep_config(None), now_ms).await;
+    let server = SchedulerServer::start(store.clone(), &scheduler_config(None), now_ms).await;
     server
-        .sweep
-        .run_pass(GarbageCollection::Collect)
+        .scheduler
+        .run_sweep(GarbageCollection::Collect)
         .await
         .expect("list namespaces");
     assert!(
@@ -417,8 +423,8 @@ async fn a_sweep_retires_a_deleted_namespace_after_its_grace() {
     server.clock.advance_ms(DAY_MS);
     assert_eq!(
         server
-            .sweep
-            .run_pass(GarbageCollection::Collect)
+            .scheduler
+            .run_sweep(GarbageCollection::Collect)
             .await
             .expect("list namespaces"),
         1,
@@ -429,12 +435,9 @@ async fn a_sweep_retires_a_deleted_namespace_after_its_grace() {
         Vec::<String>::new()
     );
     assert_eq!(
-        server.counter(
-            "loonfs.maintenance.sweep_visit_failures",
-            &[("call", "metadata")]
-        ),
+        server.counter("loonfs.maintenance.sweep_failures", &[("call", "metadata")]),
         0,
-        "a deleted namespace is not a failed visit"
+        "a deleted namespace is not a failed call"
     );
 }
 
@@ -446,17 +449,17 @@ async fn grep_gc_runs_in_a_sweep() {
     let (writer, now_ms) = seed_writer(&store).await;
     seed_unfolded_tail(&writer, &namespace_id).await;
     writer.shutdown().await.expect("stop the writer");
-    let server = SweepServer::start(
+    let server = SchedulerServer::start(
         store.clone(),
-        &sweep_config(Some(GrepWorkerConfig::default())),
+        &scheduler_config(Some(GrepWorkerConfig::default())),
         now_ms,
     )
     .await;
     let worker = server.grep_worker.as_ref().expect("grep worker");
     worker.enable(&namespace_id).await.expect("enable grep");
     server
-        .sweep
-        .run_pass(GarbageCollection::Skip)
+        .scheduler
+        .run_sweep(GarbageCollection::Skip)
         .await
         .expect("list namespaces");
     assert_matches!(
@@ -471,8 +474,8 @@ async fn grep_gc_runs_in_a_sweep() {
         .is_empty());
 
     server
-        .sweep
-        .run_pass(GarbageCollection::Collect)
+        .scheduler
+        .run_sweep(GarbageCollection::Collect)
         .await
         .expect("list namespaces");
     assert!(
@@ -483,8 +486,8 @@ async fn grep_gc_runs_in_a_sweep() {
     );
     server.clock.advance_ms(2 * DAY_MS);
     server
-        .sweep
-        .run_pass(GarbageCollection::Collect)
+        .scheduler
+        .run_sweep(GarbageCollection::Collect)
         .await
         .expect("list namespaces");
     assert_eq!(
@@ -506,7 +509,7 @@ async fn a_sweep_drives_a_grep_backfill_to_active() {
     let session = writer
         .open_namespace(&namespace_id)
         .expect("open the namespace");
-    let files = super::MAX_GREP_STEPS_PER_VISIT + 4;
+    let files = super::MAX_GREP_STEPS_PER_INDEX_STEP + 4;
     for index in 0..files {
         session
             .put_file(
@@ -518,9 +521,9 @@ async fn a_sweep_drives_a_grep_backfill_to_active() {
             .expect("write a file");
     }
     writer.shutdown().await.expect("stop the writer");
-    let server = SweepServer::start(
+    let server = SchedulerServer::start(
         store,
-        &sweep_config(Some(GrepWorkerConfig {
+        &scheduler_config(Some(GrepWorkerConfig {
             max_files_per_step: 1,
             ..GrepWorkerConfig::default()
         })),
@@ -536,25 +539,25 @@ async fn a_sweep_drives_a_grep_backfill_to_active() {
         .expect("enable grep");
 
     server
-        .sweep
-        .run_pass(GarbageCollection::Skip)
+        .scheduler
+        .run_sweep(GarbageCollection::Skip)
         .await
         .expect("list namespaces");
     assert_matches!(
         server.grep_status(&namespace_id).await,
         GrepIndexStatus::Backfilling { .. },
-        "one visit runs at most {} build steps",
-        super::MAX_GREP_STEPS_PER_VISIT
+        "one index step runs at most {} build steps",
+        super::MAX_GREP_STEPS_PER_INDEX_STEP
     );
     server
-        .sweep
-        .run_pass(GarbageCollection::Skip)
+        .scheduler
+        .run_sweep(GarbageCollection::Skip)
         .await
         .expect("list namespaces");
     let status = server.grep_status(&namespace_id).await;
     let watermark = status
         .active_watermark()
-        .unwrap_or_else(|| panic!("the next pass finishes the backfill, found {status:?}"));
+        .unwrap_or_else(|| panic!("the next sweep finishes the backfill, found {status:?}"));
     assert_eq!(
         watermark.built_through_seq(),
         loonfs::ChangeSeq(u64::try_from(files).expect("file count fits"))
@@ -578,13 +581,13 @@ async fn a_sweep_survives_a_failing_namespace() {
         InjectedError::Transport("injected for one namespace".to_owned()),
     ));
     store.fail_all();
-    let config = sweep_config(None);
-    let server = SweepServer::start(store.clone(), &config, now_ms + 20 * MINUTE_MS).await;
+    let config = scheduler_config(None);
+    let server = SchedulerServer::start(store.clone(), &config, now_ms + 20 * MINUTE_MS).await;
 
     assert_eq!(
         server
-            .sweep
-            .run_pass(GarbageCollection::Skip)
+            .scheduler
+            .run_sweep(GarbageCollection::Skip)
             .await
             .expect("list namespaces"),
         3
@@ -594,22 +597,19 @@ async fn a_sweep_survives_a_failing_namespace() {
     assert!(server.wal_tail_objects(&names[1]).await > 0);
     assert_eq!(server.wal_tail_objects(&names[2]).await, 0);
     assert_eq!(
-        server.counter(
-            "loonfs.maintenance.sweep_visit_failures",
-            &[("call", "metadata")]
-        ),
+        server.counter("loonfs.maintenance.sweep_failures", &[("call", "metadata")]),
         1
     );
 
     server
-        .sweep
-        .run_pass(GarbageCollection::Skip)
+        .scheduler
+        .run_sweep(GarbageCollection::Skip)
         .await
         .expect("list namespaces");
     assert_eq!(
         server.wal_tail_objects(&names[1]).await,
         0,
-        "a namespace that no host holds keeps no retry state, so the next pass tries it again"
+        "a namespace that no host holds keeps no retry state, so the next sweep tries it again"
     );
 }
 
@@ -639,7 +639,7 @@ impl ObjectStore for PanicOnManifestRead {
 }
 
 #[tokio::test]
-async fn a_panicking_visit_is_backed_off_and_the_next_namespace_is_still_visited() {
+async fn a_panicking_call_is_backed_off_and_the_next_namespace_still_runs_its_steps() {
     let directory = tempdir().expect("tempdir");
     let base: SharedObjectStore = local_store(directory.path());
     let names = ["alpha", "beta", "gamma"].map(namespace_id);
@@ -653,10 +653,10 @@ async fn a_panicking_visit_is_backed_off_and_the_next_namespace_is_still_visited
         manifest_prefix: loonfs_objectstore::keys::metadata_manifest_prefix(&names[1]),
         armed: AtomicBool::new(false),
     });
-    let config = sweep_config(None);
-    let server = SweepServer::start(store.clone(), &config, now_ms + 20 * MINUTE_MS).await;
+    let config = scheduler_config(None);
+    let server = SchedulerServer::start(store.clone(), &config, now_ms + 20 * MINUTE_MS).await;
     let _held = server
-        .sweep
+        .scheduler
         .inner
         .namespaces
         .open(&names[1])
@@ -664,40 +664,40 @@ async fn a_panicking_visit_is_backed_off_and_the_next_namespace_is_still_visited
         .expect("hold the namespace that panics");
     store.armed.store(true, Ordering::SeqCst);
 
-    server.pass_after(0).await;
+    server.sweep_after(0).await;
     store.armed.store(false, Ordering::SeqCst);
     assert_eq!(server.wal_tail_objects(&names[0]).await, 0);
     assert!(server.wal_tail_objects(&names[1]).await > 0);
     assert_eq!(
         server.wal_tail_objects(&names[2]).await,
         0,
-        "the panic doesn't stop the visits to other namespaces"
+        "the panic doesn't stop the steps of other namespaces"
     );
     // The acknowledgment of the floor and the retention advance load the
     // same manifest, so they panic too.
     assert_eq!(server.counter("loonfs.maintenance.sweep_panics", &[]), 3);
     for call in [
-        SweepCall::Metadata,
-        SweepCall::RetentionAcknowledgment,
-        SweepCall::Retention,
+        MaintenanceCall::Metadata,
+        MaintenanceCall::RetentionAcknowledgment,
+        MaintenanceCall::Retention,
     ] {
-        assert_eq!(server.visit_failures(call), 1, "{call:?}");
+        assert_eq!(server.call_failures(call), 1, "{call:?}");
     }
     assert_eq!(
-        server.retry(&names[1], SweepCall::Metadata),
-        SweepRetry {
-            retry_at_ms: server.sweep.inner.timer.monotonic_now_ms()
-                + config.maintenance_interval_ms.get(),
+        server.retry(&names[1], MaintenanceCall::Metadata),
+        StepRetry {
+            retry_at_ms: server.scheduler.inner.timer.monotonic_now_ms()
+                + config.metadata_retry_interval_ms.get(),
             attempts: 1,
         },
-        "the panic counts as a failure, and ticks wait for its retry time"
+        "the panic counts as a failure, and the session steps wait for its retry time"
     );
 
-    server.pass_after(0).await;
+    server.sweep_after(0).await;
     assert_eq!(
         server.wal_tail_objects(&names[1]).await,
         0,
-        "the next pass tries the namespace again"
+        "the next sweep tries the namespace again"
     );
 }
 
@@ -710,7 +710,7 @@ async fn held_failing_server(
     failing: OperationSelector,
 ) -> (
     Arc<FailStore<LocalFsStore>>,
-    SweepServer,
+    SchedulerServer,
     NamespaceId,
     Namespace<Writable>,
 ) {
@@ -720,7 +720,7 @@ async fn held_failing_server(
         failing,
         InjectedError::PermissionDenied("expired credentials".to_owned()),
     ));
-    let server = SweepServer::start(store.clone(), config, 0).await;
+    let server = SchedulerServer::start(store.clone(), config, 0).await;
     let namespace_id = namespace_id("held-failing");
     server
         .runtime
@@ -728,7 +728,7 @@ async fn held_failing_server(
         .await
         .expect("create the namespace");
     let held = server
-        .sweep
+        .scheduler
         .inner
         .namespaces
         .open(&namespace_id)
@@ -740,16 +740,16 @@ async fn held_failing_server(
     (store, server, namespace_id, held)
 }
 
-impl SweepServer {
-    fn visit_failures(&self, call: SweepCall) -> u64 {
+impl SchedulerServer {
+    fn call_failures(&self, call: MaintenanceCall) -> u64 {
         self.counter(
-            "loonfs.maintenance.sweep_visit_failures",
+            "loonfs.maintenance.sweep_failures",
             &[("call", call.as_str())],
         )
     }
 
-    fn retry(&self, namespace_id: &NamespaceId, call: SweepCall) -> SweepRetry {
-        visit_held(&self.sweep.inner.namespaces, namespace_id, |held| {
+    fn retry(&self, namespace_id: &NamespaceId, call: MaintenanceCall) -> StepRetry {
+        with_held(&self.scheduler.inner.namespaces, namespace_id, |held| {
             call.retry(&held.host_state)
         })
         .expect("a held session")
@@ -759,20 +759,21 @@ impl SweepServer {
     /// When the held session's last metadata step said its tail's idle fold
     /// comes due.
     fn idle_fold_due_at_ms(&self, namespace_id: &NamespaceId) -> Option<u64> {
-        visit_held(&self.sweep.inner.namespaces, namespace_id, |held| {
+        with_held(&self.scheduler.inner.namespaces, namespace_id, |held| {
             held.host_state.idle_fold_due_at_ms
         })
         .expect("a held session")
     }
 
     /// Whether the held session's last metadata step left work due, so the
-    /// ticks wait for the metadata retry time before the next step.
+    /// scheduler waits for the metadata retry time before the next step.
     fn metadata_left_due(&self, namespace_id: &NamespaceId) -> bool {
-        self.retry(namespace_id, SweepCall::Metadata).retry_at_ms
-            > self.sweep.inner.timer.monotonic_now_ms()
+        self.retry(namespace_id, MaintenanceCall::Metadata)
+            .retry_at_ms
+            > self.scheduler.inner.timer.monotonic_now_ms()
     }
 
-    /// Makes the metadata call that a tick's metadata step makes, and
+    /// Makes the metadata call that a session's metadata step makes, and
     /// returns whether it finds the namespace's metadata caught up.
     async fn metadata_caught_up(&self, namespace_id: &NamespaceId) -> bool {
         self.maintenance
@@ -784,34 +785,34 @@ impl SweepServer {
             == loonfs::MetadataMaintenanceOutcome::CaughtUp
     }
 
-    async fn pass_after(&self, elapsed_ms: u64) {
+    async fn sweep_after(&self, elapsed_ms: u64) {
         self.clock.advance_ms(elapsed_ms);
-        self.sweep
-            .run_pass(GarbageCollection::Skip)
+        self.scheduler
+            .run_sweep(GarbageCollection::Skip)
             .await
             .expect("list namespaces");
     }
 
-    /// Checks that ticks make a held session's failing `call` again exactly
+    /// Checks that the session steps make a held session's failing `call` again exactly
     /// when each wait in `wait_seconds` ends, from the call's first failure.
-    async fn tick_through_retries(
+    async fn run_steps_through_retries(
         &self,
         namespace_id: &NamespaceId,
-        call: SweepCall,
+        call: MaintenanceCall,
         wait_seconds: &[u64],
     ) {
         for (attempts, wait_s) in (1..).zip(wait_seconds) {
             assert_eq!(self.retry(namespace_id, call).attempts, attempts);
-            let failures = self.visit_failures(call);
-            self.tick_after(wait_s * 1_000 - 1).await;
+            let failures = self.call_failures(call);
+            self.run_steps_after(wait_s * 1_000 - 1).await;
             assert_eq!(
-                self.visit_failures(call),
+                self.call_failures(call),
                 failures,
                 "failure {attempts} waits {wait_s} s"
             );
-            self.tick_after(1).await;
+            self.run_steps_after(1).await;
             assert_eq!(
-                self.visit_failures(call),
+                self.call_failures(call),
                 failures + 1,
                 "failure {attempts} is retried after {wait_s} s"
             );
@@ -819,52 +820,57 @@ impl SweepServer {
     }
 }
 
-/// Checks a failing metadata step's schedule with the default 5-second tick
-/// and 5-minute metadata interval: the later of that interval and a backoff
-/// that starts at one tick, while the session's writer position is current.
-/// Once the position passes the revalidation bound, the ticks give the
-/// session no metadata step, and the daily pass makes the call instead.
+/// Checks a failing metadata step's schedule with the default 5-second
+/// maintenance interval and 5-minute metadata retry interval: the later of
+/// the retry interval and a backoff that starts at one maintenance interval,
+/// while the session's writer position is current. Once the position passes
+/// the revalidation bound, the session steps run no metadata step for the
+/// session, and the sweep makes the call instead.
 #[tokio::test]
 async fn a_failing_metadata_step_waits_its_interval_until_the_position_passes_the_bound() {
     const WAIT_SECONDS: [u64; 3] = [300, 300, 300];
     let directory = tempdir().expect("tempdir");
-    let mut config = sweep_config(None);
+    let mut config = scheduler_config(None);
     assert_eq!(
         (
-            config.tick_interval_ms.get(),
-            config.maintenance_interval_ms.get()
+            config.maintenance_interval_ms.get(),
+            config.metadata_retry_interval_ms.get()
         ),
         (5_000, 5 * MINUTE_MS)
     );
     // Keeps collection from coming due while the clock runs.
     config.gc_interval_ms = const { std::num::NonZeroU64::new(30 * DAY_MS).unwrap() };
-    // The tail is due from the first tick, so each metadata step folds it
+    // The tail is due from the first run, so each metadata step folds it
     // and reaches the failing store.
     config.idle_fold_after_ms = Some(1);
     let (store, server, namespace_id, held) =
         held_failing_server(directory.path(), &config, OperationSelector::Any).await;
     store.fail_all();
-    server.tick_after(config.tick_interval_ms.get()).await;
     server
-        .tick_through_retries(&namespace_id, SweepCall::Metadata, &WAIT_SECONDS)
+        .run_steps_after(config.maintenance_interval_ms.get())
+        .await;
+    server
+        .run_steps_through_retries(&namespace_id, MaintenanceCall::Metadata, &WAIT_SECONDS)
         .await;
     // The next retry time comes after the position's revalidation bound.
-    let failures = server.visit_failures(SweepCall::Metadata);
+    let failures = server.call_failures(MaintenanceCall::Metadata);
     server
-        .tick_after(config.maintenance_interval_ms.get())
+        .run_steps_after(config.metadata_retry_interval_ms.get())
         .await;
     assert_eq!(
-        server.visit_failures(SweepCall::Metadata),
+        server.call_failures(MaintenanceCall::Metadata),
         failures,
-        "the ticks give a session without a current position no metadata step"
+        "the session steps run no metadata step for a session without a current position"
     );
 
     store.clear();
-    server.pass_after(0).await;
+    server.sweep_after(0).await;
     assert_eq!(
-        server.retry(&namespace_id, SweepCall::Metadata).attempts,
+        server
+            .retry(&namespace_id, MaintenanceCall::Metadata)
+            .attempts,
         0,
-        "the pass's success clears the backoff"
+        "the sweep's success clears the backoff"
     );
     assert_eq!(
         server.wal_tail_objects(&namespace_id).await,
@@ -875,74 +881,85 @@ async fn a_failing_metadata_step_waits_its_interval_until_the_position_passes_th
         .await
         .expect("write another tail");
     store.fail_all();
-    server.tick_after(config.tick_interval_ms.get()).await;
+    server
+        .run_steps_after(config.maintenance_interval_ms.get())
+        .await;
     assert_eq!(
-        server.retry(&namespace_id, SweepCall::Metadata).attempts,
+        server
+            .retry(&namespace_id, MaintenanceCall::Metadata)
+            .attempts,
         1,
         "a failure after a success starts a new backoff"
     );
 }
 
-/// Checks a failing collection's schedule with the default 5-second tick: a
-/// backoff that starts at one tick and doubles up to an hour.
+/// Checks a failing collection's schedule with the default 5-second
+/// maintenance interval: a backoff that starts at one interval and doubles up
+/// to an hour.
 #[tokio::test]
-async fn a_failing_collection_backs_off_from_one_tick_to_an_hour() {
+async fn a_failing_collection_backs_off_from_one_interval_to_an_hour() {
     const WAIT_SECONDS: [u64; 12] = [5, 10, 20, 40, 80, 160, 320, 640, 1_280, 2_560, 3_600, 3_600];
     let directory = tempdir().expect("tempdir");
-    let mut config = sweep_config(None);
+    let mut config = scheduler_config(None);
     config.idle_fold_after_ms = Some(0);
     let (store, server, namespace_id, _held) =
         held_failing_server(directory.path(), &config, OperationSelector::List).await;
-    server.tick_after(config.tick_interval_ms.get()).await;
+    server
+        .run_steps_after(config.maintenance_interval_ms.get())
+        .await;
     assert!(server.metadata_caught_up(&namespace_id).await);
     store.fail_all();
-    server.tick_after(config.gc_interval_ms.get()).await;
-    assert_eq!(server.visit_failures(SweepCall::Gc), 1);
+    server.run_steps_after(config.gc_interval_ms.get()).await;
+    assert_eq!(server.call_failures(MaintenanceCall::Gc), 1);
     server
-        .tick_through_retries(&namespace_id, SweepCall::Gc, &WAIT_SECONDS)
+        .run_steps_through_retries(&namespace_id, MaintenanceCall::Gc, &WAIT_SECONDS)
         .await;
-    assert_eq!(server.visit_failures(SweepCall::Metadata), 0);
+    assert_eq!(server.call_failures(MaintenanceCall::Metadata), 0);
 }
 
-/// Checks that a failing call keeps an idle session open, so the ticks
+/// Checks that a failing call keeps an idle session open, so the scheduler
 /// retry the call on its backoff, until the backoff reaches the cap, and that
 /// the session then closes.
 #[tokio::test]
 async fn an_idle_session_with_a_failing_call_closes_once_its_backoff_reaches_the_cap() {
     let directory = tempdir().expect("tempdir");
-    let mut config = sweep_config(None);
-    // The first tick folds the tail, so only collection is left due.
+    let mut config = scheduler_config(None);
+    // The first run folds the tail, so only collection is left due.
     config.idle_fold_after_ms = Some(1);
     let (store, server, namespace_id, held) =
         held_failing_server(directory.path(), &config, OperationSelector::List).await;
-    let namespaces = &server.sweep.inner.namespaces;
+    let namespaces = &server.scheduler.inner.namespaces;
     drop(held);
-    server.tick_after(config.tick_interval_ms.get()).await;
+    server
+        .run_steps_after(config.maintenance_interval_ms.get())
+        .await;
     assert_eq!(server.wal_tail_objects(&namespace_id).await, 0);
     store.fail_all();
 
-    server.tick_after(config.gc_interval_ms.get()).await;
-    assert_eq!(server.visit_failures(SweepCall::Gc), 1);
+    server.run_steps_after(config.gc_interval_ms.get()).await;
+    assert_eq!(server.call_failures(MaintenanceCall::Gc), 1);
     assert_eq!(
         held_ids(namespaces),
         std::slice::from_ref(&namespace_id),
         "a transient failure keeps the idle session held"
     );
 
-    let attempts = || server.retry(&namespace_id, SweepCall::Gc).attempts;
-    while super::retries::backoff_ms(config.tick_interval_ms.get(), attempts())
-        < super::MAX_SWEEP_BACKOFF_MS
+    let attempts = || server.retry(&namespace_id, MaintenanceCall::Gc).attempts;
+    while super::retries::backoff_ms(config.maintenance_interval_ms.get(), attempts())
+        < super::MAX_STEP_BACKOFF_MS
     {
-        let failures = server.visit_failures(SweepCall::Gc);
-        server.tick_after(super::MAX_SWEEP_BACKOFF_MS).await;
+        let failures = server.call_failures(MaintenanceCall::Gc);
+        server.run_steps_after(super::MAX_STEP_BACKOFF_MS).await;
         assert_eq!(
-            server.visit_failures(SweepCall::Gc),
+            server.call_failures(MaintenanceCall::Gc),
             failures + 1,
-            "ticks retry the call on its backoff"
+            "the scheduler retries the call on its backoff"
         );
         assert!(!held_ids(namespaces).is_empty());
     }
-    server.tick_after(config.tick_interval_ms.get()).await;
+    server
+        .run_steps_after(config.maintenance_interval_ms.get())
+        .await;
     assert!(
         held_ids(namespaces).is_empty(),
         "a call whose backoff reached the cap doesn't keep an idle session open"
@@ -950,7 +967,7 @@ async fn an_idle_session_with_a_failing_call_closes_once_its_backoff_reaches_the
 }
 
 #[tokio::test]
-async fn a_parked_visit_does_not_hold_up_later_pages() {
+async fn a_parked_namespace_does_not_hold_up_later_pages() {
     let directory = tempdir().expect("tempdir");
     let base: SharedObjectStore = local_store(directory.path());
     let parked = namespace_id("a-parked");
@@ -965,16 +982,16 @@ async fn a_parked_visit_does_not_hold_up_later_pages() {
         KeyPredicate::prefix(loonfs_objectstore::keys::namespace_prefix(&parked)),
         OperationSelector::Any,
     ));
-    let mut config = sweep_config(None);
+    let mut config = scheduler_config(None);
     config.max_concurrent_maintenance = const { std::num::NonZeroUsize::new(2).unwrap() };
-    let server = SweepServer::start(store.clone(), &config, now_ms + 20 * MINUTE_MS)
+    let server = SchedulerServer::start(store.clone(), &config, now_ms + 20 * MINUTE_MS)
         .await
         .page_limit(page_limit(2));
 
     store.block_next();
-    let pass = tokio::spawn({
-        let sweep = server.sweep.clone();
-        async move { sweep.run_pass(GarbageCollection::Skip).await }
+    let sweep = tokio::spawn({
+        let scheduler = server.scheduler.clone();
+        async move { scheduler.run_sweep(GarbageCollection::Skip).await }
     });
     loonfs_test_support::clock::bounded(Duration::from_secs(10), async {
         store.wait_until_blocked().await;
@@ -985,19 +1002,27 @@ async fn a_parked_visit_does_not_hold_up_later_pages() {
         }
     })
     .await
-    .expect("every namespace on the later pages is visited while the first visit is parked");
-    assert!(!pass.is_finished(), "the pass waits for the parked visit");
+    .expect(
+        "every namespace on the later pages runs its steps while the first namespace is parked",
+    );
+    assert!(
+        !sweep.is_finished(),
+        "the sweep waits for the parked namespace"
+    );
 
     store.release();
     assert_eq!(
-        pass.await.expect("join the pass").expect("list namespaces"),
+        sweep
+            .await
+            .expect("join the sweep")
+            .expect("list namespaces"),
         1 + later.len()
     );
     assert_eq!(server.wal_tail_objects(&parked).await, 0);
 }
 
 #[tokio::test]
-async fn a_listing_failure_on_a_later_page_lets_started_visits_finish_and_fails_the_pass() {
+async fn a_listing_failure_on_a_later_page_lets_started_namespaces_finish_and_fails_the_sweep() {
     let directory = tempdir().expect("tempdir");
     let base: SharedObjectStore = local_store(directory.path());
     let [parked, started, unlisted] = ["a-parked", "b-started", "c-unlisted"].map(namespace_id);
@@ -1022,16 +1047,16 @@ async fn a_listing_failure_on_a_later_page_lets_started_visits_finish_and_fails_
         KeyPredicate::prefix(loonfs_objectstore::keys::namespace_prefix(&parked)),
         OperationSelector::Any,
     ));
-    let mut config = sweep_config(None);
+    let mut config = scheduler_config(None);
     config.max_concurrent_maintenance = const { std::num::NonZeroUsize::new(2).unwrap() };
-    let server = SweepServer::start(store.clone(), &config, now_ms + 20 * MINUTE_MS)
+    let server = SchedulerServer::start(store.clone(), &config, now_ms + 20 * MINUTE_MS)
         .await
         .page_limit(page_limit(1));
 
     store.block_next();
-    let pass = tokio::spawn({
-        let sweep = server.sweep.clone();
-        async move { sweep.run_pass(GarbageCollection::Skip).await }
+    let sweep = tokio::spawn({
+        let scheduler = server.scheduler.clone();
+        async move { scheduler.run_sweep(GarbageCollection::Skip).await }
     });
     loonfs_test_support::clock::bounded(Duration::from_secs(10), async {
         store.wait_until_blocked().await;
@@ -1040,17 +1065,17 @@ async fn a_listing_failure_on_a_later_page_lets_started_visits_finish_and_fails_
         }
     })
     .await
-    .expect("the third listing fails while the first visit is parked");
+    .expect("the third listing fails while the first namespace is parked");
     assert!(
-        !pass.is_finished(),
-        "the pass waits for the visit it started"
+        !sweep.is_finished(),
+        "the sweep waits for the namespace it started"
     );
 
     store.release();
-    let error = pass
+    let error = sweep
         .await
-        .expect("join the pass")
-        .expect_err("a failed listing fails the pass");
+        .expect("join the sweep")
+        .expect_err("a failed listing fails the sweep");
     assert_matches!(
         error,
         ObjectStoreError::Transport { .. },
@@ -1059,15 +1084,15 @@ async fn a_listing_failure_on_a_later_page_lets_started_visits_finish_and_fails_
     assert_eq!(
         server.wal_tail_objects(&parked).await,
         0,
-        "the parked visit finishes before the pass returns"
+        "the parked namespace finishes before the sweep returns"
     );
     assert_eq!(server.wal_tail_objects(&started).await, 0);
     assert!(
         server.wal_tail_objects(&unlisted).await > 0,
-        "no visit starts after the failed listing"
+        "no namespace starts its steps after the failed listing"
     );
     assert_eq!(
-        server.counter("loonfs.maintenance.sweep_passes", &[("result", "error")]),
+        server.counter("loonfs.maintenance.sweeps", &[("result", "error")]),
         1
     );
 }
@@ -1079,18 +1104,18 @@ enum Grep {
     Enabled,
 }
 
-/// Requests one idle namespace costs: a visit that does not collect
-/// garbage, then one that does, and how many of the latter are lists. The
+/// Requests one idle namespace costs in a sweep: a sweep that does not
+/// collect garbage, then one that does, and how many of the latter are lists. The
 /// docs quote these numbers.
-const IDLE_VISIT_REQUESTS: [(Grep, usize, usize, usize); 3] = [
+const IDLE_SWEEP_REQUESTS: [(Grep, usize, usize, usize); 3] = [
     (Grep::NotMaintained, 14, 30, 10),
     (Grep::Maintained, 18, 34, 10),
     (Grep::Enabled, 19, 36, 10),
 ];
 
 #[tokio::test(start_paused = true)]
-async fn an_idle_pass_costs_one_listing_per_page_and_a_fixed_number_of_requests_per_namespace() {
-    for (grep, visit, collecting_visit, collecting_lists) in IDLE_VISIT_REQUESTS {
+async fn an_idle_sweep_costs_one_listing_per_page_and_a_fixed_number_of_requests_per_namespace() {
+    for (grep, requests, collecting_requests, collecting_lists) in IDLE_SWEEP_REQUESTS {
         let directory = tempdir().expect("tempdir");
         let base: SharedObjectStore = local_store(directory.path());
         let names = ["first", "second", "third"].map(namespace_id);
@@ -1115,8 +1140,9 @@ async fn an_idle_pass_costs_one_listing_per_page_and_a_fixed_number_of_requests_
             LocalFsStore::new(directory.path()).expect("local store"),
             KeyPredicate::any(),
         ));
-        let config = sweep_config((grep != Grep::NotMaintained).then(GrepWorkerConfig::default));
-        let server = SweepServer::start(store.clone(), &config, now_ms + 2 * DAY_MS).await;
+        let config =
+            scheduler_config((grep != Grep::NotMaintained).then(GrepWorkerConfig::default));
+        let server = SchedulerServer::start(store.clone(), &config, now_ms + 2 * DAY_MS).await;
         if grep == Grep::Enabled {
             for namespace_id in &names {
                 server
@@ -1128,16 +1154,16 @@ async fn an_idle_pass_costs_one_listing_per_page_and_a_fixed_number_of_requests_
                     .expect("enable grep");
             }
         }
-        let sweep = server.sweep.page_limit(page_limit(2));
-        // The first pass collects what the seed left behind, so the passes
+        let scheduler = server.scheduler.page_limit(page_limit(2));
+        // The first sweep collects what the seed left behind, so the sweeps
         // below find nothing to collect and nothing inside its grace.
-        sweep
-            .run_pass(GarbageCollection::Collect)
+        scheduler
+            .run_sweep(GarbageCollection::Collect)
             .await
             .expect("list namespaces");
-        // Enabling each index and the first pass's build of it publish less
+        // Enabling each index and the first sweep's build of it publish less
         // than a second apart, so the runtime raises each hint to the build's
-        // manifest when that second ends, and the passes below start from
+        // manifest when that second ends, and the sweeps below start from
         // hints at the current manifests, as the seed's do.
         store.reset();
         server.clock.advance_ms(HINT_RAISE_INTERVAL_MS);
@@ -1146,7 +1172,7 @@ async fn an_idle_pass_costs_one_listing_per_page_and_a_fixed_number_of_requests_
             if grep == Grep::Enabled {
                 // The hint is visible before its put finishes syncing and
                 // the recording store records it. Wait for that completion
-                // before measuring the next pass.
+                // before measuring the next sweep.
                 let hint = loonfs_objectstore::keys::hint(namespace_id);
                 loonfs_test_support::clock::bounded(Duration::from_secs(10), async {
                     while !store.snapshot().iter().any(|operation| {
@@ -1160,23 +1186,23 @@ async fn an_idle_pass_costs_one_listing_per_page_and_a_fixed_number_of_requests_
             }
         }
         // An index's publication drops the runtime's cached head, so this
-        // pass loads each head again, and the passes below find it cached,
-        // as an idle namespace's visits do.
-        sweep
-            .run_pass(GarbageCollection::Skip)
+        // sweep loads each head again, and the sweeps below find it cached,
+        // as an idle namespace's sweeps do.
+        scheduler
+            .run_sweep(GarbageCollection::Skip)
             .await
             .expect("list namespaces");
 
         for (garbage, per_namespace, lists_per_namespace) in [
-            (GarbageCollection::Skip, visit, 0),
+            (GarbageCollection::Skip, requests, 0),
             (
                 GarbageCollection::Collect,
-                collecting_visit,
+                collecting_requests,
                 collecting_lists,
             ),
         ] {
             store.reset();
-            sweep.run_pass(garbage).await.expect("list namespaces");
+            scheduler.run_sweep(garbage).await.expect("list namespaces");
             let operations = store.take();
             let listings = operations
                 .iter()
@@ -1188,16 +1214,16 @@ async fn an_idle_pass_costs_one_listing_per_page_and_a_fixed_number_of_requests_
             assert_eq!(listings, 2, "three namespaces at two per page");
             for namespace_id in &names {
                 let prefix = loonfs_objectstore::keys::namespace_prefix(namespace_id);
-                let visit: Vec<_> = operations
+                let namespace_requests: Vec<_> = operations
                     .iter()
                     .filter(|operation| operation.key().starts_with(&prefix))
                     .collect();
-                let lists = visit
+                let lists = namespace_requests
                     .iter()
                     .filter(|operation| matches!(operation, RecordedOperation::List { .. }))
                     .count();
                 assert_eq!(
-                    (visit.len(), lists),
+                    (namespace_requests.len(), lists),
                     (per_namespace, lists_per_namespace),
                     "requests and lists for `{namespace_id}`, grep {grep:?}, garbage \
                      {garbage:?}"
@@ -1209,7 +1235,7 @@ async fn an_idle_pass_costs_one_listing_per_page_and_a_fixed_number_of_requests_
 }
 
 #[tokio::test]
-async fn a_stray_child_of_the_namespace_prefix_is_not_a_failed_visit() {
+async fn a_stray_child_of_the_namespace_prefix_is_not_a_failed_call() {
     let directory = tempdir().expect("tempdir");
     let store = Arc::new(RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("local store"),
@@ -1221,9 +1247,9 @@ async fn a_stray_child_of_the_namespace_prefix_is_not_a_failed_visit() {
             .await
             .expect("write a stray key");
     }
-    let server = SweepServer::start(
+    let server = SchedulerServer::start(
         store.clone(),
-        &sweep_config(Some(GrepWorkerConfig::default())),
+        &scheduler_config(Some(GrepWorkerConfig::default())),
         0,
     )
     .await;
@@ -1231,8 +1257,8 @@ async fn a_stray_child_of_the_namespace_prefix_is_not_a_failed_visit() {
 
     assert_eq!(
         server
-            .sweep
-            .run_pass(GarbageCollection::Collect)
+            .scheduler
+            .run_sweep(GarbageCollection::Collect)
             .await
             .expect("list namespaces"),
         1,
@@ -1257,7 +1283,7 @@ async fn a_stray_child_of_the_namespace_prefix_is_not_a_failed_visit() {
         "gc",
     ] {
         assert_eq!(
-            server.counter("loonfs.maintenance.sweep_visit_failures", &[("call", call)]),
+            server.counter("loonfs.maintenance.sweep_failures", &[("call", call)]),
             0,
             "a namespace id with no namespace behind it is not a `{call}` failure"
         );

@@ -144,7 +144,7 @@ impl Fixture {
 }
 
 #[tokio::test]
-async fn snapshot_fork_survives_snapshot_deletion_during_an_older_gc_pass() {
+async fn snapshot_fork_survives_snapshot_deletion_during_an_older_collection() {
     let fixture = Fixture::new().await;
     let gc_gate = BlockingStore::new(
         fixture.store.clone(),

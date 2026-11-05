@@ -147,7 +147,7 @@ impl WalEnvelopeKind {
     }
 }
 
-/// Records one replayable metadata mutation materialized from a semantic commit operation.
+/// Records one replayable metadata mutation derived from a semantic commit operation.
 ///
 /// See [standard mutation operations](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#66-operations-and-wal-deltas).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -310,7 +310,7 @@ pub enum WalDelta {
     },
 }
 
-/// Associates a materialized WAL delta with the semantic operation that produced it.
+/// Associates a WAL delta with the semantic operation that produced it.
 ///
 /// See [logical commits](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#12-commits-and-revisions).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -426,7 +426,7 @@ pub struct WalCommitPayload {
     /// the commit is a merge, and omitted for every other commit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge: Option<MergeRecord>,
-    /// Materialized mutations in their authoritative `delta_index` order.
+    /// Metadata mutations in their authoritative `delta_index` order.
     pub deltas: Vec<WalCommitDelta>,
     /// Content pieces governed by [Appendix A.5](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a5-wal-records).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

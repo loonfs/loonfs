@@ -949,7 +949,7 @@ mod tests {
         assert_eq!(
             tally.files,
             u64::from(DEFAULT_PAGE_LIMIT) - 1,
-            "every page and the surviving child was visited"
+            "every page and the surviving child was read"
         );
         assert_eq!(tally.failures.len(), 1);
         assert_eq!(

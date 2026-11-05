@@ -492,7 +492,7 @@ async fn current_metadata_state<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> MetadataState {
-    load_manifest_materialization_for_inspection(
+    load_manifest_state_for_inspection(
         store,
         namespace_id,
         crate::test_support::namespace_store(store, namespace_id)
@@ -1630,7 +1630,7 @@ async fn large_compaction_inputs(
 
 #[tokio::test]
 async fn a_compaction_reads_byte_sized_spans_concurrently_within_its_configured_decoded_input() {
-    use crate::compaction::merge_iterator::{
+    use crate::compaction::run_iterator::{
         refill_iterators, MetadataSegmentBlockLoader, MetadataSegmentRowIterator,
         ITERATOR_FETCH_TARGET_BYTES,
     };

@@ -13,7 +13,7 @@ use loonfs::{
 use loonfs_grep::entry::GrepIndexStatus;
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepBlockCache, GrepBuildOutcome, GrepDisableOutcome, GrepEnableOutcome,
-    GrepError, GrepPassBudget, GrepProgress, GrepReorganizeOutcome, GrepService, GrepWorker,
+    GrepError, GrepProgress, GrepReorganizeOutcome, GrepService, GrepStepBudget, GrepWorker,
     NamespaceReads, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES, DEFAULT_GREP_PUBLISH_INTERVAL_MS,
 };
 use loonfs_types::GrepIndex;
@@ -74,7 +74,7 @@ impl GrepHost {
                 reader,
                 writer.clone(),
                 maintenance.clone(),
-                GrepPassBudget::default(),
+                GrepStepBudget::default(),
             ),
             writer,
             block_cache,
@@ -345,7 +345,7 @@ pub(crate) async fn fold_wal_and_advance_retention(
         .retention_floor_seq
 }
 
-/// Returns `paths` in the order a grep walk visits their files: by the
+/// Returns `paths` in the order a grep walk reads their files: by the
 /// content value of each file's current revision, which is its content ID
 /// and size, and then by inode ID.
 ///

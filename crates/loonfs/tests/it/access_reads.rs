@@ -563,7 +563,7 @@ async fn listing_a_checkpoints_files_requires_an_administrator() {
             .read_only()
             .with_subject(subject(principal))
             .namespace(&namespace_id)
-            .list_checkpoint_files(&checkpoint.snapshot_id)
+            .list_snapshot_files(&checkpoint.snapshot_id)
             .page()
     };
 

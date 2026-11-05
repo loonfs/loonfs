@@ -9,7 +9,7 @@ mod fork_family;
 mod live_set;
 mod options;
 mod pins;
-mod reclaim;
+mod retire;
 mod session_cache;
 mod sweep;
 #[cfg(test)]

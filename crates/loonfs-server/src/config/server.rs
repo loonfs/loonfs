@@ -54,8 +54,8 @@ pub struct ServerConfig {
     /// 2.
     pub max_concurrent_folds: Option<NonZeroUsize>,
     /// Maximum metadata compaction units this server runs at once, whether
-    /// writer sessions, the maintenance sweep, or maintenance requests start
-    /// them. A compaction never takes a fold permit. Defaults to the runtime's
+    /// writer sessions, the maintenance scheduler, or maintenance requests
+    /// start them. A compaction never takes a fold permit. Defaults to the runtime's
     /// [`DEFAULT_MAX_CONCURRENT_COMPACTIONS`](loonfs::DEFAULT_MAX_CONCURRENT_COMPACTIONS),
     /// 2.
     pub max_concurrent_compactions: Option<NonZeroUsize>,
@@ -105,7 +105,7 @@ pub struct ServerConfig {
     #[serde(default)]
     pub grep: GrepConfig,
     /// Whether this server serves maintenance requests, runs the maintenance
-    /// sweep, both, or neither.
+    /// scheduler, both, or neither.
     #[serde(default = "default_maintenance")]
     pub maintenance: JobMode,
     /// Minimum time between publication starts in one namespace, in
@@ -134,9 +134,9 @@ pub struct ServerConfig {
     #[serde(default = "default_request_deadline_ms")]
     pub request_deadline_ms: NonZeroU64,
     /// Maximum time graceful shutdown waits for accepted requests to drain
-    /// and then for the maintenance sweep to stop, in milliseconds, counted
-    /// from the shutdown signal. Requests and sweep visits still running at
-    /// the deadline are dropped. Writer and cache settlement continue
+    /// and then for the maintenance scheduler to stop, in milliseconds,
+    /// counted from the shutdown signal. Requests and maintenance steps still
+    /// running at the deadline are dropped. Writer and cache settlement continue
     /// afterward.
     #[serde(default = "default_shutdown_deadline_ms")]
     pub shutdown_deadline_ms: NonZeroU64,
@@ -171,27 +171,31 @@ pub struct ServerConfig {
     /// finishes or is dropped.
     #[serde(default = "default_max_concurrent_downloads")]
     pub max_concurrent_downloads: NonZeroUsize,
-    /// How many namespaces the maintenance sweep visits at once. Folds and
-    /// compactions also wait for the fold and compaction permits. Defaults to 8.
+    /// How many namespaces the maintenance scheduler runs steps on at once.
+    /// Folds and compactions also wait for the fold and compaction permits.
+    /// Defaults to 8.
     #[serde(default = "default_max_concurrent_maintenance")]
     pub max_concurrent_maintenance: NonZeroUsize,
-    /// Milliseconds between ticks of held sessions. Defaults to 5000.
-    #[serde(default = "default_tick_interval_ms")]
-    pub tick_interval_ms: NonZeroU64,
-    /// Milliseconds before retrying unfinished metadata. Defaults to 300000.
+    /// Milliseconds between the scheduler's runs of each open session's due
+    /// steps. Defaults to 5000.
     #[serde(default = "default_maintenance_interval_ms")]
     pub maintenance_interval_ms: NonZeroU64,
+    /// Milliseconds before a metadata step that left work runs again.
+    /// Defaults to 300000.
+    #[serde(default = "default_metadata_retry_interval_ms")]
+    pub metadata_retry_interval_ms: NonZeroU64,
     /// Least milliseconds between collections for sessions whose seq moved. Defaults to 3600000 (1 hour).
     #[serde(default = "default_gc_interval_ms")]
     pub gc_interval_ms: NonZeroU64,
-    /// Milliseconds between full passes over every namespace, with collection.
-    /// The first runs at start. Defaults to 86400000 (24 hours).
-    #[serde(default = "default_full_sweep_interval_ms")]
-    pub full_sweep_interval_ms: NonZeroU64,
+    /// Milliseconds between sweeps, which list every namespace in the store
+    /// and run each one's due steps; the first sweep runs at start. Defaults
+    /// to 86400000 (24 hours).
+    #[serde(default = "default_sweep_interval_ms")]
+    pub sweep_interval_ms: NonZeroU64,
     /// How long the server keeps a namespace's history before it advances
     /// the namespace's retention floor past that history, in milliseconds,
-    /// for each namespace without a retention window of its own. Each full
-    /// pass advances every active namespace's floor to the last commit at or
+    /// for each namespace without a retention window of its own. Each sweep
+    /// advances every active namespace's floor to the last commit at or
     /// before the current time minus the namespace's window, or minus this
     /// setting for a namespace that has no window of its own. Absent, the
     /// server advances only the floors of namespaces that have their own
@@ -222,7 +226,7 @@ pub struct ServerConfig {
     pub max_read_working_bytes: Option<usize>,
     /// How old a WAL tail's newest commit must be before maintenance folds
     /// a tail that is below the fold thresholds, in milliseconds. The
-    /// maintenance sweep and explicit `metadata` requests use the same
+    /// maintenance scheduler and explicit `metadata` requests use the same
     /// period. Zero turns the rule off. Defaults to the runtime's
     /// [`DEFAULT_IDLE_FOLD_AFTER_MS`](loonfs::DEFAULT_IDLE_FOLD_AFTER_MS), 15
     /// minutes.
@@ -291,7 +295,7 @@ fn default_request_deadline_ms() -> NonZeroU64 {
 }
 
 /// Default for `shutdown_deadline_ms`, so a graceful shutdown waits at most
-/// 10 minutes for accepted requests and the maintenance sweep. That is long
+/// 10 minutes for accepted requests and the maintenance scheduler. That is long
 /// enough for an accepted request to finish the provider operation it already
 /// started. The assertion below checks this default only, because an operator
 /// can configure any positive value.
@@ -333,11 +337,11 @@ fn default_max_concurrent_maintenance() -> NonZeroUsize {
     const { NonZeroUsize::new(8).unwrap() }
 }
 
-fn default_tick_interval_ms() -> NonZeroU64 {
+fn default_maintenance_interval_ms() -> NonZeroU64 {
     const { NonZeroU64::new(5_000).unwrap() }
 }
 
-fn default_maintenance_interval_ms() -> NonZeroU64 {
+fn default_metadata_retry_interval_ms() -> NonZeroU64 {
     const { NonZeroU64::new(300_000).unwrap() }
 }
 
@@ -345,7 +349,7 @@ fn default_gc_interval_ms() -> NonZeroU64 {
     const { NonZeroU64::new(3_600_000).unwrap() }
 }
 
-fn default_full_sweep_interval_ms() -> NonZeroU64 {
+fn default_sweep_interval_ms() -> NonZeroU64 {
     const { NonZeroU64::new(86_400_000).unwrap() }
 }
 
@@ -393,14 +397,14 @@ impl ServerConfig {
         }
     }
 
-    /// Returns the cadence and limits of the maintenance sweep.
-    pub(crate) fn sweep_config(&self) -> crate::sweep::SweepConfig {
-        crate::sweep::SweepConfig {
+    /// Returns the cadence and limits of the maintenance scheduler.
+    pub(crate) fn scheduler_config(&self) -> crate::scheduler::SchedulerConfig {
+        crate::scheduler::SchedulerConfig {
             max_concurrent_maintenance: self.max_concurrent_maintenance,
-            tick_interval_ms: self.tick_interval_ms.get(),
             maintenance_interval_ms: self.maintenance_interval_ms.get(),
+            metadata_retry_interval_ms: self.metadata_retry_interval_ms.get(),
             gc_interval_ms: self.gc_interval_ms.get(),
-            full_sweep_interval_ms: self.full_sweep_interval_ms.get(),
+            sweep_interval_ms: self.sweep_interval_ms.get(),
             retention_window_ms: self.retention_window_ms,
             idle_session_close_after_ms: self.idle_session_close_after_ms.get(),
         }

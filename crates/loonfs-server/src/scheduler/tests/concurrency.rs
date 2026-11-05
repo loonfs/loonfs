@@ -1,7 +1,7 @@
-//! Concurrent visits preserve session progress and share the host's slots.
+//! Concurrent steps preserve session progress and share the host's slots.
 
-use super::{sweep_config, visit_held, SweepServer};
-use crate::sweep::GarbageCollection;
+use super::{scheduler_config, with_held, SchedulerServer};
+use crate::scheduler::GarbageCollection;
 use loonfs_http::WriterSessions as _;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
@@ -15,9 +15,9 @@ use std::time::Duration;
 use tempfile::tempdir;
 
 #[tokio::test]
-async fn a_daily_pass_and_a_tick_never_visit_the_same_namespace_together() {
+async fn a_sweep_and_the_session_steps_never_run_on_the_same_namespace_together() {
     let directory = tempdir().expect("tempdir");
-    let namespace_id = namespace_id("one-visit");
+    let namespace_id = namespace_id("one-claim");
     // The runtime raises the hint in the background after each publication,
     // so neither the gate nor the recording selects the hint.
     let store = Arc::new(BlockingStore::new(
@@ -29,56 +29,58 @@ async fn a_daily_pass_and_a_tick_never_visit_the_same_namespace_together() {
             .except_hints(),
         OperationSelector::Any,
     ));
-    let mut config = sweep_config(None);
-    // The tick's metadata step folds the session's tail, and the pass's
+    let mut config = scheduler_config(None);
+    // The session's metadata step folds the session's tail, and the sweep's
     // acknowledgment of the retention floor loads the current manifest, so
-    // the gate parks either visit at its first request.
+    // the gate parks either one at its first request.
     config.idle_fold_after_ms = Some(1);
-    let server = SweepServer::start(store.clone(), &config, 0).await;
+    let server = SchedulerServer::start(store.clone(), &config, 0).await;
     server
         .runtime
         .create_namespace(&namespace_id, &test_actor())
         .await
         .expect("create");
     let held = server
-        .sweep
+        .scheduler
         .inner
         .namespaces
         .open(&namespace_id)
         .await
         .expect("open");
-    for tick_first in [true, false] {
+    for steps_first in [true, false] {
         held.put_file(
-            if tick_first { "/first" } else { "/second" },
+            if steps_first { "/first" } else { "/second" },
             b"data",
             &test_actor(),
         )
         .await
         .expect("publish");
-        server.clock.advance_ms(config.tick_interval_ms.get());
+        server
+            .clock
+            .advance_ms(config.maintenance_interval_ms.get());
         store.block_next();
-        let visit = tokio::spawn({
-            let sweep = server.sweep.clone();
+        let parked = tokio::spawn({
+            let scheduler = server.scheduler.clone();
             async move {
-                if tick_first {
-                    sweep.tick().await;
+                if steps_first {
+                    scheduler.run_due_steps().await;
                 } else {
-                    sweep
-                        .run_pass(GarbageCollection::Skip)
+                    scheduler
+                        .run_sweep(GarbageCollection::Skip)
                         .await
-                        .expect("daily");
+                        .expect("sweep");
                 }
             }
         });
         store.wait_until_blocked().await;
         store.inner().reset();
-        if tick_first {
+        if steps_first {
             assert_eq!(
                 server
-                    .sweep
-                    .run_pass(GarbageCollection::Skip)
+                    .scheduler
+                    .run_sweep(GarbageCollection::Skip)
                     .await
-                    .expect("daily"),
+                    .expect("sweep"),
                 1
             );
             let operations = store.inner().take();
@@ -86,17 +88,17 @@ async fn a_daily_pass_and_a_tick_never_visit_the_same_namespace_together() {
             assert_matches!(&operations[0], RecordedOperation::List { .. });
             assert_eq!(operations[0].key(), "namespaces/");
         } else {
-            server.sweep.tick().await;
+            server.scheduler.run_due_steps().await;
             assert!(store.inner().take().is_empty());
         }
         store.release();
-        visit.await.expect("visit");
+        parked.await.expect("parked");
     }
     server.runtime.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test]
-async fn a_publish_during_a_metadata_step_is_folded_by_the_next_tick() {
+async fn a_publish_during_a_metadata_step_is_folded_by_the_next_run() {
     let directory = tempdir().expect("tempdir");
     let namespace_id = namespace_id("concurrent-publish");
     // The runtime raises the hint in the background after each publication,
@@ -110,18 +112,18 @@ async fn a_publish_during_a_metadata_step_is_folded_by_the_next_tick() {
             .except_hints(),
         OperationSelector::Any,
     ));
-    let mut config = sweep_config(None);
-    // The tick's metadata step folds the session's tail, so the gate parks
-    // the visit at the fold's first request.
+    let mut config = scheduler_config(None);
+    // The session's metadata step folds the session's tail, so the gate
+    // parks the step at the fold's first request.
     config.idle_fold_after_ms = Some(1);
-    let server = SweepServer::start(store.clone(), &config, 0).await;
+    let server = SchedulerServer::start(store.clone(), &config, 0).await;
     server
         .runtime
         .create_namespace(&namespace_id, &test_actor())
         .await
         .expect("create");
     let held = server
-        .sweep
+        .scheduler
         .inner
         .namespaces
         .open(&namespace_id)
@@ -130,35 +132,39 @@ async fn a_publish_during_a_metadata_step_is_folded_by_the_next_tick() {
     held.put_file("/first", b"first", &test_actor())
         .await
         .expect("publish");
-    server.clock.advance_ms(config.tick_interval_ms.get());
+    server
+        .clock
+        .advance_ms(config.maintenance_interval_ms.get());
     store.block_next();
-    let visit = tokio::spawn({
-        let sweep = server.sweep.clone();
-        async move { sweep.tick().await }
+    let steps = tokio::spawn({
+        let scheduler = server.scheduler.clone();
+        async move { scheduler.run_due_steps().await }
     });
     store.wait_until_blocked().await;
     held.put_file("/second", b"second", &test_actor())
         .await
-        .expect("publish during visit");
+        .expect("publish during the step");
     store.release();
-    visit.await.expect("finish visit");
+    steps.await.expect("finish the step");
     store.inner().reset();
-    server.tick_after(config.tick_interval_ms.get()).await;
+    server
+        .run_steps_after(config.maintenance_interval_ms.get())
+        .await;
     assert!(
         !store.inner().take().is_empty(),
-        "the next tick folds the tail that the concurrent publish left"
+        "the next run folds the tail that the concurrent publish left"
     );
     assert_eq!(server.wal_tail_objects(&namespace_id).await, 0);
-    // The tick after a fold reads the fold's manifest once.
-    server.sweep.tick().await;
+    // The run after a fold reads the fold's manifest once.
+    server.scheduler.run_due_steps().await;
     store.inner().reset();
-    server.sweep.tick().await;
+    server.scheduler.run_due_steps().await;
     assert!(store.inner().take().is_empty());
     server.runtime.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test]
-async fn ticks_share_slots_with_a_parked_daily_pass_and_continue_when_a_slot_is_free() {
+async fn session_steps_share_slots_with_a_parked_sweep_and_continue_when_a_slot_is_free() {
     for slots in [1, 2] {
         let directory = tempdir().expect("tempdir");
         let parked = namespace_id("a-parked");
@@ -171,22 +177,22 @@ async fn ticks_share_slots_with_a_parked_daily_pass_and_continue_when_a_slot_is_
             KeyPredicate::prefix(loonfs_objectstore::keys::namespace_prefix(&parked)),
             OperationSelector::Any,
         ));
-        let mut config = sweep_config(None);
+        let mut config = scheduler_config(None);
         config.max_concurrent_maintenance =
             std::num::NonZeroUsize::new(slots).expect("a nonzero slot count");
-        // The tick's metadata step folds the held session's tail, so a tick
-        // that runs sends requests.
+        // The session's metadata step folds the held session's tail, so a
+        // run of the session steps sends requests.
         config.idle_fold_after_ms = Some(1);
-        let server = SweepServer::start(store.clone(), &config, 0).await;
+        let server = SchedulerServer::start(store.clone(), &config, 0).await;
         server
             .runtime
             .create_namespace(&parked, &test_actor())
             .await
             .expect("create");
         store.block_next();
-        let daily = tokio::spawn({
-            let sweep = server.sweep.clone();
-            async move { sweep.run_pass(GarbageCollection::Skip).await }
+        let sweep = tokio::spawn({
+            let scheduler = server.scheduler.clone();
+            async move { scheduler.run_sweep(GarbageCollection::Skip).await }
         });
         store.wait_until_blocked().await;
         server
@@ -195,7 +201,7 @@ async fn ticks_share_slots_with_a_parked_daily_pass_and_continue_when_a_slot_is_
             .await
             .expect("create after listing");
         let held = server
-            .sweep
+            .scheduler
             .inner
             .namespaces
             .open(&later)
@@ -204,28 +210,30 @@ async fn ticks_share_slots_with_a_parked_daily_pass_and_continue_when_a_slot_is_
         held.put_file("/note", b"data", &test_actor())
             .await
             .expect("publish");
-        server.clock.advance_ms(config.tick_interval_ms.get());
+        server
+            .clock
+            .advance_ms(config.maintenance_interval_ms.get());
         store.inner().reset();
-        let mut tick = Box::pin(server.sweep.tick());
+        let mut steps = Box::pin(server.scheduler.run_due_steps());
         if slots == 1 {
-            assert!(futures::poll!(tick.as_mut()).is_pending());
+            assert!(futures::poll!(steps.as_mut()).is_pending());
             assert!(
                 store.inner().take().is_empty(),
-                "the daily pass holds the only slot"
+                "the sweep holds the only slot"
             );
         } else {
-            tick.as_mut().await;
+            steps.as_mut().await;
             assert!(
                 server.metadata_caught_up(&later).await,
-                "a free slot lets the tick finish while the daily pass waits"
+                "a free slot lets the session steps finish while the sweep waits"
             );
             assert!(!store.inner().take().is_empty());
         }
-        assert!(!daily.is_finished());
+        assert!(!sweep.is_finished());
         store.release();
-        daily.await.expect("join daily").expect("daily");
+        sweep.await.expect("join the sweep").expect("sweep");
         if slots == 1 {
-            tick.await;
+            steps.await;
         }
         server.runtime.shutdown().await.expect("shutdown");
     }
@@ -235,7 +243,7 @@ async fn ticks_share_slots_with_a_parked_daily_pass_and_continue_when_a_slot_is_
 async fn cancelled_index_work_and_a_lifecycle_change_during_a_build_stay_dirty() {
     for cancel in [false, true] {
         let directory = tempdir().expect("tempdir");
-        let namespace_id = namespace_id("index-during-visit");
+        let namespace_id = namespace_id("index-during-steps");
         // The gate holds the manifest that publishes the build's steps.
         let store = Arc::new(BlockingStore::new(
             RecordingStore::new(
@@ -247,8 +255,8 @@ async fn cancelled_index_work_and_a_lifecycle_change_during_a_build_stay_dirty()
             )),
             OperationSelector::PutCreateIfAbsent,
         ));
-        let config = sweep_config(Some(loonfs_grep::GrepWorkerConfig::default()));
-        let server = SweepServer::start(store.clone(), &config, 0).await;
+        let config = scheduler_config(Some(loonfs_grep::GrepWorkerConfig::default()));
+        let server = SchedulerServer::start(store.clone(), &config, 0).await;
         server
             .runtime
             .create_namespace(&namespace_id, &test_actor())
@@ -256,33 +264,34 @@ async fn cancelled_index_work_and_a_lifecycle_change_during_a_build_stay_dirty()
             .expect("create");
         server.enable_index(&namespace_id).await;
         store.block_next();
-        let mut tick = Box::pin(server.sweep.tick());
-        // The tick reads the store before it publishes, so it runs until the
-        // gate holds its put.
+        let mut steps = Box::pin(server.scheduler.run_due_steps());
+        // The index step reads the store before it publishes, so the steps
+        // run until the gate holds the index step's put.
         tokio::select! {
-            () = tick.as_mut() => panic!("the tick finished without publishing"),
+            () = steps.as_mut() => panic!("the steps finished without publishing"),
             () = store.wait_until_blocked() => {}
         }
         if cancel {
-            drop(tick);
+            drop(steps);
             store.release();
         } else {
             server.disable_index(&namespace_id).await;
             store.release();
-            tick.await;
+            steps.await;
         }
         assert_eq!(
-            visit_held(&server.sweep.inner.namespaces, &namespace_id, |held| held
-                .index_dirty),
+            with_held(&server.scheduler.inner.namespaces, &namespace_id, |held| {
+                held.index_dirty
+            }),
             Some(true)
         );
         store.inner().reset();
-        server.sweep.tick().await;
+        server.scheduler.run_due_steps().await;
         assert!(
             !store.inner().take().is_empty(),
-            "the dirty entry is visited again"
+            "the dirty entry gets another index step"
         );
-        server.sweep.tick().await;
+        server.scheduler.run_due_steps().await;
         assert!(store.inner().take().is_empty());
         server.runtime.shutdown().await.expect("shutdown");
     }
@@ -303,27 +312,29 @@ async fn a_collection_finishing_after_close_does_not_update_the_replacement_entr
             .except_hints(),
         OperationSelector::Any,
     ));
-    let mut config = sweep_config(None);
+    let mut config = scheduler_config(None);
     config.idle_fold_after_ms = Some(0);
-    let server = SweepServer::start(store.clone(), &config, 0).await;
+    let server = SchedulerServer::start(store.clone(), &config, 0).await;
     server
         .runtime
         .create_namespace(&namespace_id, &test_actor())
         .await
         .expect("create");
-    let namespaces = &server.sweep.inner.namespaces;
+    let namespaces = &server.scheduler.inner.namespaces;
     let held = namespaces.open(&namespace_id).await.expect("open");
     held.put_file("/note", b"data", &test_actor())
         .await
         .expect("publish");
     let seq = held.last_published_seq();
     drop(held);
-    server.tick_after(config.tick_interval_ms.get()).await;
+    server
+        .run_steps_after(config.maintenance_interval_ms.get())
+        .await;
     server.clock.advance_ms(config.gc_interval_ms.get());
     store.block_next();
-    let visit = tokio::spawn({
-        let sweep = server.sweep.clone();
-        async move { sweep.tick().await }
+    let steps = tokio::spawn({
+        let scheduler = server.scheduler.clone();
+        async move { scheduler.run_due_steps().await }
     });
     store.wait_until_blocked().await;
     namespaces
@@ -337,15 +348,15 @@ async fn a_collection_finishing_after_close_does_not_update_the_replacement_entr
         .expect("open replacement");
     assert_eq!(fresh.last_published_seq(), None);
     store.release();
-    visit.await.expect("finish collection");
+    steps.await.expect("finish collection");
     assert_eq!(
-        visit_held(namespaces, &namespace_id, |held| held
+        with_held(namespaces, &namespace_id, |held| held
             .host_state
             .collected_seq),
         Some(None)
     );
     store.inner().reset();
-    server.tick_after(config.gc_interval_ms.get()).await;
+    server.run_steps_after(config.gc_interval_ms.get()).await;
     assert!(
         store.inner().take().is_empty(),
         "the replacement never published and owes no collection"
@@ -354,7 +365,7 @@ async fn a_collection_finishing_after_close_does_not_update_the_replacement_entr
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_visit_parked_in_one_session_does_not_stop_another_sessions_fold_on_the_next_interval() {
+async fn a_step_parked_in_one_session_does_not_stop_another_sessions_fold_on_the_next_interval() {
     let directory = tempdir().expect("tempdir");
     let parked = namespace_id("a-parked");
     let folded = namespace_id("b-folded");
@@ -365,40 +376,42 @@ async fn a_visit_parked_in_one_session_does_not_stop_another_sessions_fold_on_th
         KeyPredicate::prefix(loonfs_objectstore::keys::namespace_prefix(&parked)).except_hints(),
         OperationSelector::Any,
     ));
-    let mut config = sweep_config(None);
-    // The tick's metadata step folds a session's tail once the manual clock
-    // moves, so the gate parks the visit to `parked` at the fold.
+    let mut config = scheduler_config(None);
+    // The session's metadata step folds a session's tail once the manual
+    // clock moves, so the gate parks the steps of `parked` at the fold.
     config.idle_fold_after_ms = Some(1);
-    // The ticks before the first commit run the step from the store, and
-    // that step waits the interval, which the manual clock then passes.
-    config.maintenance_interval_ms = std::num::NonZeroU64::MIN;
-    let server = SweepServer::start(store.clone(), &config, 0).await;
+    // The runs before the first commit make the step from the store, and
+    // that step waits the retry interval, which the manual clock then passes.
+    config.metadata_retry_interval_ms = std::num::NonZeroU64::MIN;
+    let server = SchedulerServer::start(store.clone(), &config, 0).await;
     server
         .runtime
         .create_namespace(&parked, &test_actor())
         .await
         .expect("create");
-    let namespaces = &server.sweep.inner.namespaces;
+    let namespaces = &server.scheduler.inner.namespaces;
     let parked_handle = namespaces.open(&parked).await.expect("open");
-    let running = server.sweep.start();
-    // The daily pass starts with the loop. It finishes before the gate is
-    // armed, so the gate parks a tick's visit and not the pass's.
+    let running = server.scheduler.start();
+    // The first sweep starts with the loop. It finishes before the gate is
+    // armed, so the gate parks the session steps and not the sweep.
     loonfs_test_support::clock::bounded(Duration::from_secs(60), async {
-        while server.counter("loonfs.maintenance.sweep_passes", &[("result", "ok")]) == 0 {
+        while server.counter("loonfs.maintenance.sweeps", &[("result", "ok")]) == 0 {
             tokio::time::advance(Duration::from_millis(1)).await;
         }
     })
     .await
-    .expect("the first daily pass finishes");
+    .expect("the first sweep finishes");
     parked_handle
         .put_file("/note", b"data", &test_actor())
         .await
         .expect("publish");
     store.block_next();
-    server.clock.advance_ms(config.tick_interval_ms.get());
+    server
+        .clock
+        .advance_ms(config.maintenance_interval_ms.get());
     loonfs_test_support::clock::bounded(Duration::from_secs(60), store.wait_until_blocked())
         .await
-        .expect("a tick parks at the fold of the first session");
+        .expect("the session steps park at the fold of the first session");
 
     server
         .runtime
@@ -410,18 +423,20 @@ async fn a_visit_parked_in_one_session_does_not_stop_another_sessions_fold_on_th
         .put_file("/note", b"data", &test_actor())
         .await
         .expect("publish");
-    server.clock.advance_ms(config.tick_interval_ms.get());
+    server
+        .clock
+        .advance_ms(config.maintenance_interval_ms.get());
     loonfs_test_support::clock::bounded(Duration::from_secs(60), async {
         while server.wal_tail_objects(&folded).await > 0 {
             tokio::time::advance(Duration::from_millis(1)).await;
         }
     })
     .await
-    .expect("a later tick folds the other session's tail while the first visit is parked");
+    .expect("a later run folds the other session's tail while the first session's step is parked");
 
     store.release();
     running.cancel();
-    running.task.await.expect("the sweep stops");
+    running.task.await.expect("the scheduler stops");
     drop((parked_handle, folded_handle));
     server.runtime.shutdown().await.expect("shutdown");
 }

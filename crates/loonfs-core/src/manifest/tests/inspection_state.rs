@@ -1,10 +1,10 @@
-//! Test-only full-row manifest materialization and metadata-state inspection.
+//! Test-only full-row manifest loads and metadata-state inspection.
 
 use super::super::error::ManifestLoadError;
 use super::super::load::load_namespace_manifest_envelope_if_present;
 use super::super::validate::validate_manifest_row_seq_range;
 use super::super::validate::{
-    validate_direntry_child_bind_index, validate_manifest_materialization_ranges,
+    validate_direntry_child_bind_index, validate_manifest_sequence_ranges,
     validate_revision_rows_have_unique_keys,
 };
 use crate::in_flight::STORE_READS_IN_FLIGHT;
@@ -14,9 +14,9 @@ use crate::segment::cache::MetadataSegmentCache;
 use crate::segment::data_block_load::load_segment_data_block_span;
 use crate::segment::index_block_load::load_segment_index;
 use crate::segment::row::manifest_row_kind;
-use crate::segment::runs::{runs_in_materialization_order, MetadataFamilySegments};
+use crate::segment::runs::{runs_oldest_first, MetadataFamilySegments};
 use crate::segment::scan::{
-    ordered_manifest_segments, BlocksPerRefill, ManifestMaterializationForInspection,
+    ordered_manifest_segments, BlocksPerRefill, ManifestStateForInspection,
 };
 use futures::future::try_join_all;
 use loonfs_objectstore::keys::{metadata_manifest_object, metadata_segment_object_key};
@@ -29,13 +29,13 @@ use loonfs_types::{ChangeSeq, ManifestNo, NamespaceId};
 use std::sync::Arc;
 
 #[cfg(test)]
-pub(crate) async fn load_manifest_materialization_for_inspection<S: ObjectStore + ?Sized>(
+pub(crate) async fn load_manifest_state_for_inspection<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     manifest_no: ManifestNo,
-) -> Result<ManifestMaterializationForInspection, ManifestLoadError> {
+) -> Result<ManifestStateForInspection, ManifestLoadError> {
     let manifest_number = manifest_no;
-    load_manifest_materialization_for_inspection_if_present(store, namespace_id, &manifest_number)
+    load_manifest_state_for_inspection_if_present(store, namespace_id, &manifest_number)
         .await?
         .ok_or_else(|| ManifestLoadError::MissingManifest {
             object_key: metadata_manifest_object(namespace_id, &manifest_number),
@@ -43,13 +43,11 @@ pub(crate) async fn load_manifest_materialization_for_inspection<S: ObjectStore 
 }
 
 #[cfg(test)]
-pub(super) async fn load_manifest_materialization_for_inspection_if_present<
-    S: ObjectStore + ?Sized,
->(
+pub(super) async fn load_manifest_state_for_inspection_if_present<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     manifest_number: &ManifestNo,
-) -> Result<Option<ManifestMaterializationForInspection>, ManifestLoadError> {
+) -> Result<Option<ManifestStateForInspection>, ManifestLoadError> {
     let manifest_key = metadata_manifest_object(namespace_id, manifest_number);
     let manifest =
         load_namespace_manifest_envelope_if_present(store, namespace_id, manifest_number).await?;
@@ -63,7 +61,7 @@ pub(super) async fn load_manifest_materialization_for_inspection_if_present<
         &manifest,
     )
     .await?;
-    Ok(Some(ManifestMaterializationForInspection {
+    Ok(Some(ManifestStateForInspection {
         manifest,
         metadata_state,
     }))
@@ -86,8 +84,8 @@ pub(crate) async fn load_manifest_metadata_state_for_inspection_from_manifest<
     manifest: &NamespaceManifestEnvelope,
 ) -> Result<MetadataState, ManifestLoadError> {
     let mut metadata_state = MetadataStateBuilder::default();
-    validate_manifest_materialization_ranges(manifest_object_key, manifest.payload())?;
-    for run in runs_in_materialization_order(manifest.payload()) {
+    validate_manifest_sequence_ranges(manifest_object_key, manifest.payload())?;
+    for run in runs_oldest_first(manifest.payload()) {
         append_manifest_segments_to_metadata(
             store,
             namespace_id,

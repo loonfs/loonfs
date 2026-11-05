@@ -18,7 +18,7 @@ mod usage;
 
 use super::error::{status_for, ServedErrorCode};
 use super::middleware::{request_log_severity, RequestLogSeverity};
-use crate::{BindingState, JobMode};
+use crate::{HttpState, JobMode};
 use loonfs::SharedObjectStore;
 use loonfs_types::ROOT_INODE_ID;
 mod fixtures;
@@ -143,7 +143,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "inode_binding",
     "inode_id",
     "inode_kind",
-    "load_checkpoint_statistics",
+    "load_snapshot_statistics",
     "load_namespace_statistics",
     "maintain_only",
     "manifest_no",
@@ -1565,7 +1565,7 @@ async fn http_first_write_takes_over_a_namespace_owned_by_another_writer() {
 struct TestHarness {
     client: Client,
     addr: std::net::SocketAddr,
-    state: BindingState,
+    state: HttpState,
     server: tokio::task::JoinHandle<()>,
 }
 
@@ -1958,7 +1958,7 @@ async fn http_upload_body_over_the_limit_answers_content_too_large() {
     bootstrap_namespace(&store, "runtime-writer", &namespace_id("demo")).await;
     let mut config = test_options(temp_dir.path(), "server-writer");
     config.inline_content.inline_content_threshold_bytes = None;
-    config.binding.max_upload_bytes = Some(1024);
+    config.http.max_upload_bytes = Some(1024);
     let TestHarness { addr, server, .. } = start_server_with_config(store, config).await;
 
     let client = Client::new(ClientConfig {
@@ -2282,7 +2282,7 @@ async fn http_uploads_answer_server_busy_at_the_concurrency_cap() {
     bootstrap_namespace(&store, "runtime-writer", &namespace_id("demo")).await;
     let mut config = test_options(temp_dir.path(), "server-writer");
     config.inline_content.inline_content_threshold_bytes = None;
-    config.binding.max_concurrent_uploads = 1;
+    config.http.max_concurrent_uploads = 1;
     let TestHarness {
         addr,
         state,
@@ -2368,7 +2368,7 @@ async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
         .expect("stat seeded file")
         .inode_id;
     let mut config = test_options(temp_dir.path(), "server-writer");
-    config.binding.max_concurrent_downloads = 1;
+    config.http.max_concurrent_downloads = 1;
     let TestHarness {
         addr,
         state,
@@ -2482,8 +2482,8 @@ async fn download_admission_is_held_until_the_response_body_is_consumed() {
     )
     .await;
     let mut config = test_options(temp_dir.path(), "server-writer");
-    config.binding.max_concurrent_downloads = 1;
-    config.binding.max_in_flight_requests = Some(std::num::NonZeroUsize::MIN);
+    config.http.max_concurrent_downloads = 1;
+    config.http.max_in_flight_requests = Some(std::num::NonZeroUsize::MIN);
     let (_, state) = test_app(config, options_with_store(store))
         .await
         .expect("build app");
@@ -2562,7 +2562,7 @@ async fn http_content_read_over_the_download_limit_answers_content_too_large() {
         .expect("stat small file")
         .inode_id;
     let mut config = test_options(temp_dir.path(), "server-writer");
-    config.binding.max_download_bytes = Some(16);
+    config.http.max_download_bytes = Some(16);
     let TestHarness { addr, server, .. } = start_server_with_config(store, config).await;
 
     let client = Client::new(ClientConfig {
@@ -2664,7 +2664,7 @@ async fn grep_worker(store: &SharedObjectStore, actor: &str) -> GrepWorker<Share
         reader,
         writer,
         maintenance,
-        loonfs_grep::GrepPassBudget::default(),
+        loonfs_grep::GrepStepBudget::default(),
     )
 }
 
@@ -2744,7 +2744,7 @@ async fn publish_grep_entry(
 
 /// A deployment that answers searches over an index it does not maintain:
 /// exactly the query error surface these tests are about, with no
-/// maintenance pass racing the fault they injected.
+/// maintenance step racing the fault they injected.
 async fn start_grep_error_server(
     store: SharedObjectStore,
     root: &Path,
@@ -2952,7 +2952,7 @@ fn assert_error_response<T: std::fmt::Debug>(
 /// what they wrote. These exercise that with a store double standing in for
 /// the provider: a loopback issuer that carries the range it would sign in
 /// its URL, and a loopback object server reading the same store the
-/// deployment writes to that refuses any other range — so the whole grant
+/// deployment writes to that refuses any other range, so the whole direct download
 /// path (route, issuer adapter, presigned fetch, client verification) runs
 /// end to end without a real bucket.
 mod direct_download {
@@ -3376,7 +3376,7 @@ mod direct_download {
     /// byte count — so the behavior under test is identical at a kilobyte
     /// and at 256 MiB, and this suite does not move a gigabyte per run to
     /// restate the same comparison. That the comparison itself picks the
-    /// grant for a 300 MiB file at the real default is pinned in the
+    /// presigned URL for a 300 MiB file at the real default is pinned in the
     /// client's own tests.
     const PROXY_CAP_BYTES: u64 = 1024;
 
@@ -3391,9 +3391,9 @@ mod direct_download {
     ///
     /// It stands in for the signing half only, and carries the `Range` a
     /// real presigner signs in the URL so the object double can refuse any
-    /// other one. What a real presigner adds — that the capability expires,
+    /// other one. What a real presigner adds (that the presigned URL expires,
     /// that `Range` is inside the signature, and that the provider enforces
-    /// the digest — is pinned where it is decided: in the presigners' own
+    /// the digest) is pinned where it is decided: in the presigners' own
     /// tests, and against a live provider in the ignored suite.
     ///
     /// It implements the read and whole-object-write traits and not the
@@ -3573,9 +3573,9 @@ mod direct_download {
         max_upload_bytes: Option<u64>,
     ) -> Client {
         let mut config = test_options(root, writer_id);
-        config.binding.max_download_bytes = Some(PROXY_CAP_BYTES);
+        config.http.max_download_bytes = Some(PROXY_CAP_BYTES);
         if let Some(max_upload_bytes) = max_upload_bytes {
-            config.binding.max_upload_bytes = Some(max_upload_bytes);
+            config.http.max_upload_bytes = Some(max_upload_bytes);
         }
         let (router, _state) = test_app(
             config,
@@ -3824,7 +3824,7 @@ mod direct_download {
         let store = object_store_at(temp_dir.path());
         let objects = object_router(store.clone());
         let mut config = test_options(temp_dir.path(), "grant-ranges");
-        config.binding.max_download_bytes = Some(PROXY_CAP_BYTES);
+        config.http.max_download_bytes = Some(PROXY_CAP_BYTES);
         let (router, state) = test_app(
             config,
             TestAppOptions {

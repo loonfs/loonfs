@@ -414,7 +414,7 @@ mod tests {
     #[test]
     fn local_discovery_prunes_unrepresentable_depth_before_opening_children() {
         let root = tempfile::tempdir().expect("tempdir");
-        std::fs::create_dir_all(root.path().join("allowed/too-deep/never-visited"))
+        std::fs::create_dir_all(root.path().join("allowed/too-deep/never-read"))
             .expect("nested tree");
         let remote_root = AbsolutePath::parse(format!(
             "/{}",

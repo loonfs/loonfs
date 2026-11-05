@@ -167,7 +167,7 @@ async fn recently_superseded_manifests_keep_old_segments_and_lazy_views_until_th
             assert_eq!(file.bytes, b"body\n");
 
             // Once the hint catches up, only the successor's age can protect
-            // its predecessor. The exact pass grace applies, even below the
+            // its predecessor. The exact collection grace applies, even below the
             // longer namespace retirement grace.
             raise_hint(current.manifest().manifest_no)
                 .await

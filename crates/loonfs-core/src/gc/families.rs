@@ -1,7 +1,7 @@
 //! Object families swept one key at a time by namespace collection.
 //!
 //! Upload sessions aren't one of these families: each session has two
-//! records, so the pass sweeps them from their own listing (see
+//! records, so the collection sweeps them from their own listing (see
 //! `super::uploads`).
 
 use super::deletes::DeletedCounter;
@@ -54,7 +54,7 @@ impl CandidateFamily {
     }
 
     /// Returns how old an unreferenced object of this family has to be before
-    /// a pass deletes the object.
+    /// a collection deletes the object.
     pub(super) fn min_age_ms(self, grace_window_ms: u64) -> u64 {
         match self {
             // A compaction may publish output that is exactly the minimum age
@@ -69,7 +69,7 @@ impl CandidateFamily {
     }
 
     /// Returns the report counter of the family's deleted objects, or `None`
-    /// for pins, which a pass counts by owner.
+    /// for pins, which a collection counts by owner.
     pub(super) fn deleted_counter(self) -> Option<DeletedCounter> {
         Some(match self {
             Self::Manifests => |report| &mut report.deleted.manifests,

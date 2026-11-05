@@ -1,11 +1,11 @@
-//! Overlapping retirement passes preserve other members and retry partial effects.
+//! Overlapping retirement collections preserve other members and retry partial effects.
 
 use super::*;
 use loonfs_objectstore::keys::{content_prefix, pin};
 
 /// Checks that overlapping retirements of a fork tolerate a source pin
 /// delete whose acknowledgement was lost, that the fork's retirement deletes
-/// none of the content the fork wrote, and that the family root's pass later
+/// none of the content the fork wrote, and that the family root's collection later
 /// collects that content while a live sibling keeps what it inherited.
 #[tokio::test]
 async fn overlapping_retirement_retries_a_lost_pin_delete_and_preserves_a_live_sibling() {
@@ -135,7 +135,7 @@ async fn overlapping_retirement_retries_a_lost_pin_delete_and_preserves_a_live_s
     let report = crate::test_support::namespace_store(&store, &source)
         .gc(None, &gc_options, &aged.clock())
         .await
-        .expect("the family root's pass");
+        .expect("the family root's collection");
     assert_eq!(report.deleted.content_objects, target_keys.len() as u64);
     assert_eq!(report.deleted.retired_content_objects, 0);
     for key in &target_keys {

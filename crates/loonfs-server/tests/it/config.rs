@@ -578,10 +578,10 @@ root = "/tmp/loonfs-server"
     assert_eq!(config.max_concurrent_uploads.get(), 8);
     assert_eq!(config.max_concurrent_downloads.get(), 16);
     assert_eq!(config.max_concurrent_maintenance.get(), 8);
-    assert_eq!(config.tick_interval_ms.get(), 5_000);
-    assert_eq!(config.maintenance_interval_ms.get(), 300_000);
+    assert_eq!(config.maintenance_interval_ms.get(), 5_000);
+    assert_eq!(config.metadata_retry_interval_ms.get(), 300_000);
     assert_eq!(config.gc_interval_ms.get(), 3_600_000);
-    assert_eq!(config.full_sweep_interval_ms.get(), 86_400_000);
+    assert_eq!(config.sweep_interval_ms.get(), 86_400_000);
     assert_eq!(config.idle_session_close_after_ms.get(), 1_800_000);
 
     let path = write_config(
@@ -598,10 +598,10 @@ root = "/tmp/loonfs-server"
     let error = load_server_config(&path).expect_err("zero bound must be rejected");
     assert_invalid_field(error, "max_compaction_input_bytes");
     for field in [
-        "tick_interval_ms",
         "maintenance_interval_ms",
+        "metadata_retry_interval_ms",
         "gc_interval_ms",
-        "full_sweep_interval_ms",
+        "sweep_interval_ms",
         "idle_session_close_after_ms",
     ] {
         let path = write_config(&format!(

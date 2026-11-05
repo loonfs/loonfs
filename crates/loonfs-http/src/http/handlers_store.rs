@@ -1,7 +1,7 @@
 //! The `maintenance/v0` routes whose subject is the backing store itself rather
 //! than one namespace.
 
-use super::{AppQuery, BindingState, NoQuery, OptionalAppJson};
+use super::{AppQuery, HttpState, NoQuery, OptionalAppJson};
 use crate::http::error::ApiResponseError;
 use axum::extract::State;
 use axum::Json;
@@ -32,7 +32,7 @@ use std::sync::Arc;
     )
 )]
 pub(super) async fn probe_store(
-    State(state): State<Arc<BindingState>>,
+    State(state): State<Arc<HttpState>>,
     AppQuery(_): AppQuery<NoQuery>,
     OptionalAppJson(request): OptionalAppJson<StoreProbeRequest>,
 ) -> Result<Json<StoreProbeResponse>, ApiResponseError> {

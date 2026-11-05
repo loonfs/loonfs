@@ -1,5 +1,5 @@
 //! Grep index builds: planning one backfill or incremental step from the
-//! checkpoint or the change feed, reading and indexing its content, and
+//! snapshot or the change feed, reading and indexing its content, and
 //! publishing the result.
 
 use super::index_rows::IndexRows;
@@ -18,17 +18,17 @@ use crate::segments::GrepSegments;
 use crate::value_table::ValueTable;
 use crate::{GrepError, Result};
 use futures::{stream, StreamExt, TryFutureExt, TryStreamExt};
-use loonfs::{CheckpointFilesPageCursor, CoreError};
+use loonfs::{CoreError, SnapshotFilesPageCursor};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{ExtensionRunRef, ExtensionSegmentRef};
 use loonfs_types::{ChangeSeq, ContentRef, InodeId, PinId, RevisionNo, MAX_PAGE_LIMIT};
 use std::collections::{BTreeMap, BTreeSet};
 
 impl<S: ObjectStore + Clone> GrepSteps<'_, S> {
-    /// Runs one bounded checkpoint-backfill or incremental build unit, from
+    /// Runs one bounded snapshot-backfill or incremental build unit, from
     /// the entry that the run's earlier steps left pending.
     ///
-    /// The step first reads the checkpoint listing or the change feed to
+    /// The step first reads the snapshot listing or the change feed to
     /// learn what content it needs. Only then does it wait for a step permit,
     /// which it keeps while it reads that content and writes its run. A
     /// step that finds the index up to date, or that restarts the backfill,
@@ -136,7 +136,7 @@ impl<S: ObjectStore + Clone> GrepSteps<'_, S> {
             });
         }
         // A completed backfill is current through the sequence captured by
-        // its checkpoint. The change feed resumes after that sequence.
+        // its snapshot. The change feed resumes after that sequence.
         let (status, completed_pin_id, built_through_seq) = match progress {
             CollectedProgress::Backfill {
                 pin_id,
@@ -277,11 +277,11 @@ enum CollectedProgress {
     },
 }
 
-/// Plans one backfill step from the files the checkpoint pins. Reads no file
+/// Plans one backfill step from the files the snapshot pins. Reads no file
 /// content.
 ///
-/// The enumeration returns the checkpointed state directly — one current
-/// revision per retained file, deleted or not, in ascending inode order — so
+/// The enumeration returns the snapshot's state directly (one current
+/// revision per retained file, deleted or not, in ascending inode order), so
 /// a step reads pages until one of its budgets is met and records the last
 /// inode it consumed. The budgets are the ones the step always had: at most
 /// `max_files_per_step` files examined, and content planning stops once
@@ -299,10 +299,10 @@ async fn plan_backfill_unit(
     let mut pending = Vec::new();
     let mut planned_content_bytes = 0u64;
     let mut files_remaining = policy.max_files_per_step.get();
-    let mut cursor = cursor.map(|after_inode_id| CheckpointFilesPageCursor { after_inode_id });
+    let mut cursor = cursor.map(|after_inode_id| SnapshotFilesPageCursor { after_inode_id });
     loop {
         let page = reads
-            .list_checkpoint_files(pin_id)
+            .list_snapshot_files(pin_id)
             .page_limit(page_limit(files_remaining))
             .cursor(cursor)
             .page()
@@ -310,7 +310,7 @@ async fn plan_backfill_unit(
         if page.captured_seq != captured_seq {
             return Err(GrepError::IndexCorrupt {
                 message: format!(
-                    "checkpoint `{pin_id}` pins sequence `{}` but the grep entry is \
+                    "snapshot `{pin_id}` pins sequence `{}` but the grep entry is \
                  backfilling sequence `{captured_seq}`",
                     page.captured_seq
                 ),
@@ -339,7 +339,7 @@ async fn plan_backfill_unit(
             break;
         }
         if page_exhausted_family {
-            // Every file the checkpoint pins is indexed, so the entry leaves
+            // Every file the snapshot pins is indexed, so the entry leaves
             // backfill for the change feed.
             next_cursor = None;
             break;

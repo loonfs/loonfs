@@ -48,7 +48,7 @@ async fn snapshot_deletes_are_idempotent_and_the_checkpoint_inventory_is_read_on
         KeyPredicate::any(),
     ));
     let mut config = test_options(directory.path(), "pin-deletion-writer");
-    config.binding.serves_maintenance = true;
+    config.http.serves_maintenance = true;
     config.grep = JobMode::Disabled;
     let (router, state) = test_app(config, options_with_store(store.clone()))
         .await
@@ -122,7 +122,7 @@ async fn a_snapshot_on_a_deleted_namespace_stays_deletable() {
         KeyPredicate::any(),
     ));
     let mut config = test_options(directory.path(), "deleted-pin-writer");
-    config.binding.serves_maintenance = true;
+    config.http.serves_maintenance = true;
     config.grep = JobMode::Disabled;
     let (router, state) = test_app(config, options_with_store(store.clone()))
         .await

@@ -114,11 +114,9 @@ pub(crate) fn runs_newest_first(payload: &NamespaceManifestPayload) -> Vec<Metad
     runs
 }
 
-/// Oldest run first, which is the order a materialization applies rows in.
+/// Oldest run first, which is the order a full load applies rows in.
 /// It is the reverse of [`runs_newest_first`], down to the same tiebreak.
-pub(crate) fn runs_in_materialization_order(
-    payload: &NamespaceManifestPayload,
-) -> Vec<MetadataRunManifest> {
+pub(crate) fn runs_oldest_first(payload: &NamespaceManifestPayload) -> Vec<MetadataRunManifest> {
     let mut runs = payload
         .runs
         .iter()

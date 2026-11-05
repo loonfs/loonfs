@@ -32,14 +32,14 @@ use super::handlers_uploads::{
     abort_upload, complete_upload, create_upload, get_upload, put_upload_content, sign_upload_parts,
 };
 use super::middleware::{authenticate, observe};
-use crate::BindingState;
+use crate::HttpState;
 use axum::http::Method;
 use axum::routing::{any, get, on, post, MethodFilter, MethodRouter};
 use axum::{Extension, Router};
 use loonfs::ErrorCode;
 use std::sync::Arc;
 
-/// Whether the binding's request deadline applies to a route.
+/// Whether the HTTP API's request deadline applies to a route.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Deadline {
     /// The request deadline cancels the request.
@@ -62,7 +62,7 @@ pub(super) struct Route {
 
 /// Declares the routes of one route group: a table of each route's method,
 /// path, operation ID, and deadline, and a function that adds the routes to
-/// a router. A route that a binding serves only with an optional handle
+/// a router. A route that the HTTP API serves only with an optional handle
 /// lists its method router after `=`.
 macro_rules! routes {
     (
@@ -79,9 +79,9 @@ macro_rules! routes {
         },)+)+];
 
         fn $add(
-            $state: &BindingState,
-            router: Router<Arc<BindingState>>,
-        ) -> Router<Arc<BindingState>> {
+            $state: &HttpState,
+            router: Router<Arc<HttpState>>,
+        ) -> Router<Arc<HttpState>> {
             router $($(.route($path, routes!(@router $method $operation $($router)?)))+)+
         }
     };
@@ -220,13 +220,13 @@ pub(super) fn find_route_path(path: &str) -> Option<&'static str> {
         .map(|route| route.path)
 }
 
-/// Serves `served` with `handle` as a request extension where the binding
+/// Serves `served` with `handle` as a request extension where the HTTP API
 /// keeps the handle, and `denied` where it doesn't.
 fn gated<T: Clone + Send + Sync + 'static>(
     handle: Option<T>,
-    served: MethodRouter<Arc<BindingState>>,
-    denied: MethodRouter<Arc<BindingState>>,
-) -> MethodRouter<Arc<BindingState>> {
+    served: MethodRouter<Arc<HttpState>>,
+    denied: MethodRouter<Arc<HttpState>>,
+) -> MethodRouter<Arc<HttpState>> {
     match handle {
         Some(handle) => served.layer(Extension(handle)),
         None => denied,
@@ -234,7 +234,7 @@ fn gated<T: Clone + Send + Sync + 'static>(
 }
 
 /// Builds contract routes. Hosts register their own health, readiness, and metrics routes.
-pub fn router(state: BindingState) -> Router {
+pub fn router(state: HttpState) -> Router {
     let mut authenticated = add_routes(&state, Router::new());
     authenticated = if state.options.serves_maintenance {
         add_maintenance_routes(&state, authenticated)

@@ -1,16 +1,16 @@
 //! The kept inode filter, which tells a base compaction which inodes keep
 //! their rows.
 //!
-//! A deletion has expired in a compaction's basis when its latest tombstone
+//! A deletion is removable in a compaction's basis when its latest tombstone
 //! event is a `set` and its deletion sequence is at or below the basis
 //! manifest's acknowledged floor. Its tombstone hides its subtree at every
 //! sequence that a compaction preserves, and no undelete of it can be
 //! committed, so a base compaction of a group that stores rows by inode
-//! removes every row of the inodes that the deletion hides
+//! removes every row of the inodes that a removable deletion hides
 //! ([format section 10.3](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#103-row-retention-during-a-base-compaction)).
 //! The filter contains every inode that's visible at the basis's head or
-//! under a recoverable deletion. A walk of the basis's directory tree finds
-//! them.
+//! under a kept deletion, which is a deletion above the acknowledged floor.
+//! A walk of the basis's directory tree finds those inodes.
 
 use super::plan::{group_run_descriptors, MetadataCompactionSpec};
 use super::step::{CompactionUnitOutcome, MetadataCompactionCancellation};
@@ -46,7 +46,7 @@ pub(crate) enum KeptInodeFilter {
 
 impl KeptInodeFilter {
     /// Whether the compaction keeps `row` and judges it under its family's
-    /// retention rule, rather than removing it because an expired deletion
+    /// retention rule, rather than removing it because a removable deletion
     /// hides its inode.
     pub(crate) fn keeps(&self, row: &MetadataRow) -> bool {
         let Self::Reached(filter) = self else {
@@ -98,8 +98,8 @@ fn removes_hidden_rows(group: MetadataFamilyGroup) -> bool {
 /// without building the filter. Every deletion's sequence is at least 1, so
 /// no deletion in that basis is at or below the acknowledged floor, and the
 /// acknowledged floor never decreases, so no earlier compaction treated a
-/// deletion in it as expired either. Any other basis builds the filter,
-/// because a base compaction of `active_deletions` removes an expired
+/// deletion in it as removable either. Any other basis builds the filter,
+/// because a base compaction of `active_deletions` removes a removable
 /// deletion's `listed` row on its own schedule, so the other groups can't
 /// tell from that family whether they still store rows that the deletion
 /// hides.
@@ -250,36 +250,36 @@ struct KeptInodeWalk<'a, 'c, S: ObjectStore + ?Sized> {
     segments: VerifiedMetadataSegments<'a, S>,
     filter: BloomFilter,
     /// The basis manifest's acknowledged floor. A deletion at or below it
-    /// that no undelete cancelled has expired.
+    /// that no undelete cancelled is removable.
     acknowledged_floor_seq: ChangeSeq,
     cancellation: &'c MetadataCompactionCancellation,
 }
 
 impl<S: ObjectStore + ?Sized> KeptInodeWalk<'_, '_, S> {
     /// Inserts every inode that's visible at the basis's head, and then every
-    /// inode under a recoverable deletion.
+    /// inode under a kept deletion.
     ///
     /// Deleting an item unbinds it, so the walk from the root inode doesn't
-    /// reach a deleted subtree. An expired deletion isn't a starting point,
+    /// reach a deleted subtree. A removable deletion isn't a starting point,
     /// and its root is unbound, so no walk reaches the inodes it hides. An
-    /// inner deletion is older than the deletion around it, so no recoverable
-    /// deletion is inside an expired one, and the two walks reach every
-    /// ancestor through which the rights on an item under a recoverable
+    /// inner deletion is older than the deletion around it, so no kept
+    /// deletion is inside a removable one, and the two walks reach every
+    /// ancestor through which the rights on an item under a kept
     /// deletion are evaluated.
     async fn reach_kept_inodes(&mut self) -> Result<ControlFlow<WalkStop>> {
         if let ControlFlow::Break(stop) = self.reach(ROOT_INODE_ID, InodeKind::Directory).await? {
             return Ok(ControlFlow::Break(stop));
         }
-        self.reach_recoverable_deletions().await
+        self.reach_kept_deletions().await
     }
 
     /// Reaches every deletion above the acknowledged floor that has a
     /// `listed` row and no `removed` row in the basis's `active_deletions`.
-    async fn reach_recoverable_deletions(&mut self) -> Result<ControlFlow<WalkStop>> {
-        let mut recoverable = ListedDeletions::above(self.acknowledged_floor_seq);
+    async fn reach_kept_deletions(&mut self) -> Result<ControlFlow<WalkStop>> {
+        let mut kept = ListedDeletions::above(self.acknowledged_floor_seq);
         loop {
             let (root_inode_id, inode_kind) =
-                match recoverable.next(&self.segments, self.cancellation).await? {
+                match kept.next(&self.segments, self.cancellation).await? {
                     ControlFlow::Break(stop) => return Ok(ControlFlow::Break(stop)),
                     ControlFlow::Continue(None) => return Ok(ControlFlow::Continue(())),
                     ControlFlow::Continue(Some(deletion)) => deletion,

@@ -7,7 +7,7 @@ use super::handlers_inodes::{InodePathParams, InodeRevisionPathParams};
 use super::handlers_uploads::{presign_issuer_error, presign_time};
 use super::query_params::{live_consistency, read_at};
 use super::usage::GrantedBytes;
-use super::{AppJson, AppPath, AppQuery, BindingState, NamespaceIdPath, NoQuery, OptionalAppJson};
+use super::{AppJson, AppPath, AppQuery, HttpState, NamespaceIdPath, NoQuery, OptionalAppJson};
 use axum::extract::State;
 use axum::{Extension, Json};
 use loonfs::{DownloadOptions, ReadAt};
@@ -58,7 +58,7 @@ const DOWNLOAD_BODY_FIELDS: &[&str] = &["/consistency", "/max_staleness_ms", "/s
     )
 )]
 pub(super) async fn create_download(
-    State(state): State<Arc<BindingState>>,
+    State(state): State<Arc<HttpState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(_): AppQuery<NoQuery>,
@@ -139,7 +139,7 @@ pub(super) async fn create_download(
     )
 )]
 pub(super) async fn create_download_by_inode(
-    State(state): State<Arc<BindingState>>,
+    State(state): State<Arc<HttpState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(path): AppPath<InodePathParams>,
@@ -201,7 +201,7 @@ pub(super) async fn create_download_by_inode(
     )
 )]
 pub(super) async fn create_revision_download_by_inode(
-    State(state): State<Arc<BindingState>>,
+    State(state): State<Arc<HttpState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(path): AppPath<InodeRevisionPathParams>,
@@ -247,12 +247,12 @@ async fn inode_download_response(
     ))
 }
 
-/// Sums the lengths of a grant's ranges, for the request's usage report.
+/// Sums the lengths of a download response's ranges, for the request's usage report.
 fn granted_bytes(ranges: &[DownloadRange]) -> Extension<GrantedBytes> {
     Extension(GrantedBytes(ranges.iter().map(|range| range.length).sum()))
 }
 
-fn direct_get_issuer(state: &BindingState) -> Result<&dyn DirectGetIssuer, ApiResponseError> {
+fn direct_get_issuer(state: &HttpState) -> Result<&dyn DirectGetIssuer, ApiResponseError> {
     state
         .direct_transfers
         .as_ref()
@@ -269,7 +269,7 @@ fn direct_get_issuer(state: &BindingState) -> Result<&dyn DirectGetIssuer, ApiRe
 
 async fn presigned_ranges(
     issuer: &dyn DirectGetIssuer,
-    ranges: &[loonfs::downloads::GrantedRange],
+    ranges: &[loonfs::downloads::ObjectRange],
     mut start_offset: u64,
 ) -> Result<Vec<DownloadRange>, ApiResponseError> {
     let mut granted = Vec::with_capacity(ranges.len());

@@ -915,7 +915,7 @@ async fn point_lookups_skip_inline_filtered_runs_without_fetches() {
         "small delta-run segments should inline their filters in the manifest"
     );
 
-    let materialized = load_manifest_materialization_for_inspection(
+    let materialized = load_manifest_state_for_inspection(
         &store,
         &namespace_id,
         segments.manifest().payload().manifest_no,
@@ -1524,7 +1524,7 @@ async fn checkpoint_delta_update_does_not_read_existing_metadata_segments() {
         "delta checkpoint update should use the WAL tail and copy existing metadata file refs"
     );
     let materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, checkpoint.manifest_no)
+        load_manifest_state_for_inspection(&store, &namespace_id, checkpoint.manifest_no)
             .await
             .expect("load checkpoint manifest");
     // One delta run per checkpoint, the first included.

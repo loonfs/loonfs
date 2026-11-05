@@ -2,7 +2,7 @@
 
 use super::error::ApiResponseError;
 use crate::AuthPolicy;
-use crate::BindingState;
+use crate::HttpState;
 use axum::extract::{DefaultBodyLimit, FromRequest, FromRequestParts, RawPathParams};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, StatusCode};
@@ -27,7 +27,7 @@ pub(super) fn server_busy_error(what: &str) -> ApiResponseError {
 }
 
 pub(super) fn acquire_download_permit(
-    state: &BindingState,
+    state: &HttpState,
 ) -> Result<OwnedSemaphorePermit, ApiResponseError> {
     Arc::clone(state.download_permits())
         .try_acquire_owned()
@@ -39,7 +39,7 @@ pub(super) fn acquire_download_permit(
 
 pub(super) fn authorize(policy: &AuthPolicy, headers: &HeaderMap) -> Result<(), ApiResponseError> {
     let expected = match policy {
-        AuthPolicy::Unauthenticated => return Ok(()),
+        AuthPolicy::Open => return Ok(()),
         AuthPolicy::BearerToken(expected) => expected.expose(),
     };
     let actual = headers
@@ -339,7 +339,7 @@ fn json_pointer(path: &serde_path_to_error::Path) -> Option<String> {
     (!pointer.is_empty()).then_some(pointer)
 }
 
-impl<T, const MAX_BYTES: usize> FromRequest<Arc<BindingState>> for AppJson<T, MAX_BYTES>
+impl<T, const MAX_BYTES: usize> FromRequest<Arc<HttpState>> for AppJson<T, MAX_BYTES>
 where
     T: serde::de::DeserializeOwned,
 {
@@ -347,7 +347,7 @@ where
 
     async fn from_request(
         req: axum::extract::Request,
-        state: &Arc<BindingState>,
+        state: &Arc<HttpState>,
     ) -> Result<Self, Self::Rejection> {
         ensure_json_content_type(req.headers())?;
         let body =
@@ -535,12 +535,12 @@ impl UploadStreamOutcome {
     }
 }
 
-impl FromRequest<Arc<BindingState>> for UploadBodyStream {
+impl FromRequest<Arc<HttpState>> for UploadBodyStream {
     type Rejection = ApiResponseError;
 
     async fn from_request(
         req: axum::extract::Request,
-        state: &Arc<BindingState>,
+        state: &Arc<HttpState>,
     ) -> Result<Self, Self::Rejection> {
         let permit = Arc::clone(state.upload_permits())
             .try_acquire_owned()
@@ -599,7 +599,7 @@ fn body_too_large_error(limit: usize) -> ApiResponseError {
 /// decodes the way [`AppJson`] decodes a body.
 pub(super) struct OptionalAppJson<T>(pub(super) Option<T>);
 
-impl<T> FromRequest<Arc<BindingState>> for OptionalAppJson<T>
+impl<T> FromRequest<Arc<HttpState>> for OptionalAppJson<T>
 where
     T: serde::de::DeserializeOwned,
 {
@@ -607,7 +607,7 @@ where
 
     async fn from_request(
         req: axum::extract::Request,
-        state: &Arc<BindingState>,
+        state: &Arc<HttpState>,
     ) -> Result<Self, Self::Rejection> {
         let declared_json = ensure_json_content_type(req.headers());
         let body = extract_body_bytes(
@@ -629,12 +629,12 @@ where
 /// passes.
 pub(super) struct NoBody;
 
-impl FromRequest<Arc<BindingState>> for NoBody {
+impl FromRequest<Arc<HttpState>> for NoBody {
     type Rejection = ApiResponseError;
 
     async fn from_request(
         req: axum::extract::Request,
-        state: &Arc<BindingState>,
+        state: &Arc<HttpState>,
     ) -> Result<Self, Self::Rejection> {
         let unexpected_body = ApiResponseError::new(
             ErrorCode::InvalidRequest,

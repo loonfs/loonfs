@@ -1317,13 +1317,13 @@ async fn read_checkpoint_files<S: ObjectStore + ?Sized>(
     checkpoint_id: &PinId,
 ) -> crate::error::Result<Vec<InodeId>> {
     let page = crate::test_support::namespace_store(store, namespace_id)
-        .list_checkpoint_files_page(
+        .list_snapshot_files_page(
             checkpoint_id,
             loonfs_types::PageRequest {
                 cursor: None,
                 limit: EffectiveLimit::new(NonZeroU32::new(64).expect("nonzero")),
             },
-            crate::pin::ListCheckpointFilesOptions::default(),
+            crate::snapshot::ListSnapshotFilesOptions::default(),
         )
         .await?;
     Ok(page.files.into_iter().map(|file| file.inode_id).collect())
@@ -1430,7 +1430,7 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
             &context.clock(),
         )
         .await
-        .map(crate::pin::checkpoint_summary)
+        .map(crate::snapshot::checkpoint_summary)
         .expect("create checkpoint");
     assert_eq!(first.expires_at_ms, Some(10_000));
 
@@ -1448,7 +1448,7 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
                 &later_context.clock(),
             )
             .await
-            .map(crate::pin::checkpoint_summary)
+            .map(crate::snapshot::checkpoint_summary)
             .expect("create checkpoint");
         assert!(
             minted.insert(next.checkpoint_id.clone()),
@@ -1478,9 +1478,9 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
 }
 
 #[tokio::test]
-async fn an_expired_pin_serves_no_reads_but_stays_until_a_pass_deletes_it() {
+async fn an_expired_pin_serves_no_reads_but_stays_until_a_collection_deletes_it() {
     // A read refuses an expired pin, but the record is still a
-    // garbage-collection root until a pass deletes it, so its state stays
+    // garbage-collection root until a collection deletes it, so its state stays
     // in place.
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -1506,7 +1506,7 @@ async fn an_expired_pin_serves_no_reads_but_stays_until_a_pass_deletes_it() {
             &context.clock(),
         )
         .await
-        .map(crate::pin::checkpoint_summary)
+        .map(crate::snapshot::checkpoint_summary)
         .expect("create checkpoint whose expiry has already passed");
     assert!(crate::test_support::namespace_store(&store, &namespace_id)
         .load_pin(&already_expired.checkpoint_id)
@@ -1518,7 +1518,7 @@ async fn an_expired_pin_serves_no_reads_but_stays_until_a_pass_deletes_it() {
         .expect_err("an expired pin serves no read");
     assert_eq!(error.code(), ErrorCode::SnapshotNotFound);
 
-    // The pass after the grace deletes the record.
+    // The collection after the grace deletes the record.
     crate::test_support::namespace_store(&store, &namespace_id)
         .gc(
             None,
@@ -1530,7 +1530,7 @@ async fn an_expired_pin_serves_no_reads_but_stays_until_a_pass_deletes_it() {
             .clock(),
         )
         .await
-        .expect("gc pass");
+        .expect("collection");
     let error = read_checkpoint_files(&store, &namespace_id, &already_expired.checkpoint_id)
         .await
         .expect_err("a deleted pin serves nothing");
@@ -1568,13 +1568,13 @@ async fn a_pin_without_a_ttl_is_held_until_it_is_deleted() {
         crate::test_support::namespace_store(&store, &namespace_id)
             .gc(None, &crate::gc::GcOptions::default(), &distant.clock())
             .await
-            .expect("gc pass");
+            .expect("collection");
     }
     crate::test_support::namespace_store(&store, &namespace_id)
         .load_pin(&pin.checkpoint_id)
         .await
         .expect("read pin")
-        .expect("an unexpiring pin survives every pass");
+        .expect("an unexpiring pin survives every collection");
     assert!(
         !read_checkpoint_files(&store, &namespace_id, &pin.checkpoint_id)
             .await
@@ -1644,7 +1644,7 @@ async fn checkpoint_creation_deletes_its_pin_when_the_floor_passed_its_manifest(
             &context.clock(),
         )
         .await
-        .map(crate::pin::checkpoint_summary)
+        .map(crate::snapshot::checkpoint_summary)
         .expect_err("floor passed pin");
     assert_eq!(error.code(), ErrorCode::CheckpointUnavailable);
     assert!(store
@@ -1694,7 +1694,7 @@ async fn pin_verification_rejects_a_deleted_namespace() {
         .expect("verification runs");
     assert_eq!(
         verified,
-        crate::pin::record::PinBasisVerification::Invalid,
+        crate::snapshot::record::PinBasisVerification::Invalid,
         "a tombstoned namespace cannot acquire a new checkpoint dependency"
     );
 }
@@ -1731,7 +1731,7 @@ async fn pin_basis_verification_store_failure_deletes_the_record() {
             &context.clock(),
         )
         .await
-        .map(crate::pin::checkpoint_summary)
+        .map(crate::snapshot::checkpoint_summary)
         .expect_err("verification failed");
     assert_eq!(error.code(), ErrorCode::ServerError);
     assert!(store
@@ -1928,7 +1928,7 @@ async fn checkpoints_append_past_the_threshold_and_compaction_drains() {
         write_file_and_checkpoint(&store, &namespace_id, &context, index).await;
     }
 
-    let appended = load_manifest_materialization_for_inspection(
+    let appended = load_manifest_state_for_inspection(
         &store,
         &namespace_id,
         current_manifest_no(&store, &namespace_id).await,
@@ -1980,7 +1980,7 @@ async fn checkpoints_append_past_the_threshold_and_compaction_drains() {
         "several family groups should be compacted, got {units}"
     );
 
-    let drained = load_manifest_materialization_for_inspection(
+    let drained = load_manifest_state_for_inspection(
         &store,
         &namespace_id,
         current_manifest_no(&store, &namespace_id).await,
@@ -2153,20 +2153,14 @@ async fn bounded_compaction_reaches_the_unbounded_state_and_preserves_intermedia
     assert!(unbounded_steps < 128, "compaction did not converge");
     assert!(bounded_steps_after_first + 1 > unbounded_steps);
 
-    let bounded = load_manifest_materialization_for_inspection(
-        &bounded_store,
-        &namespace_id,
-        bounded_manifest_no,
-    )
-    .await
-    .expect("load bounded result");
-    let unbounded = load_manifest_materialization_for_inspection(
-        &unbounded_store,
-        &namespace_id,
-        unbounded_manifest_no,
-    )
-    .await
-    .expect("load unbounded result");
+    let bounded =
+        load_manifest_state_for_inspection(&bounded_store, &namespace_id, bounded_manifest_no)
+            .await
+            .expect("load bounded result");
+    let unbounded =
+        load_manifest_state_for_inspection(&unbounded_store, &namespace_id, unbounded_manifest_no)
+            .await
+            .expect("load unbounded result");
     assert!(metadata_states_equivalent_ignoring_content_identity(
         &bounded.metadata_state,
         &unbounded.metadata_state
@@ -2238,7 +2232,7 @@ async fn whole_run_compaction_rewrites_base_segments() {
 
     let first_manifest_no = checkpoint_then_compact(&store, &namespace_id, &context, policy).await;
     let first_materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, first_manifest_no)
+        load_manifest_state_for_inspection(&store, &namespace_id, first_manifest_no)
             .await
             .expect("load first manifest");
     let first_run_keys = run_segment_object_keys(&first_materialized.manifest);
@@ -2266,7 +2260,7 @@ async fn whole_run_compaction_rewrites_base_segments() {
     .await
     .0;
     let compacted_materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, compacted_manifest_no)
+        load_manifest_state_for_inspection(&store, &namespace_id, compacted_manifest_no)
             .await
             .expect("load compacted manifest");
     let materialization_after = load_current_projection(&store, &namespace_id)
@@ -2328,7 +2322,7 @@ async fn whole_run_compaction_resegments_row_key_range_families_with_delta_runs(
 
     let first_manifest_no = checkpoint_then_compact(&store, &namespace_id, &context, policy).await;
     let first_materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, first_manifest_no)
+        load_manifest_state_for_inspection(&store, &namespace_id, first_manifest_no)
             .await
             .expect("load first manifest");
     let revision_keys_before = base_segment_object_keys_for_family(
@@ -2360,7 +2354,7 @@ async fn whole_run_compaction_resegments_row_key_range_families_with_delta_runs(
     .await
     .0;
     let compacted_materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, compacted_manifest_no)
+        load_manifest_state_for_inspection(&store, &namespace_id, compacted_manifest_no)
             .await
             .expect("load compacted manifest");
     let revision_keys_after = base_segment_object_keys_for_family(
@@ -2466,7 +2460,7 @@ async fn compaction_resumes_from_the_manifest_after_interruption() {
     }
     assert!(compacted_groups.len() >= 2);
 
-    let drained = load_manifest_materialization_for_inspection(
+    let drained = load_manifest_state_for_inspection(
         &store,
         &namespace_id,
         current_manifest_no(&store, &namespace_id).await,
@@ -2598,7 +2592,7 @@ async fn over_budget_compaction_aborts_without_publishing() {
         .expect("bootstrap");
     crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
         .put_file(
-            "/docs/merge.txt",
+            "/docs/compacted.txt",
             b"body",
             DestinationBehavior::NoReplace,
             None,
@@ -2770,7 +2764,7 @@ async fn a_base_comparable_to_its_deltas_is_rebuilt_whole_with_them() {
         write_file_and_checkpoint(&store, &namespace_id, &context, index).await;
     }
 
-    let before = load_manifest_materialization_for_inspection(
+    let before = load_manifest_state_for_inspection(
         &store,
         &namespace_id,
         current_manifest_no(&store, &namespace_id).await,
@@ -2800,7 +2794,7 @@ async fn a_base_comparable_to_its_deltas_is_rebuilt_whole_with_them() {
         super::CompactionUnitOutcome::Published { group: compacted, .. } if compacted == group
     );
 
-    let after = load_manifest_materialization_for_inspection(
+    let after = load_manifest_state_for_inspection(
         &store,
         &namespace_id,
         current_manifest_no(&store, &namespace_id).await,
@@ -2907,7 +2901,7 @@ async fn a_compaction_above_the_base_keeps_the_rows_that_shadow_it() {
         "the floor must sit past the cancelling row for this test to mean anything"
     );
 
-    let before = load_manifest_materialization_for_inspection(
+    let before = load_manifest_state_for_inspection(
         &store,
         &namespace_id,
         current_manifest_no(&store, &namespace_id).await,
@@ -2950,7 +2944,7 @@ async fn a_compaction_above_the_base_keeps_the_rows_that_shadow_it() {
     let base_before = group_base_runs(&before.manifest, group.families());
     publish_planned_compaction(&store, &namespace_id, &context, policy, &spec).await;
 
-    let after = load_manifest_materialization_for_inspection(
+    let after = load_manifest_state_for_inspection(
         &store,
         &namespace_id,
         current_manifest_no(&store, &namespace_id).await,
@@ -3055,7 +3049,7 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
         let mut settled = false;
         for _step in 0..512 {
             let report = compact_with(&store, &namespace_id, policy).await;
-            let current = load_manifest_materialization_for_inspection(
+            let current = load_manifest_state_for_inspection(
                 &store,
                 &namespace_id,
                 current_manifest_no(&store, &namespace_id).await,
@@ -3088,7 +3082,7 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
         );
     }
 
-    let final_manifest = load_manifest_materialization_for_inspection(
+    let final_manifest = load_manifest_state_for_inspection(
         &store,
         &namespace_id,
         current_manifest_no(&store, &namespace_id).await,

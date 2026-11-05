@@ -7,7 +7,7 @@ use super::handlers_filesystem::LivePageQuery;
 use super::query_params::{
     checked_cursor, checked_list_cursor, effective_page_limit, live_consistency, read_at,
 };
-use super::{acquire_download_permit, AppPath, AppQuery, BindingState, NamespaceIdPath};
+use super::{acquire_download_permit, AppPath, AppQuery, HttpState, NamespaceIdPath};
 use axum::extract::State;
 use axum::response::Response;
 use axum::Json;
@@ -122,7 +122,7 @@ pub(super) struct StatInodeQuery {
     )
 )]
 pub(super) async fn get_inode(
-    State(state): State<Arc<BindingState>>,
+    State(state): State<Arc<HttpState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(path): AppPath<InodePathParams>,
@@ -208,7 +208,7 @@ pub(super) struct ListInodeChildrenQuery {
     )
 )]
 pub(super) async fn list_inode_children(
-    State(state): State<Arc<BindingState>>,
+    State(state): State<Arc<HttpState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(path): AppPath<InodePathParams>,
@@ -264,7 +264,7 @@ pub(super) async fn list_inode_children(
     )
 )]
 pub(super) async fn list_file_revisions_by_inode(
-    State(state): State<Arc<BindingState>>,
+    State(state): State<Arc<HttpState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(path): AppPath<InodePathParams>,
@@ -317,7 +317,7 @@ pub(super) async fn list_file_revisions_by_inode(
     )
 )]
 pub(super) async fn get_file_content_by_inode(
-    State(state): State<Arc<BindingState>>,
+    State(state): State<Arc<HttpState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(path): AppPath<InodePathParams>,
@@ -372,7 +372,7 @@ pub(super) async fn get_file_content_by_inode(
     )
 )]
 pub(super) async fn get_file_revision_content_by_inode(
-    State(state): State<Arc<BindingState>>,
+    State(state): State<Arc<HttpState>>,
     SubjectHeaders(subject): SubjectHeaders,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppPath(path): AppPath<InodeRevisionPathParams>,

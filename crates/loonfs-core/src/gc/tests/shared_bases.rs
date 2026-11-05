@@ -157,11 +157,11 @@ fn extent_filter_gets(
         .collect()
 }
 
-/// Checks that a pass reads the extent filter of each distinct layout segment
+/// Checks that a collection reads the extent filter of each distinct layout segment
 /// once, lists the content prefix once, and deletes only the orphans, and that
-/// a second pass through the same segment cache reads no extent filter.
+/// a second collection through the same segment cache reads no extent filter.
 #[tokio::test]
-async fn a_pass_reads_each_extent_filter_once_and_lists_content_once() {
+async fn a_collection_reads_each_extent_filter_once_and_lists_content_once() {
     let directory = tempdir().expect("directory");
     let store = RecordingStore::new(
         MetadataMapStore::aged(
@@ -194,7 +194,7 @@ async fn a_pass_reads_each_extent_filter_once_and_lists_content_once() {
         Arc::new(crate::cache::ReadWorkingMemory::new(64 * 1024 * 1024, None)),
     ));
     let prefix = content_prefix(&namespace_id);
-    for (pass, deleted, filter_gets) in [(1, &orphans, reads.len()), (2, &BTreeSet::new(), 0)] {
+    for (round, deleted, filter_gets) in [(1, &orphans, reads.len()), (2, &BTreeSet::new(), 0)] {
         store.reset();
         let report = crate::NamespaceStore {
             segment_cache: Arc::clone(&cache),
@@ -202,11 +202,11 @@ async fn a_pass_reads_each_extent_filter_once_and_lists_content_once() {
         }
         .gc(None, &options(), &context(GRACE_MS + 1).clock())
         .await
-        .expect("pass");
+        .expect("collection");
         assert_eq!(report.deleted.content_objects, deleted.len() as u64);
         let operations = store.snapshot();
         let gets = extent_filter_gets(&operations, &reads);
-        assert_eq!(gets.len(), filter_gets, "pass {pass}");
+        assert_eq!(gets.len(), filter_gets, "collection {round}");
         assert_eq!(gets.into_iter().collect::<BTreeSet<_>>().len(), filter_gets);
         let listed: Vec<_> = operations
             .iter()
@@ -217,7 +217,7 @@ async fn a_pass_reads_each_extent_filter_once_and_lists_content_once() {
                 _ => None,
             })
             .collect();
-        assert_eq!(listed, vec![prefix.clone()], "pass {pass}");
+        assert_eq!(listed, vec![prefix.clone()], "collection {round}");
         let deletes: BTreeSet<_> = operations
             .iter()
             .filter_map(|operation| match operation {
@@ -225,7 +225,7 @@ async fn a_pass_reads_each_extent_filter_once_and_lists_content_once() {
                 _ => None,
             })
             .collect();
-        assert_eq!(&deletes, deleted, "pass {pass}");
+        assert_eq!(&deletes, deleted, "collection {round}");
     }
     assert_eq!(
         store
@@ -285,7 +285,7 @@ async fn a_false_match_of_an_extent_filter_stays_until_no_root_lists_its_segment
     let report = crate::test_support::namespace_store(&store, &namespace_id)
         .gc(None, &options(), &context(GRACE_MS + 1).clock())
         .await
-        .expect("pass with the segment rooted");
+        .expect("collection with the segment rooted");
     assert_eq!(report.deleted.content_objects, 0);
 
     // The next manifest lists only a layout segment of another chain.
@@ -298,7 +298,7 @@ async fn a_false_match_of_an_extent_filter_stays_until_no_root_lists_its_segment
     let report = crate::test_support::namespace_store(&store, &namespace_id)
         .gc(None, &options(), &context(GRACE_MS + 1).clock())
         .await
-        .expect("pass with the segment unrooted");
+        .expect("collection with the segment unrooted");
     assert_eq!(report.deleted.content_objects, protected.len() as u64 + 1);
     assert!(store.head(&orphan).await.expect("head").is_none());
 }
@@ -333,7 +333,7 @@ async fn an_extent_of_a_superseded_layout_row_stays_until_no_root_lists_its_segm
         },
     };
     // The longer layout, from a later run, supersedes the first one and lists
-    // a merged object instead of the first object.
+    // a combined object instead of the first object.
     let (mut first, superseded) =
         layout_manifest(&store, &namespace_id, [layout(ExtentObject::Whole, 1, 1)]).await;
     let (longer, kept) = layout_manifest(
@@ -371,11 +371,11 @@ async fn an_extent_of_a_superseded_layout_row_stays_until_no_root_lists_its_segm
     );
     let aged = MetadataMapStore::aged(&store, KeyPredicate::any());
     let both = superseded.union(&kept).cloned().collect::<BTreeSet<_>>();
-    for (pass_store, deleted, survivors) in [(&young_successor, 0, both), (&aged, 1, kept)] {
-        let report = crate::test_support::namespace_store(pass_store, &namespace_id)
+    for (collection_store, deleted, survivors) in [(&young_successor, 0, both), (&aged, 1, kept)] {
+        let report = crate::test_support::namespace_store(collection_store, &namespace_id)
             .gc(None, &options(), &context(now_ms).clock())
             .await
-            .expect("pass");
+            .expect("collection");
         assert_eq!(report.deleted.content_objects, deleted);
         assert_eq!(
             store
