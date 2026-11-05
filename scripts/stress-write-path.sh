@@ -86,8 +86,8 @@ runtime|execution_budget::tests::one_namespace_id_in_two_stores_is_charged_separ
 runtime|publisher::tests::pin_folds::creations_wait_for_a_fold_permit_whether_or_not_the_tail_is_folded
 runtime|publisher::tests::pin_folds::creations_started_together_fold_one_at_a_time_at_a_limit_of_one
 runtime|publisher::tests::pin_folds::dropped_creations_return_their_fold_permits
-server|sweep::tests::a_parked_visit_does_not_hold_up_later_pages
-server|sweep::tests::a_listing_failure_on_a_later_page_lets_started_visits_finish_and_fails_the_pass
+server|scheduler::tests::a_parked_namespace_does_not_hold_up_later_pages
+server|scheduler::tests::a_listing_failure_on_a_later_page_lets_started_namespaces_finish_and_fails_the_sweep
 TESTS
 
 test_count=0
