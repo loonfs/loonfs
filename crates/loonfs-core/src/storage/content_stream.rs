@@ -1,81 +1,17 @@
-//! The verified streaming read of a content object, whole or in a range, and
-//! the import reader built on it.
+//! The verified streaming read of a content object, whole or in a range.
 
 use crate::error::{CoreError, Result};
-use crate::limits::CONTENT_READ_CHUNK_BYTES;
 use crate::object_cache::ObjectCache;
 use crate::storage::content::{
     describe_checksum, validate_loaded_content_bytes, DurableContentValidationError,
 };
 use crate::storage::content_location::ContentLocation;
 use bytes::Bytes;
-use futures::StreamExt;
-use loonfs_objectstore::{ByteStream, ObjectStore, ObjectStoreError};
+use loonfs_objectstore::ObjectStore;
 use loonfs_types::options::ReadRange;
 use loonfs_types::{ContentRef, ContentVerifier, PathEntry};
 use std::num::NonZeroU64;
 use std::sync::Arc;
-
-/// Opens a verified chunked reader over existing content for import.
-pub(crate) async fn open_content_import_reader<S: ObjectStore + 'static>(
-    store: S,
-    location: ContentLocation,
-    content_ref: &ContentRef,
-) -> std::result::Result<ByteStream, DurableContentValidationError> {
-    let stream_key = location.object_key().to_owned();
-    let mut source = FileContentStream::open_inner(
-        store,
-        location,
-        None,
-        content_ref.clone(),
-        CONTENT_READ_CHUNK_BYTES,
-        StreamRange::default(),
-    )
-    .await?;
-    let first = source.next_verified_chunk().await?;
-    if source.next_offset == content_ref.size_bytes {
-        source.completion()?;
-    }
-    let remaining = futures::stream::try_unfold(source, move |mut source| {
-        let stream_key = stream_key.clone();
-        async move {
-            match source.next_verified_chunk().await {
-                Ok(chunk) => Ok(chunk.map(|bytes| (bytes, source))),
-                Err(error @ DurableContentValidationError::ContentChecksumMismatch { .. }) => {
-                    Err(ObjectStoreError::BodyAborted(error.to_string()))
-                }
-                Err(error) => Err(ObjectStoreError::transport(stream_key, error.to_string())),
-            }
-        }
-    })
-    .boxed();
-    Ok(futures::stream::iter(first.into_iter().map(Ok))
-        .chain(remaining)
-        .boxed())
-}
-
-/// Verifies that the bytes at `location` match the size and checksum of
-/// `content_ref`, by reading them with the stream that an import copies them
-/// with, and discarding them.
-pub(crate) async fn verify_content_import<S: ObjectStore>(
-    store: S,
-    location: ContentLocation,
-    content_ref: &ContentRef,
-) -> std::result::Result<(), DurableContentValidationError> {
-    let mut source = FileContentStream::open_inner(
-        store,
-        location,
-        None,
-        content_ref.clone(),
-        CONTENT_READ_CHUNK_BYTES,
-        StreamRange::Whole { start_offset: 0 },
-    )
-    .await?;
-    // Each chunk moves the stream toward the end of the content, and the
-    // stream returns `None` only after it verifies the size and checksum.
-    while source.next_verified_chunk().await?.is_some() {}
-    Ok(())
-}
 
 /// The bytes of a file that a [`FileContentStream`] returns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

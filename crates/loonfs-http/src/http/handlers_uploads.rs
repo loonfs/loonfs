@@ -372,8 +372,7 @@ pub(super) fn presign_time() -> SystemTime {
 }
 
 /// Prepares the request's content proofs against the content refs its put
-/// operations name, after `prepared_content`, the proofs of the request's
-/// imports. One prepared proof covers every operation that names its ref;
+/// operations name. One prepared proof covers every operation that names its ref;
 /// tokens covering a ref no operation puts are ignored.
 ///
 /// A rejected token is reported whether or not a sibling token verified.
@@ -387,8 +386,8 @@ pub(super) async fn content_preparation_for_puts(
     verifier: ContentTokenVerifier<'_>,
     content_refs: &[&ContentRef],
     tokens: &[ContentToken],
-    mut prepared_content: Vec<PreparedContent>,
 ) -> Result<PutContentPreparation, ApiResponseError> {
+    let mut prepared_content = Vec::new();
     let mut rejections = Vec::new();
     for token in tokens
         .iter()

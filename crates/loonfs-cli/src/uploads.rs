@@ -595,10 +595,9 @@ mod tests {
             options.commit.message,
             FilesystemOperation::PutFile {
                 path: loonfs_types::AbsolutePath::parse("/file").expect("path"),
-                content: loonfs_types::FileContent::Ref {
-                    content_ref: loonfs_test_support::ids::content_ref(b"data"),
-                    source_namespace_id: None,
-                },
+                content: loonfs_types::FileContent::Ref(loonfs_test_support::ids::content_ref(
+                    b"data",
+                )),
                 behavior: options.behavior,
                 expected_inode_id: options.expected_inode_id,
                 expected_revision_no: options.expected_revision_no,

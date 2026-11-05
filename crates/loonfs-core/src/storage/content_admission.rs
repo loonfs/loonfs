@@ -74,7 +74,7 @@ enum PreparedContentKind {
         upload_id: Option<UploadId>,
     },
     /// Content of another member of the fork family, or of `namespace_id`
-    /// itself, that `namespace_id` imports without a copy. The layout is the
+    /// itself, that `namespace_id` reuses without a copy. The layout is the
     /// one that the source's view finds, and it records the chain's creator.
     Shared {
         namespace_id: NamespaceId,
@@ -152,7 +152,7 @@ impl PreparedContent {
         }
     }
 
-    /// Prepares content that `namespace_id` imports from a member of its own
+    /// Prepares content that `namespace_id` reuses from a member of its own
     /// fork family, with the layout that the source's view finds, until
     /// `expires_at_ms`.
     pub(crate) fn for_family_member(
@@ -211,8 +211,8 @@ impl PreparedContent {
     /// Returns the layout that a revision of the prepared reference records,
     /// in a commit of `namespace_id`.
     ///
-    /// An upload is one whole object, and `namespace_id` is its creator. An
-    /// import from a member of the fork family records the source's layout,
+    /// An upload is one whole object, and `namespace_id` is its creator.
+    /// Content from a member of the fork family records the source's layout,
     /// whose creator is the chain's.
     pub(crate) fn revision_layout(&self, namespace_id: &NamespaceId) -> Option<ContentLayout> {
         match &self.kind {

@@ -470,10 +470,7 @@ async fn a_merge_with_inline_content_or_an_append_is_refused() {
         vec![FilesystemOperation::CreateFileByInode {
             parent_inode_id: loonfs_types::ROOT_INODE_ID,
             display_name: loonfs_types::DisplayName::parse("inline.txt").expect("name"),
-            content: loonfs_types::FileContent::Ref {
-                content_ref: inline.content_ref().clone(),
-                source_namespace_id: None,
-            },
+            content: loonfs_types::FileContent::Ref(inline.content_ref().clone()),
         }],
     );
     let append = intent(
@@ -588,10 +585,7 @@ async fn merge_a_forks_file() -> (tempfile::TempDir, MergedFile) {
         vec![FilesystemOperation::CreateFileByInode {
             parent_inode_id: loonfs_types::ROOT_INODE_ID,
             display_name: loonfs_types::DisplayName::parse("big.bin").expect("name"),
-            content: loonfs_types::FileContent::Ref {
-                content_ref: content_ref.clone(),
-                source_namespace_id: None,
-            },
+            content: loonfs_types::FileContent::Ref(content_ref.clone()),
         }],
     );
     let proof = PreparedContent::for_family_member(main.clone(), content_ref, layout, u64::MAX);

@@ -323,10 +323,7 @@ fn create_directory(path: &str) -> FilesystemOperation {
 fn put(path: &str, content_ref: &loonfs_types::ContentRef) -> FilesystemOperation {
     FilesystemOperation::PutFile {
         path: AbsolutePath::parse(path).expect("path"),
-        content: loonfs_types::FileContent::Ref {
-            content_ref: content_ref.clone(),
-            source_namespace_id: None,
-        },
+        content: loonfs_types::FileContent::Ref(content_ref.clone()),
         behavior: DestinationBehavior::NoReplace,
         expected_inode_id: None,
         expected_revision_no: None,
@@ -1162,10 +1159,7 @@ async fn history_needs_the_history_right() {
         &mutation,
         vec![FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/team/file").expect("path"),
-            content: loonfs_types::FileContent::Ref {
-                content_ref: content,
-                source_namespace_id: None,
-            },
+            content: loonfs_types::FileContent::Ref(content),
             behavior: DestinationBehavior::Replace,
             expected_inode_id: None,
             expected_revision_no: None,

@@ -1408,10 +1408,7 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
                 None,
                 FilesystemOperation::PutFile {
                     path: AbsolutePath::parse("/file-0").expect("path"),
-                    content: loonfs_types::FileContent::Ref {
-                        content_ref: replacement.content_ref().clone(),
-                        source_namespace_id: None,
-                    },
+                    content: loonfs_types::FileContent::Ref(replacement.content_ref().clone()),
                     behavior: loonfs_types::DestinationBehavior::Replace,
                     expected_inode_id: None,
                     expected_revision_no: None,

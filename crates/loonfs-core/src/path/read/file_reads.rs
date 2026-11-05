@@ -7,16 +7,14 @@ use crate::path::read::loaded_view::LoadedMetadataView;
 use crate::storage::content::{content_object_key_for_ref, DurableContentValidationError};
 use crate::storage::content_location::extent_object_key;
 use crate::storage::content_location::ContentLocation;
-use crate::storage::tail_content::{
-    assemble_tail_content, materialize_content_layout, write_tail_content, ContentWrites,
-};
+use crate::storage::tail_content::{assemble_tail_content, write_tail_content, ContentWrites};
 use crate::PermitPool;
 use loonfs_objectstore::ObjectStore;
 use loonfs_objectstore::ObjectStoreErrorKind;
 use loonfs_types::options::AttributeInclusion;
 use loonfs_types::{
-    AbsolutePath, AccessRight, ContentExtent, ContentLayout, ContentRef, InodeId, InodeKind,
-    NamespaceId, PathEntry, PathEntryKind, RevisionNo,
+    AbsolutePath, AccessRight, ContentExtent, ContentRef, InodeId, InodeKind, NamespaceId,
+    PathEntry, PathEntryKind, RevisionNo,
 };
 
 /// File bytes plus the metadata entry they came from.
@@ -172,13 +170,13 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     }
 
     /// Returns where this view finds the bytes of `content_ref`, a reference
-    /// that an import request supplies and that this view publishes.
+    /// that a caller supplies and that this view publishes.
     ///
     /// A reference longer than its chain in this view fails with the length
     /// mismatch that a read of the bytes would return, before any read.
     /// Without the check, the location would fail with a corruption error, as
     /// if the namespace had lost bytes that its revisions or layout refer to.
-    pub(crate) async fn resolve_imported_content_location(
+    pub(crate) async fn resolve_published_content_location(
         &self,
         content_ref: &ContentRef,
     ) -> Result<ContentLocation> {
@@ -197,24 +195,6 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             }
         }
         self.resolve_content_location(content_ref).await
-    }
-
-    /// Returns the layout of `content_ref` in this view, with the chain's
-    /// creator, after writing the chain's pending pieces to content objects
-    /// under the family root's prefix, as a copy within the namespace does.
-    pub(crate) async fn materialize_content_layout(
-        &self,
-        content_ref: &ContentRef,
-        content_writes: &PermitPool,
-    ) -> Result<ContentLayout> {
-        let content = self.wal_tail.content(content_ref);
-        materialize_content_layout(
-            ContentWrites::new(self.segments.store(), content_writes, &self.head),
-            &self.metadata_view(),
-            content.as_ref(),
-            content_ref,
-        )
-        .await
     }
 
     async fn download_ranges(

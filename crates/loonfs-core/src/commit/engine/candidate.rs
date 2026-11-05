@@ -302,15 +302,15 @@ impl CommitCandidate {
         for operation in &mut self.request.intent_mut().operations {
             match operation {
                 FilesystemOperation::PutFile {
-                    content: FileContent::Ref { content_ref, .. },
+                    content: FileContent::Ref(content_ref),
                     ..
                 }
                 | FilesystemOperation::CreateFileByInode {
-                    content: FileContent::Ref { content_ref, .. },
+                    content: FileContent::Ref(content_ref),
                     ..
                 }
                 | FilesystemOperation::PutFileRevisionByInode {
-                    content: FileContent::Ref { content_ref, .. },
+                    content: FileContent::Ref(content_ref),
                     ..
                 } if &content_ref.content_id == content_id => *content_ref = reference.clone(),
                 _ => {}

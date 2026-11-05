@@ -12,7 +12,6 @@ use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::namespace::store::NamespaceStore;
 use crate::storage::content_staging::{
     stage_bytes_under_content_id, stage_streamed_under_content_id, ContentKeyOwner,
-    StreamedPayloadKind,
 };
 use crate::time::OperationClock;
 use loonfs_objectstore::keys::content_blob;
@@ -98,7 +97,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     family_root_id,
                     content_id,
                     body,
-                    StreamedPayloadKind::Request,
                     owner,
                     self.ensure_session_still_open(&catalog, upload_id, clock),
                 )

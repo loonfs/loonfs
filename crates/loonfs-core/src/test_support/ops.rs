@@ -113,10 +113,7 @@ impl<S: ObjectStore + Clone> NamespaceFixture<S> {
             normalized_commit_id(commit_id),
             FilesystemOperation::PutFile {
                 path: parse_mutation_path(absolute_path)?,
-                content: loonfs_types::FileContent::Ref {
-                    content_ref,
-                    source_namespace_id: None,
-                },
+                content: loonfs_types::FileContent::Ref(content_ref),
                 behavior,
                 expected_inode_id: None,
                 expected_revision_no: None,
@@ -157,10 +154,7 @@ impl<S: ObjectStore + Clone> NamespaceFixture<S> {
                 .await?;
             operations.push(FilesystemOperation::PutFile {
                 path: parse_mutation_path(absolute_path)?,
-                content: loonfs_types::FileContent::Ref {
-                    content_ref: content.content_ref().clone(),
-                    source_namespace_id: None,
-                },
+                content: loonfs_types::FileContent::Ref(content.content_ref().clone()),
                 behavior: DestinationBehavior::Replace,
                 expected_inode_id: None,
                 expected_revision_no: None,

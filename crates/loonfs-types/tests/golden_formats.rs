@@ -3147,10 +3147,11 @@ fn inline_commit_wire_bytes_match_golden() {
             id.clone(),
             loonfs_types::InlineContentIdentity::from_bytes(bytes),
         );
-        *content = loonfs_types::FileContent::Ref {
-            content_ref: ContentRef::blob_v1(id, bytes, crate::ChecksumAlgorithm::Crc64nvme),
-            source_namespace_id: None,
-        };
+        *content = loonfs_types::FileContent::Ref(ContentRef::blob_v1(
+            id,
+            bytes,
+            crate::ChecksumAlgorithm::Crc64nvme,
+        ));
     }
     assert_eq!(fingerprint(&resolved, &ids), expected);
 }

@@ -7,7 +7,6 @@ use crate::authorize::{Authorizer, CommitAuthority, ReadAccess};
 use crate::commit::engine::NamespaceCommitEngine;
 use crate::diff::DiffPage;
 use crate::error::{CoreError, Result};
-use crate::limits::DIRECT_TRANSFER_URL_TTL_MS;
 use crate::metadata::access::is_administrator;
 use crate::namespace::basis::ReadBasis;
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
@@ -17,9 +16,8 @@ use crate::path::read::{
     LoadedMetadataView, RetainedRevisionsPage, RetainedRevisionsPageCursor,
 };
 use crate::storage::content::DurableContentValidationError;
-use crate::storage::content_admission::PreparedContent;
 use crate::storage::content_location::ContentLocation;
-use crate::storage::content_stream::{verify_content_import, FileContentStream, StreamRange};
+use crate::storage::content_stream::{FileContentStream, StreamRange};
 use crate::wal::ProjectedWalTail;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::options::{AccessState, CommitSplitting, DiffOptions, ListOptions, StatOptions};
@@ -221,8 +219,8 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         self.load_read_view(context).await.map(drop)
     }
 
-    /// The change feed and bare content reference reads and imports work for
-    /// the token holder and for an administrator; any other subject is refused.
+    /// The change feed and bare content reference reads work for the token
+    /// holder and for an administrator; any other subject is refused.
     pub async fn ensure_administrator(&self, context: &RuntimeReadContext) -> Result<()> {
         let Some(subject) = &self.subject else {
             return Ok(());
@@ -546,7 +544,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         crate::path::read::stat_current_files_by_inode(&read.view, inode_ids, &read.access()).await
     }
 
-    /// Resolves an import source, including an unpublished upload.
+    /// Resolves where the bytes of `content_ref` are, including an unpublished upload.
     pub async fn resolve_content_location(
         &self,
         content_ref: &ContentRef,
@@ -561,65 +559,13 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             .content_published(&content_ref.content_id)
             .await?
         {
-            view.resolve_imported_content_location(content_ref).await
+            view.resolve_published_content_location(content_ref).await
         } else {
             Ok(ContentLocation::whole(
                 &context.read_basis.head.family_root_id,
                 content_ref,
             ))
         }
-    }
-
-    /// Prepares `content_ref`, which this namespace's view at `context`
-    /// refers to, for a commit of the namespace that `catalog` describes,
-    /// without copying its bytes. Returns `None` when that namespace is in
-    /// another fork family, or when no revision or layout in this view refers
-    /// to the chain (such as an upload that no commit refers to yet), and the
-    /// caller copies the bytes instead.
-    ///
-    /// Before it prepares the reference, it reads the bytes through this view
-    /// and verifies their size and checksum against the reference, as a copy
-    /// does, so a reference that doesn't match its bytes fails with the
-    /// copy's error.
-    ///
-    /// The proof includes the chain's layout in this view, with the chain's
-    /// creator, after writing the chain's pending pieces to content objects,
-    /// as a copy within the namespace does. It expires one direct transfer
-    /// lifetime after `prepared_at_ms`, a time read before `context` was
-    /// pinned, because garbage collection keeps every manifest of this view
-    /// for longer than that, the way it does for a direct download.
-    pub async fn prepare_family_content_ref(
-        &self,
-        catalog: &VerifiedNamespaceCatalogEntry,
-        content_ref: &ContentRef,
-        context: &RuntimeReadContext,
-        prepared_at_ms: u64,
-    ) -> Result<Option<PreparedContent>> {
-        if context.read_basis.head.family_root_id != *catalog.family_root_id() {
-            return Ok(None);
-        }
-        let view = self
-            .namespace
-            .load_metadata_view_for_authorization(context)
-            .await?;
-        if !view
-            .metadata_view()
-            .content_published(&content_ref.content_id)
-            .await?
-        {
-            return Ok(None);
-        }
-        let location = view.resolve_imported_content_location(content_ref).await?;
-        verify_content_import(&self.namespace.store, location, content_ref).await?;
-        let layout = view
-            .materialize_content_layout(content_ref, &self.namespace.content_writes)
-            .await?;
-        Ok(Some(PreparedContent::for_family_member(
-            catalog.namespace_id().clone(),
-            content_ref.clone(),
-            layout,
-            prepared_at_ms.saturating_add(DIRECT_TRANSFER_URL_TTL_MS),
-        )))
     }
 
     /// Reads and verifies the bytes named by a published reference.

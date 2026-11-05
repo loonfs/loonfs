@@ -359,10 +359,7 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
         operations.push(FilesystemOperation::PutFile {
             path: AbsolutePath::parse(format!("/bounded-{index:04}.txt"))
                 .expect("valid absolute path"),
-            content: loonfs_types::FileContent::Ref {
-                content_ref: content.content_ref().clone(),
-                source_namespace_id: None,
-            },
+            content: loonfs_types::FileContent::Ref(content.content_ref().clone()),
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,

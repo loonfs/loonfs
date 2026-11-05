@@ -160,10 +160,7 @@ impl Writer {
             );
             operations.push(FilesystemOperation::PutFile {
                 path: AbsolutePath::parse(*path).expect("path"),
-                content: loonfs_types::FileContent::Ref {
-                    content_ref: value.content_ref().clone(),
-                    source_namespace_id: None,
-                },
+                content: loonfs_types::FileContent::Ref(value.content_ref().clone()),
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,

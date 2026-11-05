@@ -179,10 +179,7 @@ async fn batch_delete_then_recreate_of_a_durable_file_layers_over_cached_state()
                     "recreate-cycled",
                     FilesystemOperation::PutFile {
                         path: AbsolutePath::parse("/docs/cycled.txt").expect("path"),
-                        content: loonfs_types::FileContent::Ref {
-                            content_ref: staged.into_content_ref(),
-                            source_namespace_id: None,
-                        },
+                        content: loonfs_types::FileContent::Ref(staged.into_content_ref()),
                         behavior: DestinationBehavior::NoReplace,
                         expected_inode_id: None,
                         expected_revision_no: None,
@@ -356,10 +353,7 @@ async fn an_ack_lost_wal_put_commits_once_and_the_one_shot_publish_returns_the_c
             "ack-lost-put",
             FilesystemOperation::PutFile {
                 path: AbsolutePath::parse("/ack.txt").expect("path"),
-                content: loonfs_types::FileContent::Ref {
-                    content_ref: content.content_ref().clone(),
-                    source_namespace_id: None,
-                },
+                content: loonfs_types::FileContent::Ref(content.content_ref().clone()),
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,
@@ -478,10 +472,7 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
                     "accept-a",
                     FilesystemOperation::PutFile {
                         path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-                        content: loonfs_types::FileContent::Ref {
-                            content_ref: content.content_ref().clone(),
-                            source_namespace_id: None,
-                        },
+                        content: loonfs_types::FileContent::Ref(content.content_ref().clone()),
                         behavior: DestinationBehavior::NoReplace,
                         expected_inode_id: None,
                         expected_revision_no: None,
@@ -496,10 +487,7 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
                     "reject-speculative",
                     FilesystemOperation::PutFile {
                         path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-                        content: loonfs_types::FileContent::Ref {
-                            content_ref: content.content_ref().clone(),
-                            source_namespace_id: None,
-                        },
+                        content: loonfs_types::FileContent::Ref(content.content_ref().clone()),
                         behavior: DestinationBehavior::NoReplace,
                         expected_inode_id: None,
                         expected_revision_no: None,
@@ -522,10 +510,7 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
                     "accept-a",
                     FilesystemOperation::PutFile {
                         path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-                        content: loonfs_types::FileContent::Ref {
-                            content_ref: content.content_ref().clone(),
-                            source_namespace_id: None,
-                        },
+                        content: loonfs_types::FileContent::Ref(content.content_ref().clone()),
                         behavior: DestinationBehavior::NoReplace,
                         expected_inode_id: None,
                         expected_revision_no: None,
@@ -732,10 +717,7 @@ async fn oversized_prepared_proof_candidate_replays_receipt_but_new_request_is_r
         "over-proof-replay",
         FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/proof-replay.txt").expect("path"),
-            content: loonfs_types::FileContent::Ref {
-                content_ref: stored.into_content_ref(),
-                source_namespace_id: None,
-            },
+            content: loonfs_types::FileContent::Ref(stored.into_content_ref()),
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -845,10 +827,7 @@ async fn same_batch_over_limit_proof_duplicate_joins_its_primary() {
         "over-proof-duplicate",
         FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/batch-proof.txt").expect("path"),
-            content: loonfs_types::FileContent::Ref {
-                content_ref: stored.into_content_ref(),
-                source_namespace_id: None,
-            },
+            content: loonfs_types::FileContent::Ref(stored.into_content_ref()),
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -1114,10 +1093,7 @@ async fn path_publishes_use_durable_path_commit_receipt_index() {
         "same-path-request",
         FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/same/path.txt").expect("path"),
-            content: loonfs_types::FileContent::Ref {
-                content_ref: content.content_ref().clone(),
-                source_namespace_id: None,
-            },
+            content: loonfs_types::FileContent::Ref(content.content_ref().clone()),
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -1396,10 +1372,7 @@ async fn idempotent_path_retry_returns_receipt_before_content_validation() {
                     None,
                     FilesystemOperation::PutFile {
                         path: AbsolutePath::parse("/docs/idempotent.txt").expect("path"),
-                        content: loonfs_types::FileContent::Ref {
-                            content_ref: content.content_ref().clone(),
-                            source_namespace_id: None,
-                        },
+                        content: loonfs_types::FileContent::Ref(content.content_ref().clone()),
                         behavior: DestinationBehavior::NoReplace,
                         expected_inode_id: None,
                         expected_revision_no: None,
@@ -1428,10 +1401,7 @@ async fn idempotent_path_retry_returns_receipt_before_content_validation() {
             None,
             FilesystemOperation::PutFile {
                 path: AbsolutePath::parse("/docs/idempotent.txt").expect("path"),
-                content: loonfs_types::FileContent::Ref {
-                    content_ref: content.into_content_ref(),
-                    source_namespace_id: None,
-                },
+                content: loonfs_types::FileContent::Ref(content.into_content_ref()),
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,
@@ -1590,10 +1560,7 @@ async fn file_revision_preconditions_ignore_unrelated_commits_and_reject_rewrite
     };
     let put = |path: &str| FilesystemOperation::PutFile {
         path: AbsolutePath::parse(path).expect("path"),
-        content: loonfs_types::FileContent::Ref {
-            content_ref: content.content_ref().clone(),
-            source_namespace_id: None,
-        },
+        content: loonfs_types::FileContent::Ref(content.content_ref().clone()),
         behavior: DestinationBehavior::Replace,
         expected_inode_id: None,
         expected_revision_no: None,
@@ -1793,10 +1760,7 @@ async fn attributes_preconditions_ignore_content_rewrites_and_reject_attribute_u
                 "rewrite",
                 FilesystemOperation::PutFileRevisionByInode {
                     inode_id,
-                    content: loonfs_types::FileContent::Ref {
-                        content_ref: content.content_ref().clone(),
-                        source_namespace_id: None,
-                    },
+                    content: loonfs_types::FileContent::Ref(content.content_ref().clone()),
                     expected_revision_no: loonfs_types::RevisionNo(1),
                 },
             ),

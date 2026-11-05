@@ -108,10 +108,7 @@ async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
             None,
             FilesystemOperation::PutFile {
                 path: parse_mutation_path("/b.txt").expect("mutation path"),
-                content: loonfs_types::FileContent::Ref {
-                    content_ref: prepared_content_ref,
-                    source_namespace_id: None,
-                },
+                content: loonfs_types::FileContent::Ref(prepared_content_ref),
                 behavior: DestinationBehavior::NoReplace,
                 expected_inode_id: None,
                 expected_revision_no: None,

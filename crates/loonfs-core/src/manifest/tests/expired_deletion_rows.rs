@@ -117,10 +117,7 @@ async fn put<S: ObjectStore>(
         .expect("load namespace catalog");
     let operation = FilesystemOperation::PutFile {
         path: AbsolutePath::parse(path).expect("path"),
-        content: loonfs_types::FileContent::Ref {
-            content_ref,
-            source_namespace_id: None,
-        },
+        content: loonfs_types::FileContent::Ref(content_ref),
         behavior: DestinationBehavior::Replace,
         expected_inode_id: None,
         expected_revision_no: None,

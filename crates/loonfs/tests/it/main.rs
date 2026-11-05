@@ -23,7 +23,7 @@ mod commit_retry;
 mod common;
 mod compaction_calls;
 mod concurrent_folds;
-mod content_ref_import_access;
+mod content_ref_read_access;
 mod content_request_accounting;
 mod deletion_expiry;
 mod derived_paths;

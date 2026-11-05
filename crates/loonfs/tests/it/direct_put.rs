@@ -113,19 +113,17 @@ fn direct_put_upload_flow_validates_durable_object_on_complete() {
     block_on(direct_store.put_if_absent(&begin.object_key, Bytes::copy_from_slice(bytes)))
         .expect("write direct object");
 
-    let completed =
-        block_on(fs.complete_direct_put(&namespace_id, &begin.session.upload_id, claim))
-            .expect("complete direct put");
-    assert_eq!(completed.mode, UploadMode::DirectPut);
-    let content_ref = completed
-        .content_ref()
-        .expect("completed content ref")
-        .clone();
+    let namespace = fs.namespace_writer(&namespace_id).expect("open namespace");
+    let completed = block_on(namespace.complete_upload(
+        &begin.session.upload_id,
+        CompleteUploadBody::DirectPut { content: claim },
+    ))
+    .expect("complete direct put");
+    assert_eq!(completed.response.mode, UploadMode::DirectPut);
 
-    block_on(fs.put_file_content_ref(
-        &namespace_id,
+    block_on(namespace.put_file_prepared(
         "/docs/direct.txt",
-        content_ref,
+        completed.prepared,
         &loonfs_test_support::test_actor(),
     ))
     .expect("publish direct put content");
@@ -475,10 +473,7 @@ fn concurrent_puts_coalesce_into_one_wal_object() {
                         None,
                         FilesystemOperation::PutFile {
                             path: parse_mutation_path(path).expect("valid mutation path"),
-                            content: loonfs_types::FileContent::Ref {
-                                content_ref,
-                                source_namespace_id: None,
-                            },
+                            content: loonfs_types::FileContent::Ref(content_ref),
                             behavior: DestinationBehavior::NoReplace,
                             expected_inode_id: None,
                             expected_revision_no: None,

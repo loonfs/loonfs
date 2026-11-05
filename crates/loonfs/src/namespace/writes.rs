@@ -7,13 +7,13 @@ use crate::ByteStream;
 use crate::Result;
 use crate::{
     AccessState, ActorId, AppendFileOptions, AttributeChanges, ChangeSeq, Commit, CommitOptions,
-    ContentRef, CopyOptions, CreateDirectoryOptions, DeleteOptions, InodeId, MoveOptions,
-    PutFileOptions, RevisionNo, UndeleteOptions, UpdateAccessOptions, UpdateAttributesOptions,
+    CopyOptions, CreateDirectoryOptions, DeleteOptions, InodeId, MoveOptions, PutFileOptions,
+    RevisionNo, UndeleteOptions, UpdateAccessOptions, UpdateAttributesOptions,
 };
 use crate::{Namespace, Writable};
 
+use loonfs_types::u64_from_usize;
 use loonfs_types::FileContent;
-use loonfs_types::{u64_from_usize, NamespaceId};
 
 fn single_operation(
     actor: &ActorId,
@@ -168,71 +168,11 @@ impl Namespace<Writable> {
     ) -> Result<Commit> {
         let operation = FilesystemOperation::put_file(
             loonfs_core::path::parse_mutation_path(absolute_path)?,
-            FileContent::Ref {
-                content_ref: prepared_content.content_ref().clone(),
-                source_namespace_id: None,
-            },
+            FileContent::Ref(prepared_content.content_ref().clone()),
             options,
         );
         self.commit_prepared_one(actor, &options.commit, operation, prepared_content)
             .await
-    }
-
-    /// Publishes a file revision by importing an already-durable content
-    /// reference, refusing to replace an existing file.
-    pub async fn put_file_content_ref(
-        &self,
-        absolute_path: &str,
-        content_ref: ContentRef,
-        source_namespace_id: &NamespaceId,
-        actor: &ActorId,
-    ) -> Result<Commit> {
-        self.put_file_content_ref_with_options(
-            absolute_path,
-            content_ref,
-            source_namespace_id,
-            actor,
-            &PutFileOptions::default(),
-        )
-        .await
-    }
-
-    /// Publishes a file revision by importing an already-durable content
-    /// reference from `source_namespace_id`, which can be this namespace.
-    ///
-    /// When the source is a member of this namespace's fork family, the
-    /// revision refers to the same content, and no bytes are copied. From
-    /// another fork family, this explicitly slow helper reads and verifies the
-    /// full source object, then stages a fresh copy in this namespace's fork
-    /// family before publication, and the published revision points at the
-    /// fresh prepared ref, not the input ref. A subject must be an
-    /// administrator of the source namespace. Callers that already have
-    /// same-namespace proof should prefer
-    /// [`Self::put_file_prepared_with_options`].
-    pub async fn put_file_content_ref_with_options(
-        &self,
-        absolute_path: &str,
-        content_ref: ContentRef,
-        source_namespace_id: &NamespaceId,
-        actor: &ActorId,
-        options: &PutFileOptions,
-    ) -> Result<Commit> {
-        trace::in_operation(
-            operation_span!(
-                self.core,
-                "put_file_content_ref",
-                self.namespace_id,
-                payload_class = trace::payload_class(content_ref.size_bytes)
-            ),
-            async {
-                let prepared_content = self
-                    .prepare_content_ref_inner(content_ref, source_namespace_id)
-                    .await?;
-                self.put_file_prepared_inner(absolute_path, prepared_content, actor, options)
-                    .await
-            },
-        )
-        .await
     }
 
     /// Adds bytes to the end of a file as its next revision.

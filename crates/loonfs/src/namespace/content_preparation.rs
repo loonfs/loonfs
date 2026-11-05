@@ -1,15 +1,13 @@
 //! Content preparation on a writable [`Namespace`]: staging bytes or a stream,
-//! checking an existing content reference, and redeeming a content token, so
-//! that a commit can reference the content.
+//! and redeeming a content token, so that a commit can reference the content.
 
 use crate::publish::PreparedContent;
 use crate::trace::{self, operation_span};
 use crate::ByteStream;
-use crate::ContentRef;
 use crate::Result;
 use crate::{Namespace, Writable};
 use futures::StreamExt;
-use loonfs_types::{u64_from_usize, NamespaceId};
+use loonfs_types::u64_from_usize;
 
 impl Namespace<Writable> {
     /// Prepares content for publication.
@@ -117,87 +115,6 @@ impl Namespace<Writable> {
                 body,
             )
             .await?)
-    }
-
-    /// Imports an existing content reference from `source_namespace_id`,
-    /// which can be this namespace, for later publication.
-    ///
-    /// When the source is a member of this namespace's fork family and its
-    /// view refers to the content, preparation reads and verifies the source
-    /// bytes without copying them, and the commit records the chain's layout
-    /// from the source's view. Otherwise preparation verifies the source bytes
-    /// and stages them under a fresh content ID in this namespace's fork
-    /// family, and later publication performs no content I/O. A subject must
-    /// be an administrator of the source namespace. See the API
-    /// specification's content preparation contract.
-    pub async fn prepare_content_ref(
-        &self,
-        content_ref: ContentRef,
-        source_namespace_id: &NamespaceId,
-    ) -> Result<PreparedContent> {
-        trace::in_operation(
-            operation_span!(
-                self.core,
-                "prepare_content_ref",
-                self.namespace_id,
-                payload_class = trace::payload_class(content_ref.size_bytes)
-            ),
-            self.prepare_content_ref_inner(content_ref, source_namespace_id),
-        )
-        .await
-    }
-
-    pub(super) async fn prepare_content_ref_inner(
-        &self,
-        content_ref: ContentRef,
-        source_namespace_id: &NamespaceId,
-    ) -> Result<PreparedContent> {
-        let catalog = self
-            .core
-            .load_namespace_catalog_cached(&self.namespace_id)
-            .await?;
-        let engine = self.engine();
-        let prepared_at_ms = self.core.now_ms();
-        let crate::pinned_read::PinnedRead {
-            engine: source,
-            context,
-        } = self
-            .core
-            .pinned_read(source_namespace_id, crate::Consistency::Strong)
-            .await?;
-        source.ensure_administrator(&context).await?;
-        let prepared = async {
-            if let Some(prepared) = source
-                .prepare_family_content_ref(&catalog, &content_ref, &context, prepared_at_ms)
-                .await?
-            {
-                return Ok(prepared);
-            }
-            let source_location = source
-                .resolve_content_location(&content_ref, &context)
-                .await?;
-            engine
-                .import_content_ref(
-                    &catalog,
-                    self.core.subject().map(|subject| &subject.subject_id),
-                    &content_ref,
-                    source_location,
-                )
-                .await
-        };
-        match prepared.await {
-            Err(crate::CoreError::DurableContent(
-                loonfs_core::content::DurableContentValidationError::MissingContentObject {
-                    ..
-                },
-            )) if context.read_basis.head.status.is_deleted() => {
-                Err(crate::CoreError::NamespaceDeleted {
-                    namespace_id: source_namespace_id.clone(),
-                }
-                .into())
-            }
-            result => Ok(result?),
-        }
     }
 
     /// Verifies an authorized content token for this namespace.

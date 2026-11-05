@@ -181,7 +181,6 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "path_binding",
     "path_prefix",
     "prepare_content",
-    "prepare_content_ref",
     "protocol_version",
     "put_file",
     "put_file_prepared",

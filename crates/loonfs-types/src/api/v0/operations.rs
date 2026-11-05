@@ -9,8 +9,7 @@ use crate::options::{
 };
 use crate::{
     AbsolutePath, AccessGrants, AccessRevisionNo, AttributeKey, AttributeValue,
-    AttributesRevisionNo, BindingVersion, ChangeSeq, ContentRef, DisplayName, InodeId, NamespaceId,
-    RevisionNo,
+    AttributesRevisionNo, BindingVersion, ChangeSeq, ContentRef, DisplayName, InodeId, RevisionNo,
 };
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -30,18 +29,12 @@ pub enum DeleteDirectoryBehavior {
 
 /// The content that a file write attaches: a content reference or the file's bytes.
 ///
-/// On the wire, the operation includes exactly one of `content_ref` and `inline_content`, and
-/// `source_namespace_id` only beside `content_ref`.
+/// On the wire, the operation includes exactly one of `content_ref` and `inline_content`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileContent {
-    /// Content that a content reference identifies.
-    Ref {
-        /// The referenced content.
-        content_ref: ContentRef,
-        /// The namespace that the content is imported from. `None` means that the content was
-        /// uploaded to the namespace that commits it, and a content token must cover it.
-        source_namespace_id: Option<NamespaceId>,
-    },
+    /// Content that a content reference identifies. The content was uploaded to the namespace
+    /// that commits it, and a content token or an embedded prepared value covers it.
+    Ref(ContentRef),
     /// The complete file bytes.
     Inline(Vec<u8>),
 }
@@ -50,17 +43,10 @@ pub enum FileContent {
 #[derive(Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 struct FileContentFields {
-    /// The content reference. Without `source_namespace_id`, the content was uploaded to this
-    /// namespace and a content token must cover it. Set this field or `inline_content`, but not
-    /// both.
+    /// The content reference. Set this field or `inline_content`, but not both.
     #[serde(default)]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     content_ref: Option<ContentRef>,
-    /// The namespace to import `content_ref` from. The subject must be an administrator of that
-    /// namespace. Set this field only beside `content_ref`.
-    #[serde(default)]
-    #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    source_namespace_id: Option<NamespaceId>,
     /// The complete file bytes as base64. Set this field or `content_ref`, but not both.
     #[serde(default, deserialize_with = "crate::base64_bytes::option::deserialize")]
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>, format = Byte, nullable = false))]
@@ -71,15 +57,7 @@ impl Serialize for FileContent {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut fields = serializer.serialize_struct("FileContent", 2)?;
         match self {
-            Self::Ref {
-                content_ref,
-                source_namespace_id,
-            } => {
-                fields.serialize_field("content_ref", content_ref)?;
-                if let Some(source_namespace_id) = source_namespace_id {
-                    fields.serialize_field("source_namespace_id", source_namespace_id)?;
-                }
-            }
+            Self::Ref(content_ref) => fields.serialize_field("content_ref", content_ref)?,
             Self::Inline(bytes) => {
                 fields.serialize_field("inline_content", &crate::base64_bytes::encode(bytes))?
             }
@@ -91,19 +69,9 @@ impl Serialize for FileContent {
 impl<'de> Deserialize<'de> for FileContent {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let fields = FileContentFields::deserialize(deserializer)?;
-        match (
-            fields.content_ref,
-            fields.source_namespace_id,
-            fields.inline_content,
-        ) {
-            (Some(content_ref), source_namespace_id, None) => Ok(Self::Ref {
-                content_ref,
-                source_namespace_id,
-            }),
-            (None, None, Some(bytes)) => Ok(Self::Inline(bytes)),
-            (None, Some(_), _) => Err(serde::de::Error::custom(
-                "`source_namespace_id` requires `content_ref`",
-            )),
+        match (fields.content_ref, fields.inline_content) {
+            (Some(content_ref), None) => Ok(Self::Ref(content_ref)),
+            (None, Some(bytes)) => Ok(Self::Inline(bytes)),
             _ => Err(serde::de::Error::custom(
                 "exactly one of `content_ref` and `inline_content` is required",
             )),
@@ -830,7 +798,7 @@ impl FilesystemOperation {
             Self::PutFile { content, .. }
             | Self::CreateFileByInode { content, .. }
             | Self::PutFileRevisionByInode { content, .. } => match content {
-                FileContent::Ref { content_ref, .. } => Some(content_ref),
+                FileContent::Ref(content_ref) => Some(content_ref),
                 FileContent::Inline(_) => None,
             },
             Self::CreateDirectory { .. }
@@ -1097,65 +1065,6 @@ mod tests {
     }
 
     #[test]
-    fn a_put_names_its_source_namespace_only_beside_a_content_ref() {
-        let content_ref = serde_json::json!({
-            "kind": "blob_v1",
-            "content_id": "con_014d2pf2dbsqqg28t5cy4tqkff",
-            "size_bytes": 1,
-            "checksum": { "algorithm": "crc64nvme", "value": "aaaaaaaaaaaaaaaa" }
-        });
-        for source in [None, Some("source")] {
-            let mut document = serde_json::json!({
-                "kind": "put_file",
-                "path": "/docs/a.txt",
-                "content_ref": content_ref.clone(),
-            });
-            if let Some(source) = source {
-                document["source_namespace_id"] = source.into();
-            }
-            let put: FilesystemOperation =
-                serde_json::from_value(document.clone()).expect("a put with a content ref");
-            let FilesystemOperation::PutFile {
-                content:
-                    FileContent::Ref {
-                        source_namespace_id,
-                        ..
-                    },
-                ..
-            } = &put
-            else {
-                panic!("expected a put of a content reference, got {put:?}");
-            };
-            assert_eq!(
-                source_namespace_id.as_ref().map(NamespaceId::as_str),
-                source
-            );
-            assert_eq!(
-                serde_json::to_value(&put).expect("encode the put")["source_namespace_id"],
-                document["source_namespace_id"]
-            );
-        }
-        for content in [
-            serde_json::json!({ "source_namespace_id": "source" }),
-            serde_json::json!({ "source_namespace_id": "source", "inline_content": "aGVsbG8K" }),
-        ] {
-            let mut document = serde_json::json!({ "kind": "put_file", "path": "/docs/a.txt" });
-            document
-                .as_object_mut()
-                .expect("operation object")
-                .extend(content.as_object().expect("content fields").clone());
-            let error = serde_json::from_value::<FilesystemOperation>(document)
-                .expect_err("a source namespace without a content reference");
-            assert!(
-                error
-                    .to_string()
-                    .contains("`source_namespace_id` requires `content_ref`"),
-                "{error}"
-            );
-        }
-    }
-
-    #[test]
     fn an_undelete_destination_is_one_path_or_one_parent_and_name() {
         for (destination, message) in [
             (
@@ -1300,10 +1209,7 @@ mod tests {
             (
                 FilesystemOperation::PutFile {
                     path: path("/docs/a.txt"),
-                    content: FileContent::Ref {
-                        content_ref: content_ref.clone(),
-                        source_namespace_id: None,
-                    },
+                    content: FileContent::Ref(content_ref.clone()),
                     behavior: DestinationBehavior::NoReplace,
                     expected_inode_id: None,
                     expected_revision_no: None,

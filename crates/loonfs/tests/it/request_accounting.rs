@@ -187,10 +187,7 @@ async fn warm_phase_request_accounting() {
                     loonfs::publish::FilesystemOperation::PutFile {
                         path: AbsolutePath::parse(format!("/hot/file-{index:05}.txt"))
                             .expect("path"),
-                        content: loonfs_types::FileContent::Ref {
-                            content_ref: content_ref.clone(),
-                            source_namespace_id: None,
-                        },
+                        content: loonfs_types::FileContent::Ref(content_ref.clone()),
                         behavior: loonfs::DestinationBehavior::NoReplace,
                         expected_inode_id: None,
                         expected_revision_no: None,

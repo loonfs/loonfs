@@ -85,20 +85,14 @@ fn batch(first: &ContentRef, second: &ContentRef) -> Vec<FilesystemOperation> {
         },
         FilesystemOperation::PutFile {
             path: absolute(FIRST_FILE),
-            content: loonfs_types::FileContent::Ref {
-                content_ref: first.clone(),
-                source_namespace_id: None,
-            },
+            content: loonfs_types::FileContent::Ref(first.clone()),
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,
         },
         FilesystemOperation::PutFile {
             path: absolute(SECOND_FILE),
-            content: loonfs_types::FileContent::Ref {
-                content_ref: second.clone(),
-                source_namespace_id: None,
-            },
+            content: loonfs_types::FileContent::Ref(second.clone()),
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -264,10 +258,7 @@ async fn a_commit_returns_the_change_it_committed_and_replays_it() {
         content_tokens: vec![content_token(&staged)],
         operations: vec![FilesystemOperation::PutFile {
             path: absolute(ROOT_FILE),
-            content: loonfs_types::FileContent::Ref {
-                content_ref: staged.content_ref.clone(),
-                source_namespace_id: None,
-            },
+            content: loonfs_types::FileContent::Ref(staged.content_ref.clone()),
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -369,10 +360,7 @@ async fn a_replay_from_retained_commit_metadata_keeps_its_events() {
         content_tokens: vec![content_token(&staged)],
         operations: vec![FilesystemOperation::PutFile {
             path: absolute(ROOT_FILE),
-            content: loonfs_types::FileContent::Ref {
-                content_ref: staged.content_ref.clone(),
-                source_namespace_id: None,
-            },
+            content: loonfs_types::FileContent::Ref(staged.content_ref.clone()),
             behavior: DestinationBehavior::NoReplace,
             expected_inode_id: None,
             expected_revision_no: None,
@@ -455,10 +443,7 @@ async fn a_failing_operation_names_its_position_and_commits_nothing() {
                     },
                     FilesystemOperation::PutFile {
                         path: absolute(FIRST_FILE),
-                        content: loonfs_types::FileContent::Ref {
-                            content_ref: staged.content_ref.clone(),
-                            source_namespace_id: None,
-                        },
+                        content: loonfs_types::FileContent::Ref(staged.content_ref.clone()),
                         behavior: DestinationBehavior::NoReplace,
                         expected_inode_id: None,
                         expected_revision_no: None,
@@ -603,10 +588,7 @@ async fn a_put_revision_without_an_inode_identifies_the_revision_field() {
                 content_tokens: vec![content_token(&content)],
                 operations: vec![FilesystemOperation::PutFile {
                     path: absolute(ROOT_FILE),
-                    content: loonfs_types::FileContent::Ref {
-                        content_ref: content.content_ref,
-                        source_namespace_id: None,
-                    },
+                    content: loonfs_types::FileContent::Ref(content.content_ref),
                     behavior: DestinationBehavior::Replace,
                     expected_inode_id: None,
                     expected_revision_no: Some(RevisionNo(1)),
@@ -1113,10 +1095,7 @@ async fn a_misspelled_commit_precondition_is_rejected_rather_than_dropped() {
                 content_tokens: vec![content_token(&first)],
                 operations: vec![FilesystemOperation::PutFile {
                     path: absolute(FIRST_FILE),
-                    content: loonfs_types::FileContent::Ref {
-                        content_ref: first.content_ref.clone(),
-                        source_namespace_id: None,
-                    },
+                    content: loonfs_types::FileContent::Ref(first.content_ref.clone()),
                     behavior: DestinationBehavior::NoReplace,
                     expected_inode_id: None,
                     expected_revision_no: None,
@@ -1188,101 +1167,5 @@ async fn a_misspelled_commit_precondition_is_rejected_rather_than_dropped() {
     assert_eq!(replaced.revision_no(), Some(RevisionNo(2)));
     assert_eq!(replaced.content_ref(), Some(&second.content_ref));
 
-    harness.server.abort();
-}
-
-/// Checks that a put that names a source namespace imports the content
-/// without a content token: from a member of the same fork family it keeps
-/// the reference, and from another fork family it commits a copy.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_put_that_names_a_source_namespace_imports_its_content() {
-    let temp_dir = tempdir().expect("tempdir");
-    let harness = start_server(test_config(
-        temp_dir.path().join("store"),
-        "loonfs-server-import",
-        "http-import",
-    ))
-    .await;
-    let actor = loonfs_test_support::test_actor();
-    let (source, fork, other) = (
-        namespace_id("demo"),
-        namespace_id("fork"),
-        namespace_id("other"),
-    );
-    for namespace in [&source, &other] {
-        harness
-            .client
-            .create_namespace(namespace, &actor)
-            .await
-            .expect("create namespace");
-    }
-    let staged = stage_uploaded_content(&harness.client, &source, FIRST_BYTES).await;
-    harness
-        .client
-        .commit(
-            &source,
-            &actor,
-            &CommitRequest {
-                preconditions: Vec::new(),
-                commit_id: commit_id("source-put"),
-                message: None,
-                content_tokens: vec![content_token(&staged)],
-                operations: vec![FilesystemOperation::PutFile {
-                    path: absolute(ROOT_FILE),
-                    content: loonfs_types::FileContent::Ref {
-                        content_ref: staged.content_ref.clone(),
-                        source_namespace_id: None,
-                    },
-                    behavior: DestinationBehavior::NoReplace,
-                    expected_inode_id: None,
-                    expected_revision_no: None,
-                }],
-            },
-        )
-        .await
-        .expect("source put");
-    harness
-        .client
-        .fork_namespace(&source, &fork, &actor)
-        .await
-        .expect("fork");
-    let import = |namespace: &str| CommitRequest {
-        preconditions: Vec::new(),
-        commit_id: commit_id(&format!("import-into-{namespace}")),
-        message: None,
-        content_tokens: Vec::new(),
-        operations: vec![FilesystemOperation::PutFile {
-            path: absolute("/imported.txt"),
-            content: loonfs_types::FileContent::Ref {
-                content_ref: staged.content_ref.clone(),
-                source_namespace_id: Some(source.clone()),
-            },
-            behavior: DestinationBehavior::NoReplace,
-            expected_inode_id: None,
-            expected_revision_no: None,
-        }],
-    };
-    for (namespace, keeps_reference) in [(&fork, true), (&other, false)] {
-        harness
-            .client
-            .commit(namespace, &actor, &import(namespace.as_str()))
-            .await
-            .expect("import");
-        let spec = NamespacePath::parse(namespace.as_str(), "/imported.txt").expect("path");
-        let entry = harness.client.stat(&spec).await.expect("stat the import");
-        assert_eq!(
-            entry.content_ref() == Some(&staged.content_ref),
-            keeps_reference,
-            "{namespace}"
-        );
-        assert_eq!(
-            harness
-                .client
-                .read_file(&spec)
-                .await
-                .expect("read the import"),
-            FIRST_BYTES
-        );
-    }
     harness.server.abort();
 }

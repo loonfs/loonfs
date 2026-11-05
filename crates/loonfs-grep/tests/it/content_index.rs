@@ -94,18 +94,13 @@ impl ContentFixture {
             .expect("write the file")
     }
 
-    /// Writes a file at `path` that refers to `content_ref`, the way a copy
-    /// or a merge refers to content that the namespace already stores.
-    pub(crate) async fn put_reference(&self, path: &str, content_ref: &ContentRef) -> Commit {
+    /// Copies the file at `source_path` to `path`, so that both files refer
+    /// to one content value.
+    pub(crate) async fn copy(&self, source_path: &str, path: &str) -> Commit {
         self.namespace
-            .put_file_content_ref(
-                path,
-                content_ref.clone(),
-                &self.namespace_id,
-                &loonfs_test_support::test_actor(),
-            )
+            .copy_path(source_path, path, &loonfs_test_support::test_actor())
             .await
-            .expect("write the file by reference")
+            .expect("copy the file")
     }
 
     pub(crate) async fn content_ref(&self, path: &str) -> ContentRef {
@@ -292,7 +287,7 @@ async fn a_value_indexed_once_for_two_files_is_found_for_both() {
     let fixture = ContentFixture::new("one-value-two-files").await;
     fixture.put("/one.txt", b"a shared needle\n").await;
     let content_ref = fixture.content_ref("/one.txt").await;
-    fixture.put_reference("/two.txt", &content_ref).await;
+    fixture.copy("/one.txt", "/two.txt").await;
     fixture.content_reads();
 
     fixture
@@ -336,7 +331,7 @@ async fn a_build_step_skips_a_value_that_texts_records() {
         .await
         .expect("enable");
     let content_ref = fixture.content_ref("/one.txt").await;
-    let two = fixture.put_reference("/two.txt", &content_ref).await;
+    let two = fixture.copy("/one.txt", "/two.txt").await;
     fixture.content_reads();
 
     assert_matches!(
@@ -623,9 +618,13 @@ async fn the_re_reference_check_abandons_a_reorganization_whose_dropped_value_co
     let (first, to_base) =
         start_a_pruning_base_reorganization(&fixture, b"a comeback needle\n").await;
 
-    // A commit brings the first value back, and a build step finds its
+    // A restore brings the first value back, and a build step finds its
     // `texts` row in the reorganization's inputs and skips it.
-    fixture.put_reference("/b.txt", &first).await;
+    fixture
+        .namespace
+        .restore_revision("/a.txt", RevisionNo(1), &loonfs_test_support::test_actor())
+        .await
+        .expect("restore the first revision");
     assert_matches!(
         fixture.build_step().await,
         GrepBuildOutcome::Indexed {
@@ -641,14 +640,13 @@ async fn the_re_reference_check_abandons_a_reorganization_whose_dropped_value_co
     let manifest = fixture.manifest().await;
     assert!(manifest.reorganize().is_none());
     assert!(manifest.runs().iter().all(|run| run.level != 2));
-    // The appended file still contains the needle in its longer value.
     assert_eq!(
         fixture
             .grep_paths("comeback needle")
             .await
             .into_iter()
             .collect::<BTreeSet<_>>(),
-        BTreeSet::from(["/a.txt".to_owned(), "/b.txt".to_owned()])
+        BTreeSet::from(["/a.txt".to_owned()])
     );
     assert_eq!(fixture.text_rows(&ContentValue::of(&first)).await, [true]);
 }

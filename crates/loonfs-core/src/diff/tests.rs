@@ -291,10 +291,7 @@ async fn administer_put(history: &History, path: &str) -> Commit {
         history,
         |content_ref| FilesystemOperation::PutFile {
             path,
-            content: loonfs_types::FileContent::Ref {
-                content_ref: content_ref.expect("put content"),
-                source_namespace_id: None,
-            },
+            content: loonfs_types::FileContent::Ref(content_ref.expect("put content")),
             behavior: loonfs_types::DestinationBehavior::Replace,
             expected_inode_id: None,
             expected_revision_no: None,

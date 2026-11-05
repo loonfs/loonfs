@@ -60,10 +60,7 @@ impl Namespace<Writable> {
                 let operation = FilesystemOperation::create_file_by_inode(
                     parent_inode_id,
                     display_name.clone(),
-                    FileContent::Ref {
-                        content_ref: prepared_content.content_ref().clone(),
-                        source_namespace_id: None,
-                    },
+                    FileContent::Ref(prepared_content.content_ref().clone()),
                 );
                 self.commit_prepared_one(actor, options, operation, prepared_content)
                     .await
@@ -118,10 +115,7 @@ impl Namespace<Writable> {
                 let prepared_content = self.prepare_content_inner(bytes).await?;
                 let operation = FilesystemOperation::put_file_revision_by_inode(
                     inode_id,
-                    FileContent::Ref {
-                        content_ref: prepared_content.content_ref().clone(),
-                        source_namespace_id: None,
-                    },
+                    FileContent::Ref(prepared_content.content_ref().clone()),
                     expected_revision_no,
                 );
                 self.commit_prepared_one(actor, options, operation, prepared_content)

@@ -180,7 +180,7 @@ File content is durable no later than the commit that references it. File conten
 
 Garbage collection deletes a WAL object only after a manifest covers it, and the fold that published that manifest has already written the WAL object's pieces as extents. So a WAL object is never deleted while some of its pieces exist only in the WAL. This is also why a reference identifies content but doesn't prove that a content object contains its bytes yet. [Content verification](#45-content-verification) defines where a reader finds the bytes.
 
-Every member of a fork family writes its new content under the family root's prefix: the object of each upload, the objects that a fold writes for inline pieces, and the extents of new chains. So a fork reads inherited content with the same keys as its source, and a reference that one member commits identifies the same bytes in every other member. Content is never copied between the members of a fork family. (An import from another fork family copies the bytes, as [Cross-namespace copies and moves](#97-cross-namespace-copies-and-moves) describes.)
+Every member of a fork family writes its new content under the family root's prefix: the object of each upload, the objects that a fold writes for inline pieces, and the extents of new chains. So a fork reads inherited content with the same keys as its source, and a reference that one member commits identifies the same bytes in every other member. Content is never copied between the members of a fork family.
 
 A chain's "creator" is the namespace whose commit started the chain, and only the creator extends the chain in place. The chain's layout records the creator next to its extents (see [Metadata rows and row keys](#a6-metadata-rows-and-row-keys)). An append by any other member of the fork family starts a new chain that shares the first chain's extents (see [Operations and WAL deltas](#66-operations-and-wal-deltas)).
 
@@ -188,7 +188,7 @@ Reading inherited content doesn't require the source's manifest. A fork's manife
 
 Two separate uploads of identical bytes create two objects, because LoonFS doesn't deduplicate content across uploads. A retry within one upload session reuses that session's content ID, so retries don't depend on finding another upload with identical bytes.
 
-Why does every member of a fork family write content under one prefix? The members of a fork family are the namespaces that can share a content object, because a fork inherits its source's references and every other import copies the bytes. With one prefix, a reference identifies the same object in every member, a member's retirement never deletes an object that another member reads, and one collection sees every root of every object it can delete (see [Content roots](#119-content-roots)). With a prefix for each namespace, a reference from one member into another member's prefix would need a pin in that direction for as long as the reference exists.
+Why does every member of a fork family write content under one prefix? The members of a fork family are the namespaces that can share a content object: a fork inherits its source's references, a merge carries a fork's references into its source, and no operation carries a reference into another fork family. With one prefix, a reference identifies the same object in every member, a member's retirement never deletes an object that another member reads, and one collection sees every root of every object it can delete (see [Content roots](#119-content-roots)). With a prefix for each namespace, a reference from one member into another member's prefix would need a pin in that direction for as long as the reference exists.
 
 ### 1.6 File and subtree deletion
 
@@ -798,7 +798,7 @@ The reference HTTP server represents admission evidence as signed content tokens
 
 Immediately before it publishes newly accepted requests, the writer checks that every externally supplied content reference has matching, unexpired admission evidence. This check includes the time spent acquiring or checking the writer, loading the view, planning, and preparing the WAL object. It uses the request clock plus the monotonic time elapsed since the batch call began, including earlier attempts, so retrying doesn't restart the evidence's validity.
 
-A retained matching commit receipt replays without new admission evidence. Internal copy and restore operations reuse references that the validated namespace state already established, and they don't authorize arbitrary imports from other namespaces. An import from another fork family writes verified bytes under a new content ID in the destination's fork family (see [Cross-namespace copies and moves](#97-cross-namespace-copies-and-moves)).
+A retained matching commit receipt replays without new admission evidence. Internal copy and restore operations reuse references that the validated namespace state already established, and a merge reuses the fork's. A commit has no other way to reference content that another namespace wrote.
 
 Why does admission evidence expire? Garbage collection has to know when it can delete a completed upload that nothing references. If evidence never expired, a commit could reference the upload at any time, and its content could never be deleted safely. The receipt window, the token lifetime, and the publication budget determine the earliest safe deletion time, and [Upload-session cleanup](#116-upload-session-cleanup) and [Appendix C](#appendix-c-timing-and-size-reference) show the exact calculation.
 
@@ -1337,13 +1337,9 @@ Pins are deleted from descendants to ancestors. If deleting a source pin fails, 
 
 A rename that keeps the inode stays within one namespace. Across namespaces, a move is a copy to the destination followed by a deletion in the source, without an atomic transaction across both histories.
 
-Within a fork family, a reference identifies the same object in every member, so a fork keeps using inherited references through its source pin. No import is needed between members. An import from another fork family writes verified bytes under a new content ID in the destination's fork family. (A reference into another fork family's prefix would point at an object whose collection doesn't read the destination's roots, so the destination would need a pin on the source for as long as the reference exists.)
+Within a fork family, a reference identifies the same object in every member, so a fork keeps using inherited references through its source pin, and a merge carries the fork's references into its source. No operation carries a reference into another fork family: such a reference would point at an object whose garbage collection pass doesn't read the destination's roots, so the destination would need a pin on the source for as long as the reference exists. Content moves between fork families by an upload.
 
-An import identifies the source namespace, and it checks that namespace's current view for authorization, including an import within the same namespace. The import reads the requested reference where the source's current view finds its bytes (see [Content verification](#45-content-verification)): in the source's own tail pieces, or in content objects. Reclaimed content returns the same error as any missing content object. The import verifies the bytes and stages them under a new content ID in the destination's fork family. Forks pin manifests, so inherited content has always been written to content objects.
-
-A [merge](glossary.md#merge) admits its content references without an import. The merge includes each reference with the layout that the fork's revision and layout rows record (the fork is folded before a merge, so every reference has a layout), and LoonFS admits the reference without reading its bytes. The fork wrote those rows itself, and no caller supplied the references, so there's nothing to verify. Once the merge is in the namespace's WAL tail, the namespace's own content roots keep the content (see [Content roots](#119-content-roots)).
-
-A subject that imports a bare reference MUST be an administrator of the source namespace. An unrestricted source, and a request with no subject, don't need an administrator grant. Authorization always uses the source's current head, and a deleted source uses the access state in its final manifest.
+A [merge](glossary.md#merge) admits its content references from the fork's own rows. The merge includes each reference with the layout that the fork's revision and layout rows record (the fork is folded before a merge, so every reference has a layout), and LoonFS admits the reference without reading its bytes. The fork wrote those rows itself, and no caller supplied the references, so there's nothing to verify. Once the merge is in the namespace's WAL tail, the namespace's own content roots keep the content (see [Content roots](#119-content-roots)).
 
 ## 10. Retention and compaction
 
@@ -1571,7 +1567,7 @@ Pin bodies aren't needed to identify these roots, because the manifest number is
 
 A manifest below the current one stays a root while its immediate successor is younger than `T`, whether it's above or below the observed hint. The successor's age comes from its modification time in the manifest listing. A successor listed without a time counts as young, and a successor missing from the listing doesn't make the older manifest a root.
 
-The tombstone keeps its runs, so an import from a deleted namespace can still be authorized against its final access state. Retirement doesn't read those segments (see [Retirement](#95-retirement)). Content objects have their own roots (see [Content roots](#119-content-roots)).
+The tombstone keeps its runs, so a deleted namespace's references protect its content until retirement. Retirement doesn't read those segments (see [Retirement](#95-retirement)). Content objects have their own roots (see [Content roots](#119-content-roots)).
 
 A retention floor can move past a pinned manifest's folded head sequence, and that doesn't remove the pin's protection. Reads through the pin use the pinned manifest's runs directly.
 
