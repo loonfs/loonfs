@@ -325,21 +325,38 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
         }))
     }
 
+    /// Resolves the revision that a restore copies. A revision at or below
+    /// the retention floor is found only while it's the file's newest at or
+    /// below the floor. A base compaction removes the older ones once the
+    /// floor is acknowledged, and this refusal is what lets it: every commit
+    /// validated against the floor leaves them alone, so none copies a
+    /// revision whose content the collector reclaims
+    /// ([format section 10.3](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#103-row-retention-during-a-base-compaction)).
     pub(super) async fn resolve_restore_source_revision(
         &self,
         inode_id: InodeId,
         source_revision_no: RevisionNo,
     ) -> Result<RevisionRecord> {
-        Ok(self
-            .view()
+        let missing = || CommitValidationError::RestoreRevisionSourceRevisionMissing {
+            inode_id,
+            source_revision_no,
+        };
+        let view = self.view();
+        let revision = view
             .revision_at_head(inode_id, source_revision_no)
             .await?
-            .ok_or(
-                CommitValidationError::RestoreRevisionSourceRevisionMissing {
-                    inode_id,
-                    source_revision_no,
-                },
-            )?)
+            .ok_or_else(missing)?;
+        let floor_seq = view.retention_floor_seq();
+        if revision.committed_seq <= floor_seq {
+            let newest_at_floor = view
+                .at_seq(floor_seq)
+                .latest_revision_record(inode_id)
+                .await?;
+            if newest_at_floor.is_none_or(|newest| newest.revision_no != revision.revision_no) {
+                return Err(missing().into());
+            }
+        }
+        Ok(revision)
     }
 
     pub(super) async fn ensure_rename_does_not_cycle(

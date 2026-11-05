@@ -241,7 +241,7 @@ Index maintenance reduces this gap when it runs. Core backpressure on the WAL ta
 
 ## Grep garbage collection
 
-Core garbage collection collects grep segments under the segment rule that it applies to metadata segments. A segment stays while a current, pinned, or recently superseded manifest lists it in grep's entry, including the inputs and outputs of an in-progress reorganization, and an unlisted segment is deleted once it's more than 24 hours old. The `gc` result counts the deleted segments in `deleted.extension_segments`. A run that lost its publication, or that stopped before it published, leaves its segments unlisted, and a later collection deletes them. Disabling the index and deleting the namespace empty the entry's runs, so the index's segments become unlisted too.
+Core garbage collection collects grep segments under the segment rule that it applies to metadata segments. A segment stays while the current manifest or a pinned manifest lists it in grep's entry, including the inputs and outputs of an in-progress reorganization, and an unlisted segment is deleted once it's more than 24 hours old. The `gc` result counts the deleted segments in `deleted.extension_segments`. A run that lost its publication, or that stopped before it published, leaves its segments unlisted, and a later collection deletes them. Disabling the index and deleting the namespace empty the entry's runs, so the index's segments become unlisted too.
 
 ## Costs and defaults
 

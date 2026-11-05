@@ -791,12 +791,22 @@ async fn a_deleted_file_keeps_its_newest_revision_past_the_floor_and_undelete_re
         .await
         .expect("advance the floor past the deletion");
     assert_eq!(advanced.retention_floor_seq, deletion.committed_seq);
-    compact_until_done(&fs.maintenance, &namespace_id).await;
-
+    // The deletion sits at the floor, and it stays recoverable until a writer
+    // acknowledges the floor, so the undelete lands first.
     namespace_writer
         .undelete(inode_id, deletion.committed_seq, &actor)
         .await
         .expect("undelete the file");
+    fs.create_snapshot(&namespace_id)
+        .await
+        .expect("fold the undelete");
+    // The acknowledgment lets the base compaction apply the floor: the file
+    // keeps its newest revision at the floor and loses the older one.
+    fs.maintenance
+        .acknowledge_retention_floor(&namespace_id)
+        .await
+        .expect("acknowledge the floor");
+    compact_until_done(&fs.maintenance, &namespace_id).await;
     let reader = fresh_reader(store(temp_dir.path())).await;
     let namespace = reader.namespace(&namespace_id);
     assert_eq!(

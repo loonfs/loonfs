@@ -148,8 +148,12 @@ fn layout_segments(manifest: &crate::namespace::control::LoadedManifest) -> BTre
         .collect()
 }
 
+/// Checks that a pinned view on an earlier manifest adds extent filter reads
+/// only for the layout segments that the current manifest doesn't list: a
+/// layout compaction gives the pinned manifest layout segments of its own,
+/// and a writer claim leaves the layout segments as they were.
 #[tokio::test]
-async fn superseded_views_add_segment_reads_only_for_uncovered_layout_segments() {
+async fn pinned_views_add_segment_reads_only_for_uncovered_layout_segments() {
     use crate::compaction::CompactionUnitOutcome;
 
     for own_runs in [false, true] {
@@ -159,7 +163,8 @@ async fn superseded_views_add_segment_reads_only_for_uncovered_layout_segments()
             LocalFsStore::new(directory.path()).expect("store"),
             KeyPredicate::any(),
         ));
-        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context(1_000))
+        let setup = context(1_000);
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
             .create()
             .await
             .expect("namespace");
@@ -169,7 +174,7 @@ async fn superseded_views_add_segment_reads_only_for_uncovered_layout_segments()
                 &namespace_id,
                 &format!("/docs/{name}"),
                 name,
-                &context(1_000),
+                &setup,
             )
             .await;
             crate::test_support::namespace_store(&store, &namespace_id)
@@ -181,6 +186,9 @@ async fn superseded_views_add_segment_reads_only_for_uncovered_layout_segments()
             .load_current_manifest()
             .await
             .expect("previous");
+        let pin = create_checkpoint(&store, &namespace_id, &setup)
+            .await
+            .expect("pin the previous manifest");
         if own_runs {
             for _ in 0..16 {
                 let outcome = crate::test_support::NamespaceFixture::new(
@@ -209,36 +217,33 @@ async fn superseded_views_add_segment_reads_only_for_uncovered_layout_segments()
             }
         } else {
             crate::test_support::namespace_store(&store, &namespace_id)
-                .acquire_writer_epoch(&context(1_000).writer_id)
+                .acquire_writer_epoch(&setup.writer_id)
                 .await
-                .expect("supersede");
+                .expect("replace the previous manifest");
         }
         let current = crate::test_support::namespace_store(&store, &namespace_id)
             .load_current_manifest()
             .await
             .expect("current");
+        assert!(current.manifest().manifest_no > previous.manifest().manifest_no);
         assert_eq!(
             layout_segments(&previous) != layout_segments(&current),
             own_runs
         );
         let now_ms = GRACE_MS + 1;
-        let recent = MetadataMapStore::new(
-            Arc::clone(&store),
-            KeyPredicate::exact(&current.object_key),
-            move |mut meta| {
-                meta.last_modified_at_ms = Some(now_ms);
-                meta
-            },
-        );
-        let rooted = RecordingStore::metadata_segments(recent);
+        let rooted = RecordingStore::metadata_segments(Arc::clone(&store));
         crate::test_support::namespace_store(&rooted, &namespace_id)
             .gc(None, &options(), &context(now_ms).clock())
             .await
-            .expect("root predecessor");
+            .expect("root the pinned manifest");
         // Reads within one collection have no fixed order, so both lists are
         // compared sorted.
         let mut rooted_reads = rooted.take_get_keys();
         rooted_reads.sort();
+        crate::test_support::namespace_store(&store, &namespace_id)
+            .delete_pin(&pin.checkpoint_id)
+            .await
+            .expect("release the pin");
         let current_only = RecordingStore::metadata_segments(Arc::clone(&store));
         crate::test_support::namespace_store(&current_only, &namespace_id)
             .gc(None, &options(), &context(now_ms).clock())
@@ -261,11 +266,11 @@ async fn superseded_views_add_segment_reads_only_for_uncovered_layout_segments()
 }
 
 /// Checks that a collection reads the extent filter of each layout segment once,
-/// when every rooted manifest adds one delta run over a base that the current
-/// manifest no longer lists, and that it loads those manifests with more than
-/// one read and at most `STORE_READS_IN_FLIGHT` reads in flight.
+/// when every pinned view adds one delta run over a base that the current
+/// manifest no longer lists, and that it loads those pinned manifests with
+/// more than one read and at most `STORE_READS_IN_FLIGHT` reads in flight.
 #[tokio::test]
-async fn a_collection_reads_each_extent_filter_once_however_many_roots_list_its_segment() {
+async fn a_collection_reads_each_extent_filter_once_however_many_pinned_views_list_its_segment() {
     use crate::compaction::CompactionUnitOutcome;
 
     const DELTA_RUNS: usize = 8;
@@ -293,10 +298,9 @@ async fn a_collection_reads_each_extent_filter_once_however_many_roots_list_its_
             &setup,
         )
         .await;
-        crate::test_support::namespace_store(setup_store, &namespace_id)
-            .fold_wal()
+        create_checkpoint(setup_store, &namespace_id, &setup)
             .await
-            .expect("fold");
+            .expect("fold and pin");
         let folded = crate::test_support::namespace_store(setup_store, &namespace_id)
             .load_current_manifest()
             .await
@@ -335,7 +339,7 @@ async fn a_collection_reads_each_extent_filter_once_however_many_roots_list_its_
         .expect("compacted manifest");
     assert!(layout_segments(&current).is_disjoint(&base));
     segments.extend(layout_segments(&current));
-    // Every successor is younger than the grace, so every manifest is a root.
+    // A pin keeps each fold's manifest, so every manifest is a root.
     let now_ms = now_after_newest_object(setup_store, &namespace_id, 1).await;
     crate::test_support::namespace_store(&store, &namespace_id)
         .gc(None, &options(), &context(now_ms).clock())

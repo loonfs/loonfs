@@ -2,11 +2,11 @@
 //! candidates as one numbered WAL put, then returns
 //! one result per candidate.
 
-use super::batch::PublishViewEffect;
+use super::batch::{PublishBatchReport, PublishViewEffect};
 use super::publish_view::WriterPosition;
 use crate::engine::{NamespaceEngine, Writable};
-use crate::error::{CoreError, Result, WriterFence};
-use crate::manifest::PublishedManifest;
+use crate::error::{CoreError, MetadataProjectionLoadError, Result, WriterFence};
+use crate::manifest::{ManifestLoadError, PublishedManifest};
 use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::namespace::store::NamespaceStore;
 use crate::namespace::writer_epoch::AcquiredWriter;
@@ -491,6 +491,7 @@ impl PositionState {
         )
         .await;
         let position = publish_view.into_position();
+        let published = classify_replaced_basis(namespace, &position, published).await;
         self.projection_observed = Some(projection_observed);
         let update = self.update_publish_tail_projection(
             &namespace.namespace_id,
@@ -588,6 +589,60 @@ struct TailProjectionUpdate {
     wal_tail_objects: u64,
     wal_tail_bytes: usize,
     advanced: bool,
+}
+
+/// Returns `report` with each result that found a metadata segment missing
+/// replaced by `ManifestReplaced`, and the batch's effect set to drop the
+/// position, when the store shows a manifest above the batch's basis.
+/// Garbage collection keeps the segments of the current manifest and of
+/// pinned manifests, so a successor can drop the basis's, and the next unit
+/// plans on the current manifest. Without a successor, the segment is
+/// missing from the current manifest, and the result stays
+/// `namespace_corrupt`.
+async fn classify_replaced_basis<S: ObjectStore>(
+    namespace: &NamespaceStore<S>,
+    position: &WriterPosition,
+    mut report: PublishBatchReport,
+) -> PublishBatchReport {
+    if !report.results.iter().any(found_segment_missing) {
+        return report;
+    }
+    let replaced_manifest_no = position.read_basis.basis.manifest_no();
+    let current_manifest_no = match namespace.load_current_manifest().await {
+        Ok(current) => current.payload().manifest_no,
+        Err(_) => return report,
+    };
+    if current_manifest_no <= replaced_manifest_no {
+        return report;
+    }
+    for result in &mut report.results {
+        if found_segment_missing(result) {
+            *result = Err(CoreError::ManifestReplaced {
+                replaced_manifest_no,
+                current_manifest_no,
+            });
+        }
+    }
+    report.effect = PublishViewEffect::Invalidated;
+    report
+}
+
+/// Returns whether `result` failed because a metadata segment of the basis
+/// is missing, in the batch itself or in one of its operations.
+fn found_segment_missing(result: &Result<Commit>) -> bool {
+    let Err(error) = result else {
+        return false;
+    };
+    let error = match error {
+        CoreError::FailedOperation { error, .. } => error.as_ref(),
+        error => error,
+    };
+    matches!(
+        error,
+        CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(
+            ManifestLoadError::MissingSegment { .. }
+        ))
+    )
 }
 
 fn repeated_error(count: usize, error: CoreError) -> Vec<Result<Commit>> {

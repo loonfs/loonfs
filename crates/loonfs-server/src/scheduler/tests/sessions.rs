@@ -690,7 +690,7 @@ async fn collection_runs_hourly_only_when_the_session_moved() {
     let operations = store.take();
     assert_eq!(
         list_count(&operations),
-        10,
+        9,
         "collection lists the namespace's garbage without listing namespaces"
     );
     assert!(operations.iter().all(|op| op
@@ -710,7 +710,7 @@ async fn collection_runs_hourly_only_when_the_session_moved() {
         .await;
     assert_eq!(
         list_count(&store.take()),
-        10,
+        9,
         "the first run after the commit collects, because collection comes before the \
          index step"
     );

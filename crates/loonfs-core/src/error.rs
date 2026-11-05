@@ -18,8 +18,8 @@ use loonfs_types::format::control::WriterBlock;
 pub use loonfs_types::MergeBound;
 use loonfs_types::{ActiveWriter, CommittedReceipt, MergeConflict};
 use loonfs_types::{
-    BindingVersion, ChangeSeq, CommitId, ErrorDetails, InodeId, InodeKind, NamespaceId, PathError,
-    PrincipalScope, RevisionNo, UploadId, WriterEpoch,
+    BindingVersion, ChangeSeq, CommitId, ErrorDetails, InodeId, InodeKind, ManifestNo, NamespaceId,
+    PathError, PrincipalScope, RevisionNo, UploadId, WriterEpoch,
 };
 use thiserror::Error;
 
@@ -329,6 +329,19 @@ pub enum CoreError {
         expected: ChangeSeq,
         actual: ChangeSeq,
     },
+    /// A read or a publication on a manifest that a newer manifest replaced
+    /// found a metadata segment missing. Garbage collection keeps the
+    /// segments of the current manifest and of pinned manifests, so a
+    /// successor can drop the replaced manifest's. The code is `stale_head`:
+    /// a read runs again at the current manifest, and the publisher plans the
+    /// commit again on it.
+    #[error(
+        "manifest `{replaced_manifest_no}` was replaced by manifest `{current_manifest_no}`, and a segment it lists is missing"
+    )]
+    ManifestReplaced {
+        replaced_manifest_no: ManifestNo,
+        current_manifest_no: ManifestNo,
+    },
     // The message is the failed operation's own, and `details()` reports the index.
     #[error("{error}")]
     FailedOperation {
@@ -493,7 +506,9 @@ impl CoreError {
             CoreError::Forbidden { .. } | CoreError::PrincipalScopeMismatch { .. } => {
                 ErrorCode::Forbidden
             }
-            CoreError::StaleHeadPrecondition { .. } => ErrorCode::StaleHead,
+            CoreError::StaleHeadPrecondition { .. } | CoreError::ManifestReplaced { .. } => {
+                ErrorCode::StaleHead
+            }
             CoreError::BindingVersionMismatch { .. } => ErrorCode::BindingVersionMismatch,
             CoreError::CommitIdReuseConflict { .. } => ErrorCode::CommitIdReuseConflict,
             CoreError::MergeRangeConflict { .. } => ErrorCode::MergeRangeConflict,
@@ -636,7 +651,8 @@ impl CoreError {
             | CoreError::RootGrantsWithoutAdministrator
             | CoreError::LiveSetExceedsReadMemory { .. }
             | CoreError::ManifestTooLarge { .. }
-            | CoreError::StaleHeadPrecondition { .. } => None,
+            | CoreError::StaleHeadPrecondition { .. }
+            | CoreError::ManifestReplaced { .. } => None,
         }
     }
 

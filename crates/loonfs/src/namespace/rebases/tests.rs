@@ -223,6 +223,7 @@ async fn a_replay_that_deletes_a_directory_plans_again_after_the_new_fork_change
         slot,
         record,
         report,
+        ..
     } = *planned;
     assert_eq!(record.source_through_seq, deleted.committed_seq);
     assert_eq!(report, Vec::new());

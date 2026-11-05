@@ -47,7 +47,7 @@ fn the_compaction_keeps_a_latest_empty_revision() {
         MetadataFamilyGroup::Access,
         &mut rows_by_family,
         ChangeSeq(9),
-        ChangeSeq(0),
+        ChangeSeq(9),
     )
     .expect("compact access");
 

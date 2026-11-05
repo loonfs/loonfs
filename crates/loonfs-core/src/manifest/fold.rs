@@ -137,10 +137,11 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// "Publishing a manifest"). A writer session passes the tail
     /// it keeps as `held`, and every other caller passes `None`, which loads the
     /// tail from the store. A tail passed as `held` whose last check is at the revalidation
-    /// bound is discarded, and the tail is loaded from the store too: garbage
-    /// collection keeps the manifest that the tail was read above for one grace
-    /// after a successor, and a check within the bound is younger than that
-    /// grace (see `update_manifest`). The publication's first attempt starts
+    /// bound is discarded, and the tail is loaded from the store too: a check
+    /// within the bound found no manifest above the basis, so every manifest
+    /// above it was published after the check and is younger than the grace
+    /// window, and garbage collection hasn't deleted any of them (see
+    /// `update_manifest`). The publication's first attempt starts
     /// from the manifest that the tail was read above, and each later attempt
     /// starts from the manifest that the attempt before it found (see
     /// `update_manifest`).

@@ -125,13 +125,15 @@ pub(super) async fn compact_and_collect_replaced_segments<S: ObjectStore>(
         .expect("pins")
         .is_empty());
     let options = crate::gc::GcOptions::default();
-    // A superseded manifest roots its replaced segments until its successor
-    // has aged past the collector's grace window.
-    let successor_modified_ms = store
-        .head(&current.object_key)
+    // The replaced segments report an ancient age, and the collection runs
+    // after the selected manifest has aged past the collector's grace window,
+    // so the collection deletes the segments that only the selected manifest
+    // lists.
+    let selected_modified_ms = store
+        .head(&selected.object_key)
         .await
-        .expect("successor metadata")
-        .expect("successor exists")
+        .expect("selected manifest metadata")
+        .expect("selected manifest exists")
         .last_modified_at_ms
         .expect("test store provides a timestamp");
     let collection = crate::test_support::namespace_store(store, namespace_id)
@@ -140,7 +142,7 @@ pub(super) async fn compact_and_collect_replaced_segments<S: ObjectStore>(
             &options,
             &writer_at(
                 "collector",
-                (successor_modified_ms + options.grace_window_ms + 1)
+                (selected_modified_ms + options.grace_window_ms + 1)
                     .max(crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1),
             )
             .clock(),

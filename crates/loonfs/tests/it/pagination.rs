@@ -834,8 +834,8 @@ async fn a_revision_listing_paged_across_a_compaction_neither_repeats_nor_skips(
             .await
             .expect("fold the revisions into a run");
     }
-    // The floor falls on revision 3, so the next base compaction drops
-    // revisions 1 and 2.
+    // The floor falls on revision 3, and the maintainer's fence acknowledges
+    // it, so the next base compaction drops revisions 1 and 2.
     let advanced = fs
         .advance_retention_floor_with_options(
             &namespace_id,
@@ -846,6 +846,10 @@ async fn a_revision_listing_paged_across_a_compaction_neither_repeats_nor_skips(
         .await
         .expect("advance the floor to revision 3");
     assert_eq!(advanced.retention_floor_seq, committed[2]);
+    fs.maintenance
+        .acknowledge_retention_floor(&namespace_id)
+        .await
+        .expect("acknowledge the floor");
 
     let revision_numbers = |page: &ListFileRevisionsResponse| {
         page.revisions

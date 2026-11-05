@@ -28,9 +28,8 @@ async fn read_during_compaction_and_collection(
     let namespace = NamespaceId::parse("reader-gc-probe").expect("namespace");
     let old_segments = Arc::new(Mutex::new(BTreeSet::<String>::new()));
     let selected = old_segments.clone();
-    // The old segments and every manifest report an ancient age. A superseded
-    // manifest roots its segments while its successor is younger than the
-    // grace, and this probe needs the collection to really remove them.
+    // The old segments and every manifest report an ancient age, so the
+    // collection removes a replaced manifest's segments at once.
     let manifest_prefix = loonfs_objectstore::keys::metadata_manifest_prefix(&namespace);
     let store = Arc::new(BlockingStore::new(
         MetadataMapStore::aged(

@@ -91,7 +91,6 @@ async fn one_collection_deletes_an_aged_upload_and_every_expired_snapshot_among_
             // Root content before reading the WAL tail, and sweep the sessions.
             upload_session_prefix(&namespace_id),
             pin_prefix(&namespace_id),
-            metadata_manifest_prefix(&namespace_id), // Discover superseded roots before sweeping.
             metadata_manifest_prefix(&namespace_id),
             wal_prefix(&namespace_id),
             metadata_segment_prefix(&namespace_id),

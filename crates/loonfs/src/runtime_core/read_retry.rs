@@ -31,13 +31,14 @@ pub(crate) async fn classify_read_result<T>(
     match source {
         ReadSource::Head => {
             let current = namespace.load_current_manifest().await?;
-            let read_manifest_no = context.read_basis.basis.manifest_no();
+            let replaced_manifest_no = context.read_basis.basis.manifest_no();
             let current_manifest_no = current.payload().manifest_no;
-            if current_manifest_no > read_manifest_no {
-                return Err(Error::ManifestReplaced {
-                    read_manifest_no,
+            if current_manifest_no > replaced_manifest_no {
+                return Err(CoreError::ManifestReplaced {
+                    replaced_manifest_no,
                     current_manifest_no,
-                });
+                }
+                .into());
             }
         }
         ReadSource::Snapshot(snapshot_id) => {
@@ -87,7 +88,7 @@ impl RuntimeCore {
         let context = pinned.context.clone();
         let result =
             classify_read_result(self, &context, &ReadSource::Head, read(pinned).await).await;
-        if !matches!(result, Err(Error::ManifestReplaced { .. })) {
+        if !matches!(result, Err(Error::Core(CoreError::ManifestReplaced { .. }))) {
             return result;
         }
         // The position becomes the cached head when it's dropped, so the head

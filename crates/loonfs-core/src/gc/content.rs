@@ -2,18 +2,17 @@
 //! manifests list. On a family root, the rooted manifests include the layout
 //! views of every other member of its fork family.
 
-use super::charged_set::{Charge, ChargedSet};
+use super::charged_set::Charge;
 use super::fork_family::FamilyWalkOutcome;
-use super::live_set::{LiveSet, RetirementStatus};
+use super::live_set::RetirementStatus;
 use super::sweep::{ContentReference, Sweep};
 use crate::error::{CoreError, Result};
 use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::segment::index_block_load::load_segment_extent_filter;
 use futures::{stream, StreamExt, TryStreamExt};
-use loonfs_objectstore::keys::{content_prefix, metadata_segment_object_key};
+use loonfs_objectstore::keys::content_prefix;
 use loonfs_objectstore::layout::content_id_of;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::manifest::{MetadataRowFamily, MetadataSegmentRef};
 use loonfs_types::format::segment_blocks::{filter_key_hashes, SegmentFilter};
 use loonfs_types::GcResponse;
 use std::sync::Arc;
@@ -62,14 +61,13 @@ impl ContentSweep {
                 return Ok(None);
             }
         }
-        let segments = distinct_layout_segments(live)?;
         let mut filters_charge = Charge::new(&live.memory);
         let store = &sweep.namespace.store;
         let segment_cache = sweep.namespace.segment_cache.as_ref();
-        let mut filters = Vec::with_capacity(segments.len());
+        let mut filters = Vec::new();
         let mut extent_filter_bytes = 0;
         // Unboxed, rustc cannot prove the collection future `Send` through this stream.
-        let mut loads = stream::iter(segments)
+        let mut loads = stream::iter(live.layout_segments.values())
             .map(|descriptor| load_segment_extent_filter(store, segment_cache, descriptor))
             .buffered(STORE_READS_IN_FLIGHT)
             .boxed();
@@ -120,25 +118,4 @@ impl ContentSweep {
             });
         sweep.namespace.apply_decisions(decisions, report).await
     }
-}
-
-/// Lists each layout segment of the rooted manifests once, however many
-/// manifests list it.
-fn distinct_layout_segments(live: &LiveSet) -> Result<Vec<&MetadataSegmentRef>> {
-    let mut covered = ChargedSet::new(&live.memory);
-    let mut segments = Vec::new();
-    for descriptor in live
-        .manifests
-        .iter()
-        .flat_map(|manifest| &manifest.payload().runs)
-        .flat_map(|run| &run.segments)
-        .filter(|segment| segment.family == MetadataRowFamily::ContentLayouts)
-    {
-        let key = metadata_segment_object_key(descriptor);
-        if !covered.contains(&key) {
-            covered.insert(key)?;
-            segments.push(descriptor);
-        }
-    }
-    Ok(segments)
 }

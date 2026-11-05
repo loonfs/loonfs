@@ -1,17 +1,14 @@
-//! Manifests, runs, WAL objects, and content protected by namespace retention,
+//! Manifests, runs, WAL objects, and content protected by the current manifest,
 //! pins, and upload sessions, and on a family root by the roots of every other
-//! member of its fork family. Superseded manifests and their runs remain
-//! rooted while their successor is younger than the collection's grace window or has
-//! no provider timestamp.
+//! member of its fork family.
 
-use super::charged_set::{Charge, ChargedMap, ChargedQueue, ChargedSet, CollectionMemory};
+use super::charged_set::{ChargedMap, ChargedQueue, ChargedSet, CollectionMemory};
 use super::families::CandidateFamily;
 use super::fork_family::{FamilyWalkReport, MemberState};
-use super::pins::{GraceAge, PinSweep};
+use super::pins::PinSweep;
 use super::session_cache::{CompletedUploadSession, CompletedUploadSessionCache};
 use super::uploads::{ListedUpload, ListedUploadSession};
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
-use crate::heap_bytes::manifest_heap_bytes;
 use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::limits::NAMESPACE_RETIREMENT_GRACE_WINDOW_MS;
 use crate::manifest::load_namespace_manifest_envelope_if_present;
@@ -23,18 +20,19 @@ use crate::snapshot::record::pin_key_ids;
 use crate::time::Observation;
 use crate::time::OperationClock;
 use crate::wal::{live_folded_wal_no, object_is_required};
-use futures::{future, stream, StreamExt, TryStreamExt};
+use futures::{future, TryStreamExt};
 use loonfs_objectstore::keys::{
-    extension_segment_object_key, metadata_manifest_object, metadata_manifest_prefix,
-    metadata_segment_object_key, pin_prefix,
+    extension_segment_object_key, metadata_manifest_object, metadata_segment_object_key, pin_prefix,
 };
 use loonfs_objectstore::layout::manifest_no_of;
 use loonfs_objectstore::ObjectStore;
 use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_types::format::control::{PinOwner, PinPayload};
-use loonfs_types::format::manifest::NamespaceManifestPayload;
+use loonfs_types::format::manifest::{
+    MetadataRowFamily, MetadataSegmentRef, NamespaceManifestPayload,
+};
 use loonfs_types::{ContentId, ManifestNo, NamespaceId, UploadId, WalNo};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::pin::pin;
 use std::sync::Arc;
 
@@ -131,9 +129,10 @@ pub(super) struct LiveSet {
     /// instead of reading each record again. The collection on a family root reads
     /// every record of its own pins to find its forks.
     pub(super) pin_records: ChargedMap<String, PinPayload>,
-    /// The layout views of every namespace whose roots the collection read.
-    pub(super) manifests: Vec<LoadedManifest>,
-    manifest_charge: Charge,
+    /// The layout segments that the rooted manifests list, keyed by object
+    /// key, whose extent filters root the content that every rooted view
+    /// refers to.
+    pub(super) layout_segments: ChargedMap<String, MetadataSegmentRef>,
     pub(super) memory: CollectionMemory,
     /// What the collection read of its fork family's roots.
     pub(super) family: FamilyWalkReport,
@@ -151,14 +150,14 @@ pub(super) struct LiveSet {
 }
 
 impl LiveSet {
-    /// Loads roots, their segments, and the content they refer to, including
-    /// superseded manifests with a young or undated successor regardless of
-    /// the discovery hint. On a family root, it then loads the same roots of
-    /// every other member of the fork family. Reads go through the
-    /// namespace's segment cache, with up to `STORE_READS_IN_FLIGHT` root
-    /// manifests loading at once, and the object keys, content IDs, listed
-    /// upload records, completed sessions, manifests, and fork family members
-    /// that the collection keeps are charged to its read working memory as they
+    /// Loads roots, their segments, and the content they refer to: the
+    /// current manifest, the WAL tail above it, and the manifests that pins
+    /// keep. On a family root, it then loads the same roots of every other
+    /// member of the fork family. Reads go through the namespace's segment
+    /// cache, with up to `STORE_READS_IN_FLIGHT` root manifests loading at
+    /// once, and the object keys, content IDs, listed upload records,
+    /// completed sessions, layout segments, and fork family members that the
+    /// collection keeps are charged to its read working memory as they
     /// arrive. The collection doesn't read the record of a completed session that
     /// `session_cache` has.
     pub(super) async fn load<S: ObjectStore>(
@@ -220,8 +219,7 @@ impl LiveSet {
             family: FamilyWalkReport::own_roots(),
             members: ChargedMap::new(&memory),
             member_queue: ChargedQueue::new(&memory),
-            manifests: Vec::new(),
-            manifest_charge: Charge::new(&memory),
+            layout_segments: ChargedMap::new(&memory),
             memory,
             has_pins: false,
             retirement_grace_window_ms: grace_window_ms.max(NAMESPACE_RETIREMENT_GRACE_WINDOW_MS),
@@ -236,7 +234,7 @@ impl LiveSet {
             content_id_bytes = live.content_ids.reserved_bytes(),
             completed_session_bytes = live.completed_sessions.reserved_bytes(),
             pin_record_bytes = live.pin_records.reserved_bytes(),
-            manifest_bytes = live.manifest_charge.reserved_bytes(),
+            layout_segment_bytes = live.layout_segments.reserved_bytes(),
             member_bytes = live.members.reserved_bytes() + live.member_queue.reserved_bytes(),
             live_set_bytes = live.memory.held_bytes(),
             read_memory_limit_bytes = live.memory.limit(),
@@ -272,9 +270,8 @@ impl LiveSet {
     }
 
     /// Adds the roots of one namespace whose current manifest `anchor`
-    /// loaded: that manifest, the WAL tail above it, the manifests that the
-    /// namespace's pins keep, and its manifests whose successor is younger
-    /// than the grace window. It returns what the pin listing found.
+    /// loaded: that manifest, the WAL tail above it, and the manifests that
+    /// the namespace's pins keep. It returns what the pin listing found.
     pub(super) async fn load_namespace_roots<S: ObjectStore>(
         &mut self,
         namespace: &NamespaceStore<S>,
@@ -284,8 +281,8 @@ impl LiveSet {
         clock: &OperationClock,
     ) -> Result<ListedPins> {
         let head = anchor.manifest.payload();
-        // A tombstone roots its runs like any current manifest: an import from
-        // a deleted source is still authorized against its final access state.
+        // A tombstone roots its runs like any current manifest, so a deleted
+        // namespace's references protect its content until retirement.
         self.protect_manifest(&anchor.manifest, roots)?;
         // A tombstone's runs cover its whole WAL, so it has no tail.
         if !head.status.is_deleted() {
@@ -301,19 +298,8 @@ impl LiveSet {
             }
         }
         let mut rooted = BTreeSet::from([head.manifest_no]);
-        let pins = self
-            .load_pinned_manifests(namespace, roots, grace_window_ms, clock, &mut rooted)
-            .await?;
-        self.load_superseded_manifests(
-            namespace,
-            head.manifest_no,
-            roots,
-            grace_window_ms,
-            clock,
-            &rooted,
-        )
-        .await?;
-        Ok(pins)
+        self.load_pinned_manifests(namespace, roots, grace_window_ms, clock, &mut rooted)
+            .await
     }
 
     /// Protects the manifest of each listed pin, loading up to
@@ -425,61 +411,13 @@ impl LiveSet {
         Ok(ListedPins { any_key })
     }
 
-    /// Protects each manifest below the current one, `current_manifest_no`,
-    /// that `rooted` doesn't list and whose immediate successor is younger
-    /// than the grace window or has no provider timestamp.
-    async fn load_superseded_manifests<S: ObjectStore>(
-        &mut self,
-        namespace: &NamespaceStore<S>,
-        current_manifest_no: ManifestNo,
-        roots: Roots,
-        grace_window_ms: u64,
-        clock: &OperationClock,
-        rooted: &BTreeSet<ManifestNo>,
-    ) -> Result<()> {
-        let prefix = metadata_manifest_prefix(&namespace.namespace_id);
-        let mut listing = namespace.store.list_entries_from_stream(&prefix, None);
-        let mut listed_manifests = BTreeMap::new();
-        while let Some(entry) = listing
-            .next()
-            .await
-            .transpose()
-            .map_err(|error| CoreError::store(&prefix, &error))?
-        {
-            if let Some(manifest_no) = manifest_no_of(&entry.key) {
-                listed_manifests.insert(manifest_no, entry.last_modified_at_ms);
-            }
-        }
-        let superseded = listed_manifests.keys().copied().filter(|&manifest_no| {
-            manifest_no < current_manifest_no
-                && !rooted.contains(&manifest_no)
-                && listed_manifests
-                    .get(&ManifestNo(manifest_no.0 + 1))
-                    .is_some_and(|&successor_time| {
-                        GraceAge::of(successor_time, grace_window_ms, clock.request_at_ms())
-                            != GraceAge::Aged
-                    })
-        });
-        // Another collector can delete a listed manifest after the listing, and
-        // a manifest that's gone needs no protection.
-        let mut loads = pin!(stream::iter(superseded)
-            .map(|manifest_no| namespace.load_root_manifest(manifest_no))
-            .buffered(STORE_READS_IN_FLIGHT));
-        while let Some(manifest) = loads.try_next().await? {
-            if let Some(manifest) = manifest {
-                self.protect_manifest(&manifest, roots)?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Keeps `manifest` as a layout view, and keeps the manifest and its
-    /// metadata and extension segments themselves when `roots` protects the
-    /// namespace's own objects.
+    /// Keeps the layout segments that `manifest` lists, and keeps the
+    /// manifest and its metadata and extension segments themselves when
+    /// `roots` protects the namespace's own objects.
     ///
-    /// Every root manifest is a layout view, a tombstone included, because a
-    /// deleted member's references protect content until the member is
-    /// retired.
+    /// Every root manifest contributes its layout segments, a tombstone
+    /// included, because a deleted member's references protect content until
+    /// the member is retired.
     fn protect_manifest(&mut self, manifest: &LoadedManifest, roots: Roots) -> Result<()> {
         if roots.protects_own_objects() {
             self.objects.insert(manifest.object_key.clone())?;
@@ -493,9 +431,18 @@ impl LiveSet {
                 }
             }
         }
-        self.manifest_charge
-            .add(manifest_heap_bytes(&manifest.envelope))?;
-        self.manifests.push(manifest.clone());
+        for segment in manifest
+            .payload()
+            .runs
+            .iter()
+            .flat_map(|run| &run.segments)
+            .filter(|segment| segment.family == MetadataRowFamily::ContentLayouts)
+        {
+            let key = metadata_segment_object_key(segment);
+            if self.layout_segments.get(&key).is_none() {
+                self.layout_segments.insert(key, segment.clone())?;
+            }
+        }
         Ok(())
     }
 

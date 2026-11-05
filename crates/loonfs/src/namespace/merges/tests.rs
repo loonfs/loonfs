@@ -307,6 +307,51 @@ async fn a_merge_reads_the_fork_at_its_folds_manifest() {
     }
 }
 
+/// Checks that a merge's plan pins the fork's folded manifest while the
+/// merge runs, and that the merge deletes the pin once it commits.
+#[tokio::test]
+async fn a_merge_releases_the_pin_its_plan_took_on_the_fork() {
+    let family = family().await;
+    let request = family.request("merge-pin");
+    let planned = family.plan(&request).await;
+    let pinned = family
+        .fork
+        .list_snapshots()
+        .page()
+        .await
+        .expect("the fork's snapshots while the merge is planned");
+    assert_eq!(
+        pinned
+            .snapshots
+            .iter()
+            .map(|snapshot| snapshot.snapshot_id.clone())
+            .collect::<Vec<_>>(),
+        vec![planned.fork_pin.clone()],
+        "the plan pins the fork"
+    );
+    let mut replans = 0;
+    family
+        .commit(&request, planned, |request, slot| {
+            replans += 1;
+            let main = &family.main;
+            Box::pin(async move { main.plan_merge(&request, Some(slot)).await })
+        })
+        .await
+        .expect("the merge");
+    assert_eq!(replans, 0, "the plan commits");
+    let released = family
+        .fork
+        .list_snapshots()
+        .page()
+        .await
+        .expect("the fork's snapshots after the merge");
+    assert!(
+        released.snapshots.is_empty(),
+        "the merge releases its pin: {:?}",
+        released.snapshots
+    );
+}
+
 /// Checks that a retry of a merge that's still planned or in flight gets
 /// `commit_queue_full`, instead of planning the merge a second time under
 /// the merge slot, and that a retry after the merge commits returns the
