@@ -517,8 +517,8 @@ async fn a_fold_from_a_fresh_position_puts_on_its_basis_and_reads_no_hint() {
 
 /// Checks that a fold from a position whose last check is at the
 /// revalidation bound loads the tail from the store instead of reading the
-/// position's manifest, which garbage collection removes once a successor
-/// is older than the grace window.
+/// position's manifest, which garbage collection removes once the manifest
+/// is replaced and older than the grace window.
 #[tokio::test]
 async fn a_fold_from_a_position_past_the_bound_loads_the_tail_from_the_store() {
     let mut writer = Writer::open().await;
@@ -530,8 +530,8 @@ async fn a_fold_from_a_position_past_the_bound_loads_the_tail_from_the_store() {
         metadata_manifest_object(&writer.namespace_id, &held.read_basis.basis.manifest_no());
 
     // Another process folds the tail and raises the hint, and garbage
-    // collection removes the position's manifest once the fold is older
-    // than the grace window.
+    // collection removes the position's manifest, which the fold replaced,
+    // once that manifest is older than the grace window.
     let other = writer.other_process();
     let folded_by_other = crate::test_support::namespace_store(&other, &writer.namespace_id)
         .fold_wal()

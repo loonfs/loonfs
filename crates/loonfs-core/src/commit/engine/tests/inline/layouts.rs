@@ -800,7 +800,11 @@ async fn collection_lists_content_once_and_keeps_a_shared_base_of_another_chain(
         .fold_wal()
         .await
         .expect("fold replacement");
-    prune_revisions(&store, &namespace_id).await;
+    // The maintainer's fence acknowledges the floor, so the compaction drops
+    // the replaced revisions and the chains that only they named.
+    advance_floor(&store, &namespace_id).await;
+    acknowledge_floor(&store, &namespace_id, &context).await;
+    compact_all(&store, &namespace_id).await;
     let report = crate::test_support::namespace_store(&aged, &namespace_id)
         .gc(
             None,
@@ -819,8 +823,16 @@ async fn collection_lists_content_once_and_keeps_a_shared_base_of_another_chain(
     }
 }
 
+/// Folds the tail, moves the floor to the head, and compacts every family
+/// group. The floor isn't acknowledged, so a whole-state compaction keeps
+/// every row.
 async fn prune_revisions(store: &RecordingStore<LocalFsStore>, namespace_id: &NamespaceId) {
-    use crate::compaction::MetadataCompactionPolicy;
+    advance_floor(store, namespace_id).await;
+    compact_all(store, namespace_id).await;
+}
+
+/// Moves the retention floor to the head.
+async fn advance_floor(store: &RecordingStore<LocalFsStore>, namespace_id: &NamespaceId) {
     use crate::manifest::RetentionTarget;
     crate::test_support::NamespaceFixture::new(
         store,
@@ -834,6 +846,29 @@ async fn prune_revisions(store: &RecordingStore<LocalFsStore>, namespace_id: &Na
     .advance_retention_floor(RetentionTarget::Head)
     .await
     .expect("floor");
+}
+
+/// Acknowledges the retention floor as a maintainer does for a namespace
+/// whose writer commits nothing: a fence that records the floor, folded.
+/// The fold folds every WAL object before the fence too.
+async fn acknowledge_floor(
+    store: &RecordingStore<LocalFsStore>,
+    namespace_id: &NamespaceId,
+    context: &WriterAt,
+) {
+    crate::test_support::namespace_store(store, namespace_id)
+        .acquire_writer_epoch(&context.writer_id)
+        .await
+        .expect("write a fence");
+    crate::test_support::namespace_store(store, namespace_id)
+        .fold_wal()
+        .await
+        .expect("fold the fence");
+}
+
+/// Compacts every family group that needs it.
+async fn compact_all(store: &RecordingStore<LocalFsStore>, namespace_id: &NamespaceId) {
+    use crate::compaction::MetadataCompactionPolicy;
     for _ in 0..16 {
         if matches!(
             crate::test_support::NamespaceFixture::new(
@@ -857,12 +892,83 @@ async fn prune_revisions(store: &RecordingStore<LocalFsStore>, namespace_id: &Na
     }
 }
 
-#[tokio::test]
-async fn collection_keeps_shared_objects_named_only_by_an_unfolded_restore() {
+/// Collects with every object aged past the grace.
+async fn collect_aged(
+    store: &Arc<RecordingStore<LocalFsStore>>,
+    namespace_id: &NamespaceId,
+    context: &WriterAt,
+) -> loonfs_types::GcResponse {
     use crate::gc::GcOptions;
+    let aged = MetadataMapStore::aged(store.clone(), KeyPredicate::any());
+    let options = GcOptions::default();
+    crate::test_support::namespace_store(&aged, namespace_id)
+        .gc(
+            None,
+            &options,
+            &WriterAt {
+                now_ms: options.grace_window_ms + 1,
+                ..context.clone()
+            }
+            .clock(),
+        )
+        .await
+        .expect("collect")
+}
+
+/// Reads one revision of `path` through the current view.
+async fn read_revision(
+    store: &RecordingStore<LocalFsStore>,
+    namespace_id: &NamespaceId,
+    path: &str,
+    revision_no: RevisionNo,
+) -> Vec<u8> {
+    let namespace = crate::test_support::namespace_store(store, namespace_id);
+    let view = namespace.load_current_metadata_view().await.expect("view");
+    view.read_file_revision_bytes(
+        path,
+        revision_no,
+        None,
+        &ReadAccess::live(Authorizer::Unrestricted),
+    )
+    .await
+    .expect("read the revision")
+    .bytes
+}
+
+/// The content IDs that the manifest's revision rows name.
+async fn revision_content_ids(
+    store: &RecordingStore<LocalFsStore>,
+    manifest: &crate::namespace::control::LoadedManifest,
+) -> std::collections::BTreeSet<ContentId> {
     use crate::manifest::metadata_basis_from_manifest;
     use loonfs_types::format::manifest::{MetadataRow, MetadataRowFamily};
+    let basis = metadata_basis_from_manifest(store, None, manifest);
+    basis
+        .segments
+        .scan_range(
+            MetadataRowFamily::Revisions,
+            MetadataRowFamily::Revisions.row_key_prefix(),
+            None,
+            32,
+            None,
+            crate::segment::BlocksPerRefill::One,
+        )
+        .await
+        .expect("manifest revisions")
+        .into_iter()
+        .filter_map(|(_, row)| match row {
+            MetadataRow::FileRevision(row) => Some(row.content_ref.content_id),
+            _ => None,
+        })
+        .collect()
+}
 
+/// Checks that an unfolded restore keeps its source chain's objects through a
+/// floor advance and a collection: a whole-state compaction keeps the source
+/// revision until the floor is acknowledged, and the fold that acknowledges
+/// the floor folds the restore first, whose own row then names the chain.
+#[tokio::test]
+async fn collection_keeps_shared_objects_that_a_restore_names_across_the_floors_acknowledgment() {
     let (_directory, store, mut engine, context) = setup().await;
     let namespace_id = engine.namespace.namespace_id.clone();
     let (inode_id, original) = folded_file(&store, &mut engine, &context, b"hello").await;
@@ -930,24 +1036,10 @@ async fn collection_keeps_shared_objects_named_only_by_an_unfolded_restore() {
         .await
         .expect("manifest");
     assert!(manifest.payload().head_seq < restored.committed_seq);
-    let basis = metadata_basis_from_manifest(&store, None, &manifest);
-    let rows = basis
-        .segments
-        .scan_range(
-            MetadataRowFamily::Revisions,
-            MetadataRowFamily::Revisions.row_key_prefix(),
-            None,
-            32,
-            None,
-            crate::segment::BlocksPerRefill::One,
-        )
-        .await
-        .expect("manifest revisions");
-    assert_eq!(rows.len(), 2);
-    assert!(rows.iter().all(|(_, row)| matches!(
-        row,
-        MetadataRow::FileRevision(row) if row.content_ref.content_id != original.content_id && row.content_ref.content_id != shared.content_id
-    )));
+    // The floor isn't acknowledged, so the compaction keeps the restore's
+    // source revision and the copy's.
+    let named = revision_content_ids(&store, &manifest).await;
+    assert!(named.contains(&shared.content_id) && named.contains(&original.content_id));
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let view = namespace
         .load_current_metadata_view()
@@ -962,20 +1054,7 @@ async fn collection_keeps_shared_objects_named_only_by_an_unfolded_restore() {
             .layout,
         shared_layout.layout
     );
-    let aged = MetadataMapStore::aged(store.clone(), KeyPredicate::any());
-    let options = GcOptions::default();
-    let report = crate::test_support::namespace_store(&aged, &namespace_id)
-        .gc(
-            None,
-            &options,
-            &WriterAt {
-                now_ms: options.grace_window_ms + 1,
-                ..context
-            }
-            .clock(),
-        )
-        .await
-        .expect("collect after grace");
+    let report = collect_aged(&store, &namespace_id, &context).await;
     assert_eq!(report.deleted.content_objects, 0);
     for extent in &shared_layout.layout.extents {
         let key = crate::storage::content_location::extent_object_key(&family_root_id(), extent);
@@ -985,10 +1064,44 @@ async fn collection_keeps_shared_objects_named_only_by_an_unfolded_restore() {
         read_file(&store, &namespace_id, RevisionNo(4)).await,
         b"hello!"
     );
+
+    // The fold of the restore and the maintainer's fence acknowledge the
+    // floor, so the next compaction drops the source revisions and the
+    // deleted copy, and the restore's own row names the shared chain.
     crate::test_support::namespace_store(&store, &namespace_id)
         .fold_wal()
         .await
         .expect("fold restore");
+    acknowledge_floor(&store, &namespace_id, &context).await;
+    compact_all(&store, &namespace_id).await;
+    let manifest = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_current_manifest()
+        .await
+        .expect("compacted manifest");
+    let named = revision_content_ids(&store, &manifest).await;
+    assert!(named.contains(&shared.content_id) && !named.contains(&original.content_id));
+    let view = namespace
+        .load_current_metadata_view()
+        .await
+        .expect("compacted view");
+    assert_eq!(
+        view.projected_metadata_view()
+            .content_layout(&shared.content_id)
+            .await
+            .expect("layout")
+            .expect("carried layout")
+            .layout,
+        shared_layout.layout
+    );
+    let report = collect_aged(&store, &namespace_id, &context).await;
+    assert_eq!(
+        report.deleted.content_objects, 1,
+        "only the deleted copy's replacement goes: {report:?}"
+    );
+    for extent in &shared_layout.layout.extents {
+        let key = crate::storage::content_location::extent_object_key(&family_root_id(), extent);
+        assert!(store.head(&key).await.expect("head").is_some(), "{key}");
+    }
     assert_eq!(
         read_file(&store, &namespace_id, RevisionNo(4)).await,
         b"hello!"
@@ -1289,9 +1402,14 @@ async fn downloads_report_unwritable_pieces_without_changing_content() {
     assert_no_writes(store);
 }
 
+/// Checks that a reference planned on an older view, whose source the
+/// writer then replaced, keeps its chain through a floor advance, the
+/// floor's acknowledgment, and a collection: a whole-state compaction keeps
+/// the replaced revision until the floor is acknowledged, and the fold that
+/// acknowledges the floor folds the reference first, whose own row then
+/// names the chain.
 #[tokio::test]
-async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
-    use crate::gc::GcOptions;
+async fn a_pending_reference_keeps_its_chain_through_the_floors_acknowledgment() {
     use crate::manifest::metadata_basis_from_manifest;
     use crate::path::write::PublishPlanningSession;
     use loonfs_types::format::manifest::MetadataRowFamily;
@@ -1428,7 +1546,7 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
                 }
             }
         }
-        crate::test_support::namespace_store(&store, &namespace_id)
+        let reference_seq = crate::test_support::namespace_store(&store, &namespace_id)
             .append_wal_commit(
                 plan.deltas.into_iter().map(|delta| delta.delta).collect(),
                 Vec::new(),
@@ -1442,66 +1560,66 @@ async fn references_to_pending_pieces_survive_layout_pruning_and_collection() {
             )
             .await
             .expect("fold captured source");
-        prune_revisions(&store, &namespace_id).await;
-        let manifest = crate::test_support::namespace_store(&store, &namespace_id)
-            .load_current_manifest()
-            .await
-            .expect("manifest");
-        let basis = metadata_basis_from_manifest(&store, None, &manifest);
-        let rows = basis
-            .segments
-            .scan_range(
-                MetadataRowFamily::ContentLayouts,
-                &format!("content-layout-{}-", content_ref.content_id.body()),
-                Some(&format!(
-                    "content-layout-{}.",
-                    content_ref.content_id.body()
-                )),
-                32,
-                None,
-                crate::segment::BlocksPerRefill::One,
-            )
-            .await
-            .expect("layouts");
-        assert!(rows.is_empty(), "the basis no longer names this chain");
-        let options = GcOptions::default();
-        let aged = MetadataMapStore::aged(store.clone(), KeyPredicate::any());
-        crate::test_support::namespace_store(&aged, &namespace_id)
-            .gc(
-                None,
-                &options,
-                &WriterAt {
-                    now_ms: options.grace_window_ms + 1,
-                    ..context
-                }
-                .clock(),
-            )
-            .await
-            .expect("collect");
-        for extent in &carried.extents {
-            let key =
-                crate::storage::content_location::extent_object_key(&family_root_id(), extent);
-            assert!(store.head(&key).await.expect("head").is_some(), "{key}");
-        }
-        for folded in [false, true] {
-            if folded {
-                crate::test_support::namespace_store(&store, &namespace_id)
-                    .fold_wal()
+        let chain_layout_rows = |manifest: crate::namespace::control::LoadedManifest| {
+            let store = &store;
+            let content_id = content_ref.content_id.clone();
+            async move {
+                let basis = metadata_basis_from_manifest(store, None, &manifest);
+                basis
+                    .segments
+                    .scan_range(
+                        MetadataRowFamily::ContentLayouts,
+                        &format!("content-layout-{}-", content_id.body()),
+                        Some(&format!("content-layout-{}.", content_id.body())),
+                        32,
+                        None,
+                        crate::segment::BlocksPerRefill::One,
+                    )
                     .await
-                    .expect("fold reference");
+                    .expect("layouts")
+                    .len()
             }
-            let namespace = crate::test_support::namespace_store(&store, &namespace_id);
-            let view = namespace.load_current_metadata_view().await.expect("view");
-            let bytes = view
-                .read_file_revision_bytes(
-                    if restore { "/file-0" } else { "/target-0" },
-                    RevisionNo(if restore { 4 } else { 2 }),
-                    None,
-                    &ReadAccess::live(Authorizer::Unrestricted),
-                )
+        };
+        for acknowledged in [false, true] {
+            if acknowledged {
+                // The maintainer's fence acknowledges the floor, and its fold
+                // folds the reference first, so the reference's own row names
+                // the chain once the compaction drops the replaced revision.
+                acknowledge_floor(&store, &namespace_id, &context).await;
+                compact_all(&store, &namespace_id).await;
+            } else {
+                // The floor isn't acknowledged, so the compaction keeps the
+                // replaced revision, and the chain with it.
+                prune_revisions(&store, &namespace_id).await;
+            }
+            let manifest = crate::test_support::namespace_store(&store, &namespace_id)
+                .load_current_manifest()
                 .await
-                .expect("read reference");
-            assert_eq!(bytes.bytes, b"hello!");
+                .expect("manifest");
+            assert_eq!(
+                manifest.payload().head_seq >= reference_seq,
+                acknowledged,
+                "the fold of the fence folds the reference"
+            );
+            assert!(
+                chain_layout_rows(manifest).await > 0,
+                "the basis names the chain (acknowledged: {acknowledged})"
+            );
+            collect_aged(&store, &namespace_id, &context).await;
+            for extent in &carried.extents {
+                let key =
+                    crate::storage::content_location::extent_object_key(&family_root_id(), extent);
+                assert!(store.head(&key).await.expect("head").is_some(), "{key}");
+            }
+            let (path, revision_no) = if restore {
+                ("/file-0", RevisionNo(4))
+            } else {
+                ("/target-0", RevisionNo(2))
+            };
+            assert_eq!(
+                read_revision(&store, &namespace_id, path, revision_no).await,
+                b"hello!"
+            );
         }
     }
 }

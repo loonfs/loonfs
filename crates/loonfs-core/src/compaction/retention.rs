@@ -24,8 +24,12 @@ pub(crate) enum RetentionRule {
     /// sequence above the fork point, so this rule keeps every merge index row
     /// that a merge's range check can read.
     CommitHistory,
-    /// Every revision above the floor, plus the newest at or below it, per
-    /// inode.
+    /// Every revision above the acknowledged floor, plus the newest at or
+    /// below it, per inode. The writer refuses a restore of a revision at or
+    /// below its basis's retention floor unless the revision is the newest at
+    /// or below that floor, and a restore validated against an older basis
+    /// can still copy a revision that a later advance has passed, so the rows
+    /// wait for the acknowledged floor, as a listed deletion does.
     WholeState,
     /// Remove cancelled deletion pairs and the listed rows of expired
     /// deletions.
@@ -44,7 +48,10 @@ impl RetentionRule {
             Self::KeepEveryRow => RetentionOperator::KeepEveryRow,
             Self::FirstPerGroup => RetentionOperator::FirstPerGroup(false),
             Self::CommitHistory => RetentionOperator::CommitHistory,
-            Self::WholeState => RetentionOperator::WholeState(WholeStateRetention::default()),
+            Self::WholeState => RetentionOperator::WholeState(WholeStateRetention {
+                acknowledged_floor_seq,
+                previous_at_floor: None,
+            }),
             Self::ActiveDeletions => RetentionOperator::ActiveDeletions(ActiveDeletionRetention {
                 acknowledged_floor_seq,
                 revoked: false,
@@ -77,7 +84,7 @@ impl RetentionOperator {
             Self::KeepEveryRow => Some(row),
             Self::FirstPerGroup(kept) => (!std::mem::replace(kept, true)).then_some(row),
             Self::CommitHistory => keep_commit_history_row(row, floor_seq),
-            Self::WholeState(state) => state.push(family, row, floor_seq)?,
+            Self::WholeState(state) => state.push(family, row)?,
             Self::ActiveDeletions(state) => state.push(row),
             Self::Bindings(state) => state.push(family, row, floor_seq)?,
         };
@@ -108,18 +115,28 @@ fn keep_commit_history_row(row: MetadataRow, floor_seq: ChangeSeq) -> Option<Met
     }
 }
 
-/// Retains every file, attribute, and access revision above the floor and
-/// the newest revision at or below the floor for each inode.
+/// Retains every file, attribute, and access revision above the acknowledged
+/// floor and the newest revision at or below it for each inode.
 ///
 /// Whole-state row keys sort each inode's revisions newest first. The first row
-/// at or below the floor is the inode's state at the floor, including a cleared
-/// state, and the floor keeps no older history. The operator keeps a
-/// recoverably deleted inode's rows like any other inode's, so an undelete
-/// restores the prior state, and a base compaction removes the rows of an inode
-/// that a removable deletion hides before they reach the operator. The
-/// operator processes this order without retaining the complete history.
-#[derive(Debug, Default)]
+/// at or below the acknowledged floor is the inode's state at that floor,
+/// including a cleared state, and the floor keeps no older history. The
+/// operator keeps a recoverably deleted inode's rows like any other inode's,
+/// so an undelete restores the prior state, and a base compaction removes the
+/// rows of an inode that a removable deletion hides before they reach the
+/// operator. The operator processes this order without retaining the complete
+/// history.
+///
+/// The acknowledged floor decides, not the retention floor, because a restore
+/// validated against an older basis can copy a revision that a later advance
+/// has passed, and the acknowledged floor shows that every commit after the
+/// acknowledging WAL object was validated against the floor, so none of them
+/// copies a revision that the floor dropped
+/// ([format section 10.3](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#103-row-retention-during-a-base-compaction)).
+#[derive(Debug)]
 pub(crate) struct WholeStateRetention {
+    /// The basis manifest's acknowledged floor.
+    acknowledged_floor_seq: ChangeSeq,
     /// The revision of the previous row at or below the floor. The inode has
     /// kept its newest row at or below the floor once this is set. It also
     /// catches two rows sharing one revision number: descending revision
@@ -128,16 +145,11 @@ pub(crate) struct WholeStateRetention {
 }
 
 impl WholeStateRetention {
-    fn push(
-        &mut self,
-        family: MetadataRowFamily,
-        row: MetadataRow,
-        floor_seq: ChangeSeq,
-    ) -> Result<Option<MetadataRow>> {
+    fn push(&mut self, family: MetadataRowFamily, row: MetadataRow) -> Result<Option<MetadataRow>> {
         let Some((inode_id, revision, committed_seq)) = whole_state_revision(&row) else {
             return Ok(Some(row));
         };
-        if committed_seq > floor_seq {
+        if committed_seq > self.acknowledged_floor_seq {
             return Ok(Some(row));
         }
         // Writer invariant: one inode's whole-state rows are numbered
@@ -149,7 +161,7 @@ impl WholeStateRetention {
             let family = family.as_str();
             return Err(CoreError::NamespaceCorrupt(format!(
                 "inode `{inode_id}` has two {family} rows at revision \
-                 `{revision}` at or below the retention floor; refusing to drop rows"
+                 `{revision}` at or below the acknowledged floor; refusing to drop rows"
             )));
         }
         if self.previous_at_floor.replace(revision).is_some() {
@@ -627,7 +639,7 @@ mod tests {
     #[test]
     fn one_inode_keeps_the_newest_row_at_the_floor() {
         for family in WHOLE_STATE_FAMILIES {
-            let mut operator = RetentionRule::WholeState.operator(ChangeSeq(0));
+            let mut operator = RetentionRule::WholeState.operator(floor());
             let mut kept = Vec::new();
             // Newest first: two above the floor, then a hundred thousand below.
             for (revision, committed_seq) in [(100_002u64, 102u64), (100_001, 101)] {
@@ -655,10 +667,45 @@ mod tests {
         }
     }
 
+    /// Checks that a whole-state row above the acknowledged floor stays, even
+    /// at or below the retention floor, and that the row kept at the floor is
+    /// the newest at or below the acknowledged floor.
+    #[test]
+    fn a_whole_state_row_leaves_only_at_or_below_the_acknowledged_floor() {
+        for family in WHOLE_STATE_FAMILIES {
+            let mut operator = RetentionRule::WholeState.operator(ChangeSeq(40));
+            let mut kept = Vec::new();
+            // Newest first: three between the floors, then two at or below the
+            // acknowledged floor.
+            for (revision, committed_seq) in [(5u64, 99u64), (4, 50), (3, 41), (2, 40), (1, 39)] {
+                if let Some((_, row)) = operator
+                    .push(
+                        family,
+                        whole_state_row(family, 7, revision, committed_seq),
+                        floor(),
+                    )
+                    .expect("push")
+                {
+                    kept.push(row);
+                }
+            }
+            assert_eq!(
+                kept,
+                vec![
+                    whole_state_row(family, 7, 5, 99),
+                    whole_state_row(family, 7, 4, 50),
+                    whole_state_row(family, 7, 3, 41),
+                    whole_state_row(family, 7, 2, 40),
+                ],
+                "{family:?}"
+            );
+        }
+    }
+
     #[test]
     fn two_whole_state_rows_at_one_revision_below_the_floor_are_refused() {
         for family in WHOLE_STATE_FAMILIES {
-            let mut operator = RetentionRule::WholeState.operator(ChangeSeq(0));
+            let mut operator = RetentionRule::WholeState.operator(floor());
             operator
                 .push(family, whole_state_row(family, 7, 5, 50), floor())
                 .expect("the first row at the floor is kept");

@@ -6,8 +6,8 @@ use super::merges::{missing_fork, MergeOutcome, PlannedMerge};
 use crate::publisher::MergeSlot;
 use crate::trace::{self, operation_span};
 use crate::{
-    ActorId, CommitId, Consistency, CoreError, LoonFs, MergeConflict, MergeForkOptions, Namespace,
-    NamespaceId, NamespaceMetadata, RebaseForkResponse, Result, Writable,
+    ActorId, CommitId, Consistency, CoreError, Error, LoonFs, MergeConflict, MergeForkOptions,
+    Namespace, NamespaceId, NamespaceMetadata, RebaseForkResponse, Result, Writable,
 };
 use loonfs_core::MergeRequest;
 
@@ -187,45 +187,59 @@ impl Namespace<Writable> {
     /// planned as [`Self::plan_merge`] plans a merge.
     ///
     /// The plan checks that this namespace is a rebase's new fork for the
-    /// fork and checks both floors, folds the fork, and plans against this
-    /// namespace's head, reading the source through this namespace's fork
-    /// pin.
+    /// fork and checks both floors, folds and pins the fork, and plans
+    /// against this namespace's head, reading the source through this
+    /// namespace's fork pin.
     pub(crate) async fn plan_replay(
         &self,
         request: &MergeRequest,
         slot: Option<MergeSlot>,
     ) -> Result<PlannedMerge<Vec<MergeConflict>>> {
         let source_namespace_id = &request.source_namespace_id;
-        self.plan_commit(request, slot, |new_fork| async move {
-            let fork = self
-                .core
-                .pinned_read(source_namespace_id, Consistency::Strong)
-                .await?;
-            let basis = new_fork
-                .engine
-                .check_replay(&new_fork.context, &fork.engine, &fork.context, request)
-                .await?;
-            let fork = self.fold_and_read(source_namespace_id).await?;
-            let source = self
-                .core
-                .pinned_read_at_snapshot(&basis.manifest.owner_namespace_id, &basis.source_pin_id)
-                .await?;
-            let plan = new_fork
-                .engine
-                .plan_replay(
-                    &new_fork.context,
-                    &fork.engine,
-                    &fork.context,
-                    &source.engine,
-                    &source.context,
-                    request,
-                    self.core.now_ms(),
-                    self.session().merge_allowance(),
-                )
-                .await?;
-            let record = plan.record().clone();
-            let report = plan.conflicts().to_vec();
-            Ok((plan.into_candidate(), record, report))
+        // Boxed so the replay's future stays within the compiler's layout depth.
+        self.plan_commit(request, slot, |new_fork| {
+            Box::pin(async move {
+                let fork = self
+                    .core
+                    .pinned_read(source_namespace_id, Consistency::Strong)
+                    .await?;
+                let basis = new_fork
+                    .engine
+                    .check_replay(&new_fork.context, &fork.engine, &fork.context, request)
+                    .await?;
+                let prepared_at_ms = self.core.now_ms();
+                let (fork, fork_pin) = self
+                    .pin_fork(source_namespace_id, request, prepared_at_ms)
+                    .await?;
+                let planned = async {
+                    let source = self
+                        .core
+                        .pinned_read_at_snapshot(
+                            &basis.manifest.owner_namespace_id,
+                            &basis.source_pin_id,
+                        )
+                        .await?;
+                    let plan = new_fork
+                        .engine
+                        .plan_replay(
+                            &new_fork.context,
+                            &fork.engine,
+                            &fork.context,
+                            &source.engine,
+                            &source.context,
+                            request,
+                            prepared_at_ms,
+                            self.session().merge_allowance(),
+                        )
+                        .await?;
+                    let record = plan.record().clone();
+                    let report = plan.conflicts().to_vec();
+                    Ok::<_, Error>((plan.into_candidate(), record, report))
+                }
+                .await;
+                self.planned_with_fork_pin(source_namespace_id, fork_pin, planned)
+                    .await
+            })
         })
         .await
     }

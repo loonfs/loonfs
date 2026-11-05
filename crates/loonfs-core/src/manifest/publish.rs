@@ -248,13 +248,12 @@ impl<S: ObjectStore> NamespaceStore<S> {
     ///
     /// Returns `None` when `basis` was checked the revalidation bound ago or
     /// longer, before the probe or when its response arrives, and the caller then
-    /// loads the current manifest through the hint. Garbage collection keeps a
-    /// manifest while its successor is younger than the grace window. The basis
-    /// had no successor when it was checked, so every manifest above it was
-    /// published after the check, and within the bound, garbage collection
-    /// hasn't deleted any of them. The probe therefore finds the newest
-    /// manifest, and a put after it can't create a deleted number again, beside
-    /// the newer manifests.
+    /// loads the current manifest through the hint. The basis had no successor
+    /// when it was checked, so every manifest above it was published after the
+    /// check. Within the bound, such a manifest is younger than the grace
+    /// window, so garbage collection hasn't deleted any of them. The probe
+    /// therefore finds the newest manifest, and a put after it can't create a
+    /// deleted number again, beside the newer manifests.
     async fn find_current_above(&self, basis: &PublicationBasis) -> Result<Option<LoadedManifest>> {
         if !basis.checked.is_within_revalidation_bound() {
             return Ok(None);

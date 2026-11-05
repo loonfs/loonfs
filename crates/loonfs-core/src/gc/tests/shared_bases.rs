@@ -304,8 +304,9 @@ async fn a_false_match_of_an_extent_filter_stays_until_no_root_lists_its_segment
 }
 
 /// Checks that an extent that only a superseded layout row lists stays
-/// protected while a rooted manifest lists that row's segment, and is
-/// collected once no rooted manifest lists the segment.
+/// protected while the current manifest lists that row's segment, and is
+/// collected once a compacted manifest is current and no rooted manifest
+/// lists the segment.
 #[tokio::test]
 async fn an_extent_of_a_superseded_layout_row_stays_until_no_root_lists_its_segment() {
     use loonfs_types::format::manifest::{MetadataRunRef, RunTier};
@@ -355,24 +356,10 @@ async fn an_extent_of_a_superseded_layout_row_stays_until_no_root_lists_its_segm
     compacted.manifest_no = ManifestNo(2);
     compacted.runs = vec![longer_run(RunTier::Base)];
     publish_layout_manifest(&store, first).await;
-    write_namespace_manifest(&store, compacted)
-        .await
-        .expect("compacted manifest");
 
     let now_ms = GRACE_MS + 1;
-    let successor = metadata_manifest_object(&namespace_id, &ManifestNo(2));
-    let young_successor = MetadataMapStore::new(
-        &store,
-        KeyPredicate::exact(&successor),
-        move |mut metadata| {
-            metadata.last_modified_at_ms = Some(now_ms);
-            metadata
-        },
-    );
-    let aged = MetadataMapStore::aged(&store, KeyPredicate::any());
-    let both = superseded.union(&kept).cloned().collect::<BTreeSet<_>>();
-    for (collection_store, deleted, survivors) in [(&young_successor, 0, both), (&aged, 1, kept)] {
-        let report = crate::test_support::namespace_store(collection_store, &namespace_id)
+    let collect = async |deleted, survivors: BTreeSet<String>| {
+        let report = crate::test_support::namespace_store(&store, &namespace_id)
             .gc(None, &options(), &context(now_ms).clock())
             .await
             .expect("collection");
@@ -386,5 +373,12 @@ async fn an_extent_of_a_superseded_layout_row_stays_until_no_root_lists_its_segm
                 .collect::<BTreeSet<_>>(),
             survivors
         );
-    }
+    };
+    // Every object reports an ancient age, and the current manifest still
+    // lists the superseded row's segment.
+    collect(0, superseded.union(&kept).cloned().collect()).await;
+    write_namespace_manifest(&store, compacted)
+        .await
+        .expect("compacted manifest");
+    collect(1, kept).await;
 }

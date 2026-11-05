@@ -42,7 +42,7 @@ The position of one object in a numbered series, such as a manifest number (`man
 
 ### Garbage collection (`gc`)
 
-The process that deletes stored objects that nothing references anymore, such as superseded manifests, folded WAL objects, and unused content objects. Code uses the short form `gc` in names, as in `gc_namespace`. Each call runs one [collection](#collection).
+The process that deletes stored objects that nothing references anymore, such as replaced manifests, folded WAL objects, and unused content objects. Code uses the short form `gc` in names, as in `gc_namespace`. Each call runs one [collection](#collection).
 
 ### Head
 
@@ -226,7 +226,7 @@ The process that rewrites a namespace's metadata runs into fewer runs, and drops
 
 ### Retention floor
 
-The sequence number below which a namespace's history is no longer guaranteed. Above the floor, every file's history is complete. At or below it, each visible file keeps at least its newest revision, and so does a deleted file while its deletion is recoverable. Compaction can remove the older rows at or below the floor (superseded bindings, old revisions, and commit receipts). A deletion at or below the floor has expired, so it can't be restored, and once the writer's log has acknowledged the floor, the deletion is [removable](#removable-deletion) and a base compaction removes the rows that the deletion hides. A retention advance moves the floor forward, and the floor never moves back. A pin below the floor still protects its manifest. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
+The sequence number below which a namespace's history is no longer guaranteed. Above the floor, every file's history is complete. At or below it, each visible file keeps at least its newest revision, and so does a deleted file while its deletion is recoverable. Compaction can remove the older rows at or below the floor (superseded bindings, old revisions, and commit receipts), and it removes old file, attribute, and access revisions only once the writer's log has acknowledged the floor (see [Acknowledged floor](#acknowledged-floor)). A deletion at or below the floor has expired, so it can't be restored, and once the writer's log has acknowledged the floor, the deletion is [removable](#removable-deletion) and a base compaction removes the rows that the deletion hides. A retention advance moves the floor forward, and the floor never moves back. A pin below the floor still protects its manifest. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
 
 ### Retention window
 
@@ -234,7 +234,7 @@ A namespace setting, in milliseconds, for how much recent history a scheduled re
 
 ### Acknowledged floor
 
-A manifest field (`acknowledged_floor_seq`) that records the highest [retention floor](#retention-floor) that any WAL object folded into the manifest was validated against. Each WAL object records the floor of the manifest that its writer validated it against (`basis_floor_seq`), and a fold copies the highest one into the manifest. A base compaction removes the rows that a deletion hides only when the deletion is at or below the acknowledged floor, because every restore validated against a lower floor is folded by then. For example, if the floor is 20 and the acknowledged floor is 5, a deletion at sequence 10 has expired, but it isn't [removable](#removable-deletion), and its rows stay until a WAL object validated against the floor of 20 is folded. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
+A manifest field (`acknowledged_floor_seq`) that records the highest [retention floor](#retention-floor) that any WAL object folded into the manifest was validated against. Each WAL object records the floor of the manifest that its writer validated it against (`basis_floor_seq`), and a fold copies the highest one into the manifest. A base compaction removes the rows that a deletion hides only when the deletion is at or below the acknowledged floor, because every restore validated against a lower floor is folded by then. For the same reason, a base compaction keeps every file, attribute, and access revision above the acknowledged floor. For example, if the floor is 20 and the acknowledged floor is 5, a deletion at sequence 10 has expired, but it isn't [removable](#removable-deletion), and its rows stay until a WAL object validated against the floor of 20 is folded. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
 
 ### Control object
 
@@ -254,7 +254,7 @@ The verified set of metadata runs, from the current manifest, that a read starts
 
 A stored record that keeps one manifest, and every segment it lists, from being deleted after newer manifests are published, so the namespace stays readable as it was at that point in its history. The format calls the record a "pin". Every pin is a snapshot with one of two owners:
 
-- A "user pin" is a snapshot whose owner is `user`. A caller creates it and can delete it, and it may expire. Its ID is the `snapshot_id` that the read routes and forks accept, and the snapshot routes manage only user pins. A snapshot can have an expiry time, or none. An expired snapshot can't be read or forked, and it stays listed until garbage collection deletes it. For example, a sandbox can create a snapshot before an agent edits it, and then read or fork the snapshot after the edits.
+- A "user pin" is a snapshot whose owner is `user`. A caller creates it and can delete it, and it may expire. Its ID is the `snapshot_id` that the read routes and forks accept, and the snapshot routes manage only user pins. A snapshot can have an expiry time, or none. An expired snapshot can't be read or forked, and it stays listed until garbage collection deletes it. For example, a sandbox can create a snapshot before an agent edits it, and then read or fork the snapshot after the edits. A merge or a rebase also creates a user pin on the fork while it plans, and deletes the pin after its commit.
 - A "fork pin" is a snapshot whose owner is `fork`. It keeps the source manifest that a fork reads through, until the fork is retired. A read of the source accepts a fork pin's ID as `snapshot_id`, so a client can read the source as it was at the fork point.
 
 The maintenance API's "checkpoint" inventory lists every pin of a namespace, so an operator can see what keeps old manifests, and the API calls any pin's ID a `checkpoint_id`. See [Pins](format.md#8-pins).
@@ -305,7 +305,7 @@ A live read with the `eventual` [consistency](#consistency), which is the defaul
 
 ### Revalidation bound
 
-The longest time a reader can trust that no newer manifest exists after it last checked (`READ_REVALIDATION_BOUND_MS`). The bound applies to a cached view, to a [writer position](#writer-position), and to the manifest that a manifest publication builds on. After that, the reader loads the current manifest again before it serves a read, and the publication loads the current manifest through the hint before its put. The minimum [grace window](#grace-window) includes this bound, so it doesn't delete a superseded manifest that a reader might still be using. See [Replaying the visible WAL](format.md#42-replaying-the-visible-wal).
+The longest time a reader can trust that no newer manifest exists after it last checked (`READ_REVALIDATION_BOUND_MS`). The bound applies to a cached view, to a [writer position](#writer-position), and to the manifest that a manifest publication builds on. After that, the reader loads the current manifest again before it serves a read, and the publication loads the current manifest through the hint before its put. The minimum [grace window](#grace-window) is at least this bound plus the clock allowance, so an object published after a reader's last check isn't deleted while the reader trusts that check. See [Replaying the visible WAL](format.md#42-replaying-the-visible-wal).
 
 ### Cursor
 
@@ -369,7 +369,7 @@ One garbage collection call over a namespace. A collection reads the current man
 
 ### Grace window
 
-How old an unreferenced manifest, WAL object, content object, or temporary object has to be before garbage collection deletes it (`grace_window_ms`). The grace window is configurable (one hour by default), but it can't be lower than `GC_MIN_GRACE_WINDOW_MS`. That minimum makes sure every write planned against an older state has finished or failed before garbage collection deletes an object the write might reference. Two other windows have names of their own: the "retirement grace", which a deleted namespace waits before it can be retired, and the "completed-content grace", which keeps a completed upload's records. See [Candidate and age rules](format.md#113-candidate-and-age-rules).
+How old an unreferenced manifest, WAL object, content object, or temporary object has to be before garbage collection deletes it (`grace_window_ms`). The grace window is configurable (one hour by default), but it can't be lower than `GC_MIN_GRACE_WINDOW_MS`. That minimum makes sure every write planned against an older state has finished or failed before garbage collection deletes an object the write might reference. Garbage collection doesn't wait for reads, so a read that must outlive the current manifest takes a [snapshot](#snapshot). Two other windows have names of their own: the "retirement grace", which a deleted namespace waits before it can be retired, and the "completed-content grace", which keeps a completed upload's records. See [Candidate and age rules](format.md#113-candidate-and-age-rules).
 
 ### Namespace retirement
 

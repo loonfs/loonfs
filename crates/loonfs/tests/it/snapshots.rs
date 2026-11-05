@@ -648,7 +648,8 @@ async fn a_fork_pin_reads_a_revision_after_the_sources_floor_passes_it() {
         .await
         .expect("put a later revision");
     // The floor advances to the folded head, so the later revision is folded
-    // first, and the compaction keeps only that revision.
+    // first, and once the maintainer's fence acknowledges the floor, the
+    // compaction keeps only that revision.
     fs.maintenance
         .fold_wal(&source)
         .await
@@ -656,6 +657,10 @@ async fn a_fork_pin_reads_a_revision_after_the_sources_floor_passes_it() {
     fs.advance_retention_floor(&source)
         .await
         .expect("advance the floor to the head");
+    fs.maintenance
+        .acknowledge_retention_floor(&source)
+        .await
+        .expect("acknowledge the floor");
     compact_until_done(&fs.maintenance, &source).await;
 
     // A fresh reader reads the compacted manifest instead of a cached view.

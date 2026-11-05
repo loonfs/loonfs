@@ -264,15 +264,6 @@ pub enum Error {
     /// An error reported by the underlying `loonfs-core` engine.
     #[error(transparent)]
     Core(#[from] CoreError),
-    /// The manifest that a read used was replaced by a newer manifest, and a
-    /// segment that the read needed is missing.
-    #[error("manifest replaced: the read used manifest `{read_manifest_no}`, and manifest `{current_manifest_no}` replaced it")]
-    ManifestReplaced {
-        /// The manifest that the read used.
-        read_manifest_no: ManifestNo,
-        /// The current manifest, observed after the read found a segment missing.
-        current_manifest_no: ManifestNo,
-    },
     /// A request field fails runtime policy.
     #[error("invalid request: {message}")]
     InvalidRequest {
@@ -318,7 +309,6 @@ impl Error {
     pub fn code(&self) -> ErrorCode {
         match self {
             Self::Core(error) => error.code(),
-            Self::ManifestReplaced { .. } => ErrorCode::StaleHead,
             Self::Config(_) | Self::InvalidRequest { .. } => ErrorCode::InvalidRequest,
             Self::NotSupported { .. } => ErrorCode::NotSupported,
             Self::RuntimeTask(_) => ErrorCode::ServerError,
@@ -337,8 +327,7 @@ impl Error {
             Self::Config(_)
             | Self::RuntimeTask(_)
             | Self::InvalidRequest { .. }
-            | Self::NotSupported { .. }
-            | Self::ManifestReplaced { .. } => None,
+            | Self::NotSupported { .. } => None,
         }
     }
 
@@ -378,8 +367,7 @@ impl Error {
             Self::Config(_)
             | Self::RuntimeTask(_)
             | Self::InvalidRequest { .. }
-            | Self::NotSupported { .. }
-            | Self::ManifestReplaced { .. } => None,
+            | Self::NotSupported { .. } => None,
         };
         if let Some(message) = store_message {
             return message;
@@ -391,7 +379,6 @@ impl Error {
             | Self::InvalidRequest { message, .. }
             | Self::NotSupported { message, .. } => std::borrow::Cow::Owned(message.clone()),
             Self::Core(error) => std::borrow::Cow::Owned(error.to_string()),
-            Self::ManifestReplaced { .. } => std::borrow::Cow::Owned(self.to_string()),
         }
     }
 }

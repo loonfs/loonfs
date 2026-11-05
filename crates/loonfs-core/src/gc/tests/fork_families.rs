@@ -225,8 +225,8 @@ async fn content_that_only_a_member_view_refers_to_stays_through_every_generatio
         .gc(None, &options(), &aged.clock())
         .await
         .expect("the root's collection");
-    // A member's roots cost one pin listing and one manifest listing, and the
-    // root's collection lists nothing else under the member's prefix.
+    // A member's roots cost one pin listing, and the root's collection lists
+    // nothing else under the member's prefix.
     let listings = store
         .take()
         .into_iter()
@@ -235,10 +235,7 @@ async fn content_that_only_a_member_view_refers_to_stays_through_every_generatio
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(
-        listings,
-        [pin_prefix(&family[1]), metadata_manifest_prefix(&family[1])]
-    );
+    assert_eq!(listings, [pin_prefix(&family[1])]);
     assert_eq!(report.deleted.content_objects, 1);
     assert!(!exists(&store, &unreferenced).await);
     for key in &referenced {

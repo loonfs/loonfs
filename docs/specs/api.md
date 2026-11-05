@@ -71,7 +71,7 @@ The example below is the reference deployment's document, with the server's defa
     "commit.max_request_body_bytes": 2097152,
     "download.service_proxied.max_concurrent_requests": 16,
     "download.service_proxied.max_content_bytes": 268435456,
-    "maintenance.gc.min_grace_window_ms": 2490000,
+    "maintenance.gc.min_grace_window_ms": 1335000,
     "pagination.default_limit": 1000,
     "pagination.max_limit": 1000,
     "query.grep.scan_budget_files": 4096,
@@ -117,7 +117,7 @@ Registered limit keys:
 | `commit.max_content_tokens` | The largest number of content tokens that one commit can include. A request over the limit returns `invalid_request` before planning. |
 | `commit.max_external_content_refs` | The largest number of distinct external content references that one commit's operations can refer to. A request over the limit returns `invalid_request` before planning. |
 | `commit.max_message_bytes` | The largest commit `message` accepted, in bytes. A longer message returns `invalid_request` before planning. |
-| `maintenance.gc.min_grace_window_ms` | The smallest `grace_window_ms` accepted on a `gc` request. A smaller value returns `invalid_request`. The value is derived from the publication budgets and the presigned URL lifetime, rather than tuned. |
+| `maintenance.gc.min_grace_window_ms` | The smallest `grace_window_ms` accepted on a `gc` request. A smaller value returns `invalid_request`. The value is derived from the publication budgets, rather than tuned. |
 | `query.grep.scan_budget_files` | The number of files that an `allow_scan` grep without a plan scans before the request fails with `query_unindexable`. |
 | `query.grep.tail_budget_files` | The number of revisions in the unindexed tail that one grep scans exhaustively before it fails with `index_lagging`. |
 
@@ -851,7 +851,7 @@ Whatever the target, the floor doesn't pass a commit that's less than one hour o
 
 A request that includes both targets returns `invalid_request`. A target at or below the current floor changes nothing, and the response reports the current floor (see [Advancing the retention floor](format.md#101-advancing-the-retention-floor)).
 
-The retention floor limits incremental replay and file revision history. Above the floor, a file's revision history is complete. At or below the floor, each file keeps its newest revision. Once the floor advances, a base compaction removes the older revisions, so a revision listing ends at that newest revision, and reading or restoring a removed revision returns `revision_not_found`. A deleted file keeps its newest revision while its deletion is recoverable, so a restore still returns its content. GC reclaims the content object of a removed revision once no retained view references it and it's older than the grace window (see [Content roots](format.md#119-content-roots)).
+The retention floor limits incremental replay and file revision history. Above the floor, a file's revision history is complete. At or below the floor, each file keeps its newest revision. Once the floor advances and the writer's log acknowledges the new floor (described below), a base compaction removes the older revisions, so a revision listing ends at that newest revision, and reading a removed revision returns `revision_not_found`. A restore of a revision at or below the floor succeeds only for the file's newest revision at or below the floor, and an older one returns `revision_not_found` whether or not a compaction has removed it yet. A deleted file keeps its newest revision while its deletion is recoverable, so a restore still returns its content. GC reclaims the content object of a removed revision once no retained view references it and it's older than the grace window (see [Content roots](format.md#119-content-roots)).
 
 The floor also bounds the trash. Once the floor is at or above a deletion's `deletion_seq`, the deletion has expired, so it leaves the trash, and a restore of it returns `not_deleted` (see [Advancing the retention floor](format.md#101-advancing-the-retention-floor)). The job commits nothing for the deletions that expire, and the change feed has no event for them. An expired deletion becomes removable once the writer's log has acknowledged the new floor, which happens when a fold includes a WAL object that was validated against that floor, such as the writer's next commit or the fence of a new writer session. A base compaction then removes the revisions and other rows that the removable deletion hides. For a namespace that nobody writes to, the reference server's next sweep writes that fence itself (see [Deleting, retaining, and reclaiming](#deleting-retaining-and-reclaiming)). The namespace diagnostics report the floor that the writer's log has acknowledged as `acknowledged_floor_seq`. GC then reclaims the content of the removed revisions in the same way.
 
@@ -994,12 +994,12 @@ A deleted ancestor namespace keeps every object it published while a live descen
 
 In an active namespace, GC reclaims a content object once it's older than the grace window and nothing references it. A content object is referenced by:
 
-- a revision in the current manifest, in a pinned manifest, in a manifest whose successor is younger than the grace window, or in the unfolded WAL tail, or
+- a revision in the current manifest, in a pinned manifest, or in the unfolded WAL tail, or
 - an upload session record, which references its own content.
 
 [Content roots](format.md#119-content-roots) defines these rules. Deleting a file or a tree doesn't reclaim anything while the deletion is recoverable, because a deleted file keeps its newest revision. A compaction that removes old revisions at or below the retention floor makes their content collectable, and so does a base compaction that removes the revisions that a removable deletion hides (see [Retention jobs](#retention-jobs)). So a deleted tree's content is reclaimed once the floor reaches the deletion and the writer's log acknowledges that floor.
 
-The metadata retention floor is a separate mechanism. It limits WAL replay history and file revision history, and it makes older WAL objects eligible for GC. A caller advances it explicitly, with `POST .../runs` and the body `{"kind":"retention"}`, or with `loonfs maintenance retention advance`, and the reference server advances it on a schedule under each namespace's [retention window](glossary.md#retention-window), as described below. After the floor advances, a base compaction keeps every revision above the floor, and each file's newest revision at or below it.
+The metadata retention floor is a separate mechanism. It limits WAL replay history and file revision history, and it makes older WAL objects eligible for GC. A caller advances it explicitly, with `POST .../runs` and the body `{"kind":"retention"}`, or with `loonfs maintenance retention advance`, and the reference server advances it on a schedule under each namespace's [retention window](glossary.md#retention-window), as described below. After the floor advances and the writer's log acknowledges the new floor, a base compaction keeps every revision above the floor, and each file's newest revision at or below it.
 
 Completed upload sessions in active namespaces keep their records for the derived completed-content grace, which is slightly longer than seven days. A session record protects its content from collection, so GC reclaims staged content that no commit published on a collection after the record is removed.
 
@@ -1362,7 +1362,7 @@ An `eventual` read can read an older head than one that a caller learned from a 
 
 Why is `eventual` the default? A read that follows a write in the same process already sees the write. A read that follows a write in another process is the case that needs a request, so that read asks for `strong`. A process that opens a namespace for the first time loads it by discovery, which is as fresh as `strong`. Other reads send no request within their maximum staleness. A deployment whose readers always follow writes in other processes sets `strong` as the default in the server's configuration, and pays a request on every read.
 
-Why can't the maximum staleness exceed the revalidation bound? Garbage collection can delete the segments of a superseded manifest once its grace window passes, and the bound is what keeps a read off them (see [Replaying the visible WAL](format.md#42-replaying-the-visible-wal)). A reader confirms a head that's older than the bound whatever the setting, so LoonFS rejects a longer maximum staleness instead of accepting a setting that it can't honor.
+Why can't the maximum staleness exceed the revalidation bound? A successor check's answer is usable only within the bound, because a successor published after the check might already have been deleted (see [Replaying the visible WAL](format.md#42-replaying-the-visible-wal)). A reader confirms a head that's older than the bound whatever the setting, so LoonFS rejects a longer maximum staleness instead of accepting a setting that it can't honor.
 
 #### Namespace statistics
 
@@ -2714,7 +2714,7 @@ To merge a fork, the server:
 3. Checks that the fork was made from this namespace, and reads the fork point.
 4. Refuses a fork point below this namespace's retention floor with `rebootstrap_required`.
 5. Reads this namespace's [merge index](glossary.md#merge-index) for the fork's newest merge, which sets where the range starts, and refuses a start below the fork's own retention floor with `rebootstrap_required`.
-6. Folds the fork, so that each content reference in the merge's commit has a layout in the fork's manifest.
+6. Folds the fork, so that each content reference in the merge's commit has a layout in the fork's manifest, and pins the folded manifest with a snapshot of the fork named `merge <commit_id>`, which keeps the content that the merge refers to. The server deletes the snapshot after the commit at step 9, and the snapshot expires 15 minutes after the plan started if the delete fails.
 7. Computes the fork's net change over the range and the commit's planned size, and returns `merge_too_large` with a split hint (described below) if the range's commits touched more inodes than one WAL object could contain an operation for, or if the commit wouldn't fit one WAL object or the merge allowance.
 8. Classifies the change against this namespace's head under the conflict rule ([Validation](format.md#62-validation)), and returns `merge_conflict` if any inode conflicts.
 9. Commits the merge as the only commit in its WAL object. If the commit fails because this namespace changed after the plan, with a code from the table below, the server keeps the slot, goes back to step 1, and plans the same range again, up to three times, before it returns the commit's error. A later plan reports a row that changed in between, and that isn't the fork's own, as `merge_conflict`. For example, a name that another inode took is a `name` conflict. Another merge of the fork that committed in between makes the later plan return `merge_range_conflict`.
@@ -2895,7 +2895,7 @@ To rebase a fork, the server:
 3. Looks up the commit receipt of `commit_id` in the new fork, and returns the new fork without a conflict report if a replay commit with that ID was committed.
 4. Takes the merge slot, as a merge does.
 5. Finds where the range starts: after the new fork's previous replay commit, or after `resume_after_seq` for the first replay commit. It refuses a start below the fork's own retention floor, or a new fork whose retention floor is above the new fork's own fork point, with `rebootstrap_required`.
-6. Folds the fork, computes the fork's net change over the range and the commit's planned size, and returns `merge_too_large` if the replay commit doesn't fit, as a merge does.
+6. Folds and pins the fork, as a merge does, computes the fork's net change over the range and the commit's planned size, and returns `merge_too_large` if the replay commit doesn't fit, as a merge does.
 7. Classifies the change under the conflict rule against the new fork's head, and reads this namespace's history up to the new fork's fork point through the new fork's fork pin.
 8. Commits the changes that don't conflict into the new fork as one replay commit, and returns the new fork and the conflict report. If the commit fails because the new fork changed after the plan, the server keeps the slot, goes back to step 3, and plans the same range again, up to three times, before it returns the commit's error, as a merge does. A later plan reports a row that changed in between, and that isn't the fork's own, in the conflict report.
 

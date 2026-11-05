@@ -166,6 +166,25 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         self.visible_seq
     }
 
+    /// Returns this view's sources at `visible_seq`, at or below this view's
+    /// sequence, without the durable cache, which keeps only the newest rows.
+    pub(crate) fn at_seq(&self, visible_seq: ChangeSeq) -> MetadataView<'a, 'store, S> {
+        assert!(
+            visible_seq <= self.visible_seq,
+            "a view at an earlier sequence is at or below the view it comes from"
+        );
+        MetadataView {
+            visible_seq,
+            sources: MetadataSourceStack {
+                overlay: self.sources.overlay,
+                batch_accepted: self.sources.batch_accepted,
+                wal_tail: self.sources.wal_tail,
+                manifest: self.sources.manifest,
+                durable_cache: None,
+            },
+        }
+    }
+
     /// The retention floor of the view's manifest.
     pub(crate) fn retention_floor_seq(&self) -> ChangeSeq {
         self.sources

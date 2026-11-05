@@ -255,9 +255,11 @@ impl RuntimeCore {
     /// An eventual read takes the cached head while the head was confirmed
     /// less than the read's maximum staleness ago, so the read sees every
     /// commit acknowledged before that confirmation. The head's manifest
-    /// check must also be younger than the revalidation bound, because
-    /// garbage collection may delete the segments of a superseded manifest
-    /// once the bound passes (format section 4.2).
+    /// check must also be younger than the revalidation bound: garbage
+    /// collection deletes the segments of a replaced manifest once the
+    /// manifest is older than the grace window, and the bound is shorter than
+    /// the grace window (format section 4.2). A read that still finds a
+    /// segment missing runs once more from the current manifest.
     fn eventual_head(
         &self,
         namespace_id: &NamespaceId,

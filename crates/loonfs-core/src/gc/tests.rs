@@ -52,10 +52,10 @@ mod fork_chain;
 mod fork_families;
 mod listings;
 mod many_pins;
+mod replaced_manifests;
 mod retirement;
 mod session_cache;
 mod shared_bases;
-mod superseded_roots;
 mod upload_records;
 
 const GRACE_MS: u64 = 60 * 60 * 1000;
@@ -1043,25 +1043,32 @@ async fn publish_inline(
     key
 }
 
-/// Folds the tail, moves the floor to the head, and compacts every family
-/// group, so each file keeps only its newest revision.
+/// Folds the tail, moves the floor to the head, acknowledges it, and
+/// compacts every family group, so each file keeps only its newest revision.
 async fn compact_below_the_floor<S: ObjectStore>(store: &S, namespace_id: &NamespaceId) {
     crate::test_support::namespace_store(store, namespace_id)
         .fold_wal()
         .await
         .expect("fold wal");
-    crate::test_support::NamespaceFixture::new(
-        store,
-        namespace_id,
-        &crate::test_support::writer_at(
-            "test-writer",
-            crate::test_support::grace_elapsed_after(1_000),
-        ),
-    )
-    .engine()
-    .advance_retention_floor(RetentionTarget::Head)
-    .await
-    .expect("advance floor");
+    let floor_writer = crate::test_support::writer_at(
+        "test-writer",
+        crate::test_support::grace_elapsed_after(1_000),
+    );
+    crate::test_support::NamespaceFixture::new(store, namespace_id, &floor_writer)
+        .engine()
+        .advance_retention_floor(RetentionTarget::Head)
+        .await
+        .expect("advance floor");
+    // The fence of a writer epoch records the advanced floor, and its fold
+    // acknowledges the floor, so a base compaction drops the older revisions.
+    crate::test_support::namespace_store(store, namespace_id)
+        .acquire_writer_epoch(&floor_writer.writer_id)
+        .await
+        .expect("write a fence");
+    crate::test_support::namespace_store(store, namespace_id)
+        .fold_wal()
+        .await
+        .expect("fold the fence");
     for _ in 0..16 {
         let outcome = crate::test_support::NamespaceFixture::new(
             store,
@@ -1209,10 +1216,16 @@ async fn a_revision_compacted_away_below_the_floor_loses_its_object_after_the_gr
     compact_below_the_floor(&store, &namespace_id).await;
     let first_key = loonfs_objectstore::keys::content_blob(&namespace_id, &first.content_id);
 
-    // Only the manifest the compaction superseded still names the object.
+    // No root names the object any more. The manifests and segments report
+    // an ancient age, and the object itself is younger than the grace.
     let young = context(now_after_newest_object(&store, &namespace_id, 0).await);
-    let aged_content = MetadataMapStore::aged(&store, KeyPredicate::content_blob());
-    let report = crate::test_support::namespace_store(&aged_content, &namespace_id)
+    let manifests = KeyPredicate::manifest(&namespace_id);
+    let segments = KeyPredicate::metadata_segment();
+    let aged_metadata = MetadataMapStore::aged(
+        &store,
+        KeyPredicate::new(move |key| manifests.matches(key) || segments.matches(key)),
+    );
+    let report = crate::test_support::namespace_store(&aged_metadata, &namespace_id)
         .gc(None, &options(), &young.clock())
         .await
         .expect("collection inside the grace");
@@ -3477,7 +3490,10 @@ async fn a_collection_fails_when_its_pinned_manifests_do_not_fit_the_read_memory
         .load_current_manifest()
         .await
         .expect("current manifest");
-    let budget = 8 * crate::heap_bytes::manifest_heap_bytes(&head.envelope);
+    // Each rooted manifest charges its object keys, content IDs, and layout
+    // segments, which here come to less than the first manifest's envelope,
+    // so four envelopes hold one pinned manifest but not ten.
+    let budget = 4 * crate::heap_bytes::manifest_heap_bytes(&head.envelope);
     let memory = Arc::new(crate::cache::ReadWorkingMemory::new(budget, None));
     let cache = Arc::new(root_scan_cache(Arc::clone(&memory)));
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);

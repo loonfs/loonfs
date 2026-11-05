@@ -46,6 +46,7 @@ mod publication;
 mod publish_discovery;
 mod read_consistency;
 mod read_view;
+mod replaced_basis;
 mod request_accounting;
 mod retained_views;
 mod runtime_config;

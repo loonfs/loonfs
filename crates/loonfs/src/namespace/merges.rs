@@ -9,9 +9,10 @@ use crate::publisher::{FoldWhen, MergeSlot};
 use crate::trace::{self, operation_span};
 use crate::{
     ActorId, Commit, CommitId, Consistency, CoreError, Error, MergeForkOptions, Mode, Namespace,
-    NamespaceId, NextMergeRangeResponse, Result, Writable,
+    NamespaceId, NextMergeRangeResponse, PinId, Result, Writable,
 };
 use futures::future::BoxFuture;
+use loonfs_core::limits::DIRECT_TRANSFER_URL_TTL_MS;
 use loonfs_core::MergeRequest;
 use loonfs_types::format::wal::MergeRecord;
 
@@ -30,14 +31,16 @@ pub(crate) enum PlannedMerge<R = ()> {
 }
 
 /// The commit that makes a merge, the merge slot that the merge keeps, the
-/// merge's record, whose range a later plan of the request applies, and
-/// what the plan reports with the commit: nothing for a merge, which refuses
-/// a conflict, and the conflict report for a replay commit.
+/// merge's record, whose range a later plan of the request applies, what
+/// the plan reports with the commit (nothing for a merge, which refuses a
+/// conflict, and the conflict report for a replay commit), and the pin on
+/// the fork's manifest that the plan read, which the commit releases.
 pub(crate) struct PlannedCommit<R = ()> {
     pub(crate) candidate: CommitCandidate,
     pub(crate) slot: MergeSlot,
     pub(crate) record: MergeRecord,
     pub(crate) report: R,
+    pub(crate) fork_pin: PinId,
 }
 
 /// How the commit of a merge, or of a replay commit, ended.
@@ -175,44 +178,55 @@ impl Namespace<Writable> {
     /// commit ID, or the commit that makes the merge, planned against this
     /// namespace's head under `slot`, or under a merge slot that the plan
     /// takes (see [`Self::plan_commit`]). The plan checks the fork and the
-    /// floors and finds the range's start, folds the fork, and plans. It
-    /// checks the merge's size, and then its conflicts.
+    /// floors and finds the range's start, folds and pins the fork, and
+    /// plans. It checks the merge's size, and then its conflicts.
     pub(crate) async fn plan_merge(
         &self,
         request: &MergeRequest,
         slot: Option<MergeSlot>,
     ) -> Result<PlannedMerge> {
         let source_namespace_id = &request.source_namespace_id;
-        self.plan_commit(request, slot, |main| async move {
-            let fork = self
-                .core
-                .pinned_read(source_namespace_id, Consistency::Strong)
-                .await?;
-            main.engine
-                .check_merge(&main.context, &fork.engine, &fork.context, request)
-                .await?;
-            let fork = self.fold_and_read(source_namespace_id).await?;
-            let plan = main
-                .engine
-                .plan_merge(
-                    &main.context,
-                    &fork.engine,
-                    &fork.context,
-                    request,
-                    self.core.now_ms(),
-                    self.session().merge_allowance(),
-                )
-                .await?;
-            let record = plan.record().clone();
-            Ok((plan.into_candidate()?, record, ()))
+        // Boxed so the merge's future stays within the compiler's layout depth.
+        self.plan_commit(request, slot, |main| {
+            Box::pin(async move {
+                let fork = self
+                    .core
+                    .pinned_read(source_namespace_id, Consistency::Strong)
+                    .await?;
+                main.engine
+                    .check_merge(&main.context, &fork.engine, &fork.context, request)
+                    .await?;
+                let prepared_at_ms = self.core.now_ms();
+                let (fork, fork_pin) = self
+                    .pin_fork(source_namespace_id, request, prepared_at_ms)
+                    .await?;
+                let planned = async {
+                    let plan = main
+                        .engine
+                        .plan_merge(
+                            &main.context,
+                            &fork.engine,
+                            &fork.context,
+                            request,
+                            prepared_at_ms,
+                            self.session().merge_allowance(),
+                        )
+                        .await?;
+                    let record = plan.record().clone();
+                    Ok::<_, Error>((plan.into_candidate()?, record, ()))
+                }
+                .await;
+                self.planned_with_fork_pin(source_namespace_id, fork_pin, planned)
+                    .await
+            })
         })
         .await
     }
 
     /// Returns the merge or replay commit that this namespace committed under
-    /// the request's commit ID, or the commit, its record, and its report
-    /// that `plan` plans from this namespace's head under `slot`, or under a
-    /// merge slot that this call takes.
+    /// the request's commit ID, or the commit, its record, its report, and
+    /// the pin on the fork that `plan` plans from this namespace's head under
+    /// `slot`, or under a merge slot that this call takes.
     ///
     /// The receipt lookup comes first, so a retry of a commit that committed
     /// takes no slot and folds nothing, even after the fork was deleted. The
@@ -224,7 +238,7 @@ impl Namespace<Writable> {
         plan: impl FnOnce(PinnedRead) -> Plan,
     ) -> Result<PlannedMerge<R>>
     where
-        Plan: std::future::Future<Output = Result<(CommitCandidate, MergeRecord, R)>>,
+        Plan: std::future::Future<Output = Result<(CommitCandidate, MergeRecord, R, PinId)>>,
     {
         let target = self
             .core
@@ -237,7 +251,7 @@ impl Namespace<Writable> {
             Some(slot) => slot,
             None => self.session().acquire_merge_slot()?,
         };
-        let (candidate, record, report) = plan(target)
+        let (candidate, record, report, fork_pin) = plan(target)
             .await
             .map_err(|error| missing_fork(&request.source_namespace_id, error))?;
         Ok(PlannedMerge::Candidate(Box::new(PlannedCommit {
@@ -245,6 +259,7 @@ impl Namespace<Writable> {
             slot,
             record,
             report,
+            fork_pin,
         })))
     }
 
@@ -254,7 +269,8 @@ impl Namespace<Writable> {
     /// [`ErrorCode::is_stale_plan`](crate::ErrorCode::is_stale_plan)), up to
     /// [`MAX_MERGE_PLANS`] plans in all. A later plan applies the first
     /// plan's range, so it never merges a longer range, and a merge of the
-    /// fork that committed in between returns `merge_range_conflict`.
+    /// fork that committed in between returns `merge_range_conflict`. Each
+    /// plan's pin on the fork is released once its commit returns.
     pub(crate) async fn commit_merge<'a, R>(
         &'a self,
         request: &MergeRequest,
@@ -268,11 +284,15 @@ impl Namespace<Writable> {
                 slot,
                 record,
                 report,
+                fork_pin,
             } = match planned {
                 PlannedMerge::Committed(commit) => return Ok(MergeOutcome::Found(commit)),
                 PlannedMerge::Candidate(planned) => *planned,
             };
-            match self.submit_merge(candidate, &slot).await {
+            let committed = self.submit_merge(candidate, &slot).await;
+            self.release_fork_pin(&request.source_namespace_id, &fork_pin)
+                .await;
+            match committed {
                 Err(error) if error.code().is_stale_plan() && plans < MAX_MERGE_PLANS => {
                     plans += 1;
                     let request = MergeRequest {
@@ -338,26 +358,76 @@ impl Namespace<Writable> {
         }
     }
 
-    /// Folds the WAL tail of `namespace_id`, and returns a strong read of
-    /// it at the fold's manifest or a newer one.
+    /// Folds the fork, pins the manifest that covers its tail, and reads the
+    /// fork through the pin, so the merge's range ends at the fork's folded
+    /// head. The pin keeps that manifest, its segments, and the content its
+    /// layouts refer to while the merge plans and commits, as a snapshot
+    /// does: a fold, a retention advance, and a compaction of the fork in
+    /// between can replace the manifest, and the collector keeps only what
+    /// the current manifest and the pinned manifests refer to. The pin
+    /// expires with the plan's content proofs, so a merge that can't release
+    /// it leaves it to the fork's collector.
     ///
-    /// The fold is the namespace's one fold path, so when the namespace's
-    /// writer session in this runtime is already folding, the fold waits for
-    /// that fold instead of folding the same tail.
-    ///
-    /// The fold moves the namespace's cached head onto the manifest that
-    /// covers the tail, whether it published that manifest or found it
-    /// current, or drops the cached head when it can't move there. So the
-    /// read starts from that manifest or a newer one, and a merge, whose
-    /// range ends at the fork's folded head, merges the whole range.
-    pub(crate) async fn fold_and_read(&self, namespace_id: &NamespaceId) -> Result<PinnedRead> {
-        self.mode
+    /// The fold is the namespace's one fold path, so when the fork's writer
+    /// session in this runtime is already folding, the fold waits for that
+    /// fold instead of folding the same tail.
+    pub(super) async fn pin_fork(
+        &self,
+        fork_id: &NamespaceId,
+        request: &MergeRequest,
+        prepared_at_ms: u64,
+    ) -> Result<(PinnedRead, PinId)> {
+        let name = format!("merge {}", request.commit_id);
+        let expires_at_ms = Some(prepared_at_ms + DIRECT_TRANSFER_URL_TTL_MS);
+        let snapshot = self
+            .mode
             .publisher
-            .fold_namespace(namespace_id, FoldWhen::Always)
+            .pin_after_fold(fork_id, |manifest| {
+                let engine = self
+                    .core
+                    .writer_engine(&self.mode.writer.writer_id, fork_id);
+                let name = name.clone();
+                async move { engine.create_snapshot(name, expires_at_ms, manifest).await }
+            })
             .await?;
-        self.core
-            .pinned_read(namespace_id, Consistency::Strong)
-            .await
+        let fork = self
+            .core
+            .pinned_read_at_snapshot(fork_id, &snapshot.snapshot_id)
+            .await?;
+        Ok((fork, snapshot.snapshot_id))
+    }
+
+    /// Returns `planned` with the pin its plan read the fork through, or
+    /// releases the pin and returns the plan's error.
+    pub(super) async fn planned_with_fork_pin<R>(
+        &self,
+        fork_id: &NamespaceId,
+        fork_pin: PinId,
+        planned: Result<(CommitCandidate, MergeRecord, R)>,
+    ) -> Result<(CommitCandidate, MergeRecord, R, PinId)> {
+        match planned {
+            Ok((candidate, record, report)) => Ok((candidate, record, report, fork_pin)),
+            Err(error) => {
+                self.release_fork_pin(fork_id, &fork_pin).await;
+                Err(error)
+            }
+        }
+    }
+
+    /// Deletes the pin that a merge's plan took on the fork. A pin that the
+    /// delete leaves behind expires, and the fork's collector deletes it.
+    async fn release_fork_pin(&self, fork_id: &NamespaceId, fork_pin: &PinId) {
+        let engine = self
+            .core
+            .writer_engine(&self.mode.writer.writer_id, fork_id);
+        if let Err(error) = engine.delete_snapshot(fork_pin).await {
+            tracing::warn!(
+                namespace_id = %fork_id,
+                snapshot_id = %fork_pin,
+                error = %error,
+                "could not release a merge's pin on the fork"
+            );
+        }
     }
 
     /// Returns a maintenance value that folds as this runtime's writer.

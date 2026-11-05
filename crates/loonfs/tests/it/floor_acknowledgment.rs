@@ -2,10 +2,10 @@
 //! acknowledges a floor that the writer committed against, and a fence
 //! acknowledges the floor of a namespace that nobody wrote to.
 
-use crate::common::writer_epoch;
+use crate::common::{compact_until_done, writer_epoch};
 use loonfs::{
-    AcknowledgeRetentionFloorOutcome, ChangeSeq, LoonFs, NamespaceId, RetentionFloors,
-    SharedObjectStore, Writable,
+    AcknowledgeRetentionFloorOutcome, ChangeSeq, DestinationBehavior, ErrorCode, LoonFs, Namespace,
+    NamespaceId, PutFileOptions, RetentionFloors, RevisionNo, SharedObjectStore, Writable,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
@@ -232,5 +232,108 @@ async fn a_namespace_whose_writer_committed_after_the_advance_is_acknowledged_by
         .put_file("/later.txt", b"still the writer", &test_actor())
         .await
         .expect("the session still commits");
+    writer.shutdown().await.expect("shut down");
+}
+
+/// The revision numbers of `path`'s retained revisions, newest first.
+async fn revision_nos(namespace: &Namespace<Writable>, path: &str) -> Vec<RevisionNo> {
+    namespace
+        .list_file_revisions(path)
+        .page()
+        .await
+        .expect("list the revisions")
+        .revisions
+        .iter()
+        .map(|revision| revision.revision_no)
+        .collect()
+}
+
+/// Checks that a restore copies a revision at or below the floor only while
+/// it's the file's newest at or below the floor, whether or not the older
+/// revisions are still stored, and that a base compaction removes the older
+/// revisions once a fold acknowledges the floor, and not before.
+#[tokio::test]
+async fn a_restore_finds_only_the_newest_revision_at_or_below_the_floor() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = recording_store(temp_dir.path());
+    let clock = Arc::new(ManualClock::at_system_time());
+    let namespace_id = namespace_id("restore");
+    let writer = runtime(&store, &clock, "writer").await;
+    writer
+        .create_namespace(&namespace_id, &test_actor())
+        .await
+        .expect("create the namespace");
+    let namespace = writer
+        .open_namespace(&namespace_id)
+        .expect("open the namespace");
+    let maintenance = writer.maintenance(writer_id("writer"));
+    let replace = PutFileOptions {
+        behavior: DestinationBehavior::Replace,
+        ..PutFileOptions::default()
+    };
+    // Each revision is folded into its own run, so the compactions below are
+    // base compactions, which apply the floor.
+    let mut floor = ChangeSeq(0);
+    for body in ["draft one", "draft two", "draft three"] {
+        floor = namespace
+            .put_file_with_options("/report.txt", body.as_bytes(), &test_actor(), &replace)
+            .await
+            .expect("write a revision")
+            .committed_seq;
+        maintenance
+            .fold_wal(&namespace_id)
+            .await
+            .expect("fold the revision");
+    }
+    clock.advance_ms(loonfs::GC_DEFAULT_GRACE_WINDOW_MS);
+    let advanced = maintenance
+        .advance_retention_floor(&namespace_id)
+        .await
+        .expect("advance the floor");
+    assert_eq!(advanced.retention_floor_seq, floor);
+
+    // The older revisions are still stored, and a restore finds neither.
+    for revision_no in [RevisionNo(1), RevisionNo(2)] {
+        let error = namespace
+            .restore_revision("/report.txt", revision_no, &test_actor())
+            .await
+            .expect_err("an older revision at or below the floor isn't restored");
+        assert_eq!(error.code(), ErrorCode::RevisionNotFound, "{error:?}");
+    }
+    compact_until_done(&maintenance, &namespace_id).await;
+    assert_eq!(
+        revision_nos(&namespace, "/report.txt").await,
+        [RevisionNo(3), RevisionNo(2), RevisionNo(1)],
+        "a compaction before the writer's log acknowledges the floor keeps every revision"
+    );
+
+    // The restore is validated against the floor, and its fold acknowledges
+    // the floor, so the next base compaction removes the older revisions.
+    namespace
+        .restore_revision("/report.txt", RevisionNo(3), &test_actor())
+        .await
+        .expect("restore the newest revision at the floor");
+    maintenance
+        .fold_wal(&namespace_id)
+        .await
+        .expect("fold the restore");
+    compact_until_done(&maintenance, &namespace_id).await;
+    assert_eq!(
+        revision_nos(&namespace, "/report.txt").await,
+        [RevisionNo(4), RevisionNo(3)]
+    );
+    assert_eq!(
+        namespace
+            .read_file("/report.txt")
+            .await
+            .expect("read the restored file")
+            .bytes,
+        b"draft three"
+    );
+    let error = namespace
+        .restore_revision("/report.txt", RevisionNo(2), &test_actor())
+        .await
+        .expect_err("a removed revision isn't restored");
+    assert_eq!(error.code(), ErrorCode::RevisionNotFound, "{error:?}");
     writer.shutdown().await.expect("shut down");
 }

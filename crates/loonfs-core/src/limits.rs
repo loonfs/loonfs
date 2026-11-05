@@ -225,23 +225,26 @@ const fn max_u64(left: u64, right: u64) -> u64 {
 /// Minimum age of an unreachable object before garbage collection or repair may
 /// remove it.
 ///
-/// The value covers the longer of two spans, then provider operation time and
-/// the combined clock-error and scheduling allowance. The first span is the
-/// longest publication budget. The second is the revalidation bound plus the
-/// lifetime of a direct transfer presigned URL: a view up to the bound old can
-/// still issue a presigned URL, and the presigned URL outlives the view.
-pub const GC_MIN_GRACE_WINDOW_MS: u64 = max_u64(
-    max_u64(WAL_PUBLISH_BUDGET_MS, METADATA_PUBLICATION_BUDGET_MS),
-    READ_REVALIDATION_BOUND_MS + DIRECT_TRANSFER_URL_TTL_MS,
-) + PROVIDER_PUBLICATION_REQUEST_BOUND_MS
-    + GC_SAFETY_MARGIN_MS;
+/// Every numbered put starts within a publication budget of the observation
+/// it was planned against, and the provider applies it within its request
+/// bound, so an object older than the longest budget plus the request bound
+/// plus the clock allowance was written before any put still in flight was
+/// planned. Collection roots only the current manifest and the pinned
+/// manifests. A read whose manifest a newer one replaced can find a segment
+/// collected; it returns `stale_head` and is read again. A read that must
+/// outlive the current manifest takes a snapshot.
+pub const GC_MIN_GRACE_WINDOW_MS: u64 =
+    max_u64(WAL_PUBLISH_BUDGET_MS, METADATA_PUBLICATION_BUDGET_MS)
+        + PROVIDER_PUBLICATION_REQUEST_BOUND_MS
+        + GC_SAFETY_MARGIN_MS;
 
 pub use loonfs_types::limits::READ_REVALIDATION_BOUND_MS;
 
 /// The revalidation bound is the longest publication budget plus the
-/// provider's request bound. A successor published after the probe cannot be
-/// collected within this bound: collection waits the grace window, which
-/// reserves this bound plus the clock allowance.
+/// provider's request bound. A WAL object or claim manifest that another
+/// writer creates after this writer's successor check is younger than the
+/// grace when a put that the check allowed runs, so the put collides with it
+/// instead of finding a collected number.
 const _: () = assert!(
     READ_REVALIDATION_BOUND_MS
         == max_u64(WAL_PUBLISH_BUDGET_MS, METADATA_PUBLICATION_BUDGET_MS)
@@ -249,21 +252,6 @@ const _: () = assert!(
 );
 
 const _: () = assert!(READ_REVALIDATION_BOUND_MS + GC_SAFETY_MARGIN_MS <= GC_MIN_GRACE_WINDOW_MS);
-
-/// A writer plans against its basis without checking it while the basis's
-/// last confirmation is at most one WAL publication budget old. A batch
-/// planned when the basis is a budget old can start its put up to a budget
-/// later, because the put's budget runs from the batch's tip observation,
-/// which the writer's previous commit refreshed. So the writer can read the
-/// basis's segments, or commit a reference to content that only the basis
-/// lists, until two budgets after the confirmation, and the provider applies
-/// that put within its request bound. The basis's successor is created after
-/// the confirmation, and garbage collection keeps the basis and its segments
-/// for one grace after that.
-const _: () = assert!(
-    2 * WAL_PUBLISH_BUDGET_MS + PROVIDER_PUBLICATION_REQUEST_BOUND_MS + GC_SAFETY_MARGIN_MS
-        <= GC_MIN_GRACE_WINDOW_MS
-);
 
 /// A writer checks its basis once the last confirmation is more than a WAL
 /// publication budget old, and the writer uses the result only within the
@@ -303,16 +291,23 @@ pub const METADATA_COMPACTION_BUDGET_MS: u64 =
 
 /// Lifetime of a direct download or direct put presigned URL.
 ///
-/// A part presigned URL writes no object, so the grace window does not need to
-/// cover it.
+/// A download URL reads the content of a revision that a view at most the
+/// revalidation bound old refers to. The content of the view's current
+/// revision stays referenced until the URL ends, because a retention advance
+/// passes the commit that replaces the revision only once that commit is a
+/// default grace window old, and the assertion below the default grace keeps
+/// that longer than the bound and this lifetime together. A URL for a
+/// revision that the view already lists as replaced can stop working before
+/// it expires, once a compaction removes the revision and a collection
+/// deletes its content. A part presigned URL writes no object.
 pub const DIRECT_TRANSFER_URL_TTL_MS: u64 = 15 * 60 * 1000;
 
 /// Minimum retirement grace from the deletion call's clock.
 ///
 /// The tombstone put starts within the publication budget, and the provider
-/// applies it within its request bound. Outstanding reads and direct
-/// presigned URLs run from that write, and the minimum grace window covers
-/// them.
+/// applies it within its request bound. Reads and direct transfer URLs that
+/// a view issued before the tombstone end within the minimum grace window
+/// after that write.
 pub const NAMESPACE_RETIREMENT_GRACE_WINDOW_MS: u64 =
     METADATA_PUBLICATION_BUDGET_MS + PROVIDER_PUBLICATION_REQUEST_BOUND_MS + GC_MIN_GRACE_WINDOW_MS;
 
@@ -330,6 +325,24 @@ pub const FAMILY_ROOTS_READ_BUDGET_MS: u64 =
 pub use loonfs_types::limits::GC_DEFAULT_GRACE_WINDOW_MS;
 
 const _: () = assert!(GC_DEFAULT_GRACE_WINDOW_MS >= GC_MIN_GRACE_WINDOW_MS);
+
+/// A member that replaces or deletes a revision after a family root's
+/// collection started keeps the revision's rows until a retention advance
+/// passes that commit, a default grace window later, so the collection
+/// reads the member's current manifest with the reference still in it
+/// (format section 11.9).
+const _: () = assert!(FAMILY_ROOTS_READ_BUDGET_MS < GC_DEFAULT_GRACE_WINDOW_MS);
+
+/// A retention advance moves the floor only past commits older than the
+/// default grace, so a revision stays referenced for at least that long
+/// after a commit replaces it. A view at most the revalidation bound old,
+/// and a direct transfer URL it issued, read content that was referenced
+/// when the view was checked, and the margin keeps it referenced until the
+/// URL ends.
+const _: () = assert!(
+    READ_REVALIDATION_BOUND_MS + DIRECT_TRANSFER_URL_TTL_MS + GC_SAFETY_MARGIN_MS
+        <= GC_DEFAULT_GRACE_WINDOW_MS
+);
 
 /// Most parts one direct multipart upload may cut into. This is the
 /// S3-compatible ceiling, so with the session's part size it fixes the
@@ -405,9 +418,9 @@ mod tests {
 
     #[test]
     fn derived_minimum_grace_window_sits_below_the_default() {
-        // 19 min 15 s revalidation bound + 15 min presigned URL lifetime
-        // + 4 min 15 s request bound + 3 min margin = 41 min 30 s.
-        assert_eq!(GC_MIN_GRACE_WINDOW_MS, 2_490_000);
+        // 15 min publication budget + 4 min 15 s request bound + 3 min margin
+        // = 22 min 15 s.
+        assert_eq!(GC_MIN_GRACE_WINDOW_MS, 1_335_000);
         assert!(
             GC_MIN_GRACE_WINDOW_MS < GcOptions::default().grace_window_ms,
             "the conservative default grace window must satisfy its own floor"
