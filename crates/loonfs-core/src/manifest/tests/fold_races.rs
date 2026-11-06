@@ -47,18 +47,22 @@ impl Rival {
                 assert!(compactions > 0, "the compaction rival should publish");
             }
             Self::RetentionAdvance => {
-                crate::test_support::NamespaceFixture::new(
-                    store,
-                    namespace_id,
-                    &crate::test_support::writer_at(
-                        "test-writer",
-                        crate::test_support::grace_elapsed_after(test_context().now_ms),
-                    ),
-                )
-                .engine()
-                .advance_retention_floor(RetentionTarget::Head)
-                .await
-                .expect("advance the floor");
+                // The floor's publication by the holder of the writer epoch,
+                // which changes nothing but the floor.
+                let namespace = crate::test_support::namespace_store(store, namespace_id);
+                let current = namespace
+                    .load_current_manifest()
+                    .await
+                    .expect("load the current manifest");
+                let published = namespace
+                    .publish_retention_floor(
+                        None,
+                        current.payload().writer_epoch,
+                        current.payload().head_seq,
+                    )
+                    .await
+                    .expect("publish the floor");
+                assert!(published.published.is_some(), "the floor moves");
             }
             Self::ExtensionPublication => {
                 let fixture = crate::test_support::NamespaceFixture::new(

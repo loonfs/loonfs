@@ -7,8 +7,8 @@ use crate::publish::CommitCandidate;
 use crate::runtime_core::{HeadPositions, ReadPositionSlot, RuntimeCore};
 use crate::trace::phase_event;
 use crate::{
-    CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, Error, ErrorCode, Result,
-    SharedObjectStore, WriterState,
+    AdvanceRetentionResponse, CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, Error,
+    ErrorCode, Result, SharedObjectStore, WriterState,
 };
 use futures::future::BoxFuture;
 use loonfs_core::publish::{NamespaceCommitEngine, WriterPosition};
@@ -162,6 +162,17 @@ impl NamespaceSession {
         options: DeleteNamespaceOptions,
     ) -> Result<DeleteNamespaceResponse> {
         self.publisher.submit_delete(options).await
+    }
+
+    /// Submits an advance of the retention floor to `target`, sequenced like
+    /// a deletion: mutations admitted before it publish first, and are
+    /// folded before the floor moves, and mutations admitted after it are
+    /// validated against the new floor.
+    pub(crate) async fn submit_retention_advance(
+        &self,
+        target: ChangeSeq,
+    ) -> Result<AdvanceRetentionResponse> {
+        self.publisher.submit_retention_advance(target).await
     }
 
     pub(crate) fn state(&self) -> NamespaceSessionStatus {

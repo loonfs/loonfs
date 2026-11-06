@@ -238,20 +238,17 @@ impl Scheduler {
         gone
     }
 
-    /// Acknowledges the namespace's current retention floor, and then
-    /// advances the floor to the last commit at or before the current time
-    /// minus the namespace's retention window, or minus `retention_window_ms`
-    /// for a namespace that has no window of its own, with the same advance
-    /// as the `retention` job. A namespace with neither window keeps its
-    /// floor. A deleted namespace returns `namespace_deleted`, which isn't a
-    /// failure. A failed acknowledgment doesn't stop the advance.
+    /// Advances the namespace's retention floor to the last commit at or
+    /// before the current time minus the namespace's retention window, or
+    /// minus `retention_window_ms` for a namespace that has no window of its
+    /// own, with the same advance as the `retention` job. A namespace with
+    /// neither window keeps its floor. A deleted namespace returns
+    /// `namespace_deleted`, which isn't a failure.
     ///
-    /// The acknowledgment comes first, so the floor it acknowledges is the
-    /// one that the previous sweep set, and a namespace whose writer
-    /// committed since then has acknowledged that floor already. Only a
-    /// namespace that nobody wrote to since the previous sweep gets a fence.
-    /// For when the deletions below the new floor expire, and when their
-    /// rows are removed, see [Advancing the floor on a
+    /// A floor that moves is advanced through the namespace's writer session
+    /// in this server, which the advance opens when the server has none. For
+    /// when the deletions below the new floor expire, and when their rows are
+    /// removed, see [Advancing the floor on a
     /// schedule](https://github.com/loonfs/loonfs/blob/main/docs/design/retention-window.md#advancing-the-floor-on-a-schedule).
     async fn advance_retention(
         &self,
@@ -262,32 +259,13 @@ impl Scheduler {
         if inner.stop.is_cancelled() {
             return;
         }
-        // Boxed so the spawned scheduler's `Send` check does not recurse
-        // through every engine future the acknowledgment and the advance
-        // await.
-        let acknowledged = contain(
-            inner
-                .maintenance
-                .acknowledge_retention_floor(namespace_id)
-                .boxed()
-                .map(|result| result.map_err(|error| CallFailure::error(error.code(), error))),
-        )
-        .await;
-        self.record_call(
-            namespace_id,
-            entry,
-            MaintenanceCall::RetentionAcknowledgment,
-            acknowledged,
-            0,
-        );
-        if inner.stop.is_cancelled() {
-            return;
-        }
         let options = AdvanceRetentionFloorOptions {
             target: RetentionTarget::Window {
                 default_window_ms: inner.config.retention_window_ms,
             },
         };
+        // Boxed so the spawned scheduler's `Send` check does not recurse
+        // through every engine future the advance awaits.
         let result = contain(
             inner
                 .maintenance

@@ -249,19 +249,6 @@ async fn read_floor_seq<S: ObjectStore + ?Sized>(
         .retention_floor_seq()
 }
 
-/// The current manifest's acknowledged floor.
-async fn read_acknowledged_floor_seq<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-) -> ChangeSeq {
-    crate::test_support::namespace_store(store, namespace_id)
-        .load_current_manifest()
-        .await
-        .expect("load the current manifest")
-        .payload()
-        .acknowledged_floor_seq
-}
-
 /// Folds the WAL tail and advances the retention floor to `deletion_seq`,
 /// which expires the deletion committed at that sequence and every older
 /// one, at a time when every commit is a grace window old.
@@ -288,29 +275,6 @@ async fn advance_floor_through<S: ObjectStore + ?Sized>(
     .await
     .expect("advance the floor to the deletion");
     assert_eq!(advanced.response.retention_floor_seq, deletion_seq);
-}
-
-/// Acknowledges the current retention floor the way a maintainer does for a
-/// namespace that nobody writes to: acquires the writer epoch, whose fence
-/// records the floor, and folds the fence.
-async fn acknowledge_floor<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    context: &WriterAt,
-) {
-    crate::test_support::namespace_store(store, namespace_id)
-        .acquire_writer_epoch(&context.writer_id)
-        .await
-        .expect("write a fence");
-    crate::test_support::namespace_store(store, namespace_id)
-        .fold_wal()
-        .await
-        .expect("fold the fence");
-    assert_eq!(
-        read_acknowledged_floor_seq(store, namespace_id).await,
-        read_floor_seq(store, namespace_id).await,
-        "the fold of the fence acknowledges the floor"
-    );
 }
 
 /// Checkpoints, then compacts every delta run into the base through
@@ -343,7 +307,6 @@ fn compact_rows_with_retention(
     group: MetadataFamilyGroup,
     rows_by_family: &mut BTreeMap<ApiMetadataRowFamily, Vec<MetadataRow>>,
     floor_seq: ChangeSeq,
-    acknowledged_floor_seq: ChangeSeq,
 ) -> crate::error::Result<()> {
     for cluster in retention_clusters(group) {
         // The stream a compaction sees: the cluster's rows by locality, then family,
@@ -366,7 +329,7 @@ fn compact_rows_with_retention(
             .iter()
             .map(|family| (*family, Vec::new()))
             .collect();
-        let mut operator = cluster.rule.operator(acknowledged_floor_seq);
+        let mut operator = cluster.rule.operator();
         let mut locality: Option<String> = None;
         for (family, row_key, row) in stream {
             let row_locality = locality_of(family, &row_key, cluster.locality);
@@ -919,7 +882,6 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
         writer_epoch: head.writer_epoch,
         next_run_no,
         retention_floor_seq: source.retention_floor_seq,
-        acknowledged_floor_seq: head.basis_floor_seq,
         runs,
         extensions: Default::default(),
     })
@@ -1041,7 +1003,6 @@ pub(super) async fn publish_manifest_with_segments<S: ObjectStore + ?Sized>(
         writer_epoch: loonfs_types::WriterEpoch(1),
         next_run_no: RunNo(1),
         retention_floor_seq: ChangeSeq(0),
-        acknowledged_floor_seq: ChangeSeq(0),
         runs: vec![MetadataRunRef {
             run_no: RunNo(0),
             run_seq: head_seq,

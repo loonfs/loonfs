@@ -241,7 +241,8 @@ async fn gc_reaps_below_floor_wal_objects_after_the_grace_window() {
         .await
         .expect("collection");
 
-    assert_eq!(report.deleted.wal_objects, 4);
+    // The advance's fence is folded too.
+    assert_eq!(report.deleted.wal_objects, 5);
     stat_root(&store, &namespace_id).await;
 }
 
@@ -1745,7 +1746,8 @@ async fn gc_never_deletes_the_live_replay_tail() {
         .await
         .expect("collection");
 
-    assert_eq!(report.deleted.wal_objects, 4);
+    // The advance's fence is folded too.
+    assert_eq!(report.deleted.wal_objects, 5);
     // Latest reads replay the retained tail over the manifest basis.
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let view = namespace

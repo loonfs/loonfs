@@ -215,7 +215,8 @@ pub use error::{
 pub use gc::GcOptions;
 pub use manifest::{
     next_run_no_after, ExtensionBasis, ExtensionPublication, FoldWalOutcome, FoldWalResponse,
-    FoldedWalTail, ManifestLoadError, PublicationReport, PublishedManifest, RetentionTarget,
+    FoldedWalTail, ManifestLoadError, PublicationReport, PublishedManifest, RetentionPlan,
+    RetentionTarget,
 };
 pub use merge::{check_planned_bytes, MergeAllowance, MergePlan, MergeRequest, ReplayPlan};
 pub use namespace::store::NamespaceStore;

@@ -1,9 +1,7 @@
 //! Undelete validation against the retention floor of a writer session's
-//! basis, around a retention advance that the session hasn't moved onto yet.
+//! basis, around a retention advance that the session makes itself.
 
 use super::*;
-use crate::manifest::RetentionTarget;
-use loonfs_types::format::wal::decode_wal_object_envelope_zstd;
 use loonfs_types::FilesystemChange;
 use loonfs_types::{AbsolutePath, DeleteDirectoryBehavior, InodeId};
 
@@ -85,43 +83,14 @@ async fn delete<S: ObjectStore>(
     (inode_id, deleted.committed_seq)
 }
 
-/// The basis floor of the WAL object that commits `committed_seq`.
-async fn basis_floor_of(
-    store: &LocalFsStore,
-    namespace_id: &NamespaceId,
-    committed_seq: ChangeSeq,
-) -> ChangeSeq {
-    for key in store
-        .list_prefix(&wal_prefix(namespace_id))
-        .await
-        .expect("list the WAL")
-    {
-        let bytes = store
-            .get(&key, None)
-            .await
-            .expect("read a WAL object")
-            .expect("the WAL object exists");
-        let payload = decode_wal_object_envelope_zstd(&bytes)
-            .expect("decode a WAL object")
-            .into_payload();
-        if payload
-            .records
-            .iter()
-            .any(|record| record.committed_seq == committed_seq)
-        {
-            return payload.basis_floor_seq;
-        }
-    }
-    panic!("no WAL object commits sequence {committed_seq}")
-}
-
-/// Checks that a session validates an undelete against the floor of its own
-/// basis: before it moves onto a retention advance's manifest, it restores a
-/// deletion that the advance passed, and its WAL object records the old
-/// floor. After the move, an undelete of a deletion at or below the new
-/// floor returns `not_deleted`, and one above it succeeds.
+/// Checks that a session's own retention advance orders the session's
+/// undeletes around it. An undelete before the advance is folded into the
+/// manifest before the floor moves, even when the advance expires the
+/// deletion it restored. After the advance, an undelete of a deletion at or
+/// below the new floor returns `not_deleted`, and one above it succeeds. The
+/// session keeps its writer epoch throughout.
 #[tokio::test]
-async fn an_undelete_is_validated_against_the_floor_of_the_sessions_basis() {
+async fn a_sessions_advance_orders_its_undeletes_around_the_floor() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("undelete-floor").expect("valid namespace id");
@@ -135,41 +104,32 @@ async fn an_undelete_is_validated_against_the_floor_of_the_sessions_basis() {
     );
     let (restored, restored_seq) = delete(&mut engine, "restored").await;
     let (expired, expired_seq) = delete(&mut engine, "expired").await;
-    let folded = crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal_tail(
-            engine.writer_position(),
-            &OperationClock::start(0, Arc::new(StdMonotonicTimer::default())),
-        )
-        .await
-        .expect("fold");
-    engine.record_manifest_published(folded.manifest);
-    let advanced = crate::test_support::NamespaceFixture::new(
-        &store,
-        &namespace_id,
-        &crate::test_support::writer_at(
-            "test-writer",
-            crate::test_support::grace_elapsed_after(1_000),
-        ),
-    )
-    .engine()
-    .advance_retention_floor(RetentionTarget::Head)
-    .await
-    .expect("advance the floor");
-    assert_eq!(advanced.response.retention_floor_seq, expired_seq);
-
-    // The session still plans against the fold's manifest, whose floor is 0.
     let restored_commit = publish(
         &mut engine,
         undelete("undelete-before", restored, restored_seq),
     )
     .await
-    .expect("an undelete against the old floor");
-    assert_eq!(
-        basis_floor_of(&store, &namespace_id, restored_commit.committed_seq).await,
-        ChangeSeq(0)
-    );
+    .expect("an undelete before the advance");
+    let epoch = engine
+        .acquire_position(&context("writer").clock())
+        .await
+        .expect("the session's epoch")
+        .writer_epoch;
 
-    engine.record_manifest_published(advanced.published.expect("a published advance"));
+    let (folded, advanced) = advance_in_session(&mut engine, expired_seq).await;
+    assert!(
+        folded.folded_wal_no
+            >= crate::test_support::namespace_store(&store, &namespace_id)
+                .load_read_state()
+                .await
+                .expect("read the head")
+                .wal_no,
+        "the fold covers the session's tip"
+    );
+    assert!(advanced.manifest.head_seq >= restored_commit.committed_seq);
+    assert_eq!(advanced.retention_floor_seq, expired_seq);
+    assert_eq!(advanced.writer_epoch, epoch, "the session keeps its epoch");
+
     let error = publish(
         &mut engine,
         undelete("undelete-expired", expired, expired_seq),
@@ -178,11 +138,7 @@ async fn an_undelete_is_validated_against_the_floor_of_the_sessions_basis() {
     .expect_err("an undelete at the new floor");
     assert_eq!(error.code(), ErrorCode::NotDeleted, "{error:?}");
     let (above, above_seq) = delete(&mut engine, "above").await;
-    let above_commit = publish(&mut engine, undelete("undelete-above", above, above_seq))
+    publish(&mut engine, undelete("undelete-above", above, above_seq))
         .await
         .expect("an undelete above the new floor");
-    assert_eq!(
-        basis_floor_of(&store, &namespace_id, above_commit.committed_seq).await,
-        expired_seq
-    );
 }

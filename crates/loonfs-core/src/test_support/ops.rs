@@ -312,7 +312,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
             wal_no,
             writer_epoch: head.writer_epoch,
             head_seq: committed_seq,
-            basis_floor_seq: head.basis_floor_seq,
             records: vec![WalCommitPayload {
                 committed_seq,
                 commit_id: CommitId::generate(),
@@ -343,5 +342,52 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .await
             .map_err(|error| CoreError::store(&key, &error))?;
         Ok(committed_seq)
+    }
+}
+
+impl<S: ObjectStore> crate::engine::NamespaceEngine<S, crate::engine::Writable> {
+    /// Advances the retention floor toward `target` with the runtime's three
+    /// steps, for a test of core without a runtime (format spec, "Advancing
+    /// the retention floor").
+    ///
+    /// The advance plans the floor from the current manifest, and returns
+    /// that manifest's floor without another request when the floor would
+    /// not move. Otherwise, it acquires the writer epoch under this engine's
+    /// writer ID, as a runtime does for a namespace it has no writer session
+    /// for, folds the WAL tail, and publishes the floor under the epoch, in
+    /// that order, and commits nothing. A writer session with an older epoch
+    /// then returns `writer_fenced` to its next publication. The report
+    /// includes the manifest that records the new floor.
+    pub async fn advance_retention_floor(
+        &self,
+        target: crate::manifest::RetentionTarget,
+    ) -> Result<crate::manifest::PublicationReport<loonfs_types::AdvanceRetentionResponse>> {
+        let current = self.namespace.load_current_manifest().await?;
+        let response = |retention_floor_seq| loonfs_types::AdvanceRetentionResponse {
+            namespace_id: self.namespace.namespace_id.clone(),
+            retention_floor_seq,
+        };
+        let floor = match self
+            .namespace
+            .plan_retention_floor(&current, target)
+            .await?
+        {
+            crate::manifest::RetentionPlan::Stays(floor) => {
+                return Ok(crate::manifest::PublicationReport {
+                    response: response(floor),
+                    published: None,
+                })
+            }
+            crate::manifest::RetentionPlan::Moves(floor) => floor,
+        };
+        let acquisition = self.namespace.acquire_writer(self.writer_id()).await?;
+        self.namespace
+            .fold_wal_tail(None, &self.namespace.start_clock())
+            .await?;
+        let published = self
+            .namespace
+            .publish_retention_floor(None, acquisition.writer.writer_epoch, floor)
+            .await?;
+        Ok(published.map(response))
     }
 }

@@ -279,6 +279,43 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
         }
     }
 
+    /// Acquires the session's writer epoch when the session has none, and
+    /// keeps a position at the namespace's tip, which is at or above the
+    /// session's fence and every WAL object that the session wrote.
+    ///
+    /// A retention advance acquires the position before it folds, so the fold
+    /// covers every WAL object of an older epoch (format spec, "Advancing
+    /// the retention floor"). The position is the one that the next batch
+    /// would plan against: the engine's own while the store shows it current,
+    /// and otherwise the current manifest and WAL tail. A session that finds
+    /// another writer's epoch is fenced, and returns `writer_fenced`.
+    pub async fn acquire_position(&mut self, clock: &OperationClock) -> Result<AcquiredWriter> {
+        let Self {
+            namespace,
+            writer_id,
+            position,
+        } = self;
+        let LoadedPublishView {
+            view,
+            projection_observed,
+            ..
+        } = position
+            .load_publish_view(namespace, writer_id, clock)
+            .await?;
+        let acquired_writer = view.acquired_writer.clone();
+        position.projection_observed = Some(projection_observed);
+        position.current = Some(view.into_position());
+        Ok(acquired_writer)
+    }
+
+    /// Records that a publication under the session's epoch found another
+    /// writer's epoch, so the session publishes nothing more and drops its
+    /// position.
+    pub fn record_fenced(&mut self, fence: WriterFence) {
+        self.position.invalidate_projection();
+        *self.position.lock_session() = WriterSessionStatus::Fenced(fence);
+    }
+
     /// Publishes `candidates` as one batch. Retries share `clock`, so the
     /// batch keeps one commit time, and content evidence continues aging.
     pub async fn publish_batch(

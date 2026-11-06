@@ -421,7 +421,6 @@ fn sample_wal_payload() -> WalObjectPayload {
         wal_no: WalNo(2),
         writer_epoch: WriterEpoch(3),
         head_seq: ChangeSeq(2),
-        basis_floor_seq: ChangeSeq(0),
         records: vec![WalCommitPayload {
             committed_seq: ChangeSeq(2),
             commit_id: commit_id(),
@@ -577,7 +576,6 @@ fn sample_manifest_payload() -> NamespaceManifestPayload {
         writer_epoch: WriterEpoch(3),
         next_run_no: RunNo(1),
         retention_floor_seq: ChangeSeq(0),
-        acknowledged_floor_seq: ChangeSeq(0),
         runs: vec![MetadataRunRef {
             run_no: RunNo(0),
             run_seq: ChangeSeq(2),
@@ -961,6 +959,25 @@ fn manifest_without_required_fields_is_rejected() {
             "the rejection should name the field: {error}"
         );
     }
+}
+
+/// A manifest that records an acknowledged floor is a manifest of the
+/// removed design, and the strict decoder rejects it as it rejects any other
+/// unknown field.
+#[test]
+fn manifest_with_an_acknowledged_floor_is_rejected() {
+    let mut document = serde_json::to_value(sample_manifest_payload())
+        .expect("encode active manifest as a document");
+    document["acknowledged_floor_seq"] = serde_json::Value::from(0);
+
+    let error = serde_json::from_value::<NamespaceManifestPayload>(document)
+        .expect_err("a manifest with an acknowledged floor must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("unknown field `acknowledged_floor_seq`"),
+        "the rejection should name the field: {error}"
+    );
 }
 
 #[test]
@@ -1678,6 +1695,27 @@ fn wal_decode_rejects_unknown_payload_fields() {
         error,
         WalCodecError::Envelope(EnvelopeCodecError::PayloadDecode(message))
             if message.contains("unknown field") && message.contains("field_from_the_future")
+    );
+}
+
+/// A WAL object that records the floor its writer validated against is an
+/// object of the removed design, and the strict decoder rejects it as it
+/// rejects any other unknown field.
+#[test]
+fn wal_decode_rejects_a_basis_floor() {
+    let document = wal_document_with_payload_edit(&sample_wal_payload(), |payload| {
+        cbor_map_of(payload).push((
+            ciborium::Value::from("basis_floor_seq"),
+            ciborium::Value::from(0),
+        ));
+    });
+
+    let error = decode_wal_object_envelope_zstd(&document)
+        .expect_err("a WAL object with a basis floor must be rejected");
+    assert_matches!(
+        error,
+        WalCodecError::Envelope(EnvelopeCodecError::PayloadDecode(message))
+            if message.contains("unknown field") && message.contains("basis_floor_seq")
     );
 }
 

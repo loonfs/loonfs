@@ -105,11 +105,6 @@ impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
         self.position
     }
 
-    /// The retention floor of the manifest that the view plans against.
-    pub(crate) fn retention_floor_seq(&self) -> ChangeSeq {
-        self.position.retention_floor_seq
-    }
-
     pub(super) fn write_stop(&self) -> Option<WriteStop> {
         self.write_stop
     }
@@ -168,8 +163,7 @@ impl WriterPosition {
     /// it is. A later manifest moves the position by the rule of
     /// [`move_read_basis`]. A position that moves takes the manifest's
     /// retention floor, so the session validates its next commits against a
-    /// floor that a retention advance raised, and its next WAL object
-    /// records that floor.
+    /// floor that a retention advance raised.
     pub(crate) fn move_to(&mut self, manifest: &PublishedManifest) -> bool {
         if manifest.manifest.manifest_no <= self.read_basis.basis.manifest_no() {
             return true;

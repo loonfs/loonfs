@@ -71,19 +71,10 @@ pub(super) enum MaintenanceCall {
     /// The retention advance, which a sweep makes, or leaves to the steps
     /// that have the namespace when the sweep reaches it.
     Retention,
-    /// The acknowledgment of the retention floor, which the steps that make
-    /// the retention advance make first.
-    RetentionAcknowledgment,
 }
 
 impl MaintenanceCall {
-    pub(super) const ALL: [Self; 5] = [
-        Self::Metadata,
-        Self::GrepIndex,
-        Self::Gc,
-        Self::Retention,
-        Self::RetentionAcknowledgment,
-    ];
+    pub(super) const ALL: [Self; 4] = [Self::Metadata, Self::GrepIndex, Self::Gc, Self::Retention];
 
     pub(super) fn as_str(self) -> &'static str {
         match self {
@@ -91,20 +82,19 @@ impl MaintenanceCall {
             Self::GrepIndex => "grep_index",
             Self::Gc => "gc",
             Self::Retention => "retention",
-            Self::RetentionAcknowledgment => "retention_acknowledgment",
         }
     }
 
-    /// The call's retry state on a held entry. The retention advance and
-    /// the acknowledgment keep none, because the session steps never retry
-    /// them, so a failed one waits for the next sweep like a call on a
-    /// namespace without a held entry.
+    /// The call's retry state on a held entry. The retention advance keeps
+    /// none, because the session steps never retry it, so a failed one
+    /// waits for the next sweep like a call on a namespace without a held
+    /// entry.
     pub(super) fn retry(self, state: &SchedulerState) -> Option<StepRetry> {
         match self {
             Self::Metadata => Some(state.metadata_retry),
             Self::GrepIndex => Some(state.index_retry),
             Self::Gc => Some(state.gc_retry),
-            Self::Retention | Self::RetentionAcknowledgment => None,
+            Self::Retention => None,
         }
     }
 
@@ -113,7 +103,7 @@ impl MaintenanceCall {
             Self::Metadata => Some(&mut state.metadata_retry),
             Self::GrepIndex => Some(&mut state.index_retry),
             Self::Gc => Some(&mut state.gc_retry),
-            Self::Retention | Self::RetentionAcknowledgment => None,
+            Self::Retention => None,
         }
     }
 }
@@ -210,8 +200,8 @@ impl Scheduler {
     /// On a held namespace, the first failure in a row logs at error level
     /// and later ones at warning level, and the doubling backoff limits how
     /// often they repeat. A namespace that no host keeps open has no retry
-    /// state, and neither do the retention advance and its acknowledgment,
-    /// because the next sweep is their retry. Each sweep that finds one
+    /// state, and neither does the retention advance, because the next sweep
+    /// is its retry. Each sweep that finds one
     /// failing logs one error line, so the namespace logs once per
     /// `sweep_interval_ms` (a day by default). The rule of logging a
     /// repeating failure once allows one line per interval, so a failure

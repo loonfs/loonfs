@@ -72,7 +72,9 @@ async fn a_merge_is_published_alone_in_its_wal_object() {
         .iter()
         .map(|item| match item {
             WorkItem::Batch(batch) => batch.candidates.len(),
-            WorkItem::Delete(_) => panic!("expected commit batch"),
+            WorkItem::Delete(_) | WorkItem::RetentionAdvance(_) => {
+                panic!("expected commit batch")
+            }
         })
         .collect::<Vec<_>>();
     assert_eq!(batches, [2, 1, 2]);

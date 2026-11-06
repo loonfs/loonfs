@@ -163,6 +163,55 @@ async fn an_explicit_fold_from_a_live_session_puts_on_its_basis_and_reads_no_hin
     fixture.shut_down().await;
 }
 
+/// Checks that a retention advance in a runtime with the namespace's live
+/// session publishes the floor on the session's position. The fold before the
+/// floor finds the tail folded, so the floor's put is the advance's one
+/// manifest request, and the advance reads no hint before it.
+#[tokio::test]
+async fn a_retention_advance_from_a_live_session_puts_on_its_basis_and_reads_no_hint() {
+    let clock = Arc::new(ManualClock::at_system_time());
+    let fixture = Fixture::new({
+        let clock = Arc::clone(&clock);
+        move |builder| builder.wall_clock(clock)
+    })
+    .await;
+    let maintenance = fixture
+        .writer
+        .maintenance(loonfs_test_support::ids::writer_id("writer-a"));
+    maintenance
+        .fold_wal(&fixture.namespace_id)
+        .await
+        .expect("fold the first commit");
+    fixture.writer.drain().await.expect("drain");
+    // Every commit is a grace window old, so the advance can pass them.
+    clock.advance_ms(crate::GC_DEFAULT_GRACE_WINDOW_MS);
+    let next = fixture
+        .current_manifest_no()
+        .await
+        .successor()
+        .expect("next manifest number");
+    fixture.reset_requests();
+    let advanced = bounded(
+        Duration::from_secs(10),
+        maintenance.advance_retention_floor(&fixture.namespace_id),
+    )
+    .await
+    .expect("the advance returns")
+    .expect("advance the floor");
+    assert!(advanced.retention_floor_seq > ChangeSeq(0));
+    assert_eq!(
+        fixture.manifest_requests(),
+        vec![("put", fixture.manifest(next))]
+    );
+    assert_hint_at_current_manifest(
+        &fixture.writer,
+        fixture.store.as_ref(),
+        &fixture.namespace_id,
+    )
+    .await;
+    fixture.shut_down().await;
+}
+
 /// Checks that the session's fold at the write stop puts the position's
 /// successor without a request first and without reading the hint, and that
 /// the commit waiting for the fold then commits.

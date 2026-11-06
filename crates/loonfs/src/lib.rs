@@ -221,9 +221,8 @@ pub use execution_budget::{
 };
 pub use loonfs_core::{phase_span, Phase};
 pub use maintenance::{
-    AcknowledgeRetentionFloorOutcome, AcknowledgeRetentionFloorReport, MaintainMetadataReport,
-    Maintenance, MaintenanceCancellation, MetadataCompactionOutcome, MetadataCompactionReport,
-    MetadataMaintenanceReport, RetentionFloors,
+    MaintainMetadataReport, Maintenance, MaintenanceCancellation, MetadataCompactionOutcome,
+    MetadataCompactionReport, MetadataMaintenanceReport,
 };
 pub use metadata_cache::{
     MetadataCache, MetadataCacheBuilder, MetadataCacheStats, SsdBlockWriter, SsdSegmentBlocks,

@@ -37,10 +37,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     ///
     /// The acquisition publishes a claim manifest with the next epoch and
     /// this engine's writer ID, then writes a fence at the next WAL number.
-    /// The fence records the retention floor of the manifest that the
-    /// acquisition discovered, so a fold of the fence acknowledges that
-    /// floor. A writer session with an older epoch returns `writer_fenced`
-    /// to its next publication. The report includes the claim manifest.
+    /// A writer session with an older epoch returns `writer_fenced` to its
+    /// next publication. The report includes the claim manifest.
     pub async fn acquire_writer_epoch(&self) -> Result<PublicationReport<WriterEpoch>> {
         let acquisition = self.namespace.acquire_writer(self.writer_id()).await?;
         Ok(PublicationReport {
@@ -55,9 +53,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// a claim manifest with the next epoch, then writes a fence at the next WAL
     /// number (format spec, "Writer ownership").
     ///
-    /// A writer session acquires its epoch here before its first publication,
-    /// and a maintainer that acknowledges the retention floor acquires one here
-    /// and commits nothing after the fence.
+    /// A writer session acquires its epoch here before its first publication.
     pub(crate) async fn acquire_writer(&self, writer_id: &WriterId) -> Result<WriterAcquisition> {
         let clock = self.start_clock();
         let acquired_at_ms = clock.request_at_ms();
@@ -101,13 +97,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
             let head = &anchor.read_state;
             ensure_writer_not_fenced(head, &acquired)?;
             super::control::ensure_namespace_live(&head.namespace_id, head.status)?;
-            let fence = prepare_wal_object(
-                self.namespace_id.clone(),
-                acquired.writer_epoch,
-                head,
-                anchor.retention_floor_seq(),
-                &[],
-            )?;
+            let fence =
+                prepare_wal_object(self.namespace_id.clone(), acquired.writer_epoch, head, &[])?;
             match publish_wal_object(&self.store, &fence, &tip).await {
                 Ok(()) => {
                     anchor.read_state = head.after_wal_object(fence.envelope().payload());

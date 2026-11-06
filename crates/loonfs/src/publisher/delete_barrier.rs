@@ -69,6 +69,9 @@ impl NamespacePublisher {
             for waiter in queued.deletes {
                 let _ = waiter.send(Err(self.namespace_deleted().into()));
             }
+            for waiter in queued.retention_advances {
+                let _ = waiter.send(Err(self.namespace_deleted().into()));
+            }
         }
         for waiter in waiters {
             let _ = waiter.send(outcome.clone());

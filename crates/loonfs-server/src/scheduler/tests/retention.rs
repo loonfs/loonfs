@@ -38,11 +38,6 @@ const NAMESPACE_WINDOW_MS: u64 = 15 * DAY_MS;
 /// current manifest. The docs quote this number.
 const IDLE_ADVANCE_REQUESTS: usize = 4;
 
-/// Requests the acknowledgment of the floor costs in a sweep of a
-/// namespace whose acknowledged floor is at its retention floor: one load
-/// of the current manifest. The docs quote this number.
-const IDLE_ACKNOWLEDGMENT_REQUESTS: usize = 4;
-
 /// A config with every default, and `window_ms` as its retention window.
 pub(super) fn retention_config(window_ms: Option<u64>) -> ServerConfig {
     let mut config = scheduler_config(None);
@@ -551,10 +546,9 @@ async fn an_idle_sweep_costs_the_same_requests_whichever_window_applies() {
         )
         .await;
         // The first sweep moves the floor to the head when a window applies,
-        // and collects what the seed left behind. Nobody writes to the
-        // namespace, so the second sweep acknowledges that floor with a fence
-        // and a fold. Each publication raises the hint, so each sweep
-        // collects the manifests that the previous sweep replaced.
+        // which claims the writer epoch, fences, and folds, and it collects
+        // what the seed left behind. Each publication raises the hint, so
+        // each sweep collects the manifests that the previous sweep replaced.
         for _ in 0..3 {
             server
                 .scheduler
@@ -589,23 +583,9 @@ async fn an_idle_sweep_costs_the_same_requests_whichever_window_applies() {
             requests.push(sweep.len());
         }
 
-        // The sweep's share is one load of the current manifest for the
-        // acknowledgment and one for the advance.
+        // The advance's share of the sweep is one load of the current
+        // manifest.
         store.reset();
-        server
-            .maintenance
-            .acknowledge_retention_floor(&namespace_id)
-            .await
-            .expect("acknowledge the floor");
-        let acknowledgment = store.take();
-        assert!(acknowledgment
-            .iter()
-            .all(|operation| operation.key().starts_with(&prefix)));
-        assert_eq!(
-            acknowledgment.len(),
-            IDLE_ACKNOWLEDGMENT_REQUESTS,
-            "{windows}"
-        );
         let target = RetentionTarget::Window {
             default_window_ms: server_window_ms.and_then(NonZeroU64::new),
         };
@@ -628,4 +608,143 @@ async fn an_idle_sweep_costs_the_same_requests_whichever_window_applies() {
         sweeps.windows(2).all(|pair| pair[0] == pair[1]),
         "every sweep makes the advance, whichever window applies: {sweeps:?}"
     );
+}
+
+/// The writes of one namespace in `operations`: the manifests and the WAL
+/// objects that they put.
+fn manifest_and_wal_puts(
+    operations: &[RecordedOperation],
+    namespace_id: &NamespaceId,
+) -> (usize, usize) {
+    let puts = |prefix: String| {
+        operations
+            .iter()
+            .filter(|operation| {
+                matches!(
+                    operation,
+                    RecordedOperation::Put { .. } | RecordedOperation::PutStreamed { .. }
+                ) && operation.key().starts_with(&prefix)
+            })
+            .count()
+    };
+    (
+        puts(loonfs_objectstore::keys::metadata_manifest_prefix(
+            namespace_id,
+        )),
+        puts(loonfs_objectstore::keys::wal_prefix(namespace_id)),
+    )
+}
+
+/// The writer epoch of the namespace's current manifest.
+async fn writer_epoch(
+    store: &dyn loonfs_objectstore::ObjectStore,
+    namespace_id: &NamespaceId,
+) -> u64 {
+    loonfs_core::test_support::namespace_store(store, namespace_id)
+        .load_current_manifest()
+        .await
+        .expect("load the current manifest")
+        .payload()
+        .writer_epoch
+        .0
+}
+
+/// Checks the three ways a sweep's advance runs. A namespace with a live
+/// session advances under that session's writer epoch, a namespace with no
+/// session gets one that claims the next epoch, writes one fence, folds once,
+/// and publishes the floor, and a namespace whose floor would not move gets
+/// no session and no write.
+#[tokio::test]
+async fn a_sweeps_advance_runs_in_the_namespaces_session_or_opens_one() {
+    let directory = tempdir().expect("tempdir");
+    let store = Arc::new(RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("local store"),
+        KeyPredicate::any(),
+    ));
+    let config = retention_config(Some(WINDOW_MS));
+    let server = SchedulerServer::start(store.clone(), &config, START_MS).await;
+    let [held_id, idle_id, recent_id] = ["held", "idle", "recent"].map(namespace_id);
+    for namespace_id in [&held_id, &idle_id, &recent_id] {
+        server
+            .runtime
+            .create_namespace(namespace_id, &test_actor())
+            .await
+            .expect("create the namespace");
+    }
+    let held = server
+        .scheduler
+        .inner
+        .namespaces
+        .open(&held_id)
+        .await
+        .expect("hold the session");
+    let held_seq = held
+        .put_file("/old.txt", b"history", &test_actor())
+        .await
+        .expect("write a file")
+        .committed_seq;
+    let idle_seq = server.commit(&idle_id, "/old.txt").await;
+    for namespace_id in [&held_id, &idle_id] {
+        server
+            .maintenance
+            .fold_wal(namespace_id)
+            .await
+            .expect("fold the history");
+    }
+    server.clock.advance_ms(2 * WINDOW_MS);
+    server.commit(&recent_id, "/recent.txt").await;
+    server
+        .maintenance
+        .fold_wal(&recent_id)
+        .await
+        .expect("fold the history");
+    let epochs_before = [
+        writer_epoch(store.as_ref(), &held_id).await,
+        writer_epoch(store.as_ref(), &idle_id).await,
+    ];
+    let recent_floor = server.retention_floor(&recent_id).await;
+    // Only the held namespace has a session.
+    server.wait_for_open_sessions(1).await;
+
+    store.reset();
+    server
+        .scheduler
+        .run_sweep(GarbageCollection::Skip)
+        .await
+        .expect("list namespaces");
+    let operations = store.take();
+
+    assert_eq!(server.retention_floor(&held_id).await, held_seq);
+    assert_eq!(
+        writer_epoch(store.as_ref(), &held_id).await,
+        epochs_before[0],
+        "the held session advances under its own epoch"
+    );
+    assert_eq!(
+        manifest_and_wal_puts(&operations, &held_id),
+        (1, 0),
+        "the held session's folded tail needs no fold, so the floor is its one write"
+    );
+
+    assert_eq!(server.retention_floor(&idle_id).await, idle_seq);
+    assert_eq!(
+        writer_epoch(store.as_ref(), &idle_id).await,
+        epochs_before[1] + 1,
+        "the session opened for the advance claims the next epoch"
+    );
+    assert_eq!(
+        manifest_and_wal_puts(&operations, &idle_id),
+        (3, 1),
+        "one claim, one fence, one fold, and one advance"
+    );
+
+    assert_eq!(server.retention_floor(&recent_id).await, recent_floor);
+    assert_eq!(
+        manifest_and_wal_puts(&operations, &recent_id),
+        (0, 0),
+        "a floor that would not move writes nothing"
+    );
+    // The session opened for the idle namespace's advance ends with it.
+    server.wait_for_open_sessions(1).await;
+    drop(held);
 }

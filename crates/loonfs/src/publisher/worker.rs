@@ -109,6 +109,12 @@ impl NamespacePublisher {
                         return;
                     }
                 }
+                WorkItem::RetentionAdvance(pending) => {
+                    // An advance folds, so it's bounded by its fold permit
+                    // alone, as a delete is.
+                    drop(publication);
+                    self.execute_retention_advance(pending).await;
+                }
             }
         }
     }

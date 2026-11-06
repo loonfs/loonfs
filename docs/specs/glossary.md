@@ -108,15 +108,11 @@ The fields of a file's current revision that a directory listing reports: the re
 
 ### Tombstone
 
-A committed deletion record. Deleting an item removes its name from its parent directory and records a tombstone. The item's revisions, and everything below it, stay in place, and the tombstone hides them like a filter applied on top of the metadata. A [restore](#restore) revokes the tombstone and binds the item's name again, so the whole subtree reappears unchanged. Once the [retention floor](#retention-floor) reaches the deletion, the deletion has expired. An expired deletion can't be restored, and its tombstone keeps hiding the subtree. Once the writer's log has acknowledged the floor, the deletion is [removable](#removable-deletion), and a base compaction removes the subtree's rows. See [File and subtree deletion](format.md#16-file-and-subtree-deletion). (A deleted namespace's final manifest is a different record, the namespace tombstone.)
+A committed deletion record. Deleting an item removes its name from its parent directory and records a tombstone. The item's revisions, and everything below it, stay in place, and the tombstone hides them like a filter applied on top of the metadata. A [restore](#restore) revokes the tombstone and binds the item's name again, so the whole subtree reappears unchanged. Once the [retention floor](#retention-floor) reaches the deletion, the deletion has expired. An expired deletion can't be restored, its tombstone keeps hiding the subtree, and a base compaction removes the subtree's rows. See [File and subtree deletion](format.md#16-file-and-subtree-deletion). (A deleted namespace's final manifest is a different record, the namespace tombstone.)
 
 ### Restore
 
 Bringing a deleted file or directory back, or making a prior revision's content current again. Restoring a deletion revokes its [tombstone](#tombstone) and binds the deleted root again, under its saved parent and name or at a new destination, so the whole subtree reappears with its revision history. Only a recoverable deletion can be restored. The API spells this operation `undelete`, and the change feed reports it as an `undeleted` event. Restoring a revision (`restore_revision`) makes that revision's content the file's current content. See [File and subtree deletion](format.md#16-file-and-subtree-deletion).
-
-### Removable deletion
-
-An expired deletion whose deletion sequence is at or below the basis manifest's [acknowledged floor](#acknowledged-floor), so that no restore of the deletion can still be committed. A base compaction removes the rows that a removable deletion hides. A deletion expires as soon as the [retention floor](#retention-floor) reaches it, but it becomes removable only once the writer's log has acknowledged that floor. For example, if the floor is 20 and the acknowledged floor is 5, a deletion at sequence 10 has expired, but it isn't removable yet, so its rows stay. See [Row retention during a base compaction](format.md#103-row-retention-during-a-base-compaction).
 
 ### Namespace tombstone
 
@@ -226,15 +222,11 @@ The process that rewrites a namespace's metadata runs into fewer runs, and drops
 
 ### Retention floor
 
-The sequence number below which a namespace's history is no longer guaranteed. Above the floor, every file's history is complete. At or below it, each visible file keeps at least its newest revision, and so does a deleted file while its deletion is recoverable. Compaction can remove the older rows at or below the floor (superseded bindings, old revisions, and commit receipts), and it removes old file, attribute, and access revisions only once the writer's log has acknowledged the floor (see [Acknowledged floor](#acknowledged-floor)). A deletion at or below the floor has expired, so it can't be restored, and once the writer's log has acknowledged the floor, the deletion is [removable](#removable-deletion) and a base compaction removes the rows that the deletion hides. A retention advance moves the floor forward, and the floor never moves back. A pin below the floor still protects its manifest. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
+The sequence number below which a namespace's history is no longer guaranteed. Above the floor, every file's history is complete. At or below it, each visible file keeps at least its newest revision, and so does a deleted file while its deletion is recoverable. Compaction can remove the older rows at or below the floor (superseded bindings, old revisions, old attribute and access states, and commit receipts). A deletion at or below the floor has expired, so it can't be restored, and if its latest event is still `set`, a base compaction removes the rows that it hides. For example, if the floor is 20, a deletion at sequence 10 that nobody restored has expired, and the next base compaction of each family group removes the rows of the inodes that the deletion hides. A retention advance moves the floor forward, and the floor never moves back. Only the holder of the namespace's [writer epoch](#writer-epoch) advances the floor, after it has folded every commit validated against the old floor, so no restore of an expired deletion can be committed after the advance. A pin below the floor still protects its manifest. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
 
 ### Retention window
 
 A namespace setting, in milliseconds, for how much recent history a scheduled retention advance keeps. The reference server's [sweep](#sweep) advances each namespace's [retention floor](#retention-floor) to the last commit made at or before the current time minus the window. It uses the namespace's own window if the namespace's manifest sets `retention_window_ms`, and the server's `retention_window_ms` setting otherwise. For example, a namespace with a 7-day window keeps at least 7 days of revisions and recoverable deletions. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
-
-### Acknowledged floor
-
-A manifest field (`acknowledged_floor_seq`) that records the highest [retention floor](#retention-floor) that any WAL object folded into the manifest was validated against. Each WAL object records the floor of the manifest that its writer validated it against (`basis_floor_seq`), and a fold copies the highest one into the manifest. A base compaction removes the rows that a deletion hides only when the deletion is at or below the acknowledged floor, because every restore validated against a lower floor is folded by then. For the same reason, a base compaction keeps every file, attribute, and access revision above the acknowledged floor. For example, if the floor is 20 and the acknowledged floor is 5, a deletion at sequence 10 has expired, but it isn't [removable](#removable-deletion), and its rows stay until a WAL object validated against the floor of 20 is folded. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
 
 ### Control object
 
@@ -331,7 +323,7 @@ A manifest publication that increases the writer epoch or the compactor epoch by
 
 ### Fence
 
-A WAL object with no commits. A new writer session publishes a fence as part of starting up, so that it can begin committing with its writer epoch. Once the fence is written, a writer session with an older epoch can't commit. A fence also records the retention floor of the manifest it was planned against, so a maintainer can write one to acknowledge a floor for a namespace that nobody writes to (see [Acknowledged floor](#acknowledged-floor)).
+A WAL object with no commits. A new writer session publishes a fence as part of starting up, so that it can begin committing with its writer epoch. Once the fence is written, a writer session with an older epoch can't commit.
 
 ### Compactor epoch
 
@@ -339,7 +331,7 @@ A counter in the manifest, like the writer epoch, that stops a compaction from p
 
 ### Maintainer
 
-The role that folds a namespace's WAL, compacts its metadata, advances its retention floor, publishes an extension's entry, and collects its garbage. The namespace's writer session commits and deletes the namespace, and any process can be its maintainer, with or without the writer session. A compaction claims the compactor epoch first, and a fold, a retention advance, or an extension's publication publishes under the current compactor epoch without a claim. A maintainer that acknowledges the retention floor of a namespace that nobody writes to claims the writer epoch and writes a fence (see [Acknowledged floor](#acknowledged-floor)). See [Publishing a manifest](format.md#72-publishing-a-manifest).
+The role that folds a namespace's WAL, compacts its metadata, publishes an extension's entry, and collects its garbage. The other role is the writer, which commits, deletes the namespace, and advances its [retention floor](#retention-floor), under the [writer epoch](#writer-epoch). Any process can be a namespace's maintainer, with or without the writer session. A compaction claims the compactor epoch first, and a fold or an extension's publication publishes under the current compactor epoch without a claim. A process without a writer session that advances the floor acquires the writer epoch first, with a claim and a fence (see [Advancing the retention floor](format.md#101-advancing-the-retention-floor)). See [Maintenance roles](../design/maintenance-roles.md) for the two roles and [Publishing a manifest](format.md#72-publishing-a-manifest).
 
 ### Job
 

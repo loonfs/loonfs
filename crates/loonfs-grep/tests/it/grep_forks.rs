@@ -3,7 +3,7 @@
 //! through the fork pin, restarts an inherited backfill in the fork, and
 //! clears an inherited reorganization.
 
-use crate::common::{control, fold_wal_and_advance_retention};
+use crate::common::control;
 use crate::content_index::{request, ContentFixture};
 use loonfs::{Namespace, NamespaceId, Writable};
 use loonfs_grep::entry::{GrepEntry, GrepIndexStatus};
@@ -138,12 +138,7 @@ async fn the_gap_below_the_fork_point_is_read_through_the_fork_pin() {
 
     let (fork_id, _fork_handle) = fork(&fixture).await;
     fixture.put("/after.txt", b"after the fork\n").await;
-    let floor = fold_wal_and_advance_retention(
-        &fixture.store,
-        &fixture.host.maintenance,
-        &fixture.namespace_id,
-    )
-    .await;
+    let floor = fixture.advance_retention_floor().await;
     assert!(floor > gap, "the source's floor passes the fork point");
     let GrepIndexStatus::Active {
         built_through_seq, ..

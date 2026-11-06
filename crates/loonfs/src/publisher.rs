@@ -2,8 +2,8 @@
 //!
 //! Each namespace writer session has one queue. Concurrent commits may share
 //! a WAL object and head update. Duplicate commit IDs join in flight,
-//! conflicting reuse is rejected, and namespace deletion is ordered with
-//! other mutations.
+//! conflicting reuse is rejected, and namespace deletion and retention
+//! advances are ordered with other mutations.
 //!
 //! A new commit that reaches the write stop waits at the front of the queue
 //! for the session's fold, for at most the publication policy's write-stop
@@ -28,6 +28,7 @@ mod inline_content;
 pub(crate) mod metrics;
 mod queue;
 mod registry;
+mod retention_advance;
 mod session_tasks;
 mod worker;
 

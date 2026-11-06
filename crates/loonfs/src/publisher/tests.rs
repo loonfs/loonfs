@@ -689,7 +689,9 @@ async fn publisher_splits_batches_at_the_wal_bound_in_admission_order() {
             .iter()
             .map(|item| match item {
                 WorkItem::Batch(batch) => batch.candidates.len(),
-                WorkItem::Delete(_) => panic!("expected commit batch"),
+                WorkItem::Delete(_) | WorkItem::RetentionAdvance(_) => {
+                    panic!("expected commit batch")
+                }
             })
             .collect::<Vec<_>>();
         assert_eq!(batches, expected_batches);
@@ -1421,7 +1423,9 @@ async fn a_failed_retry_keeps_the_result_a_batch_already_settled() {
         .iter()
         .map(|item| match item {
             WorkItem::Batch(batch) => batch.candidates.len(),
-            WorkItem::Delete(_) => panic!("expected commit batch"),
+            WorkItem::Delete(_) | WorkItem::RetentionAdvance(_) => {
+                panic!("expected commit batch")
+            }
         })
         .collect::<Vec<_>>();
     assert_eq!(batches, [2], "both candidates share one batch");

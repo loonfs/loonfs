@@ -7,19 +7,14 @@ use crate::namespace::state::NamespaceReadState;
 use loonfs_types::format::wal::{
     encode_wal_object_envelope_zstd, WalCommitPayload, WalObjectPayload,
 };
-use loonfs_types::{ChangeSeq, NamespaceId, WriterEpoch};
+use loonfs_types::{NamespaceId, WriterEpoch};
 
 /// Builds a WAL object for `records` after `head`, or a fence when
 /// `records` is empty.
-///
-/// `basis_floor_seq` is the retention floor of the manifest that the
-/// records were validated against, or that the fence was planned against
-/// ([Advancing the retention floor](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#101-advancing-the-retention-floor)).
 pub(crate) fn prepare_wal_object(
     namespace_id: NamespaceId,
     writer_epoch: WriterEpoch,
     head: &NamespaceReadState,
-    basis_floor_seq: ChangeSeq,
     records: &[CommitPlan],
 ) -> Result<PreparedWalObject> {
     assert!(
@@ -32,7 +27,6 @@ pub(crate) fn prepare_wal_object(
         namespace_id,
         writer_epoch,
         head,
-        basis_floor_seq,
         records.iter().map(wal_payload_from_commit_plan).collect(),
     )
 }
@@ -43,15 +37,10 @@ pub(crate) fn prepare_wal_object(
 /// A batch publish calls this function instead of [`prepare_wal_object`],
 /// because the batch already built each commit's payload to apply the commit
 /// to its planning session.
-///
-/// A `basis_floor_seq` below the head's is `NamespaceCorrupt`, because the
-/// head's floor comes from stored WAL objects or a stored manifest, and
-/// replay rejects a WAL object that lowers it.
 pub(crate) fn prepare_wal_object_from_payloads(
     namespace_id: NamespaceId,
     writer_epoch: WriterEpoch,
     head: &NamespaceReadState,
-    basis_floor_seq: ChangeSeq,
     payload_records: Vec<WalCommitPayload>,
 ) -> Result<PreparedWalObject> {
     let payload = WalObjectPayload {
@@ -67,11 +56,8 @@ pub(crate) fn prepare_wal_object_from_payloads(
         head_seq: payload_records
             .last()
             .map_or(head.seq, |record| record.committed_seq),
-        basis_floor_seq,
         records: payload_records,
     };
-    super::replay::validate_basis_floor(head.wal_no, head.basis_floor_seq, &payload)
-        .map_err(|error| CoreError::NamespaceCorrupt(error.to_string()))?;
     let object = encode_wal_object_envelope_zstd(payload)
         .expect("a WAL object this process built should encode");
     super::replay::validate_wal_object_for_replay(head.seq, object.envelope())

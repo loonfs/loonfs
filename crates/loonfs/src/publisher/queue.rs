@@ -1,11 +1,15 @@
-//! Submission and admission: the candidates and deletes that enter a
-//! namespace's queue, and the work items the worker takes from it.
+//! Submission and admission: the candidates, deletes, and retention advances
+//! that enter a namespace's queue, and the work items the worker takes from
+//! it.
 
 use super::admission::{AdmissionPermit, AdmittedWaiter, PublicationAdmission};
 use super::{NamespacePublisher, NamespacePublisherState};
 use crate::publish::CommitCandidate;
 use crate::trace::phase_event;
-use crate::{CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, Result};
+use crate::{
+    AdvanceRetentionResponse, ChangeSeq, CoreError, DeleteNamespaceOptions,
+    DeleteNamespaceResponse, Result,
+};
 use loonfs_core::commit::CommitFingerprint;
 use loonfs_core::limits::MAX_CONTENTION_ATTEMPTS;
 use loonfs_core::publish::WalPublishError;
@@ -21,9 +25,17 @@ pub(super) struct PendingDelete {
     pub(super) waiters: Vec<AdmittedWaiter<Result<DeleteNamespaceResponse>>>,
 }
 
+/// A retention advance that waits in the queue: the floor it moves to, and
+/// the callers that wait for it.
+pub(super) struct PendingRetentionAdvance {
+    pub(super) target: ChangeSeq,
+    pub(super) waiters: Vec<AdmittedWaiter<Result<AdvanceRetentionResponse>>>,
+}
+
 pub(super) enum WorkItem {
     Batch(OpenBatch),
     Delete(PendingDelete),
+    RetentionAdvance(PendingRetentionAdvance),
 }
 
 pub(super) struct OpenBatch {
@@ -378,6 +390,45 @@ impl NamespacePublisher {
         Ok(receiver)
     }
 
+    /// Enqueues an advance of the retention floor to `target`, which
+    /// publishes after the work admitted before it and before the work
+    /// admitted after it (format spec, "Advancing the retention floor").
+    ///
+    /// An advance queued behind another advance that's still waiting joins
+    /// it, and the joined advance moves the floor to the higher of the two
+    /// targets. Both callers share its outcome.
+    pub(super) async fn submit_retention_advance(
+        &self,
+        target: ChangeSeq,
+    ) -> Result<AdvanceRetentionResponse> {
+        let (sender, receiver) = oneshot::channel();
+        {
+            let mut state = self.lock_state();
+            let _session = self.admitted_session(&state)?;
+            let permit = self.context.admission.acquire(&self.namespace_id, 0)?;
+            let sender = AdmittedWaiter::new(sender, &permit);
+            match state.queue.back_mut() {
+                Some(WorkItem::RetentionAdvance(pending)) => {
+                    pending.target = pending.target.max(target);
+                    pending.waiters.push(sender);
+                }
+                _ => state
+                    .queue
+                    .push_back(WorkItem::RetentionAdvance(PendingRetentionAdvance {
+                        target,
+                        waiters: vec![sender],
+                    })),
+            }
+            self.spawn_worker_if_idle(&mut state);
+        }
+        receiver.await.unwrap_or_else(|_| {
+            Err(CoreError::WalPublish(WalPublishError::OutcomeUnknown(
+                "publisher task stopped mid-advance".to_owned(),
+            ))
+            .into())
+        })
+    }
+
     fn trace_enqueue(&self, queue_depth: usize, reason: &'static str) {
         self.context
             .runtime_core
@@ -476,6 +527,7 @@ async fn receive_delete(
 pub(super) struct QueuedWaiters {
     pub(super) commits: Vec<AdmittedWaiter<Result<Commit>>>,
     pub(super) deletes: Vec<AdmittedWaiter<Result<DeleteNamespaceResponse>>>,
+    pub(super) retention_advances: Vec<AdmittedWaiter<Result<AdvanceRetentionResponse>>>,
 }
 
 /// Empties the queue and hands back every waiter it kept. Called once the
@@ -492,6 +544,9 @@ pub(super) fn take_queued_waiters(state: &mut NamespacePublisherState) -> Queued
                 }
             }
             WorkItem::Delete(pending) => waiters.deletes.extend(pending.waiters),
+            WorkItem::RetentionAdvance(pending) => {
+                waiters.retention_advances.extend(pending.waiters);
+            }
         }
     }
     waiters
@@ -505,7 +560,7 @@ pub(super) fn queued_candidates(state: &NamespacePublisherState) -> usize {
         .iter()
         .map(|item| match item {
             WorkItem::Batch(batch) => batch.candidates.len(),
-            WorkItem::Delete(_) => 0,
+            WorkItem::Delete(_) | WorkItem::RetentionAdvance(_) => 0,
         })
         .sum()
 }

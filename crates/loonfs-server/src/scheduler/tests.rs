@@ -203,6 +203,31 @@ impl SchedulerServer {
         }
     }
 
+    /// Waits until the runtime's open writer sessions number `expected`, and
+    /// fails the test if they never do. A session ends once its last admitted
+    /// work finishes, which can be just after the call that admitted it
+    /// returns.
+    async fn wait_for_open_sessions(&self, expected: i64) {
+        let open = || {
+            let snapshot = self.recorder.snapshot();
+            let open = snapshot
+                .by_name("loonfs.publisher.sessions_open")
+                .find_map(|entry| match entry.value {
+                    MetricValue::Gauge(value) => Some(value),
+                    _ => None,
+                })
+                .unwrap_or(0);
+            open
+        };
+        for _ in 0..10_000 {
+            if open() == expected {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(open(), expected, "open writer sessions");
+    }
+
     async fn grep_status(&self, namespace_id: &NamespaceId) -> GrepIndexStatus {
         self.grep_worker
             .as_ref()
@@ -650,14 +675,9 @@ async fn a_panicking_call_is_backed_off_and_the_next_namespace_still_runs_its_st
         0,
         "the panic doesn't stop the steps of other namespaces"
     );
-    // The acknowledgment of the floor and the retention advance load the
-    // same manifest, so they panic too.
-    assert_eq!(server.counter("loonfs.maintenance.sweep_panics", &[]), 3);
-    for call in [
-        MaintenanceCall::Metadata,
-        MaintenanceCall::RetentionAcknowledgment,
-        MaintenanceCall::Retention,
-    ] {
+    // The retention advance loads the same manifest, so it panics too.
+    assert_eq!(server.counter("loonfs.maintenance.sweep_panics", &[]), 2);
+    for call in [MaintenanceCall::Metadata, MaintenanceCall::Retention] {
         assert_eq!(server.call_failures(call), 1, "{call:?}");
     }
     assert_eq!(
@@ -1085,9 +1105,9 @@ enum Grep {
 /// collect garbage, then one that does, and how many of the latter are lists. The
 /// docs quote these numbers.
 const IDLE_SWEEP_REQUESTS: [(Grep, usize, usize, usize); 3] = [
-    (Grep::NotMaintained, 14, 29, 9),
-    (Grep::Maintained, 18, 33, 9),
-    (Grep::Enabled, 19, 34, 9),
+    (Grep::NotMaintained, 10, 25, 9),
+    (Grep::Maintained, 14, 29, 9),
+    (Grep::Enabled, 15, 30, 9),
 ];
 
 #[tokio::test(start_paused = true)]
@@ -1224,16 +1244,10 @@ async fn a_stray_child_of_the_namespace_prefix_is_not_a_failed_call() {
         .iter()
         .filter(|operation| operation.key().starts_with("namespaces/stray/"))
         .collect();
-    // The metadata call, the grep build, the acknowledgment of the floor, the
-    // retention advance, and collection each read the hint once.
-    assert_eq!(stray.len(), 5, "{stray:?}");
-    for call in [
-        "metadata",
-        "grep_index",
-        "retention_acknowledgment",
-        "retention",
-        "gc",
-    ] {
+    // The metadata call, the grep build, the retention advance, and
+    // collection each read the hint once.
+    assert_eq!(stray.len(), 4, "{stray:?}");
+    for call in ["metadata", "grep_index", "retention", "gc"] {
         assert_eq!(
             server.counter("loonfs.maintenance.sweep_failures", &[("call", call)]),
             0,
@@ -1242,7 +1256,6 @@ async fn a_stray_child_of_the_namespace_prefix_is_not_a_failed_call() {
     }
 }
 
-mod floor_acknowledgment;
 mod indexing;
 mod retention;
 mod sessions;

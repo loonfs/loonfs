@@ -682,7 +682,6 @@ async fn manifest_run_rejects_rows_after_run_seq() {
         writer_epoch: materialization.head.writer_epoch,
         next_run_no: RunNo(2),
         retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
-        acknowledged_floor_seq: ChangeSeq(0),
         runs: vec![
             MetadataRunRef {
                 run_no: RunNo(0),

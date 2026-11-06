@@ -91,7 +91,7 @@ impl Maintenance {
     /// loaded through the segment cache, or `None` when the runtime has no
     /// position for the namespace or the position's last check is at the
     /// revalidation bound.
-    async fn load_position_basis(
+    pub(super) async fn load_position_basis(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<Option<PublicationBasis>> {

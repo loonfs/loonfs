@@ -882,7 +882,6 @@ fn openapi_publishes_namespace_diagnostics_in_the_maintenance_api_group() {
     assert_eq!(
         required_fields(diagnostics),
         BTreeSet::from([
-            "acknowledged_floor_seq",
             "created_at_ms",
             "created_by",
             "head_seq",

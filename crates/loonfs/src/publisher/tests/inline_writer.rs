@@ -1043,7 +1043,7 @@ async fn a_staged_commit_is_charged_the_weight_of_the_staged_candidate() {
                 .iter()
                 .filter_map(|item| match item {
                     WorkItem::Batch(batch) => Some(&batch.candidates),
-                    WorkItem::Delete(_) => None,
+                    WorkItem::Delete(_) | WorkItem::RetentionAdvance(_) => None,
                 })
                 .flatten()
                 .map(|queued| {

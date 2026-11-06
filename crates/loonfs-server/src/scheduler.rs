@@ -173,14 +173,14 @@ pub enum GarbageCollection {
 /// advance would make the window a day longer for exactly the namespaces
 /// that are busiest.
 ///
-/// Before each advance, the scheduler acknowledges the floor that the
-/// previous sweep set, with [`Maintenance::acknowledge_retention_floor`]. A
-/// namespace whose writer committed since the previous sweep has
-/// acknowledged that floor, or acknowledges it when a metadata step folds
-/// its tail, and a namespace that nobody wrote to gets a fence. A writer
-/// session that the fence fences returns `writer_fenced` to its next
-/// request, like after any takeover. A failed acknowledgment keeps no retry
-/// state either, and the next sweep tries it again.
+/// An advance whose floor moves runs in the namespace's writer session in
+/// this server, which folds the tail and publishes the floor under its
+/// writer epoch. For a namespace that the server holds no session for, the
+/// advance opens one, which acquires the writer epoch, and the session ends
+/// when the advance returns. A writer session of the namespace in another
+/// process returns `writer_fenced` to its next request, like after any
+/// takeover. A failed advance keeps no retry state either, and the next
+/// sweep tries it again.
 ///
 /// The scheduler starts a session's steps without waiting for the steps
 /// that other sessions started at the interval before, so a long step on one
@@ -281,8 +281,8 @@ impl Scheduler {
 
     /// Runs one sweep: the steps of every namespace that the store lists.
     /// With [`GarbageCollection::Collect`], each namespace also gets a
-    /// collection. Each namespace's retention floor is acknowledged and then
-    /// advanced under its retention window.
+    /// collection. Each namespace's retention floor is advanced under its
+    /// retention window.
     ///
     /// Returns how many namespaces the sweep listed, or the listing failure
     /// that ended it once the namespaces it had started returned. A failed

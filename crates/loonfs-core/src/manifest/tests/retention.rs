@@ -1,7 +1,8 @@
 //! Checkpoint retention, compaction, and publication budgets.
 
-use super::super::{FoldWalOutcome, PublicationReport};
+use super::super::PublicationReport;
 use super::*;
+use crate::publish::SharedWriterSessionStatus;
 use crate::segment::block_memo::SessionBlockMemo;
 use crate::time::OperationClock;
 use loonfs_objectstore::keys::{pin_prefix, wal_prefix};
@@ -244,13 +245,19 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
     );
 
     assert_eq!(read_floor_seq(&store, &namespace_id).await, head_seq);
+    let after = store
+        .list_prefix(&wal_objects_prefix)
+        .await
+        .expect("list wal");
     assert_eq!(
-        store
-            .list_prefix(&wal_objects_prefix)
-            .await
-            .expect("list wal"),
-        wal_objects,
-        "the advance only moves the floor"
+        after[..wal_objects.len()],
+        wal_objects[..],
+        "the advance leaves the WAL objects before it"
+    );
+    assert_eq!(
+        after.len(),
+        wal_objects.len() + 1,
+        "the advance writes one WAL object, its fence"
     );
     assert!(store
         .head(&current_manifest_key(&store, &namespace_id).await)
@@ -1080,36 +1087,6 @@ async fn publish_directories<S: ObjectStore>(
     }
 }
 
-/// The current manifest's retention floor and acknowledged floor.
-async fn current_floors<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-) -> (ChangeSeq, ChangeSeq) {
-    let manifest = crate::test_support::namespace_store(store, namespace_id)
-        .load_current_manifest()
-        .await
-        .expect("load the current manifest");
-    let payload = manifest.envelope.payload();
-    (payload.retention_floor_seq, payload.acknowledged_floor_seq)
-}
-
-/// The basis floors of the WAL objects above the current manifest, oldest
-/// first.
-async fn tail_basis_floors<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-) -> Vec<ChangeSeq> {
-    crate::test_support::namespace_store(store, namespace_id)
-        .load_read_anchor(crate::test_support::observed_now())
-        .await
-        .expect("load the WAL tail")
-        .tail
-        .objects()
-        .iter()
-        .map(|object| object.envelope().payload().basis_floor_seq)
-        .collect()
-}
-
 /// Advances the floor to the folded head, at a time when every commit is a
 /// grace window old.
 async fn advance_to_folded_head<S: ObjectStore + ?Sized>(
@@ -1130,8 +1107,12 @@ async fn advance_to_folded_head<S: ObjectStore + ?Sized>(
     .expect("advance the floor")
 }
 
+/// Checks that an advance without a writer session takes the writer epoch,
+/// folds the tail through the fence, and publishes the floor under its
+/// epoch, so the writer it took over returns `writer_fenced` and every
+/// commit that writer made is in the manifest before the advance.
 #[tokio::test]
-async fn a_fold_acknowledges_the_highest_basis_floor_that_it_folds() {
+async fn an_advance_without_a_session_takes_the_epoch_and_folds_before_the_floor() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1141,71 +1122,80 @@ async fn a_fold_acknowledges_the_highest_basis_floor_that_it_folds() {
     let mut writer = NamespaceCommitEngine::new(
         crate::test_support::namespace_store(&store, &namespace_id),
         test_context().writer_id,
-    );
-    publish_directories(&mut writer, "folded", 20).await;
+    )
+    .writer_session(SharedWriterSessionStatus::default());
+    publish_directories(&mut writer, "folded", 2).await;
     crate::test_support::namespace_store(&store, &namespace_id)
         .fold_wal()
         .await
         .expect("fold");
-    publish_directories(&mut writer, "first", 1).await;
-    publish_directories(&mut writer, "second", 1).await;
+    publish_directories(&mut writer, "unfolded", 1).await;
+    let before = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_current_manifest()
+        .await
+        .expect("load the manifest before the advance");
 
-    // An advance raises the floor and copies the acknowledged floor.
     let advance = advance_to_folded_head(&store, &namespace_id).await;
-    assert_eq!(advance.response.retention_floor_seq, ChangeSeq(20));
-    assert_eq!(
-        current_floors(&store, &namespace_id).await,
-        (ChangeSeq(20), ChangeSeq(0))
-    );
-
-    // The session's position moves onto the advance's manifest, so its next
-    // WAL object records the new floor.
-    writer.record_manifest_published(advance.published.expect("the advance publishes"));
-    publish_directories(&mut writer, "third", 1).await;
-    assert_eq!(
-        tail_basis_floors(&store, &namespace_id).await,
-        [ChangeSeq(0), ChangeSeq(0), ChangeSeq(20)]
-    );
-    crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
+    assert_eq!(advance.response.retention_floor_seq, ChangeSeq(2));
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let advanced = namespace
+        .load_current_manifest()
         .await
-        .expect("fold");
+        .expect("load the advance's manifest");
+    let head = namespace.load_read_state().await.expect("read the head");
+    assert_eq!(advanced.retention_floor_seq(), ChangeSeq(2));
     assert_eq!(
-        current_floors(&store, &namespace_id).await,
-        (ChangeSeq(20), ChangeSeq(20))
+        advanced.payload().writer_epoch,
+        before
+            .payload()
+            .writer_epoch
+            .successor()
+            .expect("next epoch"),
+        "the advance claims the next epoch"
+    );
+    assert_eq!(
+        advanced.payload().head_seq,
+        ChangeSeq(3),
+        "the fold before the floor covers the unfolded commit"
+    );
+    assert_eq!(
+        advanced.folded_wal_no(),
+        head.wal_no,
+        "the fold covers the fence, and the advance commits nothing after it"
     );
 
-    // A fold of objects that record the acknowledged floor keeps it.
-    publish_directories(&mut writer, "fourth", 1).await;
-    assert_eq!(
-        tail_basis_floors(&store, &namespace_id).await,
-        [ChangeSeq(20)]
-    );
-    crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
-        .await
-        .expect("fold");
-    assert_eq!(
-        current_floors(&store, &namespace_id).await,
-        (ChangeSeq(20), ChangeSeq(20))
-    );
-
-    // A fold with no WAL object to fold publishes nothing, so the
-    // acknowledged floor stays where it is.
-    let unchanged = current_manifest_no(&store, &namespace_id).await;
-    assert_eq!(
-        crate::test_support::namespace_store(&store, &namespace_id)
-            .fold_wal()
+    // The writer's put collides with the fence, and its retry finds the
+    // advance's epoch.
+    let mut codes = Vec::new();
+    for _ in 0..2 {
+        let error = writer
+            .publish_batch(
+                vec![CommitCandidate::new(CommitIntent::single(
+                    CommitId::generate(),
+                    loonfs_test_support::test_actor(),
+                    None,
+                    FilesystemOperation::CreateDirectory {
+                        path: AbsolutePath::parse("/after").expect("path"),
+                        parents: false,
+                    },
+                ))],
+                &test_context().clock(),
+            )
             .await
-            .expect("fold")
-            .outcome,
-        FoldWalOutcome::AlreadyCurrent
-    );
-    assert_eq!(current_manifest_no(&store, &namespace_id).await, unchanged);
+            .results
+            .pop()
+            .expect("one result")
+            .expect_err("the writer the advance took over commits nothing");
+        codes.push(error.code());
+    }
+    assert_eq!(codes, [ErrorCode::StaleHead, ErrorCode::WriterFenced]);
 }
 
+/// Checks that a floor publication under an epoch that another writer has
+/// since claimed returns `writer_fenced` and publishes nothing, and that one
+/// whose target the current floor already reached publishes nothing either.
 #[tokio::test]
-async fn a_fence_acknowledges_the_floor_of_a_namespace_that_nobody_writes_to() {
+async fn a_floor_publication_refuses_another_writers_epoch() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1219,94 +1209,45 @@ async fn a_fence_acknowledges_the_floor_of_a_namespace_that_nobody_writes_to() {
             .await
             .expect("commit");
     }
-    crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
-        .await
-        .expect("fold");
-    advance_to_folded_head(&store, &namespace_id).await;
-    assert_eq!(
-        current_floors(&store, &namespace_id).await,
-        (ChangeSeq(2), ChangeSeq(0))
-    );
-    assert_eq!(
-        crate::test_support::namespace_store(&store, &namespace_id)
-            .fold_wal()
-            .await
-            .expect("fold")
-            .outcome,
-        FoldWalOutcome::AlreadyCurrent,
-        "without a WAL object, no fold acknowledges the new floor"
-    );
-
-    // A new session's fence records the floor of the manifest it found, and
-    // a fold of the fence acknowledges that floor.
-    crate::test_support::namespace_store(&store, &namespace_id)
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let mine = namespace
         .acquire_writer_epoch(&context.writer_id)
         .await
-        .expect("acquire the writer epoch");
-    assert_eq!(
-        tail_basis_floors(&store, &namespace_id).await,
-        [ChangeSeq(2)]
-    );
-    crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
+        .expect("acquire the writer epoch")
+        .writer_epoch;
+    namespace.fold_wal().await.expect("fold");
+    namespace
+        .acquire_writer_epoch(&context.writer_id)
         .await
-        .expect("fold");
-    assert_eq!(
-        current_floors(&store, &namespace_id).await,
-        (ChangeSeq(2), ChangeSeq(2))
-    );
-}
+        .expect("another writer takes the namespace over");
+    let unchanged = current_manifest_no(&store, &namespace_id).await;
 
-#[test]
-fn a_manifest_whose_acknowledged_floor_breaks_its_bounds_fails_to_load() {
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let created = NamespaceManifestPayload::initial(
-        namespace_id.clone(),
-        1_000,
-        loonfs_test_support::test_actor(),
-        loonfs_types::NamespaceAccess::Unrestricted {},
-    );
-    let fork_basis = loonfs_types::format::control::ForkBasis {
-        manifest: loonfs_types::format::control::ManifestRef {
-            owner_namespace_id: NamespaceId::parse("source").expect("valid namespace id"),
-            manifest_no: ManifestNo(4),
-            head_seq: ChangeSeq(5),
-            payload_checksum: loonfs_types::sha256_digest(b"source"),
-        },
-        source_pin_id: PinId::parse("pin_00000000000000000004-0000000000000005").expect("pin id"),
-        rebased_from: None,
-    };
-    for (manifest, expected) in [
-        (
-            NamespaceManifestPayload {
-                acknowledged_floor_seq: ChangeSeq(1),
-                ..created.clone()
-            },
-            "acknowledged floor `1` is above the retention floor `0`",
-        ),
-        (
-            NamespaceManifestPayload {
-                fork_basis: Some(fork_basis),
-                head_seq: ChangeSeq(5),
-                retention_floor_seq: ChangeSeq(5),
-                acknowledged_floor_seq: ChangeSeq(4),
-                ..created
-            },
-            "acknowledged floor",
-        ),
-    ] {
-        let (_, bytes) = encode_namespace_manifest_json(manifest)
-            .expect("encode the manifest")
-            .into_parts();
-        let error = load::decode_manifest_at(&namespace_id, ManifestNo(1), "manifest", &bytes)
-            .expect_err("the manifest fails to load");
-        assert_matches!(
-            &error,
-            ManifestLoadError::RunManifestMismatch { message, .. } if message.contains(expected),
-            "{error}"
-        );
-    }
+    let error = namespace
+        .publish_retention_floor(None, mine, ChangeSeq(2))
+        .await
+        .expect_err("the epoch was taken over");
+    assert_matches!(&error, CoreError::WriterFenced(fence) if fence.fenced_epoch == mine);
+    assert_eq!(current_manifest_no(&store, &namespace_id).await, unchanged);
+    assert_eq!(read_floor_seq(&store, &namespace_id).await, ChangeSeq(0));
+
+    let current = namespace
+        .load_current_manifest()
+        .await
+        .expect("load the current manifest")
+        .payload()
+        .writer_epoch;
+    let raised = namespace
+        .publish_retention_floor(None, current, ChangeSeq(1))
+        .await
+        .expect("raise the floor");
+    assert_eq!(raised.response, ChangeSeq(1));
+    assert!(raised.published.is_some());
+    let reached = namespace
+        .publish_retention_floor(None, mine, ChangeSeq(1))
+        .await
+        .expect("a target the floor reached");
+    assert_eq!(reached.response, ChangeSeq(1));
+    assert!(reached.published.is_none());
 }
 
 /// Reads the files one checkpoint pins at the test clock, or the error that
@@ -2053,8 +1994,8 @@ async fn a_unit_honors_its_run_budget_and_reads_only_the_selected_runs() {
     };
     assert_eq!(input_runs, 2);
     assert!(input_runs <= policy.max_input_runs_per_step.get());
-    // The basis manifest's acknowledged floor is 0, so the unit builds no
-    // kept inode filter and reads none of the basis's slot index for one.
+    // The basis manifest's retention floor is 0, so the unit builds no kept
+    // inode filter and reads none of the basis's slot index for one.
     let reads = store.count(OperationSelector::Read);
     // The namespace's floor is still 0, so the base unit builds no kept inode
     // filter and walks nothing.
