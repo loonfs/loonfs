@@ -9,11 +9,11 @@ use crate::compaction::plan::MetadataCompactionSpec;
 use crate::compaction::plan::{group_run_descriptors, plan_group};
 use crate::compaction::publication::{input_segment_keys, CompactionPublication};
 use crate::compaction::step::MetadataCompactionCancellation;
-use crate::compaction::step::MetadataCompactionPolicy;
 use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::segment::row::manifest_row_commit_seq;
 use crate::segment::runs::MetadataFamilyGroup;
 use crate::segment::scan::VerifiedMetadataSegments;
+use crate::test_support::kept_inodes::{compact_with_seed, whole_group_spec};
 use crate::time::{OperationClock, StdMonotonicTimer};
 use loonfs_objectstore::keys::metadata_segment_prefix;
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
@@ -326,7 +326,7 @@ fn input_runs_for_group(
         .collect()
 }
 
-/// The spec a planner would produce for `group` against the current manifest:
+/// The spec of a base compaction of `group` against the current manifest:
 /// the group's oldest window of at most eight runs, the output at the
 /// manifest head, and the live retention floor.
 async fn compaction_spec_for_group<S: ObjectStore + ?Sized>(
@@ -334,18 +334,11 @@ async fn compaction_spec_for_group<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     group: MetadataFamilyGroup,
 ) -> MetadataCompactionSpec {
-    let segments = load_current_manifest_segments(store, namespace_id).await;
-    plan_group(
-        segments.manifest().payload(),
-        &segments.scan_runs,
-        group,
-        MetadataRunPolicy {
-            max_delta_runs: NonZeroUsize::MIN,
-            ..MetadataRunPolicy::default()
-        },
-        MetadataCompactionPolicy::CompactImmediately,
-    )
-    .expect("plan the group")
+    let current = crate::test_support::namespace_store(store, namespace_id)
+        .load_current_manifest()
+        .await
+        .expect("load the current manifest");
+    whole_group_spec(&current, group)
 }
 
 /// The claim a job holds while it runs, opened the way the job driver opens
@@ -537,52 +530,35 @@ async fn orphan_segment_keys<S: ObjectStore + ?Sized>(
         .await
 }
 
-/// Compacts the group in one explicit compaction unit with the budgets raised,
-/// which is the other way of running the same engine.
+/// Compacts the group's oldest window of at most eight runs into its base
+/// run, through the same run, finalization, and publication steps as a unit.
 async fn compact_group_whole<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     group: MetadataFamilyGroup,
 ) {
-    let report = {
-        let mut fixture = crate::test_support::NamespaceFixture::new(
-            store,
-            namespace_id,
-            &crate::test_support::writer_at("test-writer", 0),
-        );
-        fixture.namespace.run_policy = compact_everything_policy();
-        fixture
-    }
-    .engine()
-    .compact_metadata_unit(
-        None,
-        MetadataCompactionPolicy::CompactImmediately,
-        loonfs_types::CompactorEpoch(0),
-        &crate::compaction::MetadataCompactionCancellation::default(),
+    let current = crate::test_support::namespace_store(store, namespace_id)
+        .load_current_manifest()
+        .await
+        .expect("load the current manifest");
+    let seed = current.payload().next_run_no;
+    compact_with_seed(
+        store,
+        namespace_id,
+        &whole_group_spec(&current, group),
+        seed,
     )
-    .await
-    .expect("compact the group whole");
-    let CompactionUnitOutcome::Published {
-        group: compacted, ..
-    } = report
-    else {
-        panic!("the whole-group compaction must publish a unit");
-    };
-    assert_eq!(
-        compacted, group,
-        "both rebuilds must work on the same family group"
-    );
+    .await;
 }
 
 // -------------------------------------------------------------------------
 // The plan split
 // -------------------------------------------------------------------------
 
-/// Checks that an explicit plan takes every run of the group, up to eight,
-/// which is what anchors it at the bottom, and judges rows against the
-/// manifest's retention floor.
+/// Checks that a planned unit judges rows against the manifest's retention
+/// floor.
 #[tokio::test]
-async fn the_planner_takes_the_groups_oldest_window_whole() {
+async fn the_planner_judges_rows_against_the_manifests_retention_floor() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -590,7 +566,6 @@ async fn the_planner_takes_the_groups_oldest_window_whole() {
     let group = MetadataFamilyGroup::Bindings;
     let floor_seq = read_floor_seq(&store, &namespace_id).await;
     let segments = load_current_manifest_segments(&store, &namespace_id).await;
-
     // A one-byte buffer changes nothing about the plan.
     for policy in [compact_everything_policy(), starving_policy()] {
         let spec = plan_group(
@@ -598,21 +573,10 @@ async fn the_planner_takes_the_groups_oldest_window_whole() {
             &segments.scan_runs,
             group,
             policy,
-            MetadataCompactionPolicy::CompactImmediately,
         )
         .expect("plan the group");
         assert_eq!(spec.group(), group);
         assert_eq!(spec.frozen_floor_seq(), floor_seq);
-        let input = input_runs_for_group(segments.manifest(), group);
-        assert_eq!(
-            spec.inputs().iter().copied().collect::<BTreeSet<_>>(),
-            input.iter().map(|run| run.run_no).collect::<BTreeSet<_>>(),
-            "a unit takes every run in the group"
-        );
-        assert!(
-            input.len() > 1,
-            "this workload must leave a base under at least one delta run"
-        );
     }
 }
 
@@ -2159,28 +2123,14 @@ async fn a_unit_that_loses_its_put_publishes_over_the_winner_unless_its_inputs_m
             .expect("current manifest");
         let payload = before.payload().clone();
         let runs = runs_newest_first(&payload);
-        let plan = crate::compaction::plan::plan_compaction(
-            &payload,
-            &runs,
-            policy,
-            MetadataCompactionPolicy::CompactImmediately,
-        )
-        .expect("the unit has a window");
+        let plan = crate::compaction::plan::plan_compaction(&payload, &runs, policy)
+            .expect("the unit has a window");
         let group = plan.group();
         let input_keys = input_segment_keys(&runs, &plan).expect("the plan's inputs");
         let other = MetadataFamilyGroup::ALL
             .into_iter()
             .filter(|candidate| *candidate != group)
-            .find(|candidate| {
-                plan_group(
-                    &payload,
-                    &runs,
-                    *candidate,
-                    policy,
-                    MetadataCompactionPolicy::CompactImmediately,
-                )
-                .is_some()
-            })
+            .find(|candidate| plan_group(&payload, &runs, *candidate, policy).is_some())
             .expect("another group has a window");
         let publication = [
             RivalPublication::Fold,
@@ -2209,7 +2159,6 @@ async fn a_unit_that_loses_its_put_publishes_over_the_winner_unless_its_inputs_m
         .engine()
         .compact_metadata_unit(
             None,
-            MetadataCompactionPolicy::CompactImmediately,
             loonfs_types::CompactorEpoch(0),
             &MetadataCompactionCancellation::default(),
         )
@@ -2347,7 +2296,6 @@ async fn a_unit_whose_puts_lose_to_unrelated_publications_publishes_without_rewr
     .engine()
     .compact_metadata_unit(
         None,
-        MetadataCompactionPolicy::CompactImmediately,
         loonfs_types::CompactorEpoch(0),
         &MetadataCompactionCancellation::default(),
     )
@@ -2422,16 +2370,7 @@ async fn a_fold_that_a_unit_publishes_over_leaves_its_run_for_a_later_tier() {
     let runs = runs_newest_first(payload);
     let due_groups = MetadataFamilyGroup::ALL
         .into_iter()
-        .filter(|group| {
-            plan_group(
-                payload,
-                &runs,
-                *group,
-                policy,
-                MetadataCompactionPolicy::SizeTiered,
-            )
-            .is_some()
-        })
+        .filter(|group| plan_group(payload, &runs, *group, policy).is_some())
         .count();
     assert!(due_groups > 1, "the folds must make several groups due");
 
@@ -2458,7 +2397,6 @@ async fn a_fold_that_a_unit_publishes_over_leaves_its_run_for_a_later_tier() {
         .engine()
         .compact_metadata_unit(
             None,
-            MetadataCompactionPolicy::SizeTiered,
             loonfs_types::CompactorEpoch(0),
             &MetadataCompactionCancellation::default(),
         )
@@ -2769,12 +2707,7 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
         fixture
     }
     .engine()
-    .compact_metadata_unit(
-        None,
-        MetadataCompactionPolicy::CompactImmediately,
-        epoch,
-        &cancellation,
-    )
+    .compact_metadata_unit(None, epoch, &cancellation)
     .await
     .expect("unit fence");
     assert_eq!(unit, CompactionUnitOutcome::Fenced);
@@ -3052,7 +2985,6 @@ async fn a_unit_loads_the_current_manifest_only_without_a_basis() {
         .engine()
         .compact_metadata_unit(
             basis,
-            MetadataCompactionPolicy::default(),
             loonfs_types::CompactorEpoch(0),
             &MetadataCompactionCancellation::default(),
         )
@@ -3176,12 +3108,7 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
         fixture
     }
     .engine()
-    .compact_metadata_unit(
-        None,
-        MetadataCompactionPolicy::CompactImmediately,
-        epoch,
-        &MetadataCompactionCancellation::default(),
-    )
+    .compact_metadata_unit(None, epoch, &MetadataCompactionCancellation::default())
     .await
     .expect("publish");
     assert_matches!(
@@ -3243,12 +3170,7 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
         fixture
     }
     .engine()
-    .compact_metadata_unit(
-        None,
-        MetadataCompactionPolicy::CompactImmediately,
-        epoch,
-        &MetadataCompactionCancellation::default(),
-    )
+    .compact_metadata_unit(None, epoch, &MetadataCompactionCancellation::default())
     .await
     .expect_err("a stopped publication should fail the compaction unit");
     assert_eq!(current_manifest_number(&failing, &namespace).await, before);

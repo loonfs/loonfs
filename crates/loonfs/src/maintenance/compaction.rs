@@ -110,9 +110,8 @@ impl Maintenance {
     ///
     /// This is the namespace's one compaction loop, which a writer session
     /// runs after its folds and a host's metadata calls run after their
-    /// folds. Each unit compacts the whole window that
-    /// [`MetadataCompactionPolicy::SizeTiered`](loonfs_core::MetadataCompactionPolicy::SizeTiered)
-    /// selects. The first unit plans from `observed`, the current manifest
+    /// folds. Each unit compacts the whole size-tiered window that the
+    /// namespace's run policy selects. The first unit plans from `observed`, the current manifest
     /// that the caller loaded from the store, when it's given. The call stops when nothing is
     /// due, when another process has the compactor epoch, when
     /// `cancellation` is set, when the namespace's writer session in this
@@ -146,12 +145,7 @@ impl Maintenance {
                 break MetadataMaintenanceOutcome::Due;
             }
             let compaction = self
-                .compact_once(
-                    namespace_id,
-                    loonfs_core::MetadataCompactionPolicy::SizeTiered,
-                    observed.take(),
-                    cancellation,
-                )
+                .compact_once(namespace_id, observed.take(), cancellation)
                 .await?;
             let won = match compaction {
                 MetadataCompactionOutcome::Published { .. } => true,
@@ -223,7 +217,6 @@ impl Maintenance {
         namespace_id: &NamespaceId,
         claimed: Option<CompactorEpoch>,
         observed: Option<PublicationBasis>,
-        compaction_policy: loonfs_core::MetadataCompactionPolicy,
     ) -> Result<ControlFlow<MetadataCompactionOutcome, Option<PublicationBasis>>> {
         let (basis, from_position) = match observed {
             Some(basis) => (basis, false),
@@ -235,16 +228,11 @@ impl Maintenance {
                 None if claimed.is_some() => return Ok(ControlFlow::Continue(None)),
                 None => {
                     let current = self.load_live_basis(namespace_id).await?;
-                    return Ok(self
-                        .screen(namespace_id, claimed, current, compaction_policy)
-                        .await);
+                    return Ok(self.screen(namespace_id, claimed, current).await);
                 }
             },
         };
-        let basis = match self
-            .screen(namespace_id, claimed, basis, compaction_policy)
-            .await
-        {
+        let basis = match self.screen(namespace_id, claimed, basis).await {
             ControlFlow::Continue(Some(basis)) => basis,
             screened => return Ok(screened),
         };
@@ -267,9 +255,7 @@ impl Maintenance {
         } else {
             return Ok(ControlFlow::Continue(Some(basis)));
         };
-        Ok(self
-            .screen(namespace_id, claimed, basis, compaction_policy)
-            .await)
+        Ok(self.screen(namespace_id, claimed, basis).await)
     }
 
     /// Returns how a unit that plans from `basis` ends before it runs, or
@@ -283,7 +269,6 @@ impl Maintenance {
         namespace_id: &NamespaceId,
         claimed: Option<CompactorEpoch>,
         basis: PublicationBasis,
-        compaction_policy: loonfs_core::MetadataCompactionPolicy,
     ) -> ControlFlow<MetadataCompactionOutcome, Option<PublicationBasis>> {
         if let Some(epoch) = claimed.filter(|epoch| *epoch != basis.manifest.compactor_epoch()) {
             self.forget_fenced_compactor_epoch(namespace_id, epoch)
@@ -292,7 +277,7 @@ impl Maintenance {
         }
         if !self
             .engine(namespace_id)
-            .metadata_compaction_due(&basis.manifest, compaction_policy)
+            .metadata_compaction_due(&basis.manifest)
         {
             return ControlFlow::Break(MetadataCompactionOutcome::NotNeeded);
         }
@@ -325,7 +310,6 @@ impl Maintenance {
     pub(crate) async fn compact_once(
         &self,
         namespace_id: &NamespaceId,
-        compaction_policy: loonfs_core::MetadataCompactionPolicy,
         observed: Option<PublicationBasis>,
         cancellation: &MetadataCompactionCancellation,
     ) -> Result<MetadataCompactionOutcome> {
@@ -345,10 +329,7 @@ impl Maintenance {
             .await
             .get(namespace_id)
             .copied();
-        let basis = match self
-            .planning_basis(namespace_id, claimed, observed, compaction_policy)
-            .await?
-        {
+        let basis = match self.planning_basis(namespace_id, claimed, observed).await? {
             ControlFlow::Continue(basis) => basis,
             ControlFlow::Break(outcome) => return Ok(outcome),
         };
@@ -374,7 +355,7 @@ impl Maintenance {
         let started_at_ms = self.core.timer().monotonic_now_ms();
         let outcome = self
             .engine(namespace_id)
-            .compact_metadata_unit(basis, compaction_policy, compactor_epoch, cancellation)
+            .compact_metadata_unit(basis, compactor_epoch, cancellation)
             .await
             .map_err(Error::from);
         let elapsed_ms = self

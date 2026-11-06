@@ -747,7 +747,12 @@ fn delete_with_expected_inode_refuses_a_raced_rebinding() {
 #[tokio::test]
 async fn a_deleted_file_keeps_its_newest_revision_past_the_floor_and_undelete_restores_it() {
     let temp_dir = tempdir().expect("tempdir");
-    let fs = open_runtime_async(store(temp_dir.path()), "undelete-floor-test").await;
+    let fs = open_compacting_runtime_with_async(
+        store(temp_dir.path()),
+        "undelete-floor-test",
+        |builder| builder,
+    )
+    .await;
     let namespace_id = namespace_id("demo");
     let actor = loonfs_test_support::test_actor();
     fs.create_namespace(&namespace_id, &actor)

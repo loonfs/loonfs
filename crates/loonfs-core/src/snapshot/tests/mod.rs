@@ -7,7 +7,7 @@ mod snapshot_fork_gc;
 mod snapshot_renewal;
 
 use super::record;
-use crate::compaction::{CompactionUnitOutcome, MetadataCompactionPolicy};
+use crate::compaction::CompactionUnitOutcome;
 use crate::error::{CoreError, ErrorCode};
 use crate::manifest::tests::*;
 use crate::test_support::WriterAt;

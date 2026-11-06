@@ -258,7 +258,19 @@ async fn a_restore_finds_only_the_newest_revision_at_or_below_the_floor() {
     let store = recording_store(temp_dir.path());
     let clock = Arc::new(ManualClock::at_system_time());
     let namespace_id = namespace_id("restore");
-    let writer = runtime(&store, &clock, "writer").await;
+    // The writer's maintenance compacts every family group that has a delta
+    // run, so each compaction below ends in one base run per group.
+    let writer = LoonFs::builder_with_store(store.clone())
+        .writer_id(writer_id("writer"))
+        .config(loonfs::RuntimeConfig {
+            min_publish_interval_ms: 0,
+            ..loonfs::RuntimeConfig::default()
+        })
+        .wall_clock(clock.clone())
+        .run_policy(loonfs_core::test_support::one_delta_run_policy())
+        .build()
+        .await
+        .expect("build the runtime");
     writer
         .create_namespace(&namespace_id, &test_actor())
         .await

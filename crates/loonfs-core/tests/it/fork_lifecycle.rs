@@ -7,7 +7,7 @@ use crate::common::*;
 use bytes::Bytes;
 use loonfs_core::publish::FilesystemOperation;
 use loonfs_core::test_support::WriterAt;
-use loonfs_core::test_support::{namespace_store, NamespaceFixture};
+use loonfs_core::test_support::{compact_every_group, namespace_store, NamespaceFixture};
 use loonfs_core::{CoreError, ErrorCode};
 use loonfs_objectstore::keys::{content_blob, hint, metadata_manifest_object, pin};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -119,24 +119,8 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
         .expect("advance floor")
         .response;
     assert!(floor.retention_floor_seq > snapshot.captured_seq);
-    let mut compacted = false;
-    for _ in 0..16 {
-        let report = engine
-            .compact_metadata_unit(
-                None,
-                loonfs_core::MetadataCompactionPolicy::CompactImmediately,
-                loonfs_types::CompactorEpoch(0),
-                &loonfs_core::MetadataCompactionCancellation::default(),
-            )
-            .await
-            .expect("compact source");
-        match report {
-            loonfs_core::CompactionUnitOutcome::NotNeeded => break,
-            loonfs_core::CompactionUnitOutcome::Published { .. } => compacted = true,
-            other => panic!("expected bounded compaction, got {other:?}"),
-        }
-    }
-    assert!(compacted);
+    let (_, published) = compact_every_group(&store, &source).await;
+    assert!(published > 0);
     let mut aged = context.clone();
     aged.now_ms = u64::MAX / 4;
     let collected = namespace_store(&store, &source)
@@ -813,12 +797,14 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
         b"clone-after-fork"
     );
     let engine = namespace_engine(&store, &clone_namespace_id, &context);
+    let every_group_due = NamespaceFixture::new(&store, &clone_namespace_id, &context)
+        .with_run_policy(loonfs_core::test_support::one_delta_run_policy());
     let mut revisions_compacted = false;
     for _ in 0..16 {
-        let report = engine
+        let report = every_group_due
+            .engine()
             .compact_metadata_unit(
                 None,
-                loonfs_core::MetadataCompactionPolicy::CompactImmediately,
                 loonfs_types::CompactorEpoch(0),
                 &loonfs_core::MetadataCompactionCancellation::default(),
             )
@@ -907,21 +893,7 @@ async fn a_fork_removes_an_inherited_deletions_rows_without_a_writer_session() {
     let fork_rows = inode_rows(&store, &fork_namespace_id).await;
     assert_eq!(fork_rows, source_rows);
 
-    let fork = namespace_engine(&store, &fork_namespace_id, &context);
-    for _ in 0..16 {
-        let outcome = fork
-            .compact_metadata_unit(
-                None,
-                loonfs_core::MetadataCompactionPolicy::CompactImmediately,
-                loonfs_types::CompactorEpoch(0),
-                &loonfs_core::MetadataCompactionCancellation::default(),
-            )
-            .await
-            .expect("compact the fork");
-        if matches!(outcome, loonfs_core::CompactionUnitOutcome::NotNeeded) {
-            break;
-        }
-    }
+    compact_every_group(&store, &fork_namespace_id).await;
     assert_eq!(
         inode_rows(&store, &fork_namespace_id).await,
         fork_rows - 2,
@@ -1000,24 +972,8 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
         .expect("write descendant");
     let engine = namespace_engine(&store, &descendant, &context);
     engine.fold_wal().await.expect("fold descendant");
-    let mut compacted = false;
-    for _ in 0..16 {
-        match engine
-            .compact_metadata_unit(
-                None,
-                loonfs_core::MetadataCompactionPolicy::CompactImmediately,
-                loonfs_types::CompactorEpoch(0),
-                &loonfs_core::MetadataCompactionCancellation::default(),
-            )
-            .await
-            .expect("compact descendant")
-        {
-            loonfs_core::CompactionUnitOutcome::NotNeeded => break,
-            loonfs_core::CompactionUnitOutcome::Published { .. } => compacted = true,
-            other => panic!("expected compaction, got {other:?}"),
-        }
-    }
-    assert!(compacted);
+    let (_, published) = compact_every_group(&store, &descendant).await;
+    assert!(published > 0);
 
     namespace_engine(&store, &parent, &context)
         .delete_namespace(loonfs_core::DeleteNamespaceOptions::default())

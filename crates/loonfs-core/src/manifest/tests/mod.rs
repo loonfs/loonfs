@@ -42,7 +42,7 @@ use crate::compaction::publication::{input_segment_keys, CompactionPublication};
 use crate::compaction::retention::retention_clusters;
 use crate::compaction::run_iterator::locality_of;
 use crate::compaction::step::MetadataCompactionCancellation;
-use crate::compaction::{CompactionUnitOutcome, MetadataCompactionPolicy};
+use crate::compaction::CompactionUnitOutcome;
 use crate::error::{CoreError, ErrorCode, MetadataProjectionLoadError};
 use crate::metadata::{MetadataState, MetadataStateBuilder};
 use crate::namespace::state::NamespaceReadState;
@@ -57,7 +57,7 @@ use crate::segment::runs::{
 };
 use crate::segment::{data_block_load, index_block_load, row, scan};
 use crate::storage::content::prepare_stored_content;
-use crate::test_support::WriterAt;
+use crate::test_support::{drain_compaction, WriterAt};
 use crate::time::{OperationClock, StdMonotonicTimer};
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -385,48 +385,6 @@ fn compact_rows_with_retention(
     Ok(())
 }
 
-async fn drain_compaction<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    policy: MetadataRunPolicy,
-) -> (ManifestNo, usize) {
-    let mut published = 0;
-    loop {
-        let outcome = {
-            let mut fixture = crate::test_support::NamespaceFixture::new(
-                store,
-                namespace_id,
-                &crate::test_support::writer_at("test-writer", 0),
-            );
-            fixture.namespace.run_policy = policy;
-            fixture
-        }
-        .engine()
-        .compact_metadata_unit(
-            None,
-            MetadataCompactionPolicy::default(),
-            loonfs_types::CompactorEpoch(0),
-            &crate::compaction::MetadataCompactionCancellation::default(),
-        )
-        .await
-        .expect("compaction step");
-        match outcome {
-            CompactionUnitOutcome::Published { .. } => published += 1,
-            CompactionUnitOutcome::Abandoned | CompactionUnitOutcome::Fenced => continue,
-            CompactionUnitOutcome::NotNeeded => {
-                let manifest_no = crate::test_support::namespace_store(store, namespace_id)
-                    .load_current_manifest()
-                    .await
-                    .expect("read metadata manifest")
-                    .manifest()
-                    .manifest_no;
-                return (manifest_no, published);
-            }
-            other => panic!("an admitted unit should publish or find nothing, got {other:?}"),
-        }
-    }
-}
-
 /// Runs a unit over a plan made earlier, against the current manifest, the
 /// way `NamespaceEngine::compact_metadata_unit` runs the plan it makes.
 ///
@@ -598,13 +556,8 @@ pub(crate) async fn plan_a_family_group_compaction<S: ObjectStore + ?Sized>(
         .await
         .expect("load the current manifest");
     let payload = current.payload();
-    let spec = plan::plan_compaction(
-        payload,
-        &runs_newest_first(payload),
-        policy,
-        MetadataCompactionPolicy::default(),
-    )
-    .expect("a namespace with delta runs plans a unit");
+    let spec = plan::plan_compaction(payload, &runs_newest_first(payload), policy)
+        .expect("a namespace with delta runs plans a unit");
     (policy, spec)
 }
 

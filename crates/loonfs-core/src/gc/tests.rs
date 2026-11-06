@@ -2,7 +2,6 @@
 
 use super::options::GcOptions;
 use crate::commit::engine::{CommitCandidate, NamespaceCommitEngine};
-use crate::compaction::MetadataCompactionPolicy;
 use crate::error::CoreError;
 use crate::in_flight::{STORE_READS_IN_FLIGHT, STORE_WRITES_IN_FLIGHT};
 use crate::limits::{
@@ -1069,26 +1068,7 @@ async fn compact_below_the_floor<S: ObjectStore>(store: &S, namespace_id: &Names
         .fold_wal()
         .await
         .expect("fold the fence");
-    for _ in 0..16 {
-        let outcome = crate::test_support::NamespaceFixture::new(
-            store,
-            namespace_id,
-            &crate::test_support::writer_at("test-writer", 0),
-        )
-        .engine()
-        .compact_metadata_unit(
-            None,
-            MetadataCompactionPolicy::CompactImmediately,
-            loonfs_types::CompactorEpoch(0),
-            &crate::compaction::MetadataCompactionCancellation::default(),
-        )
-        .await
-        .expect("compact a family group");
-        if matches!(outcome, crate::compaction::CompactionUnitOutcome::NotNeeded) {
-            return;
-        }
-    }
-    panic!("compaction did not settle");
+    crate::test_support::compact_every_group(store, namespace_id).await;
 }
 
 async fn read_context<S: ObjectStore + ?Sized>(
@@ -1912,7 +1892,6 @@ async fn gc_reclaims_manifests_superseded_by_wal_folds() {
         .engine()
         .compact_metadata_unit(
             None,
-            MetadataCompactionPolicy::default(),
             loonfs_types::CompactorEpoch(0),
             &crate::compaction::MetadataCompactionCancellation::default(),
         )

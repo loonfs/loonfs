@@ -497,8 +497,9 @@ fn create_directory_request(commit_id: &str, absolute_path: &str) -> CommitInten
 async fn fenced_compaction_blocks_until_a_new_request_claims_and_publishes() {
     let temp_dir = tempdir().expect("tempdir");
     let store = store(temp_dir.path());
-    let first = open_runtime_async(store.clone(), "first").await;
-    let second = open_runtime_async(store.clone(), "second").await;
+    let first = open_compacting_runtime_with_async(store.clone(), "first", |builder| builder).await;
+    let second =
+        open_compacting_runtime_with_async(store.clone(), "second", |builder| builder).await;
     let namespace_id = namespace_id("demo");
     first
         .writer

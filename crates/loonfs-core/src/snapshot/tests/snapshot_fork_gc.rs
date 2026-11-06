@@ -75,10 +75,10 @@ impl Fixture {
             &source,
             &crate::test_support::writer_at("test-writer", 0),
         )
+        .with_run_policy(crate::test_support::one_delta_run_policy())
         .engine()
         .compact_metadata_unit(
             None,
-            MetadataCompactionPolicy::CompactImmediately,
             selected.compactor_epoch(),
             &crate::compaction::MetadataCompactionCancellation::default(),
         )

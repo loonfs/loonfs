@@ -53,6 +53,7 @@ struct CoreConfig {
     source: StoreSource,
     config: RuntimeConfig,
     session_fold_at_wal_objects: NonZeroU64,
+    run_policy: MetadataRunPolicy,
     store_kind: Option<ConfiguredObjectStoreKind>,
     /// `None` builds a private cache when the core opens.
     metadata_cache: Option<MetadataCache>,
@@ -78,6 +79,7 @@ impl<M> LoonFsBuilder<M> {
                 source,
                 config: RuntimeConfig::default(),
                 session_fold_at_wal_objects: FOLD_AT_WAL_OBJECTS,
+                run_policy: MetadataRunPolicy::default(),
                 store_kind: None,
                 metadata_cache: None,
                 execution_budget: None,
@@ -110,6 +112,19 @@ impl<M> LoonFsBuilder<M> {
     #[cfg(any(test, feature = "test-support"))]
     pub fn session_fold_at_wal_objects(mut self, objects: NonZeroU64) -> Self {
         self.core.session_fold_at_wal_objects = objects;
+        self
+    }
+
+    /// Sets the run policy that the runtime's namespaces compact under, in
+    /// place of [`MetadataRunPolicy::default`], so that a test can make a
+    /// compaction unit due after a few folds.
+    ///
+    /// A test hook, available through the `test-support` feature. The
+    /// execution budget's compaction input bound still replaces the policy's
+    /// `max_decoded_input_bytes_per_step`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn run_policy(mut self, policy: MetadataRunPolicy) -> Self {
+        self.core.run_policy = policy;
         self
     }
 
@@ -302,7 +317,7 @@ impl CoreConfig {
         });
         let run_policy = MetadataRunPolicy {
             max_decoded_input_bytes_per_step: execution_budget.max_compaction_input_bytes(),
-            ..MetadataRunPolicy::default()
+            ..self.run_policy
         };
         // Bind the cache to the store the caller supplied, not to the metrics
         // wrapper below. Each runtime builds its own wrapper, so runtimes over

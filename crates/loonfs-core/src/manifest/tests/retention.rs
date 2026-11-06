@@ -1956,7 +1956,6 @@ async fn checkpoints_append_past_the_threshold_and_compaction_drains() {
         .engine()
         .compact_metadata_unit(
             None,
-            MetadataCompactionPolicy::default(),
             loonfs_types::CompactorEpoch(0),
             &crate::compaction::MetadataCompactionCancellation::default(),
         )
@@ -2041,7 +2040,6 @@ async fn a_unit_honors_its_run_budget_and_reads_only_the_selected_runs() {
     .engine()
     .compact_metadata_unit(
         None,
-        MetadataCompactionPolicy::default(),
         loonfs_types::CompactorEpoch(0),
         &crate::compaction::MetadataCompactionCancellation::default(),
     )
@@ -2118,7 +2116,6 @@ async fn bounded_compaction_reaches_the_unbounded_state_and_preserves_intermedia
     .engine()
     .compact_metadata_unit(
         None,
-        MetadataCompactionPolicy::default(),
         loonfs_types::CompactorEpoch(0),
         &crate::compaction::MetadataCompactionCancellation::default(),
     )
@@ -2197,7 +2194,6 @@ async fn bounded_compaction_reaches_the_unbounded_state_and_preserves_intermedia
     .engine()
     .compact_metadata_unit(
         None,
-        MetadataCompactionPolicy::default(),
         loonfs_types::CompactorEpoch(0),
         &crate::compaction::MetadataCompactionCancellation::default(),
     )
@@ -2412,7 +2408,6 @@ async fn compaction_resumes_from_the_manifest_after_interruption() {
     .engine()
     .compact_metadata_unit(
         None,
-        MetadataCompactionPolicy::default(),
         loonfs_types::CompactorEpoch(0),
         &crate::compaction::MetadataCompactionCancellation::default(),
     )
@@ -2444,7 +2439,6 @@ async fn compaction_resumes_from_the_manifest_after_interruption() {
         .engine()
         .compact_metadata_unit(
             None,
-            MetadataCompactionPolicy::default(),
             loonfs_types::CompactorEpoch(0),
             &crate::compaction::MetadataCompactionCancellation::default(),
         )
@@ -2625,7 +2619,6 @@ async fn over_budget_compaction_aborts_without_publishing() {
     .engine()
     .compact_metadata_unit(
         None,
-        MetadataCompactionPolicy::default(),
         loonfs_types::CompactorEpoch(0),
         &crate::compaction::MetadataCompactionCancellation::default(),
     )
@@ -2655,7 +2648,6 @@ async fn over_budget_compaction_aborts_without_publishing() {
     .engine()
     .compact_metadata_unit(
         None,
-        MetadataCompactionPolicy::default(),
         loonfs_types::CompactorEpoch(0),
         &crate::compaction::MetadataCompactionCancellation::default(),
     )
@@ -2681,7 +2673,6 @@ async fn plan_window<S: ObjectStore + ?Sized>(
         super::plan::select_family_group(
             segments.scan_runs.as_ref(),
             segments.manifest().payload(),
-            MetadataCompactionPolicy::default(),
             policy,
         )
         .expect("a family group with delta rows to compact")
@@ -2691,7 +2682,6 @@ async fn plan_window<S: ObjectStore + ?Sized>(
         segments.scan_runs.as_ref(),
         group,
         policy,
-        MetadataCompactionPolicy::default(),
     )
     .expect("plan the group");
     (group, spec)
@@ -2715,7 +2705,6 @@ async fn compact_with<S: ObjectStore + ?Sized>(
     .engine()
     .compact_metadata_unit(
         None,
-        MetadataCompactionPolicy::default(),
         loonfs_types::CompactorEpoch(0),
         &crate::compaction::MetadataCompactionCancellation::default(),
     )

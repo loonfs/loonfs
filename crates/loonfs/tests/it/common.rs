@@ -173,8 +173,10 @@ pub(crate) fn metadata_options(max_wal_tail_objects: u64) -> MaintainMetadataOpt
     }
 }
 
-/// Runs explicit compaction until no family group is due, so every group
-/// ends in one base run and the retention floor's rules have been applied.
+/// Runs compaction units until no family group is due. Under a run policy
+/// whose delta run limit is one, such as the maintenance runtime of
+/// [`open_compacting_runtime_with_async`] has, every group ends in one base
+/// run and the retention floor's rules have been applied.
 pub(crate) async fn compact_until_done(maintenance: &Maintenance, namespace_id: &NamespaceId) {
     for _ in 0..32 {
         let step = maintenance
@@ -237,6 +239,29 @@ pub(crate) async fn open_runtime_with_async(
     writer_id: &str,
     configure: impl FnOnce(LoonFsBuilder<Writable>) -> LoonFsBuilder<Writable>,
 ) -> TestRuntime {
+    open_fixture(store, writer_id, configure, |builder| builder).await
+}
+
+/// Opens the fixture like [`open_runtime_with_async`], with a maintenance
+/// runtime whose run policy has a delta run limit of one, so that
+/// [`compact_until_done`] leaves one base run in each family group.
+pub(crate) async fn open_compacting_runtime_with_async(
+    store: SharedObjectStore,
+    writer_id: &str,
+    configure: impl FnOnce(LoonFsBuilder<Writable>) -> LoonFsBuilder<Writable>,
+) -> TestRuntime {
+    open_fixture(store, writer_id, configure, |builder| {
+        builder.run_policy(loonfs_core::test_support::one_delta_run_policy())
+    })
+    .await
+}
+
+async fn open_fixture(
+    store: SharedObjectStore,
+    writer_id: &str,
+    configure: impl FnOnce(LoonFsBuilder<Writable>) -> LoonFsBuilder<Writable>,
+    configure_maintenance: impl FnOnce(LoonFsBuilder<Writable>) -> LoonFsBuilder<Writable>,
+) -> TestRuntime {
     let writer = configure(
         LoonFs::builder_with_store(store.clone())
             .writer_id(loonfs_test_support::ids::writer_id(writer_id)),
@@ -245,12 +270,14 @@ pub(crate) async fn open_runtime_with_async(
     .await
     .expect("build writer");
     let reader = writer.read_only();
-    let maintenance = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id(writer_id))
-        .build()
-        .await
-        .expect("build maintenance")
-        .maintenance(loonfs_test_support::ids::writer_id(writer_id));
+    let maintenance = configure_maintenance(
+        LoonFs::builder_with_store(store.clone())
+            .writer_id(loonfs_test_support::ids::writer_id(writer_id)),
+    )
+    .build()
+    .await
+    .expect("build maintenance")
+    .maintenance(loonfs_test_support::ids::writer_id(writer_id));
     TestRuntime {
         writer,
         reader,

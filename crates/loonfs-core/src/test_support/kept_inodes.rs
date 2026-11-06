@@ -10,7 +10,7 @@ use crate::manifest::metadata_basis_from_manifest;
 use crate::manifest::publish::encode_manifest;
 use crate::metadata::InodeRecord;
 use crate::namespace::control::LoadedManifest;
-use crate::segment::runs::{runs_newest_first, MetadataRunPolicy};
+use crate::segment::runs::{runs_newest_first, MetadataRunManifest, MetadataRunPolicy};
 use crate::time::OperationClock;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{MetadataRow, NamespaceManifestEnvelope, RunTier};
@@ -44,28 +44,12 @@ pub async fn compact_groups_without_false_positives<S: ObjectStore + ?Sized>(
                 .await
                 .expect("load the current manifest");
             let payload = current.payload();
-            let mut runs = runs_newest_first(payload)
-                .into_iter()
-                .filter(|run| group_run_descriptors(run, group).next().is_some())
-                .collect::<Vec<_>>();
-            runs.sort_by_key(|run| (run.tier != RunTier::Base, run.run_seq));
-            compacted_every_run = runs.len() <= max_runs;
-            if runs.is_empty() {
+            let runs = group_runs_base_first(&current, group).len();
+            compacted_every_run = runs <= max_runs;
+            if runs == 0 {
                 break;
             }
-            runs.truncate(max_runs);
-            let spec = MetadataCompactionSpec::new(
-                group,
-                runs.iter().map(|run| run.run_no).collect(),
-                runs.iter()
-                    .flat_map(|run| group_run_descriptors(run, group))
-                    .map(|descriptor| descriptor.row_count)
-                    .sum(),
-                CompactionPlacement::Base {
-                    output_seq: payload.head_seq,
-                },
-                payload.retention_floor_seq,
-            );
+            let spec = whole_group_spec(&current, group);
             let mut seed = None;
             for offset in 0..64 {
                 let candidate = RunNo(payload.next_run_no.0 + offset);
@@ -89,6 +73,47 @@ pub async fn compact_groups_without_false_positives<S: ObjectStore + ?Sized>(
             "{group:?} is compacted into one base run"
         );
     }
+}
+
+/// The plan of a base compaction of `group`'s oldest runs in `current`, up
+/// to the default run policy's `max_input_runs_per_step`, base first.
+///
+/// The output is the group's base run at the manifest's head, and the
+/// compaction judges rows against the manifest's retention floor. A group
+/// with no more runs than that bound is compacted whole.
+pub(crate) fn whole_group_spec(
+    current: &LoadedManifest,
+    group: MetadataFamilyGroup,
+) -> MetadataCompactionSpec {
+    let payload = current.payload();
+    let mut runs = group_runs_base_first(current, group);
+    runs.truncate(MetadataRunPolicy::default().max_input_runs_per_step.get());
+    MetadataCompactionSpec::new(
+        group,
+        runs.iter().map(|run| run.run_no).collect(),
+        runs.iter()
+            .flat_map(|run| group_run_descriptors(run, group))
+            .map(|descriptor| descriptor.row_count)
+            .sum(),
+        CompactionPlacement::Base {
+            output_seq: payload.head_seq,
+        },
+        payload.retention_floor_seq,
+    )
+}
+
+/// The runs of `current` that list rows of `group`, the base first and then
+/// the delta runs from oldest to newest.
+fn group_runs_base_first(
+    current: &LoadedManifest,
+    group: MetadataFamilyGroup,
+) -> Vec<MetadataRunManifest> {
+    let mut runs = runs_newest_first(current.payload())
+        .into_iter()
+        .filter(|run| group_run_descriptors(run, group).next().is_some())
+        .collect::<Vec<_>>();
+    runs.sort_by_key(|run| (run.tier != RunTier::Base, run.run_seq));
+    runs
 }
 
 /// An inode row for `inode_id`, which a kept inode filter keeps exactly when

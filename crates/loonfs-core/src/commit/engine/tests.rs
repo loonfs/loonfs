@@ -1025,7 +1025,7 @@ async fn writer_after_own_compaction<'a>(
     WriterAt,
     PublishedManifest,
 ) {
-    use crate::compaction::{CompactionUnitOutcome, MetadataCompactionPolicy};
+    use crate::compaction::CompactionUnitOutcome;
 
     let (mut engine, timer, writer) = writer_after_one_publish(store, namespace_id).await;
     // Move the position after each fold, as the publisher does.
@@ -1050,12 +1050,12 @@ async fn writer_after_own_compaction<'a>(
             &crate::test_support::writer_at("test-writer", 0),
         );
         fixture.namespace.segment_cache = Arc::clone(&engine.namespace.segment_cache);
+        fixture.namespace.run_policy = crate::test_support::one_delta_run_policy();
         fixture
     }
     .engine()
     .compact_metadata_unit(
         None,
-        MetadataCompactionPolicy::CompactImmediately,
         current.compactor_epoch(),
         &crate::compaction::MetadataCompactionCancellation::default(),
     )

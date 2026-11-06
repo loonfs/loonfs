@@ -190,21 +190,22 @@ async fn pinned_views_add_segment_reads_only_for_uncovered_layout_segments() {
             .await
             .expect("pin the previous manifest");
         if own_runs {
+            let mut fixture = crate::test_support::NamespaceFixture::new(
+                &store,
+                &namespace_id,
+                &crate::test_support::writer_at("test-writer", 0),
+            );
+            fixture.namespace.run_policy = crate::test_support::one_delta_run_policy();
             for _ in 0..16 {
-                let outcome = crate::test_support::NamespaceFixture::new(
-                    &store,
-                    &namespace_id,
-                    &crate::test_support::writer_at("test-writer", 0),
-                )
-                .engine()
-                .compact_metadata_unit(
-                    None,
-                    MetadataCompactionPolicy::CompactImmediately,
-                    loonfs_types::CompactorEpoch(0),
-                    &crate::compaction::MetadataCompactionCancellation::default(),
-                )
-                .await
-                .expect("compact");
+                let outcome = fixture
+                    .engine()
+                    .compact_metadata_unit(
+                        None,
+                        loonfs_types::CompactorEpoch(0),
+                        &crate::compaction::MetadataCompactionCancellation::default(),
+                    )
+                    .await
+                    .expect("compact");
                 if matches!(
                     outcome,
                     CompactionUnitOutcome::Published {
@@ -313,21 +314,22 @@ async fn a_collection_reads_each_extent_filter_once_however_many_pinned_views_li
     assert_eq!((base.len(), segments.len()), (1, DELTA_RUNS + 1));
     // Compacting the layouts replaces the base, so each fold's manifest except
     // the last adds a layout segment that no earlier root lists.
+    let mut fixture = crate::test_support::NamespaceFixture::new(
+        setup_store,
+        &namespace_id,
+        &crate::test_support::writer_at("test-writer", 0),
+    );
+    fixture.namespace.run_policy = crate::test_support::one_delta_run_policy();
     while !matches!(
-        crate::test_support::NamespaceFixture::new(
-            setup_store,
-            &namespace_id,
-            &crate::test_support::writer_at("test-writer", 0)
-        )
-        .engine()
-        .compact_metadata_unit(
-            None,
-            MetadataCompactionPolicy::CompactImmediately,
-            loonfs_types::CompactorEpoch(0),
-            &crate::compaction::MetadataCompactionCancellation::default()
-        )
-        .await
-        .expect("compact"),
+        fixture
+            .engine()
+            .compact_metadata_unit(
+                None,
+                loonfs_types::CompactorEpoch(0),
+                &crate::compaction::MetadataCompactionCancellation::default()
+            )
+            .await
+            .expect("compact"),
         CompactionUnitOutcome::Published {
             group: loonfs_types::MetadataFamilyGroup::ContentLayouts,
             ..

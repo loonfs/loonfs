@@ -12,18 +12,17 @@ Compaction works on family groups, which [Metadata rows and row keys](../specs/f
 
 Within a group, the automatic size-tiered policy looks for a size tier, as [Compaction windows](../specs/format.md#102-compaction-windows) describes. A tier starts at a run and grows toward older runs while each older run is at most four times the size of the smallest run already in it. The newest tier of at least four runs (`MetadataRunPolicy::min_compaction_runs`) is due, and the unit compacts the whole tier, up to eight runs. A tier reaches the base when the base is at most four times the tier's smallest run, so the base is rewritten after newer runs of at least a quarter of its size build up. A group with eight delta runs (`MetadataRunPolicy::max_delta_runs`) and no tier compacts a window of its newest runs. The window starts with the two newest runs and grows toward older runs while each older run is at most four times the total size of the runs already in it. Stored bytes and row counts come from the manifest's descriptors, so planning reads no segment.
 
-The unit compacts the whole window it selects, whatever its size. `Maintenance::compact_metadata` compacts a group's runs whatever their sizes, one window per call.
+The unit compacts the whole window it selects, whatever its size.
 
-| Policy or bound | Behavior |
+| Rule or bound | Behavior |
 | --- | --- |
-| `SizeTiered` | Compacts a tier of at least four runs of similar size, or a window of a group's newest runs once the group has eight delta runs. |
-| `CompactImmediately` | Compacts a group's runs whatever their sizes, for explicit compaction. A group of more than eight runs compacts the runs above a large base first. |
-| Eight-run limit | Applies to every unit, including explicit requests. |
+| Size tiering | Compacts a tier of at least four runs of similar size, or a window of a group's newest runs once the group has eight delta runs. |
+| Eight-run limit | Applies to every unit. |
 | Compaction input | At most 64 MiB of decoded data-block input in memory at once. |
 
-A large backlog can need several publications. Explicit compaction rewrites one window per call, so a caller repeats the call for as long as it publishes. Automatic size tiering reduces repeated rewrites of the base, but obsolete metadata can stay until enough newer data builds up.
+A large backlog needs several units. Each unit rewrites one window, and a maintenance pass runs units while one is due. Size tiering reduces repeated rewrites of the base, but obsolete metadata can stay until enough newer data builds up.
 
-A compaction that starts at the group's oldest run produces a base run, and it can remove rows under the format's retention rules. A compaction that starts above the oldest run produces a delta run, and it keeps every row. Explicit compaction can promote a lone delta to become the group's base.
+A compaction that starts at the group's oldest run produces a base run, and it can remove rows under the format's retention rules. A compaction that starts above the oldest run produces a delta run, and it keeps every row.
 
 Why can't a compaction above the oldest run remove rows? An excluded older run might contain rows that a row in the window supersedes, such as an older binding version below an unbound one, or a listed deletion whose removal row is in the window.
 

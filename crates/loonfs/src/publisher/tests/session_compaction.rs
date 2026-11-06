@@ -440,9 +440,41 @@ async fn maintenance_values_from_one_runtime_share_one_compactor_claim() {
         "the session's compaction claims the namespace once"
     );
 
-    for index in 0..2 {
-        write_and_settle(&writer, &namespace, &format!("/direct-{index}")).await;
+    // The direct value needs a unit that the session's own compaction didn't
+    // run. Another process folds each of the next writes while this
+    // runtime's fold permits are held, so the session's fold finds its tail
+    // folded and starts no compaction, and the folded delta runs make a size
+    // tier due.
+    let mut permits = Vec::new();
+    for _ in 0..crate::DEFAULT_MAX_CONCURRENT_FOLDS.get() {
+        permits.push(writer.execution_budget().fold_permit().await);
     }
+    for index in 0..DEFAULT_MIN_COMPACTION_RUNS.get() {
+        namespace
+            .put_file(
+                &format!("/direct-{index}"),
+                b"body",
+                &loonfs_test_support::test_actor(),
+            )
+            .await
+            .expect("put a file");
+        loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)
+            .fold_wal_tail(
+                None,
+                &loonfs_core::time::OperationClock::start(
+                    0,
+                    loonfs_core::test_support::std_timer(),
+                ),
+            )
+            .await
+            .expect("fold the write in another process");
+    }
+    drop(permits);
+    namespace
+        .wait_for_fold()
+        .await
+        .expect("the session's fold settles");
+    writer.drain().await.expect("the session settles");
     let direct = writer.maintenance(loonfs_test_support::ids::writer_id("direct-maintenance"));
     assert_matches!(
         direct

@@ -200,7 +200,6 @@ impl Maintenance {
                 let compaction = self
                     .compact_once(
                         namespace_id,
-                        loonfs_core::MetadataCompactionPolicy::SizeTiered,
                         observed,
                         &MetadataCompactionCancellation::default(),
                     )
@@ -331,12 +330,13 @@ impl Maintenance {
         .await
     }
 
-    /// Runs one metadata compaction unit in the caller's task. The unit
-    /// compacts a family group's runs whatever their sizes, one window per
-    /// call.
+    /// Runs one metadata compaction unit in the caller's task when one is
+    /// due under the namespace's run policy. The unit is the same size-tiered
+    /// unit that [`Self::maintain_metadata`] runs after its fold check, and
+    /// the call reports that no unit was needed when nothing is due.
     ///
-    /// Repeat the call while it publishes to compact every eligible group.
-    /// The unit waits for a compaction permit from the runtime's execution
+    /// Repeat the call while it publishes to compact every due window. The
+    /// unit waits for a compaction permit from the runtime's execution
     /// budget.
     ///
     /// Cancelling `cancellation` ends the wait for a permit and reports the
@@ -350,12 +350,7 @@ impl Maintenance {
             operation_span!(self.core, "compact_metadata", namespace_id),
             async {
                 let compaction = self
-                    .compact_once(
-                        namespace_id,
-                        loonfs_core::MetadataCompactionPolicy::CompactImmediately,
-                        None,
-                        cancellation.metadata_compaction(),
-                    )
+                    .compact_once(namespace_id, None, cancellation.metadata_compaction())
                     .await?;
                 Ok(MetadataCompactionReport {
                     namespace_id: namespace_id.clone(),
