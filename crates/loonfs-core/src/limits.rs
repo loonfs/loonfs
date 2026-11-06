@@ -127,17 +127,6 @@ pub const MAX_POSITION_MOVES: usize = 8;
 /// which takes about one round trip.
 pub const MANIFEST_PROBE_WINDOW: usize = 8;
 
-/// The shortest interval between the starts of two raises of one
-/// namespace's hint by one runtime.
-///
-/// Every raise writes the same hint object with compare-and-swap, and some
-/// providers accept about one write per second to one object (see the
-/// provider reference, "Frequently used data points"). A runtime skips a
-/// raise that would start sooner instead of waiting, and raises the hint once
-/// more when the interval ends, so the hint can lag the newest manifest by
-/// the publications of the last interval.
-pub const HINT_RAISE_INTERVAL_MS: u64 = 1_000;
-
 /// Unfolded WAL bytes that make a WAL fold due.
 ///
 /// Unfolded WAL bytes are the stored sizes of the WAL objects above the

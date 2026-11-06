@@ -663,7 +663,7 @@ An idle namespace costs no requests between sweeps. A sweep costs one list reque
 | Sweep | Grep not maintained | Grep maintained, index not enabled | Grep index enabled |
 | --- | --- | --- | --- |
 | Does not collect | 14 GET or HEAD | 18 GET or HEAD | 19 GET or HEAD |
-| Collects | 20 GET or HEAD and 9 LIST | 24 GET or HEAD and 9 LIST | 26 GET or HEAD and 9 LIST |
+| Collects | 20 GET or HEAD and 9 LIST | 24 GET or HEAD and 9 LIST | 25 GET or HEAD and 9 LIST |
 
 In a sweep that collects, each object that's still inside its collection grace adds a request, and a namespace with work due adds the requests for that work. Deleted namespaces stay listed, so each one keeps this cost on every sweep. Core metadata still costs 6 requests per namespace, the acknowledgment of the retention floor adds 4, the retention advance adds 4, and garbage collection adds 15, for a total of 29. For example, a server with 1,000 caught-up idle namespaces and no grep sends no requests for them between sweeps, and about 29,000 on each daily sweep, plus the namespace listing.
 

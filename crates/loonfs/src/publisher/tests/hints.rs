@@ -1,19 +1,19 @@
-//! The hint raises that follow this runtime's manifest publications: which
-//! publications raise the hint, and how often.
+//! Tests for the hint raises that follow this runtime's manifest
+//! publications. Every publication raises the hint once, and a raise that
+//! fails or loses its compare-and-swap doesn't change the publication's
+//! result.
 
 use super::*;
-use loonfs_core::limits::HINT_RAISE_INTERVAL_MS;
-use loonfs_test_support::clock::TokioClock;
-use loonfs_types::MonotonicTimer;
+use loonfs_types::ManifestNo;
 use std::num::NonZeroU64;
 
-/// The store under a raise fixture: it parks the requests for the hint once
-/// a test arms it, records the requests for the hint, and fails the
-/// compare-and-swap writes of the hint that a test asks it to fail.
+/// The store under a raise fixture. It parks the next compare-and-swap write
+/// of the hint when a test asks it to, records the requests for the hint,
+/// and fails the compare-and-swap writes of the hint that a test asks it to
+/// fail.
 type RaiseStore = BlockingStore<RecordingStore<FailStore<LocalFsStore>>>;
 
-/// A writer whose monotonic timer is a test clock, with one namespace that it
-/// created and opened.
+/// A writer with one namespace that it created and opened.
 struct RaiseFixture {
     _directory: tempfile::TempDir,
     store: Arc<RaiseStore>,
@@ -24,7 +24,7 @@ struct RaiseFixture {
 }
 
 impl RaiseFixture {
-    async fn new(timer: Arc<dyn MonotonicTimer>) -> Self {
+    async fn new() -> Self {
         let directory = tempdir().expect("tempdir");
         let namespace_id = NamespaceId::parse("raised").expect("namespace id");
         let store = Arc::new(BlockingStore::new(
@@ -38,7 +38,7 @@ impl RaiseFixture {
                 KeyPredicate::hint(&namespace_id),
             ),
             KeyPredicate::hint(&namespace_id),
-            OperationSelector::Any,
+            OperationSelector::CompareAndSwap,
         ));
         let writer = crate::LoonFs::builder_with_store(store.clone() as SharedStore)
             .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
@@ -46,7 +46,7 @@ impl RaiseFixture {
                 min_publish_interval_ms: 0,
                 ..crate::RuntimeConfig::default()
             })
-            .monotonic_timer(timer)
+            .monotonic_timer(Arc::new(ManualClock::new(0)))
             .build()
             .await
             .expect("build writer");
@@ -78,10 +78,10 @@ impl RaiseFixture {
             .expect("commit");
     }
 
-    /// Commits, and then folds the commit with an explicit fold, which
-    /// returns within ten seconds, and returns the fold's manifest number.
-    async fn commit_and_fold(&mut self) -> u64 {
-        self.commit().await;
+    /// Folds the session's tail with an explicit fold, and returns the fold's
+    /// manifest number. The test fails if the fold doesn't return within ten
+    /// seconds.
+    async fn fold(&self) -> u64 {
         let folded = bounded(
             Duration::from_secs(10),
             self.writer
@@ -95,10 +95,23 @@ impl RaiseFixture {
         folded.manifest_no.0
     }
 
-    /// Returns the hint's manifest number, read past the gate and the
-    /// request log.
+    /// Commits, and then folds the commit, and returns the fold's manifest
+    /// number.
+    async fn commit_and_fold(&mut self) -> u64 {
+        self.commit().await;
+        self.fold().await
+    }
+
+    /// Returns the local store that sits under the gate, the request log,
+    /// and the injected failures.
+    fn local_store(&self) -> &LocalFsStore {
+        self.store.inner().inner().inner()
+    }
+
+    /// Returns the hint's manifest number, read directly from the local
+    /// store so that the read bypasses the gate and the request log.
     async fn hint(&self) -> u64 {
-        hint_manifest_no(self.store.inner().inner().inner(), &self.namespace_id)
+        hint_manifest_no(self.local_store(), &self.namespace_id)
             .await
             .0
     }
@@ -108,89 +121,96 @@ impl RaiseFixture {
     fn hint_writes(&self) -> usize {
         self.store.inner().counts().compare_and_swaps
     }
-
-    /// Waits until the hint reaches `manifest_no`, and reads the hint once
-    /// for each millisecond of the paused test clock until then.
-    async fn wait_for_hint(&self, manifest_no: u64) {
-        bounded(Duration::from_secs(10), async {
-            while self.hint().await != manifest_no {
-                sleep_ms(1).await;
-            }
-        })
-        .await
-        .expect("the hint reaches the manifest");
-    }
 }
 
-/// Moves the paused test clock, and with it a [`TokioClock`], forward by
-/// `elapsed_ms`.
-async fn advance_ms(elapsed_ms: u64) {
-    tokio::time::advance(Duration::from_millis(elapsed_ms)).await;
-}
-
-/// Checks that publications less than `HINT_RAISE_INTERVAL_MS` after the
-/// runtime's last raise of the namespace's hint return without a request for
-/// the hint, so they don't wait for a raise, that one trailing raise raises
-/// the hint to the newest of their manifests once the interval ends, and that
-/// a publication an interval after the trailing raise raises the hint at
-/// once.
-#[tokio::test(start_paused = true)]
-async fn the_raises_an_interval_skips_share_one_trailing_raise_when_it_ends() {
-    let mut fixture = RaiseFixture::new(Arc::new(TokioClock::start())).await;
+/// Checks that publications of one namespace in quick succession each raise
+/// the hint with one compare-and-swap write, so the hint records the newest
+/// manifest after each publication.
+#[tokio::test]
+async fn publications_in_quick_succession_each_raise_the_hint() {
+    let mut fixture = RaiseFixture::new().await;
     fixture.commit().await;
     fixture.writer.drain().await.expect("drain");
     assert_eq!(fixture.hint().await, 2, "the claim raises the hint");
     assert_eq!(fixture.hint_writes(), 1);
-    // The gate parks every request for the hint, so a fold that read or
-    // wrote the hint wouldn't return.
-    fixture.store.arm();
     assert_eq!(fixture.commit_and_fold().await, 3);
-    advance_ms(HINT_RAISE_INTERVAL_MS / 2).await;
-    assert_eq!(fixture.commit_and_fold().await, 4);
-    advance_ms(HINT_RAISE_INTERVAL_MS / 2 - 1).await;
-    assert_eq!(fixture.commit_and_fold().await, 5);
-    assert_eq!(fixture.hint().await, 2);
-    fixture.store.release();
-    advance_ms(1).await;
-    fixture.wait_for_hint(5).await;
-    assert_eq!(fixture.hint_writes(), 2, "one trailing raise");
-    advance_ms(HINT_RAISE_INTERVAL_MS).await;
-    assert_eq!(fixture.commit_and_fold().await, 6);
-    assert_eq!(fixture.hint().await, 6);
-    assert_eq!(fixture.hint_writes(), 3);
-    fixture.writer.shutdown().await.expect("shut down");
-}
-
-/// Checks that a failed raise doesn't fail the publication that started it,
-/// that it counts as the interval's raise, so the interval's trailing raise
-/// raises the hint when the interval ends, and that the first publication an
-/// interval after the trailing raise raises the hint at once.
-#[tokio::test(start_paused = true)]
-async fn a_failed_raise_is_ignored_and_a_publication_an_interval_later_raises_the_hint() {
-    let mut fixture = RaiseFixture::new(Arc::new(TokioClock::start())).await;
-    fixture.store.inner().inner().fail_next(1);
-    fixture.commit().await;
-    fixture.writer.drain().await.expect("drain");
-    assert_eq!(fixture.hint().await, 1, "the claim's raise failed");
-    assert_eq!(fixture.commit_and_fold().await, 3);
-    assert_eq!(fixture.hint().await, 1);
-    assert_eq!(fixture.hint_writes(), 1);
-    advance_ms(HINT_RAISE_INTERVAL_MS).await;
-    fixture.wait_for_hint(3).await;
-    assert_eq!(fixture.hint_writes(), 2, "one trailing raise");
-    advance_ms(HINT_RAISE_INTERVAL_MS).await;
+    assert_eq!(fixture.hint().await, 3);
+    assert_eq!(fixture.hint_writes(), 2);
     assert_eq!(fixture.commit_and_fold().await, 4);
     assert_eq!(fixture.hint().await, 4);
     assert_eq!(fixture.hint_writes(), 3);
     fixture.writer.shutdown().await.expect("shut down");
 }
 
-/// Checks that a reader that discovers the namespace past a hint that lags
-/// leaves the hint where it was.
+/// Checks that a failed raise doesn't fail the publication that started it
+/// and isn't retried, so the hint stays behind until the next publication
+/// raises it.
+#[tokio::test]
+async fn a_failed_raise_is_ignored_and_the_next_publication_raises_the_hint() {
+    let mut fixture = RaiseFixture::new().await;
+    fixture.store.inner().inner().fail_next(1);
+    fixture.commit().await;
+    fixture.writer.drain().await.expect("drain");
+    assert_eq!(fixture.hint().await, 1, "the claim's raise failed");
+    assert_eq!(fixture.hint_writes(), 1, "the failed raise isn't retried");
+    assert_eq!(fixture.commit_and_fold().await, 3);
+    assert_eq!(fixture.hint().await, 3);
+    assert_eq!(fixture.hint_writes(), 2);
+    fixture.writer.shutdown().await.expect("shut down");
+}
+
+/// Checks that a raise whose compare-and-swap loses to another raise of the
+/// same hint doesn't change the publication's result, isn't retried, and
+/// leaves the hint as the other raise wrote it.
+#[tokio::test]
+async fn a_raise_that_loses_its_swap_leaves_the_publication_and_the_other_raise() {
+    let mut fixture = RaiseFixture::new().await;
+    fixture.commit().await;
+    fixture.writer.drain().await.expect("drain");
+    assert_eq!(fixture.hint().await, 2);
+    fixture.commit().await;
+    // The gate parks the fold's raise after it has read the hint, and the
+    // other raise writes the hint while the fold's write waits.
+    fixture.store.block_next();
+    let other_raise = async {
+        fixture.store.wait_until_blocked().await;
+        let raised = loonfs_core::test_support::namespace_store(
+            fixture.local_store(),
+            &fixture.namespace_id,
+        )
+        .raise_hint(ManifestNo(3), None)
+        .await
+        .expect("the other raise");
+        fixture.store.release();
+        raised
+    };
+    let (folded, raised) = tokio::join!(fixture.fold(), other_raise);
+    assert_eq!(folded, 3, "the lost raise leaves the fold's result");
+    assert_eq!(fixture.hint().await, 3);
+    let hint = fixture
+        .local_store()
+        .head(&loonfs_objectstore::keys::hint(&fixture.namespace_id))
+        .await
+        .expect("head the hint")
+        .expect("the hint exists");
+    assert_eq!(
+        hint.etag.as_deref(),
+        Some(raised.etag.as_str()),
+        "the hint is the version that the other raise wrote"
+    );
+    assert_eq!(fixture.hint_writes(), 2, "the lost raise isn't retried");
+    fixture.writer.shutdown().await.expect("shut down");
+}
+
+/// Checks that a reader that starts at a hint that lags, and probes forward
+/// to the newer manifest, doesn't write the hint.
 #[tokio::test]
 async fn a_reader_never_writes_the_hint() {
-    let mut fixture = RaiseFixture::new(Arc::new(ManualClock::new(0))).await;
+    let mut fixture = RaiseFixture::new().await;
     fixture.commit().await;
+    fixture.writer.drain().await.expect("drain");
+    // The fold's raise fails, so the hint stays at the claim's manifest.
+    fixture.store.inner().inner().fail_next(1);
     assert_eq!(fixture.commit_and_fold().await, 3);
     fixture.writer.drain().await.expect("drain");
     assert_eq!(fixture.hint().await, 2);
@@ -210,8 +230,8 @@ async fn a_reader_never_writes_the_hint() {
     fixture.writer.shutdown().await.expect("shut down");
 }
 
-/// A publication that a coverage case makes after its namespace's first
-/// commit.
+/// A kind of manifest publication that
+/// `every_publication_raises_the_hint_to_its_manifest` checks.
 #[derive(Debug, Clone, Copy)]
 enum Publication {
     /// The session's first commit, which claims a writer epoch.
@@ -229,14 +249,12 @@ enum Publication {
 }
 
 /// Checks that each kind of manifest publication raises the namespace's
-/// hint to the manifest it published when the runtime started no raise of
-/// that hint in the last `HINT_RAISE_INTERVAL_MS`.
+/// hint to the manifest it published.
 #[tokio::test]
 async fn every_publication_raises_the_hint_to_its_manifest() {
     let directory = tempdir().expect("tempdir");
     let store: SharedStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
     let clock = Arc::new(ManualClock::at_system_time());
-    let timer = Arc::new(ManualClock::new(0));
     // The claim's fence and the seed commit leave two WAL objects, so the
     // third object, the put's, starts the session's own fold.
     let writer = crate::LoonFs::builder_with_store(store.clone())
@@ -247,7 +265,7 @@ async fn every_publication_raises_the_hint_to_its_manifest() {
             ..crate::RuntimeConfig::default()
         })
         .wall_clock(clock.clone())
-        .monotonic_timer(timer.clone())
+        .monotonic_timer(Arc::new(ManualClock::new(0)))
         .build()
         .await
         .expect("build writer");
@@ -295,7 +313,6 @@ async fn every_publication_raises_the_hint_to_its_manifest() {
         }
         writer.drain().await.expect("drain");
         let before = current_manifest_no(store.as_ref(), &namespace_id).await;
-        timer.advance_ms(HINT_RAISE_INTERVAL_MS);
         match publication {
             Publication::WriterClaim => {
                 commit().await.expect("commit");
@@ -348,18 +365,10 @@ async fn every_publication_raises_the_hint_to_its_manifest() {
         }
         let current = current_manifest_no(store.as_ref(), &namespace_id).await;
         assert!(current > before, "{publication:?} publishes a manifest");
-        // The acknowledgment's claim raises the hint, and its fold of the
-        // fence, less than an interval later, skips its raise.
-        let raised = match publication {
-            Publication::FloorAcknowledgment => {
-                before.successor().expect("the claim's manifest number")
-            }
-            _ => current,
-        };
         writer.drain().await.expect("drain");
         assert_eq!(
             hint_manifest_no(store.as_ref(), &namespace_id).await,
-            raised,
+            current,
             "{publication:?} raises the hint"
         );
     }

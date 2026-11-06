@@ -278,10 +278,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// Raises the namespace's hint to its current manifest, as the runtime
     /// that published that manifest does after the publication. A test hook.
     ///
-    /// A publication in core leaves the hint where it was, and a runtime skips
-    /// a raise less than `HINT_RAISE_INTERVAL_MS` after its last one, so a test
-    /// that needs garbage collection or discovery to see a current hint calls
-    /// this.
+    /// A publication in core leaves the hint where it was, so a test that
+    /// needs garbage collection or discovery to see a current hint calls this.
     pub async fn raise_hint_to_current_manifest(&self) {
         let current = self
             .load_current_manifest()
