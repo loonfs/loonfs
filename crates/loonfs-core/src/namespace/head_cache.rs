@@ -514,7 +514,6 @@ mod tests {
                     seq: ChangeSeq(seq),
                     wal_no: WalNo(seq),
                     folded_wal_no: WalNo(0),
-                    basis_floor_seq: ChangeSeq(0),
                 },
                 basis: MetadataBasis::new(ManifestRef {
                     owner_namespace_id: namespace_id,

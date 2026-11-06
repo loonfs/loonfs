@@ -21,6 +21,7 @@ use crate::{Error, Result};
 use loonfs_core::control::NamespaceStorageDiagnostics;
 use loonfs_core::{
     CheckpointPageCursor, ExtensionBasis, ExtensionPublication, MetadataCompactionCancellation,
+    RetentionPlan,
 };
 use loonfs_types::format::manifest::ExtensionEntry;
 use loonfs_types::{u64_from_usize, ExtensionName, PageRequest, RunNo, WriterId};
@@ -28,15 +29,11 @@ use std::num::NonZeroU64;
 use std::sync::Arc;
 
 mod compaction;
-mod floor_acknowledgment;
 pub(crate) mod metrics;
 mod reports;
 #[cfg(test)]
 mod tests;
 
-pub use floor_acknowledgment::{
-    AcknowledgeRetentionFloorOutcome, AcknowledgeRetentionFloorReport, RetentionFloors,
-};
 pub use reports::{
     MaintainMetadataReport, MetadataCompactionOutcome, MetadataCompactionReport,
     MetadataMaintenanceReport,
@@ -157,7 +154,6 @@ impl Maintenance {
             fork_basis: diagnostics.fork_basis,
             head_seq: diagnostics.head_seq,
             retention_floor_seq: diagnostics.retention_floor_seq,
-            acknowledged_floor_seq: diagnostics.acknowledged_floor_seq,
             current_manifest_no: Some(diagnostics.current_manifest_no),
             wal_tail_objects: diagnostics.wal_tail_objects,
             live_snapshots,
@@ -503,8 +499,8 @@ impl Maintenance {
         .await
     }
 
-    /// Advances the namespace retention floor toward `options.target` when a
-    /// verified checkpoint makes it safe.
+    /// Advances the namespace retention floor toward `options.target` through
+    /// the namespace's writer session.
     ///
     /// Whatever the target, the floor doesn't pass a commit dated less than
     /// [`GC_DEFAULT_GRACE_WINDOW_MS`](crate::GC_DEFAULT_GRACE_WINDOW_MS)
@@ -512,11 +508,27 @@ impl Maintenance {
     /// floor"), and the response includes the floor that the advance reached.
     /// Advancing the floor abandons the replay history below it, and a later
     /// base compaction keeps, for each file, every revision above the floor
-    /// and the newest revision at or below it. The runtime doesn't schedule
-    /// an advance. The reference server makes one on each maintenance sweep,
-    /// toward [`RetentionTarget::Window`](crate::RetentionTarget::Window)
-    /// with its `retention_window_ms` as the default window, so a namespace
-    /// with neither its own window nor that setting keeps its whole history.
+    /// and the newest revision at or below it, and removes the rows that an
+    /// expired deletion hides. The runtime doesn't schedule an advance. The
+    /// reference server makes one on each maintenance sweep, toward
+    /// [`RetentionTarget::Window`](crate::RetentionTarget::Window) with its
+    /// `retention_window_ms` as the default window, so a namespace with
+    /// neither its own window nor that setting keeps its whole history.
+    ///
+    /// The call plans the floor from the manifest of this runtime's writer
+    /// position when it has a current one, and otherwise from the current
+    /// manifest, and returns that manifest's floor when the floor would not
+    /// move. A floor that moves is advanced by the namespace's writer
+    /// session, which the call opens as a write does when this runtime has
+    /// none. The session's queue orders the advance after the commits
+    /// admitted before it, and the session acquires the writer epoch if it
+    /// has none, folds the WAL tail, and publishes the floor under its epoch
+    /// ([Advancing the retention
+    /// floor](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#101-advancing-the-retention-floor)).
+    /// A writer session of the namespace in another runtime then returns
+    /// `writer_fenced` to its next publication. If another writer fences
+    /// this runtime's session during the advance, the advance returns
+    /// `writer_fenced`.
     pub async fn advance_retention_floor_with_options(
         &self,
         namespace_id: &NamespaceId,
@@ -525,14 +537,25 @@ impl Maintenance {
         trace::in_operation(
             operation_span!(self.core, "advance_retention_floor", namespace_id),
             async {
-                let result = self
-                    .engine(namespace_id)
-                    .advance_retention_floor(options.target)
-                    .await
-                    .map_err(Error::from);
-                self.publisher
-                    .finish_publication(namespace_id, result)
-                    .await
+                let basis = match self.load_position_basis(namespace_id).await? {
+                    Some(basis) => basis,
+                    None => self.load_live_basis(namespace_id).await?,
+                };
+                let plan = self
+                    .core
+                    .namespace_store(namespace_id)
+                    .plan_retention_floor(&basis.manifest, options.target)
+                    .await?;
+                match plan {
+                    RetentionPlan::Stays(retention_floor_seq) => Ok(AdvanceRetentionResponse {
+                        namespace_id: namespace_id.clone(),
+                        retention_floor_seq,
+                    }),
+                    RetentionPlan::Moves(target) => {
+                        let session = self.publisher.open_session(namespace_id)?;
+                        session.submit_retention_advance(target).await
+                    }
+                }
             },
         )
         .await

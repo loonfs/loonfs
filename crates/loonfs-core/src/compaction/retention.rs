@@ -24,12 +24,10 @@ pub(crate) enum RetentionRule {
     /// sequence above the fork point, so this rule keeps every merge index row
     /// that a merge's range check can read.
     CommitHistory,
-    /// Every revision above the acknowledged floor, plus the newest at or
-    /// below it, per inode. The writer refuses a restore of a revision at or
-    /// below its basis's retention floor unless the revision is the newest at
-    /// or below that floor, and a restore validated against an older basis
-    /// can still copy a revision that a later advance has passed, so the rows
-    /// wait for the acknowledged floor, as a listed deletion does.
+    /// Every revision above the floor, plus the newest at or below it, per
+    /// inode. The writer refuses a restore of a revision at or below its
+    /// basis's retention floor unless the revision is the newest at or below
+    /// that floor.
     WholeState,
     /// Remove cancelled deletion pairs and the listed rows of expired
     /// deletions.
@@ -41,21 +39,18 @@ pub(crate) enum RetentionRule {
 }
 
 impl RetentionRule {
-    /// The operator that applies the rule in a compaction whose basis manifest
-    /// has `acknowledged_floor_seq` as its acknowledged floor.
-    pub(crate) fn operator(self, acknowledged_floor_seq: ChangeSeq) -> RetentionOperator {
+    /// The operator that applies the rule.
+    pub(crate) fn operator(self) -> RetentionOperator {
         match self {
             Self::KeepEveryRow => RetentionOperator::KeepEveryRow,
             Self::FirstPerGroup => RetentionOperator::FirstPerGroup(false),
             Self::CommitHistory => RetentionOperator::CommitHistory,
             Self::WholeState => RetentionOperator::WholeState(WholeStateRetention {
-                acknowledged_floor_seq,
                 previous_at_floor: None,
             }),
-            Self::ActiveDeletions => RetentionOperator::ActiveDeletions(ActiveDeletionRetention {
-                acknowledged_floor_seq,
-                revoked: false,
-            }),
+            Self::ActiveDeletions => {
+                RetentionOperator::ActiveDeletions(ActiveDeletionRetention { revoked: false })
+            }
             Self::Bindings => RetentionOperator::Bindings(BindingRetention::default()),
         }
     }
@@ -84,8 +79,8 @@ impl RetentionOperator {
             Self::KeepEveryRow => Some(row),
             Self::FirstPerGroup(kept) => (!std::mem::replace(kept, true)).then_some(row),
             Self::CommitHistory => keep_commit_history_row(row, floor_seq),
-            Self::WholeState(state) => state.push(family, row)?,
-            Self::ActiveDeletions(state) => state.push(row),
+            Self::WholeState(state) => state.push(family, row, floor_seq)?,
+            Self::ActiveDeletions(state) => state.push(row, floor_seq),
             Self::Bindings(state) => state.push(family, row, floor_seq)?,
         };
         Ok(kept.map(|row| (family, row)))
@@ -115,28 +110,23 @@ fn keep_commit_history_row(row: MetadataRow, floor_seq: ChangeSeq) -> Option<Met
     }
 }
 
-/// Retains every file, attribute, and access revision above the acknowledged
+/// Retains every file, attribute, and access revision above the retention
 /// floor and the newest revision at or below it for each inode.
 ///
 /// Whole-state row keys sort each inode's revisions newest first. The first row
-/// at or below the acknowledged floor is the inode's state at that floor,
-/// including a cleared state, and the floor keeps no older history. The
-/// operator keeps a recoverably deleted inode's rows like any other inode's,
-/// so an undelete restores the prior state, and a base compaction removes the
-/// rows of an inode that a removable deletion hides before they reach the
-/// operator. The operator processes this order without retaining the complete
-/// history.
+/// at or below the floor is the inode's state at that floor, including a
+/// cleared state, and the floor keeps no older history. The operator keeps a
+/// recoverably deleted inode's rows like any other inode's, so an undelete
+/// restores the prior state, and a base compaction removes the rows of an
+/// inode that an expired deletion hides before they reach the operator. The
+/// operator processes this order without retaining the complete history.
 ///
-/// The acknowledged floor decides, not the retention floor, because a restore
-/// validated against an older basis can copy a revision that a later advance
-/// has passed, and the acknowledged floor shows that every commit after the
-/// acknowledging WAL object was validated against the floor, so none of them
-/// copies a revision that the floor dropped
+/// Only the holder of the writer epoch advances the floor, after it has
+/// folded every commit validated against the old floor, so every restore
+/// that copied a revision the advance passed is already folded into the basis
 /// ([format section 10.3](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#103-row-retention-during-a-base-compaction)).
 #[derive(Debug)]
 pub(crate) struct WholeStateRetention {
-    /// The basis manifest's acknowledged floor.
-    acknowledged_floor_seq: ChangeSeq,
     /// The revision of the previous row at or below the floor. The inode has
     /// kept its newest row at or below the floor once this is set. It also
     /// catches two rows sharing one revision number: descending revision
@@ -145,11 +135,16 @@ pub(crate) struct WholeStateRetention {
 }
 
 impl WholeStateRetention {
-    fn push(&mut self, family: MetadataRowFamily, row: MetadataRow) -> Result<Option<MetadataRow>> {
+    fn push(
+        &mut self,
+        family: MetadataRowFamily,
+        row: MetadataRow,
+        floor_seq: ChangeSeq,
+    ) -> Result<Option<MetadataRow>> {
         let Some((inode_id, revision, committed_seq)) = whole_state_revision(&row) else {
             return Ok(Some(row));
         };
-        if committed_seq > self.acknowledged_floor_seq {
+        if committed_seq > floor_seq {
             return Ok(Some(row));
         }
         // Writer invariant: one inode's whole-state rows are numbered
@@ -161,7 +156,7 @@ impl WholeStateRetention {
             let family = family.as_str();
             return Err(CoreError::NamespaceCorrupt(format!(
                 "inode `{inode_id}` has two {family} rows at revision \
-                 `{revision}` at or below the acknowledged floor; refusing to drop rows"
+                 `{revision}` at or below the retention floor; refusing to drop rows"
             )));
         }
         if self.previous_at_floor.replace(revision).is_some() {
@@ -197,23 +192,19 @@ fn whole_state_revision(row: &MetadataRow) -> Option<(InodeId, u64, ChangeSeq)> 
 /// Processes active-deletion rows one deletion identity at a time.
 ///
 /// The operator removes a listed row paired with its removal marker, and the
-/// listed row of a deletion at or below the acknowledged floor, which has
-/// expired. A listed row above the acknowledged floor stays, even at or
-/// below the retention floor, because an undelete validated against an
-/// older floor can still revoke it
+/// listed row of a deletion at or below the retention floor, which has
+/// expired
 /// ([format section 10.3](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#103-row-retention-during-a-base-compaction)).
 /// Row-key order places the marker first, allowing one flag to determine
 /// whether the listed row is retained.
 #[derive(Debug)]
 pub(crate) struct ActiveDeletionRetention {
-    /// The basis manifest's acknowledged floor.
-    acknowledged_floor_seq: ChangeSeq,
     /// Whether this deletion's removal marker has already arrived.
     revoked: bool,
 }
 
 impl ActiveDeletionRetention {
-    fn push(&mut self, row: MetadataRow) -> Option<MetadataRow> {
+    fn push(&mut self, row: MetadataRow, floor_seq: ChangeSeq) -> Option<MetadataRow> {
         let MetadataRow::ActiveDeletion(crate::metadata::ActiveDeletionRecord {
             action,
             deletion_seq,
@@ -230,7 +221,7 @@ impl ActiveDeletionRetention {
                 None
             }
             ActiveDeletionRowAction::Listed { .. }
-                if self.revoked || *deletion_seq <= self.acknowledged_floor_seq =>
+                if self.revoked || *deletion_seq <= floor_seq =>
             {
                 None
             }
@@ -489,7 +480,7 @@ mod tests {
         ];
         rows.sort_by_key(MetadataRow::row_key);
         let cluster = &retention_clusters(MetadataFamilyGroup::ContentLayouts)[0];
-        let mut operator = cluster.rule.operator(ChangeSeq(0));
+        let mut operator = cluster.rule.operator();
         let family = MetadataRowFamily::ContentLayouts;
         let mut previous = String::new();
         let mut kept = Vec::new();
@@ -619,7 +610,7 @@ mod tests {
             .iter()
             .find(|cluster| cluster.families.contains(&family))
             .expect("a cluster compacts the family");
-        let mut operator = cluster.rule.operator(ChangeSeq(0));
+        let mut operator = cluster.rule.operator();
         let mut locality: Option<String> = None;
         let mut kept = Vec::new();
         for row in rows {
@@ -639,7 +630,7 @@ mod tests {
     #[test]
     fn one_inode_keeps_the_newest_row_at_the_floor() {
         for family in WHOLE_STATE_FAMILIES {
-            let mut operator = RetentionRule::WholeState.operator(floor());
+            let mut operator = RetentionRule::WholeState.operator();
             let mut kept = Vec::new();
             // Newest first: two above the floor, then a hundred thousand below.
             for (revision, committed_seq) in [(100_002u64, 102u64), (100_001, 101)] {
@@ -667,22 +658,21 @@ mod tests {
         }
     }
 
-    /// Checks that a whole-state row above the acknowledged floor stays, even
-    /// at or below the retention floor, and that the row kept at the floor is
-    /// the newest at or below the acknowledged floor.
+    /// Checks that a whole-state row above the floor stays, and that the row
+    /// kept at the floor is the newest at or below it.
     #[test]
-    fn a_whole_state_row_leaves_only_at_or_below_the_acknowledged_floor() {
+    fn a_whole_state_row_leaves_only_at_or_below_the_floor() {
+        let floor = ChangeSeq(40);
         for family in WHOLE_STATE_FAMILIES {
-            let mut operator = RetentionRule::WholeState.operator(ChangeSeq(40));
+            let mut operator = RetentionRule::WholeState.operator();
             let mut kept = Vec::new();
-            // Newest first: three between the floors, then two at or below the
-            // acknowledged floor.
+            // Newest first: three above the floor, then two at or below it.
             for (revision, committed_seq) in [(5u64, 99u64), (4, 50), (3, 41), (2, 40), (1, 39)] {
                 if let Some((_, row)) = operator
                     .push(
                         family,
                         whole_state_row(family, 7, revision, committed_seq),
-                        floor(),
+                        floor,
                     )
                     .expect("push")
                 {
@@ -705,7 +695,7 @@ mod tests {
     #[test]
     fn two_whole_state_rows_at_one_revision_below_the_floor_are_refused() {
         for family in WHOLE_STATE_FAMILIES {
-            let mut operator = RetentionRule::WholeState.operator(floor());
+            let mut operator = RetentionRule::WholeState.operator();
             operator
                 .push(family, whole_state_row(family, 7, 5, 50), floor())
                 .expect("the first row at the floor is kept");
@@ -745,7 +735,9 @@ mod tests {
 
     #[test]
     fn a_cancelled_deletion_leaves_and_a_live_one_stays() {
-        let mut operator = RetentionRule::ActiveDeletions.operator(ChangeSeq(0));
+        // The floor is below the deletion, so only a removal marker removes
+        // its listed row.
+        let mut operator = RetentionRule::ActiveDeletions.operator();
         let removed = active_deletion_row(
             3,
             ActiveDeletionRowAction::Removed {
@@ -753,29 +745,29 @@ mod tests {
             },
         );
         assert!(operator
-            .push(MetadataRowFamily::ActiveDeletions, removed, floor())
+            .push(MetadataRowFamily::ActiveDeletions, removed, ChangeSeq(0))
             .expect("push")
             .is_none());
         assert!(operator
-            .push(MetadataRowFamily::ActiveDeletions, listed(3), floor())
+            .push(MetadataRowFamily::ActiveDeletions, listed(3), ChangeSeq(0))
             .expect("push")
             .is_none());
 
         operator.close_group();
         assert!(
             operator
-                .push(MetadataRowFamily::ActiveDeletions, listed(3), floor())
+                .push(MetadataRowFamily::ActiveDeletions, listed(3), ChangeSeq(0))
                 .expect("push")
                 .is_some(),
             "the next deletion is decided on its own markers, not the previous one's"
         );
     }
 
-    /// Checks that a listed row at or below the acknowledged floor leaves,
-    /// and that one above it stays, even at or below the retention floor.
+    /// Checks that a listed row at or below the floor leaves, and that one
+    /// above it stays.
     #[test]
-    fn a_listed_row_leaves_at_or_below_the_acknowledged_floor() {
-        let mut operator = RetentionRule::ActiveDeletions.operator(ChangeSeq(40));
+    fn a_listed_row_leaves_at_or_below_the_floor() {
+        let mut operator = RetentionRule::ActiveDeletions.operator();
         let mut kept = Vec::new();
         for deletion_seq in [39, 40, 41, 99] {
             operator.close_group();
@@ -783,7 +775,7 @@ mod tests {
                 .push(
                     MetadataRowFamily::ActiveDeletions,
                     listed(deletion_seq),
-                    floor(),
+                    ChangeSeq(40),
                 )
                 .expect("push")
             {
@@ -931,7 +923,7 @@ mod tests {
 
     #[test]
     fn two_children_bound_in_one_slot_at_the_floor_are_refused() {
-        let mut operator = RetentionRule::Bindings.operator(ChangeSeq(0));
+        let mut operator = RetentionRule::Bindings.operator();
         assert!(operator
             .push(
                 MetadataRowFamily::DirentryBinds,
@@ -959,7 +951,7 @@ mod tests {
 
     #[test]
     fn two_edges_bound_for_one_child_at_the_floor_are_refused() {
-        let mut operator = RetentionRule::Bindings.operator(ChangeSeq(0));
+        let mut operator = RetentionRule::Bindings.operator();
         for (parent, name, child) in [(9, "z.txt", 41), (7, "a.txt", 42)] {
             assert!(
                 operator

@@ -52,8 +52,10 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
     /// different deletion.
     ///
     /// The floor check comes first, so a request for an expired deletion reads
-    /// no tombstone. A base compaction relies on this rule: the WAL object of
-    /// every accepted undelete records a basis floor below the deletion.
+    /// no tombstone. A base compaction relies on this rule: the writer
+    /// validates against a floor that only its own epoch raises, so no
+    /// undelete of a deletion at or below the floor is accepted after the
+    /// floor moves.
     pub(super) async fn resolve_recoverable_deletion(
         &self,
         inode_id: InodeId,
@@ -328,7 +330,7 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
     /// Resolves the revision that a restore copies. A revision at or below
     /// the retention floor is found only while it's the file's newest at or
     /// below the floor. A base compaction removes the older ones once the
-    /// floor is acknowledged, and this refusal is what lets it: every commit
+    /// floor has moved, and this refusal is what lets it: every commit
     /// validated against the floor leaves them alone, so none copies a
     /// revision whose content the collector reclaims
     /// ([format section 10.3](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#103-row-retention-during-a-base-compaction)).

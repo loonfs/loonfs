@@ -4,8 +4,7 @@
 //! stale results that leave out what the index hasn't reached.
 
 use crate::common::{
-    default_block_cache, fold_wal_and_advance_retention, grep_with, in_walk_order, page_request,
-    publish_same_content_files,
+    default_block_cache, grep_with, in_walk_order, page_request, publish_same_content_files,
 };
 use crate::content_index::{request, ContentFixture};
 use loonfs::{ErrorCode, LoonFs};
@@ -273,12 +272,7 @@ async fn a_page_after_the_floor_passes_its_cursor_returns_rebootstrap_required()
     let cursor = page_one.next_cursor.expect("a cursor");
 
     fixture.put("/three.txt", b"later\n").await;
-    fold_wal_and_advance_retention(
-        &fixture.store,
-        &fixture.host.maintenance,
-        &fixture.namespace_id,
-    )
-    .await;
+    fixture.advance_retention_floor().await;
     // A new reader loads the manifest that records the new floor.
     let reader = LoonFs::builder_with_store(fixture.store.clone())
         .read_only()

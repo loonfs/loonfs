@@ -4,7 +4,7 @@
 //! writes bounded output segments. It buffers only input blocks, retention
 //! state, one segment builder per family, and a bounded wave of encoded outputs.
 //! Only base compactions may remove rows below the retention floor, and only base
-//! compactions remove the rows of inodes that a removable deletion hides. Every
+//! compactions remove the rows of inodes that an expired deletion hides. Every
 //! compaction drops superseded layout rows.
 
 use super::kept_inodes::{load_kept_inode_filter, KeptInodeFilter};
@@ -94,9 +94,6 @@ struct GroupCompaction<'a, S: ObjectStore + ?Sized> {
     /// Where the output stands in the group and whether rows may be dropped.
     placement: CompactionPlacement,
     frozen_floor_seq: ChangeSeq,
-    /// The basis manifest's acknowledged floor, at or below which a listed
-    /// deletion that no undelete cancelled has expired.
-    acknowledged_floor_seq: ChangeSeq,
     run_policy: MetadataRunPolicy,
     input_runs: Vec<MetadataRunManifest>,
     basis_runs: &'a [MetadataRunManifest],
@@ -168,7 +165,6 @@ impl<'a, S: ObjectStore + ?Sized> GroupCompaction<'a, S> {
             store: basis.store,
             basis_runs: &basis.scan_runs,
             output_run_no: basis.manifest().payload().next_run_no,
-            acknowledged_floor_seq: basis.manifest().payload().acknowledged_floor_seq,
             chain_filter: ChainFilter::NotNeeded,
             kept_inodes,
             output_cache,
@@ -356,7 +352,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupCompaction<'a, S> {
 
         let floor_seq = self.frozen_floor_seq;
         let rule = self.rule_for(cluster);
-        let mut operator = rule.operator(self.acknowledged_floor_seq);
+        let mut operator = rule.operator();
         let mut locality: Option<String> = None;
         loop {
             if let Some(stop) = control.cancellation() {

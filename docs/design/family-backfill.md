@@ -31,7 +31,7 @@ A release that adds a target adds two manifest versions:
 
 Under both versions, every fold and every replay of the WAL tail computes the target's rows from deltas. The release's binaries publish no manifest of an older version, because an older version can't record that folds compute the target. An older binary can't load a manifest of the first version (see [Strict decoding and evolution](../specs/format.md#123-strict-decoding-and-evolution)), so once one manifest has that version, every later fold computes the target.
 
-If the target copies a field that older deltas don't include, such as the commit ID above, the release adds the field to the delta, as rule 1 requires. A fold can't compute target rows from an older binary's WAL objects, and an older writer session writes them until a fence ends the session. So the backfill first acquires the writer epoch, writes a fence, and folds, as a maintainer does to acknowledge the floor (see [Writer ownership](../specs/format.md#61-writer-ownership)). No older binary can claim the epoch after the backfill's claim.
+If the target copies a field that older deltas don't include, such as the commit ID above, the release adds the field to the delta, as rule 1 requires. A fold can't compute target rows from an older binary's WAL objects, and an older writer session writes them until a fence ends the session. So the backfill first acquires the writer epoch, writes a fence, and folds, as a process does before it advances the retention floor without a writer session (see [Writer ownership](../specs/format.md#61-writer-ownership)). No older binary can claim the epoch after the backfill's claim.
 
 A backfill then:
 

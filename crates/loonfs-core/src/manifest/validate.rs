@@ -47,12 +47,11 @@ pub(super) fn validate_manifest(
         basis.manifest.owner_namespace_id == payload.namespace_id
             || payload.is_family_root()
             || basis.manifest.head_seq > payload.retention_floor_seq
-            || basis.manifest.head_seq > payload.acknowledged_floor_seq
     }) {
         return Err(ManifestLoadError::RunManifestMismatch {
             object_key: object_key.to_owned(),
-            message: "fork provenance disagrees with namespace identity, family root, retention \
-                      floor, or acknowledged floor"
+            message: "fork provenance disagrees with namespace identity, family root, or \
+                      retention floor"
                 .to_owned(),
         });
     }
@@ -85,15 +84,6 @@ pub(super) fn validate_manifest_sequence_ranges(
         return Err(ManifestLoadError::RunManifestMismatch {
             object_key: object_key.to_owned(),
             message: "retention floor is beyond the manifest head sequence".to_owned(),
-        });
-    }
-    if payload.acknowledged_floor_seq > payload.retention_floor_seq {
-        return Err(ManifestLoadError::RunManifestMismatch {
-            object_key: object_key.to_owned(),
-            message: format!(
-                "acknowledged floor `{}` is above the retention floor `{}`",
-                payload.acknowledged_floor_seq, payload.retention_floor_seq
-            ),
         });
     }
 

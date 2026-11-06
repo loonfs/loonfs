@@ -4,7 +4,6 @@ use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
 use crate::compaction::CompactionUnitOutcome;
 use crate::gc::GcOptions;
-use crate::manifest::RetentionTarget;
 use crate::test_support::WriterAt;
 use loonfs_test_support::stores::MetadataMapStore;
 use loonfs_types::format::control::PinOwner;
@@ -105,19 +104,10 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
         )
         .await
         .expect("pin the original history");
-    let floor = crate::test_support::NamespaceFixture::new(
-        &store,
-        &namespace_id,
-        &crate::test_support::writer_at(
-            "test-writer",
-            crate::test_support::grace_elapsed_after(context.now_ms),
-        ),
-    )
-    .engine()
-    .advance_retention_floor(RetentionTarget::Head)
-    .await
-    .expect("floor exactly at original commit")
-    .response;
+    // The session advances the floor itself, so it keeps its epoch for the
+    // replay below.
+    let (_, floor) =
+        crate::commit::engine::tests::advance_in_session(&mut engine, original.committed_seq).await;
     assert_eq!(floor.retention_floor_seq, original.committed_seq);
     compact_and_check_pair(
         &store,
@@ -165,20 +155,10 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
         .await
         .expect("fold later history");
     assert_eq!(
-        crate::test_support::NamespaceFixture::new(
-            &store,
-            &namespace_id,
-            &crate::test_support::writer_at(
-                "test-writer",
-                crate::test_support::grace_elapsed_after(context.now_ms)
-            )
-        )
-        .engine()
-        .advance_retention_floor(RetentionTarget::Head)
-        .await
-        .expect("advance floor")
-        .response
-        .retention_floor_seq,
+        crate::commit::engine::tests::advance_in_session(&mut engine, later.committed_seq)
+            .await
+            .1
+            .retention_floor_seq,
         later.committed_seq
     );
     compact_and_check_pair(

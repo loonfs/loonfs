@@ -304,15 +304,26 @@ impl TestRuntime {
 
     /// Advances the namespace's retention floor toward `options.target`
     /// through [`maintenance_past_the_grace_window`].
+    ///
+    /// That handle belongs to another runtime, so an advance that moves the
+    /// floor takes the namespace's writer epoch and fences this fixture's
+    /// writer session. The fixture drops its handle, so its next write opens
+    /// a new session. A test that keeps its own handle across an advance
+    /// drops it first.
     pub(crate) async fn advance_retention_floor_with_options(
         &self,
         namespace_id: &NamespaceId,
         options: &AdvanceRetentionFloorOptions,
     ) -> loonfs::Result<AdvanceRetentionResponse> {
-        maintenance_past_the_grace_window(self.store.clone())
+        let advanced = maintenance_past_the_grace_window(self.store.clone())
             .await
             .advance_retention_floor_with_options(namespace_id, options)
-            .await
+            .await;
+        self.namespaces
+            .lock()
+            .expect("namespace writer map lock")
+            .remove(namespace_id);
+        advanced
     }
 
     /// Returns the handle this fixture holds for `namespace_id`, opening it

@@ -2,10 +2,11 @@
 //! files refer to it, the `texts` and `content_revisions` families, and the
 //! pruning of a reorganization into the base level.
 
-use crate::common::{fold_wal_and_advance_retention, GrepHost};
+use crate::common::GrepHost;
+use loonfs::publish::{CommitCandidate, CommitIntent, FilesystemOperation, PreparedContent};
 use loonfs::{
-    Commit, ContentRef, LoonFs, MetadataCache, Namespace, NamespaceId, PutFileOptions,
-    SharedObjectStore, Writable,
+    Commit, CommitId, ContentRef, LoonFs, MaintainMetadataOptions, Maintenance, MetadataCache,
+    Namespace, NamespaceId, PutFileOptions, SharedObjectStore, Writable,
 };
 use loonfs_grep::codec::{ContentRevisionRow, ContentValue, IndexRow};
 use loonfs_grep::entry::{grep_extension_name, GrepEntry};
@@ -13,10 +14,13 @@ use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome, GrepReorganizeOutcome}
 use loonfs_objectstore::keys::extension_segment_object_key;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
+use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::{first_page, nonzero_usize};
 use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
 use loonfs_types::format::segment_blocks::{decode_data_block_rows, decode_index_block};
-use loonfs_types::{GrepRequest, GrepScope, InodeId, RevisionNo, RunNo};
+use loonfs_types::{
+    AbsolutePath, ChangeSeq, FileContent, GrepRequest, GrepScope, InodeId, RevisionNo, RunNo,
+};
 use std::assert_matches;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -32,6 +36,10 @@ pub(crate) struct ContentFixture {
     pub(crate) host: GrepHost,
     pub(crate) namespace_id: NamespaceId,
     pub(crate) namespace: Namespace<Writable>,
+    /// Maintenance in the runtime that has `namespace`'s writer session.
+    maintenance: Maintenance,
+    /// The wall clock of that runtime, which stamps the fixture's commits.
+    clock: Arc<ManualClock>,
 }
 
 impl ContentFixture {
@@ -43,8 +51,10 @@ impl ContentFixture {
             KeyPredicate::content_blob(),
         ));
         let store: SharedObjectStore = content_gets.clone();
+        let clock = Arc::new(ManualClock::at_system_time());
         let writer = LoonFs::builder_with_store(store.clone())
             .writer_id(loonfs_test_support::ids::writer_id(name))
+            .wall_clock(clock.clone())
             .config(loonfs::RuntimeConfig {
                 inline_content: loonfs::InlineContentPolicy {
                     inline_content_threshold_bytes: None,
@@ -68,6 +78,7 @@ impl ContentFixture {
         let namespace = writer
             .open_namespace(&namespace_id)
             .expect("open namespace");
+        let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id(name));
         Self {
             _directory: directory,
             store,
@@ -75,6 +86,8 @@ impl ContentFixture {
             host,
             namespace_id,
             namespace,
+            maintenance,
+            clock,
         }
     }
 
@@ -92,6 +105,54 @@ impl ContentFixture {
             )
             .await
             .expect("write the file")
+    }
+
+    /// Writes `bytes` to `path` through an upload of its own, replacing any
+    /// file there, and returns the upload beside the commit, so a later
+    /// commit can refer to the same content value.
+    pub(crate) async fn put_prepared(&self, path: &str, bytes: &[u8]) -> (PreparedContent, Commit) {
+        let prepared = self
+            .namespace
+            .prepare_content(bytes)
+            .await
+            .expect("prepare the content");
+        let commit = self
+            .commit_prepared(path, &prepared, loonfs::DestinationBehavior::Replace)
+            .await;
+        (prepared, commit)
+    }
+
+    /// Creates the file `path` with the content value of `prepared`, an
+    /// upload from an earlier write.
+    pub(crate) async fn put_existing(&self, path: &str, prepared: &PreparedContent) -> Commit {
+        self.commit_prepared(path, prepared, loonfs::DestinationBehavior::NoReplace)
+            .await
+    }
+
+    async fn commit_prepared(
+        &self,
+        path: &str,
+        prepared: &PreparedContent,
+        behavior: loonfs::DestinationBehavior,
+    ) -> Commit {
+        self.namespace
+            .commit_candidate(CommitCandidate::prepared(
+                CommitIntent::single(
+                    CommitId::generate(),
+                    loonfs_test_support::test_actor(),
+                    None,
+                    FilesystemOperation::PutFile {
+                        path: AbsolutePath::parse(path).expect("path"),
+                        content: FileContent::Ref(prepared.content_ref().clone()),
+                        behavior,
+                        expected_inode_id: None,
+                        expected_revision_no: None,
+                    },
+                ),
+                vec![prepared.clone()],
+            ))
+            .await
+            .expect("commit the prepared content")
     }
 
     /// Copies the file at `source_path` to `path`, so that both files refer
@@ -253,11 +314,34 @@ impl ContentFixture {
             .collect()
     }
 
-    /// Folds the WAL and moves the retention floor to the head, so the
-    /// revisions that later revisions replaced are no longer retained.
-    pub(crate) async fn advance_retention_floor(&self) {
-        fold_wal_and_advance_retention(&self.store, &self.host.maintenance, &self.namespace_id)
-            .await;
+    /// Moves the retention floor to the head and returns the new floor, so
+    /// the revisions that later revisions replaced are no longer retained.
+    ///
+    /// The fold and the advance run in the runtime that has the fixture's
+    /// writer session, so they join that session's queue and fence nothing.
+    /// The advance plans its target from the folded manifest before it folds
+    /// the tail itself, so the call folds the tail first and the floor can
+    /// reach the head. The floor never passes a commit younger than one grace
+    /// window, so the call also moves the runtime's clock one grace window
+    /// ahead, and the floor can then pass every commit made so far. Each call
+    /// moves the clock another grace window, which does no harm because this
+    /// clock stamps every commit the fixture makes.
+    pub(crate) async fn advance_retention_floor(&self) -> ChangeSeq {
+        self.maintenance
+            .maintain_metadata_with_options(
+                &self.namespace_id,
+                &MaintainMetadataOptions {
+                    max_wal_tail_objects: std::num::NonZeroU64::MIN,
+                },
+            )
+            .await
+            .expect("fold wal");
+        self.clock.advance_ms(loonfs::GC_DEFAULT_GRACE_WINDOW_MS);
+        self.maintenance
+            .advance_retention_floor(&self.namespace_id)
+            .await
+            .expect("advance retention")
+            .retention_floor_seq
     }
 }
 
@@ -532,15 +616,13 @@ async fn a_base_reorganization_drops_a_dead_value_and_keeps_a_referenced_one() {
 
 /// Indexes `/a.txt` with `bytes` and then with a line appended, moves the
 /// retention floor to the head, and runs the first step of a base
-/// reorganization that drops the first value. Returns the first value's
-/// content reference and the policy whose later steps finish the
-/// reorganization.
+/// reorganization that drops the first value. Returns the upload of the
+/// first value and the policy whose later steps finish the reorganization.
 async fn start_a_pruning_base_reorganization(
     fixture: &ContentFixture,
     bytes: &[u8],
-) -> (ContentRef, GramIndexBuildPolicy) {
-    fixture.put("/a.txt", bytes).await;
-    let first = fixture.content_ref("/a.txt").await;
+) -> (PreparedContent, GramIndexBuildPolicy) {
+    let (first, _) = fixture.put_prepared("/a.txt", bytes).await;
     fixture
         .host
         .enable_grep_index(&fixture.namespace_id)
@@ -618,13 +700,12 @@ async fn the_re_reference_check_abandons_a_reorganization_whose_dropped_value_co
     let (first, to_base) =
         start_a_pruning_base_reorganization(&fixture, b"a comeback needle\n").await;
 
-    // A restore brings the first value back, and a build step finds its
-    // `texts` row in the reorganization's inputs and skips it.
-    fixture
-        .namespace
-        .restore_revision("/a.txt", RevisionNo(1), &loonfs_test_support::test_actor())
-        .await
-        .expect("restore the first revision");
+    // A new file refers to the first value, as a merge does when it brings a
+    // fork's file into the source, and a build step finds the value's `texts`
+    // row in the reorganization's inputs and skips it. A restore can't bring
+    // the value back, because the writer refuses to restore a revision that
+    // the floor pruned.
+    fixture.put_existing("/b.txt", &first).await;
     assert_matches!(
         fixture.build_step().await,
         GrepBuildOutcome::Indexed {
@@ -646,9 +727,14 @@ async fn the_re_reference_check_abandons_a_reorganization_whose_dropped_value_co
             .await
             .into_iter()
             .collect::<BTreeSet<_>>(),
-        BTreeSet::from(["/a.txt".to_owned()])
+        BTreeSet::from(["/a.txt".to_owned(), "/b.txt".to_owned()])
     );
-    assert_eq!(fixture.text_rows(&ContentValue::of(&first)).await, [true]);
+    assert_eq!(
+        fixture
+            .text_rows(&ContentValue::of(first.content_ref()))
+            .await,
+        [true]
+    );
 }
 
 #[tokio::test]

@@ -211,8 +211,8 @@ fn a_removal_carries_the_undeletes_sequence_so_it_is_written_to_that_commits_run
 }
 
 /// Checks that a base compaction drops cancelled pairs and the listed row of a
-/// deletion at or below the acknowledged floor, and keeps every listed row
-/// above the acknowledged floor, however far the retention floor advanced.
+/// deletion at or below the retention floor, and keeps every listed row above
+/// it.
 #[test]
 fn the_compaction_drops_cancelled_pairs_and_expired_deletions_and_keeps_the_rest() {
     let state = state_from_tombstones(vec![
@@ -229,7 +229,6 @@ fn the_compaction_drops_cancelled_pairs_and_expired_deletions_and_keeps_the_rest
     compact_rows_with_retention(
         MetadataFamilyGroup::ActiveDeletions,
         &mut rows_by_family,
-        ChangeSeq(10_000),
         ChangeSeq(10),
     )
     .expect("compact active deletions");
@@ -246,8 +245,7 @@ fn the_compaction_drops_cancelled_pairs_and_expired_deletions_and_keeps_the_rest
             "active-deletion-00000000000000000011-00000000000000000000000008-0000000001".to_owned(),
             "active-deletion-00000000000000000012-00000000000000000000000007-0000000001".to_owned(),
         ],
-        "the undeleted pair and the deletion at the acknowledged floor go, and both deletions \
-         above it stay"
+        "the undeleted pair and the deletion at the floor go, and both deletions above it stay"
     );
 }
 
@@ -598,7 +596,6 @@ async fn the_family_backed_listing_equals_the_old_tombstone_walk_on_every_step()
     // Compact everything, then compare once more: the cancelled pairs and the
     // expired deletions are gone from the family and the answer is
     // unchanged.
-    acknowledge_floor(&store, &namespace_id, &context).await;
     drain_compaction(
         &store,
         &namespace_id,
@@ -864,10 +861,10 @@ async fn delete_below_the_floor<S: ObjectStore>(
 }
 
 /// Checks that a deletion at or below the retention floor leaves the trash
-/// and refuses an undelete at once, and that a base compaction keeps its
-/// listed row until a fold acknowledges the floor, and removes it after.
+/// and refuses an undelete at once, and that a base compaction over the
+/// advance's manifest removes its listed row.
 #[tokio::test]
-async fn a_deletion_below_the_floor_leaves_the_trash_before_its_row_is_removed() {
+async fn a_deletion_below_the_floor_leaves_the_trash_and_its_row_is_removed() {
     let temp = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp.path()).expect("create local-fs store");
     let namespace_id = NamespaceId::parse("trash-below-floor").expect("namespace id");
@@ -876,11 +873,6 @@ async fn a_deletion_below_the_floor_leaves_the_trash_before_its_row_is_removed()
         .await
         .expect("bootstrap namespace");
     let (deleted_inode_id, deleted) = delete_below_the_floor(&store, &namespace_id, &context).await;
-    let every_group = MetadataRunPolicy {
-        max_delta_runs: NonZeroUsize::MIN,
-        ..MetadataRunPolicy::default()
-    };
-    drain_compaction(&store, &namespace_id, every_group).await;
     let floor_seq = read_floor_seq(&store, &namespace_id).await;
     assert!(
         floor_seq > deleted.committed_seq,
@@ -888,11 +880,6 @@ async fn a_deletion_below_the_floor_leaves_the_trash_before_its_row_is_removed()
          floor {floor_seq}, deletion {}",
         deleted.committed_seq
     );
-    assert!(
-        read_acknowledged_floor_seq(&store, &namespace_id).await < deleted.committed_seq,
-        "no WAL object validated against the new floor is folded yet"
-    );
-
     assert_eq!(
         trash_entries(&store, &namespace_id, 10).await,
         Vec::new(),
@@ -907,45 +894,22 @@ async fn a_deletion_below_the_floor_leaves_the_trash_before_its_row_is_removed()
     )
     .await;
     assert_eq!(error.code(), ErrorCode::NotDeleted, "{error:?}");
-    assert_eq!(
-        stored_active_deletions(&store, &namespace_id).await,
-        vec![(deleted.committed_seq, "listed")],
-        "a base compaction keeps the listed row until the floor is acknowledged"
-    );
 
-    // A later deletion gives the family a delta run, so the next compaction
-    // rewrites the family's base.
-    acknowledge_floor(&store, &namespace_id, &context).await;
-    write_test_file(
+    drain_compaction(
         &store,
         &namespace_id,
-        "/later.txt",
-        "com_floorlater000000000000001",
-        &context,
+        MetadataRunPolicy {
+            max_delta_runs: NonZeroUsize::MIN,
+            ..MetadataRunPolicy::default()
+        },
     )
     .await;
-    let later = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
-        .delete_path("/later.txt", None)
-        .await
-        .expect("delete path")
-        .committed_seq;
-    create_checkpoint(&store, &namespace_id, &context)
-        .await
-        .expect("create checkpoint");
-    drain_compaction(&store, &namespace_id, every_group).await;
     assert_eq!(
         stored_active_deletions(&store, &namespace_id).await,
-        vec![(later, "listed")],
-        "a base compaction over an acknowledged floor removes the expired listed row"
+        Vec::new(),
+        "a base compaction over the advance's manifest removes the expired listed row"
     );
-    assert_eq!(
-        trash_entries(&store, &namespace_id, 10)
-            .await
-            .iter()
-            .map(|entry| entry.deletion_seq)
-            .collect::<Vec<_>>(),
-        vec![later]
-    );
+    assert_eq!(trash_entries(&store, &namespace_id, 10).await, Vec::new());
 }
 
 /// Checks that a trash cursor from a page taken before a retention advance
@@ -1405,8 +1369,7 @@ async fn expire_docs<S: ObjectStore>(
 
 /// Checks that the trash, path reads, visibility, and undelete validation
 /// treat a deletion at or below the floor as expired from the advance on,
-/// and the same once a fold acknowledges the floor and base compactions
-/// remove the rows it hides.
+/// and the same once base compactions remove the rows it hides.
 #[tokio::test]
 async fn an_expired_deletion_leaves_the_trash_refuses_an_undelete_and_stays_hidden() {
     let temp = tempdir().expect("tempdir");
@@ -1417,7 +1380,6 @@ async fn an_expired_deletion_leaves_the_trash_refuses_an_undelete_and_stays_hidd
 
     for compacted in [false, true] {
         if compacted {
-            acknowledge_floor(&store, &namespace_id, &context).await;
             drain_compaction(
                 &store,
                 &namespace_id,

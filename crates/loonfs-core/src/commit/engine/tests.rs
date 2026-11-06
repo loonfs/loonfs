@@ -1607,3 +1607,37 @@ async fn publish_views_reuse_cached_segment_blocks_across_publishes() {
         "a warm cache serves every publish-view segment read"
     );
 }
+
+/// Advances the retention floor to `target` the way a writer session does:
+/// holds a position at the tip under the session's epoch, folds the tail,
+/// and publishes the floor under the epoch, moving the position onto each
+/// manifest. Returns the fold's manifest and the floor's manifest.
+pub(super) async fn advance_in_session<S: ObjectStore>(
+    engine: &mut NamespaceCommitEngine<S>,
+    target: ChangeSeq,
+) -> (
+    crate::manifest::PublishedManifest,
+    crate::manifest::PublishedManifest,
+) {
+    let clock = OperationClock::start(0, Arc::new(StdMonotonicTimer::default()));
+    let acquired = engine
+        .acquire_position(&clock)
+        .await
+        .expect("hold a position");
+    let folded = engine
+        .namespace
+        .fold_wal_tail(engine.writer_position(), &clock)
+        .await
+        .expect("fold")
+        .manifest;
+    engine.record_manifest_published(folded.clone());
+    let advanced = engine
+        .namespace
+        .publish_retention_floor(None, acquired.writer_epoch, target)
+        .await
+        .expect("publish the floor")
+        .published
+        .expect("the floor moves");
+    engine.record_manifest_published(advanced.clone());
+    (folded, advanced)
+}

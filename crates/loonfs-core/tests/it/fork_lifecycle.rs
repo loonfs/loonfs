@@ -406,7 +406,6 @@ async fn a_created_namespace_reads_manifest_one_before_its_first_fold() {
         .expect("status");
     assert_eq!(status.current_manifest_no, ManifestNo(1));
     assert_eq!(status.retention_floor_seq, ChangeSeq(0));
-    assert_eq!(status.acknowledged_floor_seq, ChangeSeq(0));
 
     NamespaceFixture::new(&store, &namespace_id, &context)
         .write_file_bytes("/docs/first.txt", b"hello", Some(&commit_id("first-write")))
@@ -614,12 +613,9 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
         .await
         .expect("clone status");
     assert_eq!(
-        (
-            clone_status.retention_floor_seq,
-            clone_status.acknowledged_floor_seq
-        ),
-        (ChangeSeq(1), ChangeSeq(1)),
-        "a fork's first manifest acknowledges the fork point"
+        clone_status.retention_floor_seq,
+        ChangeSeq(1),
+        "a fork's first manifest starts its retention floor at the fork point"
     );
     let fork_basis = clone_head.fork_basis.clone().expect("fork basis");
     assert_eq!(fork_basis.manifest.owner_namespace_id, source_namespace_id);
@@ -846,8 +842,8 @@ async fn inode_rows<S: ObjectStore + ?Sized>(store: &S, namespace_id: &Namespace
 
 /// Checks that a fork's base compactions remove the rows of a deletion that
 /// the fork inherited with no writer session ever opened in the fork,
-/// because the fork's retention floor and acknowledged floor start at its
-/// fork point, so every inherited deletion has expired. The source keeps
+/// because the fork's retention floor starts at its fork point, so every
+/// inherited deletion has expired. The source keeps
 /// its rows, and the fork's first write commits right after the fork point.
 #[tokio::test]
 async fn a_fork_removes_an_inherited_deletions_rows_without_a_writer_session() {

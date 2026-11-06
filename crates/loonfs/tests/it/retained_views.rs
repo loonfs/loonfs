@@ -239,13 +239,6 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                     .await
                     .expect("advance retention");
                 assert_eq!(advanced.retention_floor_seq, head_seq);
-                // The rebuild below applies the floor once the maintainer's
-                // fence acknowledges it.
-                runtime
-                    .maintenance
-                    .acknowledge_retention_floor(&source)
-                    .await
-                    .expect("acknowledge the floor");
             }
             "rebuilt" => {
                 let mut rebuilt = false;

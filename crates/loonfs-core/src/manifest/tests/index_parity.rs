@@ -413,13 +413,8 @@ fn drop_pass_keeps_the_floor_visible_binding_across_a_later_rename() {
         vec![bind(1, 0), unbind(2), bind(2, 1)],
     );
 
-    compact_rows_with_retention(
-        MetadataFamilyGroup::Bindings,
-        &mut rows,
-        ChangeSeq(1),
-        ChangeSeq(0),
-    )
-    .expect("drop");
+    compact_rows_with_retention(MetadataFamilyGroup::Bindings, &mut rows, ChangeSeq(1))
+        .expect("drop");
 
     assert_eq!(rows[&ApiMetadataRowFamily::DirentryBinds].len(), 3);
     assert_eq!(rows[&ApiMetadataRowFamily::DirentryChildBinds].len(), 3);
@@ -479,13 +474,8 @@ fn drop_pass_resolves_same_seq_rebinds_by_delta_index() {
         vec![bind(0), unbind.clone(), bind(2)],
     );
 
-    compact_rows_with_retention(
-        MetadataFamilyGroup::Bindings,
-        &mut rows,
-        ChangeSeq(1),
-        ChangeSeq(0),
-    )
-    .expect("drop");
+    compact_rows_with_retention(MetadataFamilyGroup::Bindings, &mut rows, ChangeSeq(1))
+        .expect("drop");
 
     // Only the delta-2 rebind (the slot's latest) survives; the superseded
     // delta-0 bind and its spent unbind marker are gone from both families.

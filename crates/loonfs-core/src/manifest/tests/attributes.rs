@@ -101,7 +101,6 @@ fn the_compaction_keeps_every_revision_above_the_floor_and_the_newest_at_it() {
         MetadataFamilyGroup::Attributes,
         &mut rows_by_family,
         ChangeSeq(6),
-        ChangeSeq(6),
     )
     .expect("compact attributes");
 
@@ -133,7 +132,6 @@ fn the_compaction_keeps_a_latest_empty_revision() {
     compact_rows_with_retention(
         MetadataFamilyGroup::Attributes,
         &mut rows_by_family,
-        ChangeSeq(9),
         ChangeSeq(9),
     )
     .expect("compact attributes");

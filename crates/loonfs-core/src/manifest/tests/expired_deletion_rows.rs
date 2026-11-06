@@ -195,8 +195,8 @@ async fn delete_recursively<S: ObjectStore + ?Sized>(
 
 /// A namespace in which the expired deletion of `/docs` hides four inodes
 /// with revisions, attributes, and access rows, the deletion of `/trash` is
-/// recoverable, and `/keep` stays visible. The current manifest acknowledges
-/// the floor at the deletion of `/docs`.
+/// recoverable, and `/keep` stays visible. The current manifest's retention
+/// floor is at the deletion of `/docs`.
 struct ExpiredDocs {
     docs: InodeId,
     /// `/docs`, `/docs/notes.txt`, `/docs/sub`, and `/docs/sub/deep.txt`.
@@ -256,7 +256,6 @@ async fn expire_docs_beside_recoverable_trash<S: ObjectStore>(
     // The floor stops at the deletion, so the views that the compaction has
     // to preserve include the ones before `/trash` was deleted.
     advance_floor_through(store, namespace_id, deletion_seq, context).await;
-    acknowledge_floor(store, namespace_id, context).await;
     ExpiredDocs {
         docs: ids["/docs"],
         hidden: [
@@ -704,7 +703,6 @@ async fn nested_deletions_expire_in_order_and_lose_their_rows_in_order() {
     let both = [outer.as_slice(), inner.as_slice()].concat();
 
     advance_floor_through(&store, &namespace_id, nested.inner_seq, &context).await;
-    acknowledge_floor(&store, &namespace_id, &context).await;
     assert_eq!(
         read_as(&store, &namespace_id, nested.gone, "prn_root")
             .await
@@ -752,7 +750,6 @@ async fn nested_deletions_expire_in_order_and_lose_their_rows_in_order() {
     );
 
     advance_floor_through(&store, &namespace_id, nested.outer_seq, &context).await;
-    acknowledge_floor(&store, &namespace_id, &context).await;
     // A later write gives the inode families delta runs, so the next
     // compactions rewrite their bases.
     put(&store, &namespace_id, "/later.txt", b"later", &context).await;
@@ -796,7 +793,7 @@ fn delta_window(
 /// A namespace with an open access mode in which the expired deletion of
 /// `/old` hides `/old`, `/old/a.txt`, and `/old/b.txt`, and the visible
 /// `/keep-{index}.txt` files share a run with `/old/b.txt`. The current
-/// manifest acknowledges the floor at the deletion. Returns the inodes of
+/// manifest's retention floor is at the deletion. Returns the inodes of
 /// `/old` and `/old/a.txt`, which an earlier run created.
 async fn expire_old<S: ObjectStore>(
     store: &S,
@@ -831,7 +828,6 @@ async fn expire_old<S: ObjectStore>(
         .expect("delete /old")
         .committed_seq;
     advance_floor_through(store, namespace_id, deletion_seq, context).await;
-    acknowledge_floor(store, namespace_id, context).await;
     (old, a)
 }
 
@@ -1217,17 +1213,17 @@ async fn listed_deletions<S: ObjectStore + ?Sized>(
 }
 
 /// Checks that a base compaction builds no kept inode filter, and reads none
-/// of the slot index, while the basis manifest's acknowledged floor is 0,
-/// even with a recoverable deletion and a deletion that a retention advance
-/// expired. Once a fold acknowledges the floor, the compaction builds the
-/// filter and walks the tree, even after a base compaction of
-/// `active_deletions` removed the expired deletion's `listed` row, and the
-/// filter leaves out the hidden file and keeps the recoverable one.
+/// of the slot index, while the basis manifest's retention floor is 0, even
+/// with two recoverable deletions. Once a retention advance expires one of
+/// them, the compaction builds the filter and walks the tree, even after a
+/// base compaction of `active_deletions` removed the expired deletion's
+/// `listed` row, and the filter leaves out the hidden file and keeps the
+/// recoverable one.
 #[tokio::test]
-async fn a_base_compaction_walks_the_tree_once_the_acknowledged_floor_is_above_zero() {
+async fn a_base_compaction_walks_the_tree_once_the_floor_is_above_zero() {
     let temp = tempdir().expect("tempdir");
     let store = RecordingStore::metadata_segments(LocalFsStore::new(temp.path()).expect("store"));
-    let namespace_id = NamespaceId::parse("acknowledged-walk").expect("namespace id");
+    let namespace_id = NamespaceId::parse("floor-walk").expect("namespace id");
     let context = writer_at("writer-1", 5_000);
     bootstrap_restricted_namespace(&store, &namespace_id, &context).await;
     put(&store, &namespace_id, "/old/a.txt", b"old", &context).await;
@@ -1237,20 +1233,20 @@ async fn a_base_compaction_walks_the_tree_once_the_acknowledged_floor_is_above_z
     let expired_seq = delete_recursively(&store, &namespace_id, "/old", &context).await;
     let recoverable_seq =
         delete_recursively(&store, &namespace_id, "/recoverable.txt", &context).await;
-    advance_floor_through(&store, &namespace_id, expired_seq, &context).await;
-    assert_eq!(
-        read_acknowledged_floor_seq(&store, &namespace_id).await,
-        ChangeSeq(0)
-    );
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .fold_wal()
+        .await
+        .expect("fold the deletions");
+    assert_eq!(read_floor_seq(&store, &namespace_id).await, ChangeSeq(0));
 
     let (filter, walk_reads) = kept_inode_filter_and_walk_reads(&store, &namespace_id).await;
     assert!(
         matches!(filter, KeptInodeFilter::EveryInode),
-        "an acknowledged floor of 0"
+        "a retention floor of 0"
     );
     assert_eq!(walk_reads, 0);
 
-    acknowledge_floor(&store, &namespace_id, &context).await;
+    advance_floor_through(&store, &namespace_id, expired_seq, &context).await;
     compact_group(
         &store,
         &namespace_id,
@@ -1350,4 +1346,59 @@ async fn a_group_compacted_after_the_trash_still_removes_an_expired_deletions_ro
         assert!(!before[&family].is_empty(), "{family:?} had hidden rows");
         assert_eq!(after[&family], Vec::new(), "{family:?} keeps no hidden row");
     }
+}
+
+/// Checks that a base compaction over the retention advance's own manifest
+/// removes every row that an expired deletion hides, with no commit and no
+/// fence after the advance. At or below the floor, a deletion whose latest
+/// event is `set` has expired, and nothing else has to happen before a
+/// compaction removes its rows.
+#[tokio::test]
+async fn a_base_compaction_over_the_advance_removes_an_expired_deletions_rows() {
+    let temp = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp.path()).expect("store");
+    let namespace_id = NamespaceId::parse("advance-basis").expect("namespace id");
+    let context = writer_at("writer-1", 5_000);
+    let (old, a) = expire_old(&store, &namespace_id, &context).await;
+    let hidden = [old, a];
+    let before = rows_of(&store, &namespace_id, &hidden).await;
+
+    // The advance's manifest is the current one, and no WAL object follows
+    // it.
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let advanced = namespace
+        .load_current_manifest()
+        .await
+        .expect("load the advance's manifest");
+    let head = namespace.load_read_state().await.expect("read the head");
+    assert_eq!(head.wal_no, advanced.folded_wal_no());
+    assert!(advanced.retention_floor_seq() > ChangeSeq(0));
+
+    compact_groups_without_false_positives(
+        &store,
+        &namespace_id,
+        &MetadataFamilyGroup::ALL,
+        &hidden,
+    )
+    .await;
+    let after = rows_of(&store, &namespace_id, &hidden).await;
+    for family in [
+        ApiMetadataRowFamily::Inodes,
+        ApiMetadataRowFamily::Revisions,
+        ApiMetadataRowFamily::DirentryBinds,
+        ApiMetadataRowFamily::DirentryChildBinds,
+        ApiMetadataRowFamily::ActiveDeletions,
+    ] {
+        assert!(!before[&family].is_empty(), "{family:?} had hidden rows");
+        assert_eq!(after[&family], Vec::new(), "{family:?} keeps no hidden row");
+    }
+    assert_eq!(
+        namespace
+            .load_read_state()
+            .await
+            .expect("read the head")
+            .wal_no,
+        head.wal_no,
+        "the compactions wrote no WAL object"
+    );
 }

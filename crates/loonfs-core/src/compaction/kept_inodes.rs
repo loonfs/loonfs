@@ -1,15 +1,15 @@
 //! The kept inode filter, which tells a base compaction which inodes keep
 //! their rows.
 //!
-//! A deletion is removable in a compaction's basis when its latest tombstone
+//! A deletion has expired in a compaction's basis when its latest tombstone
 //! event is a `set` and its deletion sequence is at or below the basis
-//! manifest's acknowledged floor. Its tombstone hides its subtree at every
+//! manifest's retention floor. Its tombstone hides its subtree at every
 //! sequence that a compaction preserves, and no undelete of it can be
 //! committed, so a base compaction of a group that stores rows by inode
-//! removes every row of the inodes that a removable deletion hides
+//! removes every row of the inodes that an expired deletion hides
 //! ([format section 10.3](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#103-row-retention-during-a-base-compaction)).
 //! The filter contains every inode that's visible at the basis's head or
-//! under a kept deletion, which is a deletion above the acknowledged floor.
+//! under a kept deletion, which is a deletion above the retention floor.
 //! A walk of the basis's directory tree finds those inodes.
 
 use super::plan::{group_run_descriptors, MetadataCompactionSpec};
@@ -35,7 +35,7 @@ const KEPT_INODE_SCAN_ROWS: usize = DIRECTORY_PAGE_RAW_SCAN_LIMIT;
 /// The inodes whose rows a base compaction keeps.
 pub(crate) enum KeptInodeFilter {
     /// The compaction keeps every row, because it isn't a base compaction of a group
-    /// that stores rows by inode, because the basis manifest's acknowledged
+    /// that stores rows by inode, because the basis manifest's retention
     /// floor is 0, or because the walk would exceed its depth limit.
     EveryInode,
     /// The inodes that the walk reached. The filter can also match an inode
@@ -46,7 +46,7 @@ pub(crate) enum KeptInodeFilter {
 
 impl KeptInodeFilter {
     /// Whether the compaction keeps `row` and judges it under its family's
-    /// retention rule, rather than removing it because a removable deletion
+    /// retention rule, rather than removing it because an expired deletion
     /// hides its inode.
     pub(crate) fn keeps(&self, row: &MetadataRow) -> bool {
         let Self::Reached(filter) = self else {
@@ -94,15 +94,14 @@ fn removes_hidden_rows(group: MetadataFamilyGroup) -> bool {
 /// Builds the kept inode filter for the compaction that `spec` plans over `basis`,
 /// or returns the outcome that stopped the walk.
 ///
-/// A basis whose manifest has an acknowledged floor of 0 keeps every row
+/// A basis whose manifest has a retention floor of 0 keeps every row
 /// without building the filter. Every deletion's sequence is at least 1, so
-/// no deletion in that basis is at or below the acknowledged floor, and the
-/// acknowledged floor never decreases, so no earlier compaction treated a
-/// deletion in it as removable either. Any other basis builds the filter,
-/// because a base compaction of `active_deletions` removes a removable
-/// deletion's `listed` row on its own schedule, so the other groups can't
-/// tell from that family whether they still store rows that the deletion
-/// hides.
+/// no deletion in that basis is at or below the floor, and the floor never
+/// decreases, so no earlier compaction treated a deletion in it as expired
+/// either. Any other basis builds the filter, because a base compaction of
+/// `active_deletions` removes an expired deletion's `listed` row on its own
+/// schedule, so the other groups can't tell from that family whether they
+/// still store rows that the deletion hides.
 ///
 /// The filter uses ten bits per expected inode, capped at
 /// `MAX_BLOOM_FILTER_BYTES`. Its seed is the output run number. A walk
@@ -118,8 +117,8 @@ pub(crate) async fn load_kept_inode_filter<S: ObjectStore + ?Sized>(
         return Ok(Ok(KeptInodeFilter::EveryInode));
     }
     let manifest = basis.manifest().payload();
-    let acknowledged_floor_seq = manifest.acknowledged_floor_seq;
-    if acknowledged_floor_seq == ChangeSeq(0) {
+    let retention_floor_seq = manifest.retention_floor_seq;
+    if retention_floor_seq == ChangeSeq(0) {
         return Ok(Ok(KeptInodeFilter::EveryInode));
     }
     let expected_inodes = basis
@@ -133,7 +132,7 @@ pub(crate) async fn load_kept_inode_filter<S: ObjectStore + ?Sized>(
     let mut walk = KeptInodeWalk {
         segments: basis.with_empty_block_memo(),
         filter,
-        acknowledged_floor_seq,
+        retention_floor_seq,
         cancellation,
     };
     match walk.reach_kept_inodes().await? {
@@ -249,9 +248,9 @@ struct KeptInodeWalk<'a, 'c, S: ObjectStore + ?Sized> {
     /// reads its input.
     segments: VerifiedMetadataSegments<'a, S>,
     filter: BloomFilter,
-    /// The basis manifest's acknowledged floor. A deletion at or below it
-    /// that no undelete cancelled is removable.
-    acknowledged_floor_seq: ChangeSeq,
+    /// The basis manifest's retention floor. A deletion at or below it that
+    /// no undelete cancelled has expired.
+    retention_floor_seq: ChangeSeq,
     cancellation: &'c MetadataCompactionCancellation,
 }
 
@@ -260,10 +259,10 @@ impl<S: ObjectStore + ?Sized> KeptInodeWalk<'_, '_, S> {
     /// inode under a kept deletion.
     ///
     /// Deleting an item unbinds it, so the walk from the root inode doesn't
-    /// reach a deleted subtree. A removable deletion isn't a starting point,
+    /// reach a deleted subtree. An expired deletion isn't a starting point,
     /// and its root is unbound, so no walk reaches the inodes it hides. An
     /// inner deletion is older than the deletion around it, so no kept
-    /// deletion is inside a removable one, and the two walks reach every
+    /// deletion is inside an expired one, and the two walks reach every
     /// ancestor through which the rights on an item under a kept
     /// deletion are evaluated.
     async fn reach_kept_inodes(&mut self) -> Result<ControlFlow<WalkStop>> {
@@ -273,10 +272,10 @@ impl<S: ObjectStore + ?Sized> KeptInodeWalk<'_, '_, S> {
         self.reach_kept_deletions().await
     }
 
-    /// Reaches every deletion above the acknowledged floor that has a
+    /// Reaches every deletion above the retention floor that has a
     /// `listed` row and no `removed` row in the basis's `active_deletions`.
     async fn reach_kept_deletions(&mut self) -> Result<ControlFlow<WalkStop>> {
-        let mut kept = ListedDeletions::above(self.acknowledged_floor_seq);
+        let mut kept = ListedDeletions::above(self.retention_floor_seq);
         loop {
             let (root_inode_id, inode_kind) =
                 match kept.next(&self.segments, self.cancellation).await? {

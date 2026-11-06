@@ -106,7 +106,6 @@ pub const WAL_OBJECT_OVERHEAD_BYTES: usize = cbor_map_bytes(&[
     ("wal_no", 9),
     ("writer_epoch", 9),
     ("head_seq", 9),
-    ("basis_floor_seq", 9),
     ("records", 9),
 ]);
 
@@ -447,10 +446,6 @@ pub struct WalObjectPayload {
     pub writer_epoch: WriterEpoch,
     /// Visible sequence after this WAL object.
     pub head_seq: ChangeSeq,
-    /// Retention floor of the manifest that the writer validated this
-    /// object's commits against, or that a fence was planned against (see
-    /// [Advancing the retention floor](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#101-advancing-the-retention-floor)).
-    pub basis_floor_seq: ChangeSeq,
     /// Logical commits in contiguous ascending sequence order.
     pub records: Vec<WalCommitPayload>,
 }
@@ -866,7 +861,6 @@ mod tests {
             wal_no: WalNo(1),
             writer_epoch: WriterEpoch(1),
             head_seq: ChangeSeq(lengths.len() as u64),
-            basis_floor_seq: ChangeSeq(0),
             records,
         }
     }
@@ -1100,7 +1094,6 @@ mod tests {
             wal_no: WalNo(crate::MAX_PUBLIC_INTEGER),
             writer_epoch: WriterEpoch(crate::MAX_PUBLIC_INTEGER),
             head_seq: ChangeSeq(crate::MAX_PUBLIC_INTEGER),
-            basis_floor_seq: ChangeSeq(crate::MAX_PUBLIC_INTEGER),
             records: Vec::new(),
         })
         .expect("encode");

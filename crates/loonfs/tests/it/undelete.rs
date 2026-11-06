@@ -4,8 +4,8 @@ use crate::common::*;
 use loonfs::publish::{parse_mutation_path, CommitIntent, FilesystemOperation};
 use loonfs::test_support::fresh_reader;
 use loonfs::{
-    ChangeSeq, CommitId, DeleteDirectoryBehavior, DeleteOptions, DestinationBehavior, Error,
-    ErrorCode, InodeId, PutFileOptions, RevisionNo,
+    AdvanceRetentionFloorOptions, ChangeSeq, CommitId, DeleteDirectoryBehavior, DeleteOptions,
+    DestinationBehavior, Error, ErrorCode, InodeId, PutFileOptions, RetentionTarget, RevisionNo,
 };
 use loonfs_test_support::ids::namespace_id;
 use std::assert_matches;
@@ -745,7 +745,7 @@ fn delete_with_expected_inode_refuses_a_raced_rebinding() {
 }
 
 #[tokio::test]
-async fn a_deleted_file_keeps_its_newest_revision_past_the_floor_and_undelete_restores_it() {
+async fn a_deleted_file_keeps_its_newest_revision_at_the_floor_and_undelete_restores_it() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = open_compacting_runtime_with_async(
         store(temp_dir.path()),
@@ -764,20 +764,25 @@ async fn a_deleted_file_keeps_its_newest_revision_past_the_floor_and_undelete_re
     };
     // Each revision is written to its own run, so the compaction below is a base
     // compaction that applies the floor; a lone base run is never rewritten.
+    let mut newest_seq = None;
     for body in ["draft one", "draft two"] {
-        fs.put_file_with_options(
-            &namespace_id,
-            "/docs/report.txt",
-            body.as_bytes(),
-            &actor,
-            &replace,
-        )
-        .await
-        .expect("put revision");
+        newest_seq = Some(
+            fs.put_file_with_options(
+                &namespace_id,
+                "/docs/report.txt",
+                body.as_bytes(),
+                &actor,
+                &replace,
+            )
+            .await
+            .expect("put revision")
+            .committed_seq,
+        );
         fs.create_snapshot(&namespace_id)
             .await
             .expect("fold the revision");
     }
+    let newest_seq = newest_seq.expect("a revision");
     let inode_id = fs
         .stat(&namespace_id, "/docs/report.txt")
         .await
@@ -791,26 +796,30 @@ async fn a_deleted_file_keeps_its_newest_revision_past_the_floor_and_undelete_re
     fs.create_snapshot(&namespace_id)
         .await
         .expect("fold the deletion");
+    // The floor stops just below the deletion, at the file's newest revision,
+    // so the deletion stays recoverable. The advance takes the writer epoch,
+    // so the undelete opens a new writer session.
+    drop(namespace_writer);
     let advanced = fs
-        .advance_retention_floor(&namespace_id)
+        .advance_retention_floor_with_options(
+            &namespace_id,
+            &AdvanceRetentionFloorOptions {
+                target: RetentionTarget::Seq(newest_seq),
+            },
+        )
         .await
-        .expect("advance the floor past the deletion");
-    assert_eq!(advanced.retention_floor_seq, deletion.committed_seq);
-    // The deletion sits at the floor, and it stays recoverable until a writer
-    // acknowledges the floor, so the undelete lands first.
-    namespace_writer
+        .expect("advance the floor to the newest revision");
+    assert_eq!(advanced.retention_floor_seq, newest_seq);
+    fs.namespace_writer(&namespace_id)
+        .expect("open a new session")
         .undelete(inode_id, deletion.committed_seq, &actor)
         .await
         .expect("undelete the file");
     fs.create_snapshot(&namespace_id)
         .await
         .expect("fold the undelete");
-    // The acknowledgment lets the base compaction apply the floor: the file
-    // keeps its newest revision at the floor and loses the older one.
-    fs.maintenance
-        .acknowledge_retention_floor(&namespace_id)
-        .await
-        .expect("acknowledge the floor");
+    // The base compaction applies the floor: the file keeps its newest
+    // revision at the floor and loses the older one.
     compact_until_done(&fs.maintenance, &namespace_id).await;
     let reader = fresh_reader(store(temp_dir.path())).await;
     let namespace = reader.namespace(&namespace_id);

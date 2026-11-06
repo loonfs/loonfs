@@ -30,9 +30,8 @@ async fn a_sweep_and_the_session_steps_never_run_on_the_same_namespace_together(
         OperationSelector::Any,
     ));
     let mut config = scheduler_config(None);
-    // The session's metadata step folds the session's tail, and the sweep's
-    // acknowledgment of the retention floor loads the current manifest, so
-    // the gate parks either one at its first request.
+    // The session's metadata step and the sweep's metadata call each fold
+    // the session's tail, so the gate parks either one at its first request.
     config.idle_fold_after_ms = Some(1);
     let server = SchedulerServer::start(store.clone(), &config, 0).await;
     server

@@ -571,7 +571,7 @@ impl TombstoneRowAction {
 /// `Listed` exposes a deletion in trash; `Removed` hides it after an undelete.
 /// Both rows share a key prefix, with `Removed` sorting first, so scans can
 /// suppress cancelled entries. Compaction later removes the cancelled pair,
-/// and the `Listed` row of a deletion at or below the acknowledged floor.
+/// and the `Listed` row of a deletion at or below the retention floor.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ActiveDeletionRowAction {

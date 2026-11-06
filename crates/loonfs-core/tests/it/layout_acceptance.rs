@@ -171,7 +171,7 @@ async fn reads_commits_and_change_feed_never_list() {
 }
 
 #[tokio::test]
-async fn maintenance_preserves_writer_and_logical_head() {
+async fn maintenance_preserves_the_logical_head() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -238,7 +238,12 @@ async fn maintenance_preserves_writer_and_logical_head() {
         .load_read_state()
         .await
         .expect("namespace state");
-    assert_eq!(after.writer_epoch, before.writer_epoch);
-    assert_eq!(after.writer, before.writer);
+    // A retention advance without a writer session takes the writer epoch
+    // (format spec, "Advancing the retention floor"), and the other
+    // maintenance calls leave it.
+    assert_eq!(
+        after.writer_epoch,
+        before.writer_epoch.successor().expect("next epoch")
+    );
     assert_eq!(after.seq, before.seq);
 }
