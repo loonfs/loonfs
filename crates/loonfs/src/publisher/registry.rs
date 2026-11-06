@@ -2,7 +2,6 @@
 //! the publisher make to a namespace.
 
 use super::admission::{AdmissionPermit, PublicationAdmission};
-use super::hint_raises::HintRaises;
 use super::{lock_state, NamespacePublisher, NamespaceTurns, PublisherContext};
 use crate::publish::CommitCandidate;
 use crate::runtime_core::{HeadPositions, ReadPositionSlot, RuntimeCore};
@@ -58,8 +57,7 @@ pub(crate) struct PublisherRegistry {
 }
 
 /// State shared by all publishers in this registry: their context, the
-/// session table, contained panic count, and the hint raises that this
-/// runtime's manifest publications started.
+/// session table, and the count of contained panics.
 pub(super) struct RegistryShared {
     pub(super) context: Arc<PublisherContext>,
     state: Mutex<RegistryState>,
@@ -67,7 +65,6 @@ pub(super) struct RegistryShared {
     /// contain panics to keep the registry usable, so this — not a task
     /// join error — is what a drain reports.
     pub(super) panicked_units: AtomicUsize,
-    pub(super) hint_raises: HintRaises,
 }
 
 pub(super) struct RegistryState {
@@ -239,6 +236,30 @@ impl RegistryShared {
             .get(namespace_id)
             .map(|live| live.publisher.clone())
     }
+
+    /// Raises the namespace's hint to `manifest_no`, a manifest that this
+    /// runtime published, with one read of the hint and one compare-and-swap
+    /// (format spec, "The current manifest and WAL tip").
+    ///
+    /// A failed raise, or one that loses its compare-and-swap, is logged and
+    /// ignored. The hint can then stay behind the newest manifest until the
+    /// next publication raises it, and discovery probes past a hint that lags.
+    pub(super) async fn raise_hint(&self, namespace_id: &NamespaceId, manifest_no: ManifestNo) {
+        if let Err(error) = self
+            .context
+            .runtime_core
+            .namespace_store(namespace_id)
+            .raise_hint(manifest_no, None)
+            .await
+        {
+            tracing::debug!(
+                namespace_id = %namespace_id,
+                manifest_no = %manifest_no,
+                error = %error,
+                "the namespace hint raise failed, and a later publication raises the hint"
+            );
+        }
+    }
 }
 
 impl HeadPositions for RegistryShared {
@@ -298,7 +319,6 @@ impl PublisherRegistry {
                     turns: HashMap::new(),
                 }),
                 panicked_units: AtomicUsize::new(0),
-                hint_raises: HintRaises::default(),
             }),
         }
     }
@@ -521,8 +541,7 @@ impl PublisherRegistry {
     }
 
     /// Waits for all current publisher workers, folds, and compactions to
-    /// finish, and with them the hint raises that their publications started,
-    /// except a trailing raise that waits for the end of its interval.
+    /// finish, and with them the hint raises that their publications started.
     ///
     /// Folds are waited for before compactions, because a fold starts its
     /// session's compaction.
@@ -564,9 +583,7 @@ impl PublisherRegistry {
     }
 
     /// Raises the namespace's hint to `manifest_no`, a manifest that this
-    /// runtime published, after the publication has returned, or leaves the
-    /// raise to the trailing raise when this runtime started a raise of that
-    /// hint less than `HINT_RAISE_INTERVAL_MS` ago.
+    /// runtime published, after the publication has returned.
     pub(crate) async fn raise_hint(&self, namespace_id: &NamespaceId, manifest_no: ManifestNo) {
         self.shared.raise_hint(namespace_id, manifest_no).await;
     }

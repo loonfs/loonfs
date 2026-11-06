@@ -1,19 +1,14 @@
 //! Manifest publications that build on a live session's writer position,
 //! which put the position's successor without a request first and read
-//! neither the hint nor a WAL object.
+//! neither the hint nor a WAL object before the put.
 
 use super::*;
 use loonfs_test_support::stores::RecordedOperation;
 use std::num::NonZeroU64;
 
-/// A store that records every request that reaches it, under a gate that
-/// parks every request for the namespace's hint once a test arms it, so a
-/// publication that read the hint would never return.
-type GatedStore = BlockingStore<RecordingStore<LocalFsStore>>;
-
 struct Fixture {
     _directory: tempfile::TempDir,
-    store: Arc<GatedStore>,
+    store: Arc<RecordingStore<LocalFsStore>>,
     writer: crate::LoonFs<crate::Writable>,
     namespace_id: NamespaceId,
     namespace: crate::Namespace<crate::Writable>,
@@ -22,10 +17,6 @@ struct Fixture {
 impl Fixture {
     /// Creates a writer built by `configure`, with its namespace created and
     /// opened, and the session's first commit published.
-    ///
-    /// The writer's monotonic timer doesn't move, so the hint raise after the
-    /// session's claim is the last one: every later publication is less than
-    /// `HINT_RAISE_INTERVAL_MS` after it, and skips its raise.
     async fn new(
         configure: impl FnOnce(
             crate::LoonFsBuilder<crate::Writable>,
@@ -33,13 +24,9 @@ impl Fixture {
     ) -> Self {
         let directory = tempdir().expect("tempdir");
         let namespace_id = NamespaceId::parse("basis").expect("namespace id");
-        let store = Arc::new(BlockingStore::new(
-            RecordingStore::new(
-                LocalFsStore::new(directory.path()).expect("store"),
-                KeyPredicate::any(),
-            ),
-            KeyPredicate::hint(&namespace_id),
-            OperationSelector::Any,
+        let store = Arc::new(RecordingStore::new(
+            LocalFsStore::new(directory.path()).expect("store"),
+            KeyPredicate::any(),
         ));
         let builder = crate::LoonFs::builder_with_store(store.clone() as SharedStore)
             .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
@@ -77,10 +64,9 @@ impl Fixture {
         }
     }
 
-    /// Parks every later request for the hint, and clears the request log.
-    fn park_hint_requests(&self) {
-        self.store.arm();
-        self.store.inner().reset();
+    /// Clears the request log.
+    fn reset_requests(&self) {
+        self.store.reset();
     }
 
     fn manifest(&self, manifest_no: ManifestNo) -> String {
@@ -88,18 +74,34 @@ impl Fixture {
     }
 
     /// Returns the logged manifest requests, and checks that the log has no
-    /// request for the hint and no read of a WAL object.
+    /// read of a WAL object and no request for the hint before the first
+    /// manifest put. The hint raise that follows each publication reads and
+    /// writes the hint after its put.
     fn manifest_requests(&self) -> Vec<(&'static str, String)> {
-        let operations = self.store.inner().take();
+        let operations = self.store.take();
         let wal = wal_prefix(&self.namespace_id);
         let hint = loonfs_objectstore::keys::hint(&self.namespace_id);
+        let manifests = metadata_manifest_prefix(&self.namespace_id);
+        let first_put = operations
+            .iter()
+            .position(|operation| {
+                matches!(operation, RecordedOperation::Put { .. })
+                    && operation.key().starts_with(&manifests)
+            })
+            .unwrap_or(operations.len());
         assert!(
-            !operations.iter().any(|operation| operation.key() == hint
-                || (operation.key().starts_with(&wal)
-                    && !matches!(operation, RecordedOperation::Put { .. }))),
+            !operations[..first_put]
+                .iter()
+                .any(|operation| operation.key() == hint),
             "{operations:?}"
         );
-        let manifests = metadata_manifest_prefix(&self.namespace_id);
+        assert!(
+            !operations
+                .iter()
+                .any(|operation| operation.key().starts_with(&wal)
+                    && !matches!(operation, RecordedOperation::Put { .. })),
+            "{operations:?}"
+        );
         operations
             .iter()
             .filter(|operation| operation.key().starts_with(&manifests))
@@ -115,11 +117,10 @@ impl Fixture {
     }
 
     async fn current_manifest_no(&self) -> ManifestNo {
-        current_manifest_no(self.store.inner(), &self.namespace_id).await
+        current_manifest_no(self.store.as_ref(), &self.namespace_id).await
     }
 
     async fn shut_down(self) {
-        self.store.release();
         self.writer.shutdown().await.expect("shut down writer");
     }
 }
@@ -136,7 +137,7 @@ async fn an_explicit_fold_from_a_live_session_puts_on_its_basis_and_reads_no_hin
         .await
         .successor()
         .expect("next manifest number");
-    fixture.park_hint_requests();
+    fixture.reset_requests();
     let folded = bounded(
         Duration::from_secs(10),
         fixture
@@ -145,7 +146,7 @@ async fn an_explicit_fold_from_a_live_session_puts_on_its_basis_and_reads_no_hin
             .fold_wal(&fixture.namespace_id),
     )
     .await
-    .expect("the fold reads no hint")
+    .expect("the fold returns")
     .expect("fold");
     assert_eq!(folded.outcome, FoldWalOutcome::Published);
     assert_eq!(folded.manifest_no, next);
@@ -153,6 +154,12 @@ async fn an_explicit_fold_from_a_live_session_puts_on_its_basis_and_reads_no_hin
         fixture.manifest_requests(),
         vec![("put", fixture.manifest(next))]
     );
+    assert_hint_at_current_manifest(
+        &fixture.writer,
+        fixture.store.as_ref(),
+        &fixture.namespace_id,
+    )
+    .await;
     fixture.shut_down().await;
 }
 
@@ -208,11 +215,11 @@ async fn a_fold_at_the_write_stop_puts_on_its_basis_and_reads_no_hint() {
         .await
         .successor()
         .expect("next manifest number");
-    fixture.park_hint_requests();
+    fixture.reset_requests();
     drop(permits);
     bounded(Duration::from_secs(10), commit)
         .await
-        .expect("the fold reads no hint, and the commit settles")
+        .expect("the commit settles")
         .expect("join the commit")
         .expect("the commit is committed after the fold");
     let requests = fixture.manifest_requests();
@@ -307,11 +314,11 @@ async fn a_session_compaction_unit_puts_on_its_basis_and_reads_no_hint() {
         .await
         .successor()
         .expect("next manifest number");
-    fixture.park_hint_requests();
+    fixture.reset_requests();
     drop(permits);
     bounded(Duration::from_secs(10), fixture.writer.drain())
         .await
-        .expect("the compaction reads no hint")
+        .expect("the compaction settles")
         .expect("drain");
     let requests = fixture.manifest_requests();
     assert_eq!(

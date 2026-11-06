@@ -32,8 +32,8 @@ async fn acquisition_shares_discovery_and_an_own_fold_needs_none() {
         .await
         .expect("namespace");
     creator.shutdown().await.expect("shutdown creator");
-    // The writer's timer doesn't move, so the fold's hint raise is skipped
-    // and no trailing raise starts while the test counts requests.
+    // The writer's timer doesn't move, so no check for a newer manifest
+    // starts while the test counts requests.
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("discovery-test"))
         .config(loonfs::RuntimeConfig {
@@ -215,12 +215,7 @@ async fn a_directory_created_during_a_fold_is_seen_after_the_projection_is_dropp
     store.inner().release();
     namespace_writer.wait_for_fold().await.expect("fold");
     writer.drain().await.expect("the fold's compaction settles");
-    // The writer's timer doesn't move, so the fold's hint raise is skipped,
-    // and no trailing raise starts while the test counts requests. The test
-    // raises the hint to the fold's manifest.
-    loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)
-        .raise_hint_to_current_manifest()
-        .await;
+    // The fold raised the hint to its manifest.
     store.reset();
 
     namespace_writer

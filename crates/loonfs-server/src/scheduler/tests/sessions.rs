@@ -603,12 +603,8 @@ async fn a_fenced_compactor_stops_before_a_unit_and_waits_for_the_retry_interval
         .compact_metadata(&namespace_id, &loonfs::MaintenanceCancellation::new())
         .await
         .expect("claim newer compactor");
-    // A runtime skips a hint raise less than a second after its last raise
-    // of the same hint, so the test raises the hint to the current manifest
-    // before it counts the session steps' requests.
-    loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)
-        .raise_hint_to_current_manifest()
-        .await;
+    // The other runtime's claim raised the hint to the current manifest
+    // before the test counts the session steps' requests.
     store.reset();
     server
         .run_steps_after(config.maintenance_interval_ms.get())

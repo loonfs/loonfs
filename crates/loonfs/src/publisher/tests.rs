@@ -3654,7 +3654,7 @@ async fn assert_hint_at_current_manifest(
 mod basis_publications;
 mod fenced_session;
 mod head_positions;
-mod hint_raises;
+mod hints;
 mod inline_writer;
 mod merges;
 mod pin_folds;

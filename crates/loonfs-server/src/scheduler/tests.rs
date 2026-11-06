@@ -6,7 +6,6 @@ use crate::config::{GrepConfig, JobMode, ServerConfig};
 use futures::TryStreamExt as _;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue, MetricsRecorder};
 use loonfs::{LoonFs, Maintenance, Namespace, NamespaceId, SharedObjectStore, Writable};
-use loonfs_core::limits::HINT_RAISE_INTERVAL_MS;
 use loonfs_grep::entry::{grep_extension_name, GrepIndexStatus};
 use loonfs_grep::{GrepWorker, GrepWorkerConfig};
 use loonfs_http::{HeldNamespace, Namespaces, WriterSessions};
@@ -267,24 +266,6 @@ async fn seed_unfolded_tail(writer: &LoonFs<Writable>, namespace_id: &NamespaceI
         .expect("write the tail");
 }
 
-/// Raises the namespace's hint to its current manifest.
-///
-/// A runtime skips a hint raise less than a second after its last raise of
-/// the same hint, so a test that counts discovery's requests raises the hint
-/// first.
-async fn raise_hint_to_current_manifest(store: &dyn ObjectStore, namespace_id: &NamespaceId) {
-    let current = loonfs_core::test_support::namespace_store(store, namespace_id)
-        .load_current_manifest()
-        .await
-        .expect("load the current manifest")
-        .manifest()
-        .manifest_no;
-    loonfs_core::test_support::namespace_store(store, namespace_id)
-        .raise_hint(current, None)
-        .await
-        .expect("raise the hint");
-}
-
 /// Returns the manifest number that the namespace's hint records.
 async fn hint_manifest_no(store: &dyn ObjectStore, namespace_id: &NamespaceId) -> ManifestNo {
     let bytes = store
@@ -298,23 +279,19 @@ async fn hint_manifest_no(store: &dyn ObjectStore, namespace_id: &NamespaceId) -
         .manifest_no
 }
 
-/// Waits until the namespace's hint records the current manifest, and moves
-/// the paused test clock forward a millisecond at a time until then, so a
-/// runtime's trailing hint raise can run.
-async fn wait_for_current_hint(store: &dyn ObjectStore, namespace_id: &NamespaceId) {
+/// Checks that the namespace's hint records the current manifest.
+async fn assert_hint_at_current_manifest(store: &dyn ObjectStore, namespace_id: &NamespaceId) {
     let current = loonfs_core::test_support::namespace_store(store, namespace_id)
         .load_current_manifest()
         .await
         .expect("load the current manifest")
         .manifest()
         .manifest_no;
-    loonfs_test_support::clock::bounded(Duration::from_secs(10), async {
-        while hint_manifest_no(store, namespace_id).await != current {
-            tokio::time::advance(Duration::from_millis(1)).await;
-        }
-    })
-    .await
-    .expect("the runtime raises the hint to the current manifest");
+    assert_eq!(
+        hint_manifest_no(store, namespace_id).await,
+        current,
+        "the runtime raises the hint to the current manifest"
+    );
 }
 
 async fn keys_under(store: &dyn ObjectStore, prefix: &str) -> Vec<String> {
@@ -1110,7 +1087,7 @@ enum Grep {
 const IDLE_SWEEP_REQUESTS: [(Grep, usize, usize, usize); 3] = [
     (Grep::NotMaintained, 14, 29, 9),
     (Grep::Maintained, 18, 33, 9),
-    (Grep::Enabled, 19, 35, 9),
+    (Grep::Enabled, 19, 34, 9),
 ];
 
 #[tokio::test(start_paused = true)]
@@ -1128,14 +1105,7 @@ async fn an_idle_sweep_costs_one_listing_per_page_and_a_fixed_number_of_requests
                 .await
                 .expect("fold the tail");
         }
-        // The seed's fold publishes less than a second after its claim, and
-        // shutting the writer down drops the fold's trailing hint raise.
         writer.shutdown().await.expect("stop the writer");
-        for namespace_id in &names {
-            loonfs_core::test_support::namespace_store(base.as_ref(), namespace_id)
-                .raise_hint_to_current_manifest()
-                .await;
-        }
         let store = Arc::new(RecordingStore::new(
             LocalFsStore::new(directory.path()).expect("local store"),
             KeyPredicate::any(),
@@ -1161,29 +1131,11 @@ async fn an_idle_sweep_costs_one_listing_per_page_and_a_fixed_number_of_requests
             .run_sweep(GarbageCollection::Collect)
             .await
             .expect("list namespaces");
-        // Enabling each index and the first sweep's build of it publish less
-        // than a second apart, so the runtime raises each hint to the build's
-        // manifest when that second ends, and the sweeps below start from
-        // hints at the current manifests, as the seed's do.
-        store.reset();
-        server.clock.advance_ms(HINT_RAISE_INTERVAL_MS);
+        // The seed's publications, the publications that enabled each index,
+        // and the first sweep's index builds each raised their namespace's
+        // hint, so the sweeps below start from hints at the current manifests.
         for namespace_id in &names {
-            wait_for_current_hint(base.as_ref(), namespace_id).await;
-            if grep == Grep::Enabled {
-                // The hint is visible before its put finishes syncing and
-                // the recording store records it. Wait for that completion
-                // before measuring the next sweep.
-                let hint = loonfs_objectstore::keys::hint(namespace_id);
-                loonfs_test_support::clock::bounded(Duration::from_secs(10), async {
-                    while !store.snapshot().iter().any(|operation| {
-                        matches!(operation, RecordedOperation::Put { key, .. } if key == &hint)
-                    }) {
-                        tokio::time::advance(Duration::from_millis(1)).await;
-                    }
-                })
-                .await
-                .expect("the trailing hint put finishes");
-            }
+            assert_hint_at_current_manifest(base.as_ref(), namespace_id).await;
         }
         // An index's publication drops the runtime's cached head, so this
         // sweep loads each head again, and the sweeps below find it cached,

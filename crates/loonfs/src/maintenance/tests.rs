@@ -732,16 +732,9 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
         .compactor_epoch(&claimed)
         .await
         .expect("claim the namespace");
-    // The maintenance runtime's timer doesn't move, so it skips every hint
-    // raise after the first in each namespace, and no trailing raise starts
-    // while the test counts requests. The test raises each hint to its
-    // current manifest before the collection below and before it counts
-    // requests.
-    for namespace in [&idle, &claimed, &retired] {
-        loonfs_core::test_support::namespace_store(store.as_ref(), namespace)
-            .raise_hint_to_current_manifest()
-            .await;
-    }
+    // Each publication raised its namespace's hint, so every hint records the
+    // current manifest before the collection below and before the test
+    // counts requests.
     for namespace in [&idle, &claimed, &retired] {
         maintenance
             .gc(namespace)

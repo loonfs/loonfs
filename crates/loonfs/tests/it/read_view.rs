@@ -1366,14 +1366,9 @@ async fn a_missing_current_segment_stays_corrupt_and_manifest_read_failures_prop
         .fold_wal(&namespace_id)
         .await
         .expect("fold");
-    // The writer's timer doesn't move, so the fold's hint raise is skipped,
-    // and no trailing raise starts while the test counts requests. The test
-    // raises the hint to the fold's manifest before it counts the reader's
-    // hint reads.
+    // The fold raised the hint to its manifest, so the reader's hint reads
+    // find the current manifest.
     runtime.writer.drain().await.expect("drain");
-    loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)
-        .raise_hint_to_current_manifest()
-        .await;
     let reader = loonfs::LoonFs::builder_with_store(store.clone())
         .read_only()
         .build()

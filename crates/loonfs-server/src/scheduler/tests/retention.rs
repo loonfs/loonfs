@@ -553,17 +553,14 @@ async fn an_idle_sweep_costs_the_same_requests_whichever_window_applies() {
         // The first sweep moves the floor to the head when a window applies,
         // and collects what the seed left behind. Nobody writes to the
         // namespace, so the second sweep acknowledges that floor with a fence
-        // and a fold. The runtime skips a hint raise less than a second after
-        // its last one, so the test raises the hint to the current manifest
-        // after each sweep, and each sweep collects the manifests that the
-        // previous sweep replaced.
+        // and a fold. Each publication raises the hint, so each sweep
+        // collects the manifests that the previous sweep replaced.
         for _ in 0..3 {
             server
                 .scheduler
                 .run_sweep(GarbageCollection::Collect)
                 .await
                 .expect("list namespaces");
-            super::raise_hint_to_current_manifest(store.as_ref(), &namespace_id).await;
         }
         let windows = format!("server {server_window_ms:?}, namespace {namespace_window_ms:?}");
 

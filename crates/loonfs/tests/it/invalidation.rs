@@ -278,7 +278,7 @@ async fn fenced_writer_stays_fenced_with_zero_cache_limits() {
         "superseded writer surfaces fencing",
     );
 
-    let hint_raises_after_fencing = counting.count(OperationSelector::CompareAndSwap);
+    let swaps_after_fencing = counting.count(OperationSelector::CompareAndSwap);
     expect_writer_fenced(
         namespace_writer_a
             .put_file("/a3.txt", b"a", &loonfs_test_support::test_actor())
@@ -287,7 +287,7 @@ async fn fenced_writer_stays_fenced_with_zero_cache_limits() {
     );
     assert_eq!(
         counting.count(OperationSelector::CompareAndSwap),
-        hint_raises_after_fencing,
+        swaps_after_fencing,
         "a fenced session must not raise the namespace's hint"
     );
     namespace_writer_b
