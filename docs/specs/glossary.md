@@ -265,11 +265,15 @@ The source namespace's sequence at which a fork was taken. The fork basis record
 
 ### Fork family
 
-A set of namespaces: one namespace that was created without a source (the [family root](#family-root)), and every namespace forked from it, directly or through other forks. Each namespace in the set is a "member" of the family, and a member leaves the fork family when it's retired. The members store their content objects and upload records under the family root's prefix, so a content reference identifies the same object in every member. The family root's [collection](#collection) deletes the family's unreferenced content, with roots from every member. The collection finds the members through fork pins, because each fork pins the namespace it was forked from. For example, if `sandbox` is a fork of `main`, and `trial` is a fork of `sandbox`, all three are members of `main`'s family, and their content objects are stored under `namespaces/main/content/`. See [Namespaces and identity](format.md#11-namespaces-and-identity).
+A set of namespaces: one namespace that was created without a source (the [family root](#family-root)), and every namespace forked from it, directly or through other forks. Each namespace in the set is a "member" of the family, and a member leaves the fork family when it's retired. The members store their content objects and upload records under the family root's prefix, so a content reference identifies the same object in every member. The family root's [collection](#collection) deletes the family's unreferenced content, with roots from every member. The collection finds the members by listing the [family pin prefix](#family-pin-prefix), because each fork pins the namespace it was forked from. For example, if `sandbox` is a fork of `main`, and `trial` is a fork of `sandbox`, all three are members of `main`'s family, and their content objects are stored under `namespaces/main/content/`. See [Namespaces and identity](format.md#11-namespaces-and-identity).
 
 ### Family root
 
 The member of a [fork family](#fork-family) that was created without a source. Every member's manifest records the family root (`family_root_id`), and the family root's prefix stores the family's content objects and upload records. A family root is the last member of its family to be retired, because each fork pins its source. Its collections keep deleting the family's unreferenced content after the family root is deleted, until the family root itself is retired. See [File contents and ownership](format.md#15-file-contents-and-ownership) and [Retirement](format.md#95-retirement).
+
+### Family pin prefix
+
+The key prefix under a [family root's](#family-root) prefix that stores every pin of its [fork family](#fork-family) (`namespaces/{family_root_id}/pins/`). Each pin is stored in a sub-prefix for the member whose manifest it keeps, and a fork pin's key also includes the fork it was created for. For example, if `sandbox` is a fork of `main`, the fork pin on `main` for `sandbox` is stored under `namespaces/main/pins/main/`, and a snapshot of `sandbox` is stored under `namespaces/main/pins/sandbox/`. The family root's collection lists the whole prefix to find every member of the family and to decide which pins are still needed. See [Records and owners](format.md#81-records-and-owners).
 
 ### Merge
 
@@ -365,7 +369,7 @@ How old an unreferenced manifest, WAL object, content object, or temporary objec
 
 ### Namespace retirement
 
-The point at which garbage collection deletes a deleted fork's pin on its source, or deletes the objects under a deleted family root's content prefix. A deleted namespace is retired once its retirement grace has passed and no pins on it remain. See [Retirement](format.md#95-retirement).
+The point at which garbage collection deletes a deleted member's pins (every pin under its sub-prefix of the [family pin prefix](#family-pin-prefix), and then its fork pin on its source), and for a deleted family root, the objects under its content prefix. A deleted namespace is retired once its retirement grace has passed and every pin on it is dead. See [Retirement](format.md#95-retirement).
 
 ## API
 

@@ -16,7 +16,7 @@ Every member of a fork family writes its content under the family root's prefix,
 
 The collection considers every other object under `namespaces/R/content/` for deletion once its provider age is at least `T`. It keeps objects that are younger than that, keys that don't parse as content object keys, and objects that an extent filter matches by chance.
 
-The members are the family root and every namespace forked from a member. The collection finds them by walking fork pins. It lists each member's pins once, and each fork pin in a listing adds the pin's target as a member (see [Fork family content](fork-family-content.md#collection)). A collection on a fork lists no content.
+The members are the family root and every namespace forked from a member. The collection finds them by listing the family's pins, which are stored under the family root's prefix, and each fork pin in the listing adds the pin's target as a member (see [Fork family pins](fork-family-pins.md)). A collection on a fork lists no content.
 
 The same rule covers every way that content becomes garbage:
 

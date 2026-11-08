@@ -970,12 +970,12 @@ The checkpoint inventory lists every pin of a namespace, so an operator can see 
 
 Each entry is a checkpoint object, which contains `namespace_id`, `checkpoint_id`, `owner`, `created_at_ms`, an optional `expires_at_ms`, `captured_seq`, and `manifest_no`. For a snapshot, `checkpoint_id` is its `snapshot_id`, and `owner` contains its `name`.
 
-A checkpoint ID has the form `pin_{manifest_no:020}-{16 lowercase hex}`. It identifies the manifest that a snapshot read uses, and every pin is assigned a new ID.
+A checkpoint ID has one of two forms. A snapshot's ID is `pin_{manifest_no:020}-{16 lowercase hex}`, and a fork pin's ID is `fork_{manifest_no:020}-{16 lowercase hex}`. The number identifies the manifest that a snapshot read uses, and every pin is assigned a new ID. A `snapshot_id` that a snapshot route returns always has the `pin_` form, and a read's `snapshot_id` also accepts a fork pin's ID.
 
-`GET /v0/maintenance/namespaces/{ns}/checkpoints?limit=100&cursor=...` returns existing pins in ascending `checkpoint_id` order. For example, a namespace with one snapshot and one fork returns:
+`GET /v0/maintenance/namespaces/{ns}/checkpoints?limit=100&cursor=...` returns existing pins in ascending `checkpoint_id` order, so a namespace's fork pins come before its snapshots. For example, a namespace with one snapshot and one fork returns:
 
 ```json
-{"namespace_id":"demo","checkpoints":[{"namespace_id":"demo","checkpoint_id":"pin_00000000000000000009-0000000000000009","owner":{"kind":"user","name":"release"},"created_at_ms":1752623000000,"expires_at_ms":1752626600000,"captured_seq":12,"manifest_no":9},{"namespace_id":"demo","checkpoint_id":"pin_00000000000000000009-00000000000000a1","owner":{"kind":"fork","target_namespace_id":"demo-copy"},"created_at_ms":1752623100000,"captured_seq":12,"manifest_no":9}]}
+{"namespace_id":"demo","checkpoints":[{"namespace_id":"demo","checkpoint_id":"fork_00000000000000000009-00000000000000a1","owner":{"kind":"fork","target_namespace_id":"demo-copy"},"created_at_ms":1752623100000,"captured_seq":12,"manifest_no":9},{"namespace_id":"demo","checkpoint_id":"pin_00000000000000000009-0000000000000009","owner":{"kind":"user","name":"release"},"created_at_ms":1752623000000,"expires_at_ms":1752626600000,"captured_seq":12,"manifest_no":9}]}
 ```
 
 `GET /v0/maintenance/namespaces/{ns}/checkpoints/{checkpoint_id}` returns one existing pin, as the same object the listing returns for it, including an expired snapshot that collection hasn't deleted. A missing ID returns `snapshot_not_found`.
@@ -2614,7 +2614,7 @@ Representative response:
   "fork_basis": {
     "source_namespace_id": "demo",
     "source_head_seq": 418,
-    "source_pin_id": "pin_00000000000000000031-3f9c2a7d41e05b68"
+    "source_pin_id": "fork_00000000000000000031-3f9c2a7d41e05b68"
   },
   "family_root_id": "demo",
   "head_seq": 418,
@@ -2861,7 +2861,7 @@ Representative response:
     "fork_basis": {
       "source_namespace_id": "demo",
       "source_head_seq": 431,
-      "source_pin_id": "pin_00000000000000000035-5c2e8f1a9b7d4e60",
+      "source_pin_id": "fork_00000000000000000035-5c2e8f1a9b7d4e60",
       "rebased_from": {"source_namespace_id": "demo-branch", "resume_after_seq": 418}
     },
     "family_root_id": "demo",

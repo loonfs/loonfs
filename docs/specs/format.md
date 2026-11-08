@@ -344,7 +344,7 @@ This section describes the objects LoonFS stores for a namespace, how their keys
 
 ### 2.1 Storage layout
 
-Each namespace's objects are stored under its own prefix, except that a fork's content objects and upload records are stored under its family root's prefix, and a temporary object is stored under the prefix of the key that it assembles ([Object keys](#a8-object-keys) lists the complete key patterns):
+Each namespace's objects are stored under its own prefix, except that a fork's content objects, upload records, and pins are stored under its family root's prefix, and a temporary object is stored under the prefix of the key that it assembles ([Object keys](#a8-object-keys) lists the complete key patterns):
 
 ```text
 namespaces/{namespace_id}/
@@ -352,7 +352,8 @@ namespaces/{namespace_id}/
 ├── manifests/{manifest_no:020}.json.zst
 ├── wal/{wal_no:020}.wal.zst
 ├── segments/{segment_id}.sst.zst
-├── pins/{pin_id}.json
+├── pins/{member_namespace_id}/{pin_id}.json
+├── pins/{member_namespace_id}/{pin_id}-{target_namespace_id}.json
 ├── uploads/{upload_id}.json
 ├── uploads/{upload_id}.outcome.json
 ├── content/
@@ -360,7 +361,7 @@ namespaces/{namespace_id}/
 └── extensions/{extension_name}/segments/{segment_id}.sst.zst
 ```
 
-Content objects and upload records are stored under the family root's prefix (see [File contents and ownership](#15-file-contents-and-ownership)), so a fork's `content/` and `uploads/` prefixes are empty. Metadata segments stay with the namespace that wrote them. A segment that a fork inherited stays under its owner's prefix, and its descriptor records the owner (`owner_namespace_id`), so readers never substitute the reading namespace into the key. Every newly written segment, including compaction output, is stored under the writing namespace's `segments/` prefix. An [extension's](#124-extensions) segments follow the same rule under the writing namespace's `extensions/{extension_name}/segments/` prefix.
+Content objects and upload records are stored under the family root's prefix (see [File contents and ownership](#15-file-contents-and-ownership)), and so is every pin of the fork family, in a sub-prefix for the member whose manifest the pin keeps (see [Records and owners](#81-records-and-owners)). So a fork's `content/`, `uploads/`, and `pins/` prefixes are empty. Metadata segments stay with the namespace that wrote them. A segment that a fork inherited stays under its owner's prefix, and its descriptor records the owner (`owner_namespace_id`), so readers never substitute the reading namespace into the key. Every newly written segment, including compaction output, is stored under the writing namespace's `segments/` prefix. An [extension's](#124-extensions) segments follow the same rule under the writing namespace's `extensions/{extension_name}/segments/` prefix.
 
 On providers that build a new object by composing whole objects (such as GCS), an assembly writes temporary objects for the parts it can't compose directly: a range of a source object, new bytes, or an intermediate result. The assembly deletes them when it finishes (see [Immutable writes and retries](#32-immutable-writes-and-retries)).
 
@@ -390,7 +391,7 @@ Each number refers to exactly one immutable object. A publisher creates the next
 
 Other objects use generated IDs:
 
-- A pin ID has the form `pin_{manifest_no:020}-{16 lowercase hex}`. The number identifies the pinned manifest, and the random suffix distinguishes separate user and fork pins on the same manifest. The durable record calls it `pin_id`, the API calls it a `checkpoint_id`, and a user pin's ID is also its `snapshot_id`.
+- A pin ID has one of two forms. A user pin's ID is `pin_{manifest_no:020}-{16 lowercase hex}`, and a fork pin's ID is `fork_{manifest_no:020}-{16 lowercase hex}`. The number identifies the pinned manifest, and the random suffix distinguishes separate pins on the same manifest, including two attempts to install the same fork. A fork pin's ID is always 42 characters. Its key also includes the namespace that the fork pin was created for (see [Records and owners](#81-records-and-owners)), and the ID doesn't, because a namespace ID is chosen by the caller and can be up to 128 bytes long. The durable record calls it `pin_id`, the API calls it a `checkpoint_id`, and a user pin's ID is also its `snapshot_id`.
 - A content ID is `con_` followed by the 26-character lowercase Crockford base 32 spelling of a random version 4 UUID. The spelling adds two zero bits in front of the UUID's 128 bits and writes each group of 5 bits as one character of `0123456789abcdefghjkmnpqrstvwxyz`, so the first character is `0` through `7`.
 - An inode ID is `ino_` followed by the same 26-character spelling, but its 128 bits aren't a UUID. Its high 64 bits are the creating commit's sequence and the inode's create number, and its low 64 bits are random. The root directory's ID is all zero bits (`ino_00000000000000000000000000`). See [Namespaces and identity](#11-namespaces-and-identity).
 - A metadata segment ID is also generated, instead of being derived from the segment's position in publication history.
@@ -510,11 +511,11 @@ A compare-and-swap (CAS) replaces an object only if the object's compare token s
 
 A read of a mutable object MUST return the bytes and the compare token for those same bytes in one response. Reading them separately isn't enough, because a concurrent update could pair one version's payload with another version's token. Compare tokens (including ETags) are opaque, and LoonFS doesn't assume they're content digests.
 
-Successful writes and deletes MUST be strongly consistent. Prefix listings return keys in ascending lexicographic order, and the garbage collection protocols depend on this behavior (being "S3 compatible" doesn't by itself mean a provider conforms). The object-store layer MUST also list the child prefixes directly under a prefix, in the same order and one page per provider request, starting after a given key. A host uses this listing to find namespaces without listing their objects.
+Successful writes and deletes MUST be strongly consistent. A prefix listing MUST include every key whose put completed before the listing began, and it MUST NOT include a key whose delete completed before the listing began. Prefix listings return keys in ascending lexicographic order, and the garbage collection protocols depend on this behavior (being "S3 compatible" doesn't by itself mean a provider conforms). The object-store layer MUST also list the child prefixes directly under a prefix, in the same order and one page per provider request, starting after a given key. A host uses this listing to find namespaces without listing their objects.
 
 A provider MUST also apply each request, if it applies it at all, within `PROVIDER_PUBLICATION_REQUEST_BOUND_MS` of when the client started the operation that sent it. The grace window reserves this much provider time. An implementation can't check this assumption. [Clock and operation assumptions](#114-clock-and-operation-assumptions) explains what depends on it, and [Publication and collection timing](#c1-publication-and-collection-timing) lists the numbers.
 
-Readers determine committed state from verified manifests and numbered WAL objects. Garbage collection also uses listings, to find candidates and dependencies (for example, retiring a namespace requires a complete listing of its pins after deletion). The format doesn't assume transactions across objects, or a consistent snapshot across control objects that are read separately.
+Readers determine committed state from verified manifests and numbered WAL objects. Garbage collection also uses listings, to find candidates and dependencies (for example, retiring a namespace requires a complete listing of its fork family's pins after deletion). The format doesn't assume transactions across objects, or a consistent snapshot across control objects that are read separately.
 
 ### 3.2 Immutable writes and retries
 
@@ -1204,7 +1205,18 @@ A "pin" is a durable record that keeps one manifest, and the segments it lists, 
 
 ### 8.1 Records and owners
 
-Each pin is stored at `pins/{pin_id}.json`. Its ID includes the pinned manifest's number and a new random suffix, so creating a pin twice on the same manifest, or with the same label, creates two separate records.
+Every pin of a [fork family](glossary.md#fork-family) is stored under the family root's prefix, in a sub-prefix for the member whose manifest the pin keeps:
+
+```text
+namespaces/{family_root_id}/pins/{member_namespace_id}/{pin_id}.json
+namespaces/{family_root_id}/pins/{member_namespace_id}/{pin_id}-{target_namespace_id}.json
+```
+
+The first form is a user pin's key, and the second is a fork pin's key, which also includes the fork pin's target namespace. The family root is the member's `family_root_id`. The prefix `namespaces/{family_root_id}/pins/` is the family's "family pin prefix". A namespace created without a source is its own family root, so if `sandbox` is a fork of `main`, the pins on `main`'s manifests are stored under `namespaces/main/pins/main/`, and the pins on `sandbox`'s manifests under `namespaces/main/pins/sandbox/`.
+
+A pin's ID includes the pinned manifest's number and a new random suffix, so creating a pin twice on the same manifest, or with the same label, creates two separate records. A user pin's ID starts with `pin_`, and a fork pin's ID starts with `fork_` (see [Numbered objects and generated IDs](#23-numbered-objects-and-generated-ids)). A fork pin's ID is always 42 characters, so in a fork pin's key, the target is the text after the `-` that follows the ID, up to `.json`, even when the target's ID contains `-`. For example, the fork pin on manifest 9 of `main` for `sandbox` could be stored at `namespaces/main/pins/main/fork_00000000000000000009-3f9c2a7d41e05b68-sandbox.json`. The target in a fork pin's key and the record's `owner.target_namespace_id` MUST be equal, and a pin whose key and record disagree is corruption.
+
+A fork knows its own fork pin's key, because the fork is the target. A lookup of a fork pin by its ID alone lists the prefix `namespaces/{family_root_id}/pins/{member_namespace_id}/{pin_id}-`, which returns one key or none in one request.
 
 | Owner | Stored owner fields | Reads | Removal |
 | --- | --- | --- | --- |
@@ -1215,12 +1227,14 @@ The record also stores the namespace, head sequence, payload checksum, and creat
 
 Expiry, read eligibility, eligibility for garbage collection, and removal are separate. An expired user pin can't be read, but the record still exists. It appears in the complete pin listing, and it keeps its manifest and segments until garbage collection deletes it. [Pin cleanup](#117-pin-cleanup) defines when each kind of pin can be collected.
 
+Why are a family's pins stored under the family root's prefix, and why does a fork pin's key include its target? The family root's collection needs every fork pin of the family to find the family's members (see [Content roots](#119-content-roots)). With every pin under one prefix, one complete listing returns every fork pin, however deep the family's forks are nested. With the target in the key, the listing shows which namespace each fork pin was created for, so the collection finds the members without reading pin records.
+
 ### 8.2 Creating and verifying a pin
 
 To create a pin from the current head, LoonFS:
 
 1. Folds the observed WAL tail as the namespace's [maintainer](glossary.md#maintainer), under the current compactor epoch, and selects a verified current manifest.
-2. Writes a new pin with put-if-absent.
+2. Writes a new pin with put-if-absent, under the namespace's sub-prefix of the family pin prefix that the selected manifest's `family_root_id` identifies.
 3. Loads the current manifest again.
 4. Checks that the manifest number and payload checksum are the same, that the namespace is active, and that its retention floor is no later than the pinned head sequence.
 
@@ -1230,7 +1244,7 @@ A put whose outcome is unknown can succeed after its creator stopped waiting (se
 
 Once a pin is acknowledged, it keeps its manifest's files, even if the retention floor later moves past its sequence.
 
-Why write the pin before checking the manifest again? A collection that runs at the same time either captured the pinned manifest as current, or captured a successor after the pin was written, and in that case the collection's complete pin listing includes the pin. Either way, the pinned manifest is protected.
+Why write the pin before checking the manifest again? A collection that runs at the same time either captured the pinned manifest as current, or captured a successor after the pin was written, and in that case the collection's complete pin listing includes the pin. Either way, the pinned manifest is protected. The family root's collection lists the family pin prefix twice, and the listing whose pins become roots is the second one, which starts after the collection has captured every member (see [Content roots](#119-content-roots)).
 
 A fork of a user pin is protected by the user pin instead. It doesn't require the user pin's historical manifest to still be current. The fork:
 
@@ -1244,9 +1258,11 @@ Both expiry checks use the request clock plus the monotonic time elapsed since t
 
 A read through a pin ID serves a user pin or a fork pin of the namespace, and an operation that forks or extends through a pin ID serves user pins only. An ID with no pin, an ID of an expired user pin, and the ID of a fork pin in a fork or an extension all return `snapshot_not_found`.
 
-A read through a pin takes the manifest number from the ID, confirms that the pin exists and, for a user pin, that it hasn't expired, and verifies its manifest reference. The read uses that manifest directly, without replaying later namespace history. The expiry check uses the reader's own clock. A fork pin has no expiry, so a read through it works until garbage collection deletes the pin after the fork is retired.
+A read through a pin takes the manifest number from the ID, and finds the pin's key from the `family_root_id` of the namespace's current manifest. For a fork pin whose target the reader doesn't know, the read finds the key by the one-request lookup in [Records and owners](#81-records-and-owners). The read then confirms that the pin exists and, for a user pin, that it hasn't expired, and verifies its manifest reference. The read uses that manifest directly, without replaying later namespace history. The expiry check uses the reader's own clock. A fork pin has no expiry, so a read through it works until garbage collection deletes the pin after the fork is retired.
 
 Explicit deletion looks up the pin and deletes a user pin. Deleting an ID with no pin succeeds without a write, so a retried deletion returns the same result as the first one. Fork pins can't be deleted explicitly, and their IDs return `snapshot_not_found`. [Reference roots](#112-reference-roots) defines which pins protect manifests from garbage collection, and [Retirement](#95-retirement) defines when a deleted namespace can be retired.
+
+A listing of a namespace's pins, such as the API's checkpoint and snapshot inventories, lists the namespace's sub-prefix of the family pin prefix in key order. Within a member's sub-prefix, `fork_` keys sort before `pin_` keys, so a checkpoint listing returns a member's fork pins before its snapshots. A fork pin's key includes its target, so the forks of a namespace can be found from the `fork_` keys under its sub-prefix without reading their records.
 
 Why can a read use a fork pin? A fork pin keeps the source's manifest at the fork point for as long as the fork exists, even after the source's retention floor passes the fork point, so a read through it sees the state that the fork started from. A [rebase](glossary.md#rebase) reads the source through its new fork's pin. So does the program that resolves the rebase's conflicts, to read the version of each conflicting file that the replayed fork started from, and so does grep, to read the source's commits that a fork's inherited index doesn't cover (see [Index lifecycle](#d2-index-lifecycle)). A fork pin can't be forked or extended, because only a snapshot has a lifetime that a caller controls.
 
@@ -1274,7 +1290,7 @@ The hint decides whether the ID is new, because the hint lives as long as the na
 
 A fork starts its own history from the source's retained metadata. To create one, LoonFS:
 
-1. Creates a verified source pin whose owner is the target namespace, either from the source's head or from an unexpired user pin (see [Creating and verifying a pin](#82-creating-and-verifying-a-pin)). The fork reads nothing of the target first: the put of the target's hint in step 4 decides whether the target exists (see [Conflicting and unknown installations](#93-conflicting-and-unknown-installations)).
+1. Creates a verified source pin whose owner is the target namespace, with a fork pin key that includes the target (see [Records and owners](#81-records-and-owners)), either from the source's head or from an unexpired user pin (see [Creating and verifying a pin](#82-creating-and-verifying-a-pin)). The fork reads nothing of the target first: the put of the target's hint in step 4 decides whether the target exists (see [Conflicting and unknown installations](#93-conflicting-and-unknown-installations)).
 2. Loads and verifies the pinned manifest.
 3. Copies the pinned manifest's run references, folded head sequence, next run number, access configuration, family root, retention window, and [extension](#124-extensions) entries. The inherited runs determine the same base sequence. The fork's retention floor is the pinned manifest's folded head sequence (see [Advancing the retention floor](#101-advancing-the-retention-floor)). Every segment keeps its owner. The fork basis is set to the pinned manifest reference and the source pin's ID. The fork basis of a fork that a [rebase](glossary.md#rebase) creates also records `rebased_from`, as described below.
 4. Builds the rest of the first manifest's fields (see [Publishing a manifest](#72-publishing-a-manifest)) and installs it (see [Creating a namespace](#91-creating-a-namespace)).
@@ -1308,28 +1324,30 @@ An ordinary operation that finds the namespace deleted returns `namespace_delete
 
 ### 9.5 Retirement
 
-"Retirement" is the point at which garbage collection deletes a deleted fork's pin on its source, or deletes the objects under a deleted family root's content prefix. No retirement deadline is stored, and garbage collection publishes no manifest. For a namespace tombstone `T`, the deadline is derived as:
+"Retirement" is the point at which garbage collection deletes a deleted member's pins (the fork pin on its source, if it has one, and every pin under the member's sub-prefix of the family pin prefix), and for a deleted family root, the objects under its content prefix. The family root's collection retires every member of its fork family (see [Content roots](#119-content-roots)). No retirement deadline is stored, and garbage collection publishes no manifest. For a namespace tombstone `T`, the deadline is derived as:
 
 ```text
 deadline(T) = T.deleted_at_ms
               + max(configured_grace, NAMESPACE_RETIREMENT_GRACE_WINDOW_MS)
 ```
 
-A tombstone is eligible for retirement when the collection's clock reaches its retirement deadline and the complete pin listing contains no pin on the namespace. Pins deleted later in the same collection still count, and any unrecognized key under the pin prefix also blocks retirement.
+A tombstone is eligible for retirement when the collection's clock reaches its retirement deadline and every pin under the member's sub-prefix, in the collection's second listing of the family pin prefix, is dead under [Pin cleanup](#117-pin-cleanup). Any unrecognized key under the sub-prefix also blocks retirement. The family root's tombstone is eligible when its deadline has passed and every pin under the whole family pin prefix is dead, so every other member is retired in the same collection or an earlier one.
+
+A fork pin whose target is eligible for retirement is dead, so one collection can retire a whole chain of deleted members. The collection judges the pins again after it finds each eligible tombstone, until no judgment changes, which takes at most one round for each member. For example, suppose B is a fork of A, the family root, and C is a fork of B, and all three are deleted with their deadlines passed and no other pins. C has no pins, so it's eligible, which makes C's pin on B dead. B is then eligible, which makes B's pin on A dead, and A is then eligible. A fork pin whose target's state couldn't be read stays live, so its member isn't eligible in that collection.
 
 An eligible tombstone's source pin is deleted, and the objects under an eligible family root's content prefix are deleted (see [Deleting a retired owner's content](#118-deleting-a-retired-owners-content)). A fork stores no content under its own prefix, so its retirement deletes no content. The objects that the fork wrote stay while another member's view refers to them (see [Content roots](#119-content-roots)).
 
-A family root is the last member of its [fork family](glossary.md#fork-family) to be retired. Each fork pins its source, and a tombstone can't be retired while a pin is on it, so a deleted family root stays unretired until every fork of it, and every fork of those forks, is retired. Garbage collection still runs on a deleted namespace, so the family root's collections keep collecting the family's content after the family root is deleted (see [Content roots](#119-content-roots)). Once the last fork is retired, the family root can be retired, and its retirement deletes the objects under the content prefix of the whole family. No other member takes over the family's content when the family root is deleted.
+A family root is the last member of its [fork family](glossary.md#fork-family) to be retired. Each fork pins its source, and a tombstone can't be retired while a live pin is on it, so a deleted family root stays unretired until every fork of it, and every fork of those forks, is retired. Garbage collection still runs on a deleted namespace, so the family root's collections keep collecting the family's content after the family root is deleted (see [Content roots](#119-content-roots)). Once the last fork is retired, the family root can be retired, and its retirement deletes the objects under the content prefix of the whole family. No other member takes over the family's content when the family root is deleted.
 
 Why doesn't another member take over the family's content when the family root is deleted? The deleted family root's collections keep running for as long as any other member exists, so nothing has to move. A takeover would need a durable record of which member collects the family's content, and a way for the members to agree on a change to that record.
 
 ### 9.6 Fork dependencies after deletion
 
-A source pin is required until its target is retired. While the target's current manifest (active or deleted) refers to the pin, garbage collection in the source keeps it (see [Pin cleanup](#117-pin-cleanup)). Retiring the target deletes the pin (see [Deleting a retired owner's content](#118-deleting-a-retired-owners-content)), even though the target's tombstone is still its current manifest and still refers to the pin. Rewriting a target's metadata doesn't copy or move inherited file bytes, because every member of a fork family finds them under the family root's prefix.
+A source pin is required until its target is retired. While the target's current manifest (active or deleted) refers to the pin, the family root's collection keeps it, unless the target is eligible for retirement in that collection (see [Pin cleanup](#117-pin-cleanup)). Retiring the target deletes the pin (see [Deleting a retired owner's content](#118-deleting-a-retired-owners-content)), even though the target's tombstone is still its current manifest and still refers to the pin. Rewriting a target's metadata doesn't copy or move inherited file bytes, because every member of a fork family finds them under the family root's prefix.
 
-For example, suppose B is a fork of A, and C is a fork of B. C's fork pin on B prevents B from being retired, and B's pin on A stays until B is retired. Retiring C deletes C's pin on B. B can then be retired once its deadline and pin checks pass, which deletes its pin on A.
+For example, suppose B is a fork of A, and C is a fork of B. While C isn't eligible for retirement, C's fork pin on B is live, so B can't be retired, and B's pin on A stays. Once C and B are both deleted and their deadlines have passed, one collection finds C eligible, judges C's pin on B dead, finds B eligible, and deletes both pins.
 
-Pins are deleted from descendants to ancestors. If deleting a source pin fails, the target's tombstone is still available for another collection.
+The collection judges the members from the leaves of the family up to the family root, within one collection. It stores no record of its judgments, so if it stops part way, for example because deleting a source pin fails, the next collection judges every pin again from its own listings and captures.
 
 ### 9.7 Cross-namespace copies and moves
 
@@ -1543,12 +1561,15 @@ An object can't be deleted as soon as nothing references it, because a publisher
 
 A collection first establishes the roots. It:
 
-1. Discovers the namespace's current manifest.
+1. Discovers the namespace's current manifest, which records the namespace's family root.
 2. Lists the upload sessions of the namespace's fork family, if the namespace is a family root (see [Upload-session cleanup](#116-upload-session-cleanup)).
 3. Reads the WAL tail.
-4. Lists all pin keys.
-5. If the namespace is a family root, repeats steps 1, 3, and 4 for each other member of its fork family, in the order that the pin listings find them (see [Content roots](#119-content-roots)).
-6. Records the protected manifests and segments.
+4. If the namespace is a family root, lists the family pin prefix completely (the first listing), to find the other members of its fork family (see [Content roots](#119-content-roots)).
+5. If the namespace is a family root, discovers the current manifest of each other member that the first listing found, and reads its WAL tail.
+6. Lists all pin keys. A fork lists its own sub-prefix of the family pin prefix, and a family root lists the whole family pin prefix again (the second listing), after step 5.
+7. Records the protected manifests and segments.
+
+This order depends on the listing rule in [Required operations](#31-required-operations). A pin whose put completed before step 6 began is in the pin listing, and a pin written later was verified against a manifest at or above the one that step 1 or step 5 captured (see [Creating and verifying a pin](#82-creating-and-verifying-a-pin)).
 
 If the namespace's own current manifest is invalid or unreadable, the collection stops before anything is deleted. If another member's current manifest is invalid or unreadable, only the collection of the fork family's content stops, and the rest of the collection continues (see [Content roots](#119-content-roots)). An absent namespace has nothing for core garbage collection to delete.
 
@@ -1564,7 +1585,7 @@ Every age decision in a collection uses the same `now_ms`, captured when the col
 | --- | --- |
 | The current active manifest | The manifest, and every segment it lists. |
 | The current deleted manifest (the namespace tombstone) | The tombstone, and every segment it lists. |
-| Every recognized pin key in the complete listing | The manifest numbered in its ID, and every segment in that manifest. |
+| Every recognized pin key under the namespace's sub-prefix of the family pin prefix, in the complete listing | The manifest numbered in its ID, and every segment in that manifest. |
 | The hint's observed manifest number | Every manifest number at or above it, so discovery can probe forward. (This root doesn't protect their runs.) |
 | The current active manifest's folded boundary | Every WAL number above `folded_wal_no`. |
 
@@ -1683,28 +1704,33 @@ Why is the session record deleted first? A session record left without its outco
 
 ### 11.7 Pin cleanup
 
-User pins become collectable after their expiry plus `T`, or after their creation plus `T` in a deleted namespace. A user pin with no expiry stays in an active namespace until it's explicitly deleted. A retained user pin reports the earlier of those times in `next_reclamation_at_ms`. Pins are deleted directly, and pin IDs are never reused.
+User pins become collectable after their expiry plus `T`, or after their creation plus `T` in a deleted namespace. A user pin with no expiry stays in an active namespace until it's explicitly deleted. A retained user pin reports the earlier of those times in `next_reclamation_at_ms`. A member's own collection applies these rules to the user pins under its sub-prefix, and the family root's collection applies them to every user pin in its second listing. A pin of either kind under the sub-prefix of a namespace that is neither the family root nor the target of a fork pin in the first listing is dead after its creation grace. Such a namespace was retired, or its installation never finished, and a pin can still land there when its creator stalled before the put or the put arrived late (see [Immutable writes and retries](#32-immutable-writes-and-retries)). Pins are deleted directly, and pin IDs are never reused.
 
-A fork pin is cleaned up based on its target namespace:
+Fork pins are judged by the family root's collection, from the target in each fork pin's key and the member states that the collection captured between its two listings of the family pin prefix (see [Content roots](#119-content-roots)). A member's own collection doesn't judge or delete fork pins. A fork pin in the second listing is cleaned up based on its target namespace:
 
 | Condition | Decision |
 | --- | --- |
-| The pin is inside its creation grace (less than `T` after its `created_at_ms`), the target's current fork basis refers to this pin with the same manifest reference, or a read of the target's store fails | Keep the pin, including when the target is deleted. |
-| The target is absent, or its fork basis doesn't refer to this pin | Delete the pin of the abandoned installation. |
+| The target was captured, its current fork basis (active or deleted) refers to this pin with the same manifest reference, and the target isn't eligible for retirement in this collection | Keep the pin. |
+| A read of the target's state failed | Keep the pin. |
+| The target wasn't captured, and a HEAD request for its hint finds it (a fork whose installation finished after the first listing, or after the collection tried to capture it) | Keep the pin. |
+| The target is eligible for retirement in this collection (see [Retirement](#95-retirement)) | The pin is dead after its creation grace. |
+| The target was captured, and it has no manifest or its fork basis doesn't refer to this pin (an abandoned or losing installation, see [Conflicting and unknown installations](#93-conflicting-and-unknown-installations)) | The pin is dead after its creation grace. |
+| The target wasn't captured, and a HEAD request for its hint finds no object | The pin is dead after its creation grace. |
+| The pin's member is neither the family root nor the target of a fork pin in the first listing (the member was retired, or its installation never finished) | The pin is dead after its creation grace. |
 | The target's current fork basis refers to this pin with a different manifest reference | Fail with `namespace_corrupt`. |
 
-The source finds the target's current manifest through the target's hint. It reads no target WAL objects and makes no listings. [Deleting a retired owner's content](#118-deleting-a-retired-owners-content) defines when a source pin is deleted.
+A fork pin's creation grace ends `T` after its `created_at_ms`. Before the collection judges a fork pin dead, it reads the pin's record, to check the creation time and that the record's target matches the key. A pin inside its creation grace is kept, whichever row applies, including when the target is deleted or has no manifest. The collection reads no other fork pin records. It reads no target WAL objects and makes no listings for a fork pin. A fork pin whose target is eligible for retirement is deleted by the target's retirement, which deletes the target's own pins first and that fork pin last, and not with the other dead pins (see [Deleting a retired owner's content](#118-deleting-a-retired-owners-content)).
 
-The family root's collection finds each member of its [fork family](glossary.md#fork-family) through the fork pin on the member's source (see [Content roots](#119-content-roots)). That pin stays until the member is retired, so the member's content references protect content until then.
+The family root's collection finds each member of its [fork family](glossary.md#fork-family) through the fork pin on the member's source, in its first listing (see [Content roots](#119-content-roots)). That pin stays until the member is retired, so the member's content references protect content until then.
 
 A candidate pin that fails verification is deleted by its creator. If that deletion fails, or the creator crashes first, garbage collection applies the pin owner's rules, including a fork pin's creation grace.
 
 ### 11.8 Deleting a retired owner's content
 
-After upload-session cleanup, garbage collection retires a tombstone that's eligible for retirement (see [Retirement](#95-retirement)) in two steps:
+After upload-session cleanup, the family root's collection retires each tombstone that's eligible for retirement (see [Retirement](#95-retirement)), in the order it found them eligible so that a member is retired before its source, in two steps:
 
 1. If the namespace is a family root, list its content prefix (see [Object keys](#a8-object-keys)), and delete every listed key, with bounded concurrency. Count the listed keys whose deletion succeeds in `deleted.retired_content_objects`. No additional age check applies. A listing or deletion failure ends the call.
-2. Delete the source pin that the tombstone's fork basis refers to, if there is one, and count it only if it was present.
+2. Delete every pin under the member's sub-prefix of the family pin prefix (all of them are dead), and then delete the source pin that the tombstone's fork basis refers to, if there is one, counting it only if it was present. The source pin goes last because the first listing finds the member through it, so a retirement that stops part way leaves a member that the next collection still finds and retires.
 
 A family root is retired after every other member of its [fork family](glossary.md#fork-family) (see [Retirement](#95-retirement)), and a fork stores nothing under its own content prefix, so step 1 deletes the content of the whole family. Until the family root is retired, its collections delete the family's unreferenced content under [Content roots](#119-content-roots), whether the family root is active or deleted.
 
@@ -1724,15 +1750,24 @@ A fork family's content objects are stored under the family root's prefix, and a
 
 Garbage collection considers every other content object under `namespaces/R/content/` for deletion once its provider age is at least `T`. It keeps an object younger than `T`, and a key that doesn't parse as a content object key. A collection on a fork lists no content, and the collection on a family root collects the fork family's content whether the family root is active or deleted (see [Retirement](#95-retirement)).
 
-The members of the fork family are `R` and every namespace forked from a member. The collection finds them by walking fork pins. `R`'s fork pins identify its first-generation forks, and a fork of a fork pins the fork it was created from, not `R`. So the collection lists the pins of each member in turn. Each fork pin in a listing adds the pin's target (`owner.target_namespace_id`) to the members, and the walk ends when a listing adds no new member. The collection lists each member's pins once, and that listing is also the member's pin listing for its reference roots (see [One complete collection](#111-one-complete-collection)).
+The members of the fork family are `R` and every namespace forked from a member. Every pin of the family is stored under `R`'s family pin prefix, and a fork pin's key includes its target (see [Records and owners](#81-records-and-owners)), so one complete listing of `namespaces/R/pins/` finds every member, however deep the family's forks are nested. The collection:
 
-A member's content references count as roots until the member is retired. A deleted member's tombstone keeps its runs, and only retirement deletes the member's source pin (see [Pin cleanup](#117-pin-cleanup)). So until the member is retired, the walk finds the member, and the collection reads the tombstone as one of the member's layout views. Retirement comes at least `NAMESPACE_RETIREMENT_GRACE_WINDOW_MS` after the deletion (see [Retirement](#95-retirement)). The collection MUST read the roots of every member within the retirement grace less the combined allowance (`NAMESPACE_RETIREMENT_GRACE_WINDOW_MS - GC_SAFETY_MARGIN_MS`, see [Clock and operation assumptions](#114-clock-and-operation-assumptions)), measured as monotonic time elapsed since the collection captured its `now_ms`. A collection that hasn't read every member's roots by then skips the fork family's content objects.
+1. Captures `R`'s state: its hint, and its current manifest or tombstone.
+2. Lists `namespaces/R/pins/` completely (the "first listing"). The members are `R` and the target of every fork pin key in the listing.
+3. Captures each other member's state (its hint, and its current manifest or tombstone) and reads its WAL tail. A member whose hint is absent isn't captured, because its installation hasn't written the hint.
+4. Lists `namespaces/R/pins/` again, after every capture (the "second listing"). The roots of each captured member `m` are its captured current manifest and the manifests above it (see [Reference roots](#112-reference-roots)), and the manifest of every pin under `namespaces/R/pins/m/` in the second listing, which the collection loads once for each manifest number.
+5. Judges every pin in the second listing (see [Pin cleanup](#117-pin-cleanup)) and finds the tombstones that are eligible for retirement (see [Retirement](#95-retirement)).
+6. Retires the eligible tombstones in the order it found them eligible, so a member is retired before its source (see [Deleting a retired owner's content](#118-deleting-a-retired-owners-content)), then deletes the other dead pins, and then collects unreferenced objects in the order in [One complete collection](#111-one-complete-collection). Retirement comes first because a member's fork pin on its source is the key that the first listing finds the member by, and the member's own retirement deletes that key last.
+
+A pin in the first listing that's missing from the second was deleted in between, and it protects nothing. A fork pin in the second listing whose target isn't in the first belongs to a fork installed in between. The collection doesn't capture that target, and it deletes nothing under the target's sub-prefix. The pin protects the source manifest that the target reads through, and an object that the target writes after the collection starts is younger than `T` for the collection.
+
+A member's content references count as roots until the member is retired. A deleted member's tombstone keeps its runs, and only retirement deletes the member's source pin (see [Pin cleanup](#117-pin-cleanup)). So until the member is retired, the first listing finds the member, and the collection reads the tombstone as one of the member's layout views. Retirement comes at least `NAMESPACE_RETIREMENT_GRACE_WINDOW_MS` after the deletion (see [Retirement](#95-retirement)). The collection MUST read the roots of every member within the retirement grace less the combined allowance (`NAMESPACE_RETIREMENT_GRACE_WINDOW_MS - GC_SAFETY_MARGIN_MS`, see [Clock and operation assumptions](#114-clock-and-operation-assumptions)), measured as monotonic time elapsed since the collection captured its `now_ms`. A collection that hasn't read every member's roots by then skips the fork family's content objects.
 
 The collection skips a fork pin whose target has no manifest (an installation that hasn't finished or that failed, as [Pin cleanup](#117-pin-cleanup) describes). When the collection finds the pin, such a target has no WAL tail or views of its own. The pin keeps the source manifest that the target reads through, and an object that the target writes after the collection starts is younger than `T` for the collection. If another member's current manifest is invalid or unreadable, only the collection of the fork family's content stops, and the rest of the collection continues. If `R`'s own current manifest is invalid or unreadable, the collection stops before anything is deleted (see [One complete collection](#111-one-complete-collection)). Other fork families are unaffected.
 
 To find the protected objects, the collection:
 
-1. Reads the roots of every member in the order in [One complete collection](#111-one-complete-collection). It lists the upload sessions under `R`'s prefix before it reads any member's WAL tail, and it finds each fork in the pin listing of the member it was forked from.
+1. Reads the roots of every member in the order in [One complete collection](#111-one-complete-collection). It lists the upload sessions under `R`'s prefix before it reads any member's WAL tail.
 2. Lists each layout segment of the members' layout views once, however many views list it. A fork's inherited segments are its source's, so the distinct segments are `R`'s and each member's own.
 3. Reads the extent filter of each listed segment, and charges the filters to read working memory.
 4. Lists `R`'s content prefix once. It protects an object when any extent filter may contain the object's name (its key with the content prefix removed), or when a tail or session root refers to its chain.
@@ -1751,9 +1786,11 @@ The collection lists upload sessions before it reads any member's WAL tail. A se
 
 Why does the collection on the family root gather every member's roots, instead of each member collecting its own content? Every member can reference every object under `R`'s prefix, so one member's roots don't show whether an object that the member doesn't reference is garbage. The family root's collection sees every root of every object it can delete.
 
-Why does the collection walk the fork pins instead of listing the members in one request? A fork pin is stored under its source's prefix, and it's the only durable record of which namespaces were forked from a member. A list of members under `R`'s prefix would be one more record that every fork installation and every retirement would have to keep in step with the pins. The walk costs one pin listing for each member, and the collection needs that listing for the member's reference roots anyway.
+Why does the collection find the members by listing the family's pins? A fork pin is the only durable record of which namespaces were forked from a member. A separate list of members under `R`'s prefix would be one more record that every fork installation and every retirement would have to keep in step with the pins. With every pin under one prefix, the listing finds every member and every pin that a judgment needs, so a pin that the collection keeps costs it no request of its own. On a family of 2,500 forks of one namespace, each listing is about 3 pages.
 
-Why does the collection have to read every member within the retirement grace, less the combined allowance? A reference can move from one member to another while a collection runs. For example, suppose that after the collection has read `R`'s roots, a commit in `R` refers to a chain that a fork wrote, and the fork is then deleted. The collection doesn't see the reference in `R`, so it relies on the fork's views. The commit came after the collection captured `now_ms`, and the deletion came after the commit. The deletion time comes from the deleting host's clock, and the retirement check uses another collector's clock. So the fork can't be retired until the retirement grace less the combined allowance has passed since the collection captured `now_ms`. Until then, the fork's source pin keeps the fork in the walk, and its tombstone keeps the runs that refer to the chain. (A member that drops a reference without being deleted commits a change that replaces or deletes the revision after the collection started. A base compaction removes the revision's rows only once the retention floor passes that commit, at least the default grace window later, which is longer than the time the collection has to read every member, so the member's current manifest still refers to the chain when the collection reads it.)
+Why does the collection list the pins twice, once before the captures and once after? A pin protects its manifest in one of two ways. If the pin is in the second listing, the collection loads the pin's manifest directly. If the pin isn't in the second listing, its put completed after that listing began (see [Required operations](#31-required-operations)). The pin's creator then loaded the member's current manifest after the put and found the pinned manifest still current (see [Creating and verifying a pin](#82-creating-and-verifying-a-pin)), so the pinned manifest was current after the collection captured the member. Its number is then at or above the captured current manifest, which the collection protects. So the roots have to be read from a listing that starts after the captures. The members have to be known before the captures, so a listing has to come first as well. A single listing before the captures would be unsafe. A pin written after that listing, and verified before the capture of its member, can keep a manifest below the captured current one, and the collection wouldn't protect that manifest. A single listing after the captures can't show which members to capture.
+
+Why does the collection have to read every member within the retirement grace, less the combined allowance? A reference can move from one member to another while a collection runs. For example, suppose that after the collection has read `R`'s roots, a commit in `R` refers to a chain that a fork wrote, and the fork is then deleted. The collection doesn't see the reference in `R`, so it relies on the fork's views. The commit came after the collection captured `now_ms`, and the deletion came after the commit. The deletion time comes from the deleting host's clock, and the retirement check uses another collector's clock. So the fork can't be retired until the retirement grace less the combined allowance has passed since the collection captured `now_ms`. Until then, the fork's source pin keeps the fork in the first listing, and its tombstone keeps the runs that refer to the chain. (A member that drops a reference without being deleted commits a change that replaces or deletes the revision after the collection started. A base compaction removes the revision's rows only once the retention floor passes that commit, at least the default grace window later, which is longer than the time the collection has to read every member, so the member's current manifest still refers to the chain when the collection reads it.)
 
 ## 12. Encodings, versions, and extensions
 
@@ -1859,7 +1896,7 @@ A namespace whose names are labels rather than keys is reserved. In such a names
 
 ## 13. Alternatives considered
 
-This section describes designs that were considered for the format and the reasons they weren't used. The design notes cover narrower choices: [commit history](../design/commit-history.md#alternatives-considered), [inline small content](../design/inline-small-content.md#alternatives-considered), [directory bindings](../design/directory-bindings.md#costs-and-alternatives), [family backfill](../design/family-backfill.md#alternatives-considered), [fork family content](../design/fork-family-content.md#alternatives-considered), [merging a fork](../design/merge.md#alternatives-considered), and [grep across a fork family](../design/grep-fork-family.md#alternatives-considered).
+This section describes designs that were considered for the format and the reasons they weren't used. The design notes cover narrower choices: [commit history](../design/commit-history.md#alternatives-considered), [inline small content](../design/inline-small-content.md#alternatives-considered), [directory bindings](../design/directory-bindings.md#costs-and-alternatives), [family backfill](../design/family-backfill.md#alternatives-considered), [fork family content](../design/fork-family-content.md#alternatives-considered), [fork family pins](../design/fork-family-pins.md#alternatives-considered), [merging a fork](../design/merge.md#alternatives-considered), and [grep across a fork family](../design/grep-fork-family.md#alternatives-considered).
 
 - **A writer lease.** A writer could take a lease with an expiry time instead of an epoch. A new writer would then have to wait for the old lease to expire before it could take over. With epochs and fences, a new writer can take over at any time, and correctness depends only on conditional writes (see [Writer ownership](#61-writer-ownership)).
 - **One upload session record whose status changes.** A single record could move from open to completed or aborted by compare-and-swap. But an upload would then write that record when the session starts and again when it ends, often less than a second later, and some providers allow about one write per second to one object. With two records that are each created once, completion and abort still race on one put-if-absent, and the cost is a second key for each ended session in the uploads listing (see [Upload sessions](#51-upload-sessions)).
@@ -1870,7 +1907,10 @@ This section describes designs that were considered for the format and the reaso
 - **An owner namespace on every content reference.** Each reference could record the namespace whose prefix stores its bytes. Within a fork family that namespace is always the family root, which the manifest records, so the field would repeat one value in every reference and every extent. The field would also make a reference into another fork family's prefix representable, and that family's collection doesn't read the reader's roots.
 - **Any member extends a chain in place.** Two members that appended to one chain from the same length would write span objects at one key with different bytes, and the chain's layout rows would describe one content ID as two byte sequences. Recording each chain's creator, and starting a new chain for every other member's append, keeps each content ID one sequence of bytes at the cost of a content ID and a layout row (see [Operations and WAL deltas](#66-operations-and-wal-deltas)).
 - **A durable record of used WAL and manifest numbers.** Recording every number that was used would remove the provider timing assumption in [Clock and operation assumptions](#114-clock-and-operation-assumptions), because a deleted number could never be mistaken for a free one. But checking the record would add a read to every commit acknowledgement and every read of the current state, and it would remove only that one assumption. A single boundary number that only increases, which garbage collection advances durably before it deletes a numbered object and a writer checks after its put-if-absent and before it acknowledges, would cost the same and remove the same assumption, and it wouldn't by itself protect unreferenced compaction outputs, content uploads, pin expiry or namespace retirement, which would keep their timing rules.
-- **Pins listed in the manifest.** Each manifest could list the pins that target it or its predecessors, and creating a pin would publish a successor whose new entry targets the predecessor, so a successful put-if-absent would prove that the target was current and nothing would need verifying afterwards. Garbage collection would protect the targets of the entries in the manifest it captured and would list nothing. A snapshot would take two fewer requests to create and one fewer to read, and retirement would need no descendants-first order. But a prototype cost more than it saved. Each live fork adds about 288 bytes to its source's manifest, which every publication writes and every cold open reads, so ten thousand forks of one source add about 2.9 MB to each. Concurrent forks of one source contend for its next manifest number, where today their pin puts don't contend: on S3, 100 concurrent forks of one namespace took 14.2 s instead of 10.2 s and made 46 percent more requests, because each publication made the other forks' view of the source stale. A tombstone's table can't change, so a deleted source keeps every manifest that its retired forks pinned until the source itself is retired, and every collection judges those dead entries again. The implementation wasn't smaller either, because the pin object, its verification and its cleanup came back as successor rules for the table, a round trip in which the collector reports dead entries and the maintainer publishes a manifest without them, and a two-pass walk over the fork family (see [Pins](#8-pins) and [Pin cleanup](#117-pin-cleanup)).
+- **Pins listed in the manifest.** Each manifest could list the pins that target it or its predecessors, and creating a pin would publish a successor whose new entry targets the predecessor, so a successful put-if-absent would prove that the target was current and nothing would need verifying afterwards. Garbage collection would protect the targets of the entries in the manifest it captured and would list nothing. A snapshot would take two fewer requests to create and one fewer to read. But a prototype showed that it costs more than it saves. Each live fork adds about 288 bytes to its source's manifest, which every publication writes and every cold open reads, so 10,000 forks of one source add about 2.9 MB to each. Concurrent forks of one source contend for its next manifest number, where pin puts don't contend. On S3, 100 concurrent forks of one namespace took 14.2 s instead of 10.2 s and made 46 to 62 percent more requests, because each publication made the other forks' view of the source stale. The implementation wasn't smaller either, because the pin object, its verification and its cleanup would return as successor rules for the table, a round trip in which the collector reports dead entries and the maintainer publishes a manifest without them, and a walk over the family's tables to judge fork entries (see [Pins](#8-pins) and [Pin cleanup](#117-pin-cleanup)).
+- **Pins as rows that a fold adds.** Creating a pin could add a row to the namespace's metadata in a fold, with the manifest that the fold publishes as the pin's target, so the publication itself would show that the target is current, and nothing would need verifying or listing. But a fork's first manifest lists its source's runs, so every fork would inherit its source's pin rows unless the rows were in a separate segment family that forks don't copy. A manifest reference includes the target's payload checksum, so a row in a segment that the target lists can't contain the reference to that target, and a target identified by its number alone, rewritten after a lost publication, would replace the reference rules in [Manifest references](#25-manifest-references). The design would also need separate target rules for a fork of a snapshot, which pins the snapshot's manifest rather than the fold's, and for a fork of an idle namespace. Without the second rule, 2,500 forks of an idle template would keep 2,500 pinned manifests, where with pin objects they share one. The collection would still find the members one at a time, by reading each member's rows, where one listing of the family pin prefix finds them all, and a tombstone's dead rows would be judged on every collection, because a tombstone has no successor.
+- **A manifest field that points to a separate pin-list object.** Each manifest could refer to an object that lists the namespace's pins, so the manifest wouldn't grow with the number of pins. But each pin would still publish a manifest of the namespace it pins, so concurrent forks of one source would still contend for the source's next manifest number, as they do when the manifest lists the pins.
+- **Keeping replaced manifests for the grace window.** Garbage collection could keep each manifest for the grace window after its successor is published, so a pin on a manifest that was just replaced would still be safe, and creating a pin wouldn't need to load the manifest again. But every collection would then have to load each recently replaced manifest to protect its segments (see [Reference roots](#112-reference-roots)).
 
 ## Appendix A. Durable records and byte encodings
 
@@ -2290,13 +2330,14 @@ A range lookup uses the last keys to find candidate blocks. Readers verify each 
 
 ### A.8 Object keys
 
-These patterns define the core object families. A segment's owner can be different from the namespace that reads it, and content objects and upload records are stored under the family root's prefix, whichever member wrote them.
+These patterns define the core object families. A segment's owner can be different from the namespace that reads it, and content objects and upload records are stored under the family root's prefix, whichever member wrote them. Pins are stored under the family root's prefix too, in the sub-prefix of the member whose manifest they keep.
 
 | Family | Object key pattern |
 | --- | --- |
 | WAL objects | `namespaces/{namespace_id}/wal/{wal_no:020}.wal.zst` |
 | Namespace manifests | `namespaces/{namespace_id}/manifests/{manifest_no:020}.json.zst` |
-| Pin records | `namespaces/{namespace_id}/pins/{pin_id}.json` |
+| User pin records | `namespaces/{family_root_id}/pins/{member_namespace_id}/{pin_id}.json` |
+| Fork pin records | `namespaces/{family_root_id}/pins/{member_namespace_id}/{pin_id}-{target_namespace_id}.json` |
 | Metadata segments | `namespaces/{owner_namespace_id}/segments/{segment_id}.sst.zst` |
 | Extension segments | `namespaces/{owner_namespace_id}/extensions/{extension_name}/segments/{segment_id}.sst.zst` |
 | Upload sessions | `namespaces/{family_root_id}/uploads/{upload_id}.json` |
@@ -2305,6 +2346,8 @@ These patterns define the core object families. A segment's owner can be differe
 | Content objects | `namespaces/{family_root_id}/content/{content_id}` |
 | Content span objects | `namespaces/{family_root_id}/content/{content_id}-{start:020}-{end:020}` |
 | Temporary objects | `namespaces/{namespace_id}/temporary/{temporary_id}` |
+
+A user pin's key ends in `{pin_id}.json`, and a fork pin's key ends in `{pin_id}-{target_namespace_id}.json`. A user pin's ID is `pin_{manifest_no:020}-{16 lowercase hex}`, and a fork pin's ID is `fork_{manifest_no:020}-{16 lowercase hex}` (see [Records and owners](#81-records-and-owners)). For example, a snapshot of manifest 4 of `sandbox`, a fork of `main`, is stored at `namespaces/main/pins/sandbox/pin_00000000000000000004-0000000000000009.json`, and the fork pin on manifest 9 of `main` for `sandbox` at `namespaces/main/pins/main/fork_00000000000000000009-3f9c2a7d41e05b68-sandbox.json`.
 
 ## Appendix B. Semantic commit fingerprints
 
