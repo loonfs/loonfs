@@ -503,7 +503,7 @@ impl Maintenance {
     /// the namespace's writer session.
     ///
     /// Whatever the target, the floor doesn't pass a commit dated less than
-    /// [`GC_DEFAULT_GRACE_WINDOW_MS`](crate::GC_DEFAULT_GRACE_WINDOW_MS)
+    /// [`RETENTION_ADVANCE_MIN_COMMIT_AGE_MS`](crate::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS)
     /// before the runtime's wall clock (format spec, "Advancing the retention
     /// floor"), and the response includes the floor that the advance reached.
     /// Advancing the floor abandons the replay history below it, and a later
@@ -511,9 +511,8 @@ impl Maintenance {
     /// and the newest revision at or below it, and removes the rows that an
     /// expired deletion hides. The runtime doesn't schedule an advance. The
     /// reference server makes one on each maintenance sweep, toward
-    /// [`RetentionTarget::Window`](crate::RetentionTarget::Window) with its
-    /// `retention_window_ms` as the default window, so a namespace with
-    /// neither its own window nor that setting keeps its whole history.
+    /// [`RetentionTarget::Window`](crate::RetentionTarget::Window), so a
+    /// namespace without a window keeps its whole history.
     ///
     /// The call plans the floor from the manifest of this runtime's writer
     /// position when it has a current one, and otherwise from the current
@@ -623,8 +622,8 @@ impl Maintenance {
 
     /// Sets the namespace's retention window.
     ///
-    /// `None` clears the window, so a host's scheduled advance uses the
-    /// host's own setting again.
+    /// `None` clears the window, and a host doesn't advance the floor of a
+    /// namespace without a window on a schedule.
     ///
     /// The call publishes a manifest that changes nothing else, and if the
     /// namespace already has the window, it publishes nothing. See

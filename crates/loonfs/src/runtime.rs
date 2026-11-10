@@ -373,19 +373,28 @@ impl LoonFs<Writable> {
     /// Creates a namespace, bootstrapping its durable state.
     ///
     /// With `options.allow_existing`, an already-existing namespace is
-    /// treated as success. Returns the namespace's post-operation status.
+    /// treated as success. Without `options.retention_window_ms`, the
+    /// namespace has the runtime's
+    /// [`default_retention_window_ms`](crate::RuntimeConfig::default_retention_window_ms).
+    /// Returns the namespace's post-operation status.
     pub async fn create_namespace_with_options(
         &self,
         namespace_id: &NamespaceId,
         actor: &ActorId,
         options: &CreateNamespaceOptions,
     ) -> Result<crate::NamespaceMetadata> {
+        let options = CreateNamespaceOptions {
+            retention_window_ms: options
+                .retention_window_ms
+                .or(self.core.config().default_retention_window_ms),
+            ..options.clone()
+        };
         trace::in_operation(
             operation_span!(self.core, "create_namespace", namespace_id),
             async {
                 let result = self
                     .engine(namespace_id)
-                    .bootstrap_namespace(actor, options)
+                    .bootstrap_namespace(actor, &options)
                     .await
                     .map_err(Error::from);
                 self.mode

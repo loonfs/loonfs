@@ -44,7 +44,7 @@ pub(super) fn human_namespace_status(namespace: &NamespaceMetadata) -> String {
 }
 
 /// Formats a namespace's retention window, or `-` when the namespace has no
-/// window of its own and the server's window applies.
+/// window.
 fn retention_window(retention_window_ms: Option<u64>) -> String {
     retention_window_ms.map_or_else(|| "-".to_owned(), |window_ms| window_ms.to_string())
 }
@@ -179,7 +179,7 @@ pub(super) fn human_maintenance_ran(ran: &MaintenanceRan) -> String {
                 window.namespace_id
             ),
             None => format!(
-                "retention window for {}: none, so the server's window applies",
+                "retention window for {}: none, so the sweep doesn't advance the floor",
                 window.namespace_id
             ),
         },

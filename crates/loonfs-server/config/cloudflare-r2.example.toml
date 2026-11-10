@@ -8,10 +8,10 @@ memory_limit_bytes = 5368709120
 #manifest_revalidation_interval_ms = 1000
 #max_staleness_ms = 1000
 #consistency = "eventual"
-# Keep 30 days of history for each namespace without a retention window of
-# its own, and advance its retention floor past older history on each
-# maintenance sweep. Omit it to advance only the floors of namespaces that
-# have their own window.
+# Record a 30-day retention window in each namespace that the server creates
+# without a window of its own. Each maintenance sweep advances a namespace's
+# retention floor past the history older than the namespace's window. Omit it
+# to create such namespaces without a window.
 #retention_window_ms = 2592000000
 
 # Requests authenticate with this bearer token. The token may instead come

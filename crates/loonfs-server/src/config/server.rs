@@ -192,14 +192,12 @@ pub struct ServerConfig {
     /// to 86400000 (24 hours).
     #[serde(default = "default_sweep_interval_ms")]
     pub sweep_interval_ms: NonZeroU64,
-    /// How long the server keeps a namespace's history before it advances
-    /// the namespace's retention floor past that history, in milliseconds,
-    /// for each namespace without a retention window of its own. Each sweep
+    /// Retention window, in milliseconds, that the server records in each
+    /// namespace that it creates without a window of its own. Each sweep
     /// advances every active namespace's floor to the last commit at or
-    /// before the current time minus the namespace's window, or minus this
-    /// setting for a namespace that has no window of its own. Absent, the
-    /// server advances only the floors of namespaces that have their own
-    /// window.
+    /// before the current time minus the namespace's window, and leaves the
+    /// floor of a namespace without a window where it is. Absent, a
+    /// namespace created without a window has no window.
     pub retention_window_ms: Option<NonZeroU64>,
     /// Idle milliseconds before a caught-up session with no request handle
     /// closes. A later write opens a new session. Defaults to 30 minutes.
@@ -394,6 +392,7 @@ impl ServerConfig {
                 Some(idle_fold_after_ms) => NonZeroU64::new(idle_fold_after_ms),
                 None => defaults.idle_fold_after_ms,
             },
+            default_retention_window_ms: self.retention_window_ms,
         }
     }
 
@@ -405,7 +404,6 @@ impl ServerConfig {
             metadata_retry_interval_ms: self.metadata_retry_interval_ms.get(),
             gc_interval_ms: self.gc_interval_ms.get(),
             sweep_interval_ms: self.sweep_interval_ms.get(),
-            retention_window_ms: self.retention_window_ms,
             idle_session_close_after_ms: self.idle_session_close_after_ms.get(),
         }
     }

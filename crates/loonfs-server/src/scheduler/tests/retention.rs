@@ -1,5 +1,5 @@
 //! The retention advance that sweeps make under each namespace's
-//! retention window, or the server's.
+//! retention window.
 
 use super::{
     idle_fold_after_ms, local_store, scheduler_config, seed_writer, SchedulerServer, DAY_MS,
@@ -193,8 +193,8 @@ async fn a_sweep_advances_each_floor_to_the_last_commit_before_the_window() {
 
 /// Commits to each namespace at `START_MS` and 20 days later, folds the
 /// commits, and returns each namespace's two sequences. The server's clock
-/// then reads 40 days after `START_MS`, so the server's 30-day window passes
-/// the first commit, and a namespace's 15-day window passes both.
+/// then reads 40 days after `START_MS`, so a 30-day window passes the first
+/// commit, and a 15-day window passes both.
 async fn seed_two_commits(
     server: &SchedulerServer,
     namespaces: &[&NamespaceId],
@@ -219,7 +219,7 @@ async fn seed_two_commits(
 }
 
 #[tokio::test]
-async fn a_sweep_advances_a_namespace_by_its_own_window_and_a_sibling_by_the_servers() {
+async fn a_sweep_advances_a_namespace_by_its_own_window_and_a_sibling_by_the_servers_default() {
     for server_window_ms in [None, Some(WINDOW_MS)] {
         let directory = tempdir().expect("tempdir");
         let server = SchedulerServer::start(
@@ -253,7 +253,7 @@ async fn a_sweep_advances_a_namespace_by_its_own_window_and_a_sibling_by_the_ser
         assert_eq!(
             server.retention_floor(&sibling).await,
             sibling_floor,
-            "server window {server_window_ms:?}: a namespace without a window takes the \
+            "server window {server_window_ms:?}: a namespace created without a window has the \
              server's, and keeps its floor when the server has none"
         );
     }
@@ -270,13 +270,14 @@ async fn each_sweep_uses_the_window_that_the_namespace_has_when_the_sweep_runs()
     .await;
     let namespace_id = namespace_id("changing");
     server.create_with_window(&namespace_id, None).await;
-    let [first, second] = seed_two_commits(&server, &[&namespace_id]).await[0];
+    let [_, second] = seed_two_commits(&server, &[&namespace_id]).await[0];
 
-    // A 50-day window passes neither commit, clearing the window makes the
-    // server's 30-day window apply, and a 15-day window passes both.
+    // A 50-day window passes neither commit, a cleared window keeps the
+    // floor although the server's 30-day default would pass the first, and a
+    // 15-day window passes both.
     for (window_ms, expected_floor) in [
         (Some(50 * DAY_MS), ChangeSeq(0)),
-        (None, first),
+        (None, ChangeSeq(0)),
         (Some(NAMESPACE_WINDOW_MS), second),
     ] {
         server
@@ -586,9 +587,7 @@ async fn an_idle_sweep_costs_the_same_requests_whichever_window_applies() {
         // The advance's share of the sweep is one load of the current
         // manifest.
         store.reset();
-        let target = RetentionTarget::Window {
-            default_window_ms: server_window_ms.and_then(NonZeroU64::new),
-        };
+        let target = RetentionTarget::Window;
         server
             .maintenance
             .advance_retention_floor_with_options(

@@ -31,7 +31,7 @@ A name is an object's key with the family root's content prefix removed, so it's
 
 ## Why the roots are enough
 
-A reader or writer in any member works from a manifest that's current or pinned, together with that member's WAL tail. A read or a write on a manifest that a newer manifest replaced runs again on the current manifest when it finds a segment missing (see [Reference roots](../specs/format.md#112-reference-roots)). So the first two roots cover every view that a read or a copy can start from. A presigned download URL for a revision that's current in the view that issued it works for the URL's whole lifetime, because a retention advance passes the commit that replaces the revision only once that commit is older than the default grace window (see [Content roots](../specs/format.md#119-content-roots)).
+A reader or writer in any member works from a manifest that's current or pinned, together with that member's WAL tail. A read or a write on a manifest that a newer manifest replaced runs again on the current manifest when it finds a segment missing (see [Reference roots](../specs/format.md#112-reference-roots)). So the first two roots cover every view that a read or a copy can start from. A presigned download URL for a revision that's current in the view that issued it works for the URL's whole lifetime, because a retention advance passes the commit that replaces the revision only once that commit is older than the advance's minimum commit age, one hour (see [Content roots](../specs/format.md#119-content-roots)).
 
 A fork's source pin keeps the pinned source manifest as a rooted view of the source, so the fork's inherited revisions and layouts are protected through that view.
 

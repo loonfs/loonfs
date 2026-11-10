@@ -203,7 +203,7 @@ async fn an_advance_orders_the_undeletes_queued_around_it() {
         .fold_wal(&namespace_id)
         .await
         .expect("fold the deletions");
-    clock.advance_ms(crate::GC_DEFAULT_GRACE_WINDOW_MS);
+    clock.advance_ms(crate::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS);
     let publisher = writer
         .mode
         .publisher
@@ -291,7 +291,7 @@ async fn a_takeover_between_the_fold_and_the_floor_fences_the_advance() {
         .fold_wal(&namespace_id)
         .await
         .expect("fold the history");
-    clock.advance_ms(crate::GC_DEFAULT_GRACE_WINDOW_MS);
+    clock.advance_ms(crate::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS);
 
     gated.block_next();
     let advance = tokio::spawn({
@@ -365,7 +365,7 @@ async fn a_commit_between_the_claim_and_the_fence_is_folded_before_the_floor() {
         .expect("open namespace");
     create_directories(&namespace, "deleted").await;
     let maintainer_clock = Arc::new(ManualClock::at_system_time());
-    maintainer_clock.advance_ms(crate::GC_DEFAULT_GRACE_WINDOW_MS);
+    maintainer_clock.advance_ms(crate::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS);
     // The maintainer's first WAL put is its fence, which the gate parks.
     let gated = Arc::new(BlockingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
@@ -452,7 +452,7 @@ async fn an_advance_by_another_runtime_fences_a_session_on_the_old_floor() {
         .open_namespace(&namespace_id)
         .expect("open namespace");
     let maintainer_clock = Arc::new(ManualClock::at_system_time());
-    maintainer_clock.advance_ms(crate::GC_DEFAULT_GRACE_WINDOW_MS);
+    maintainer_clock.advance_ms(crate::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS);
     let maintainer = runtime_at(store.clone(), "maintainer", &maintainer_clock).await;
     let maintenance = maintainer.maintenance(loonfs_test_support::ids::writer_id("maintainer"));
     // Each fold writes a run, and the directories created after the

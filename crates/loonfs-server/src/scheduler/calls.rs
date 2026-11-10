@@ -239,10 +239,9 @@ impl Scheduler {
     }
 
     /// Advances the namespace's retention floor to the last commit at or
-    /// before the current time minus the namespace's retention window, or
-    /// minus `retention_window_ms` for a namespace that has no window of its
-    /// own, with the same advance as the `retention` job. A namespace with
-    /// neither window keeps its floor. A deleted namespace returns
+    /// before the current time minus the namespace's retention window, with
+    /// the same advance as the `retention` job. A namespace without a window
+    /// keeps its floor. A deleted namespace returns
     /// `namespace_deleted`, which isn't a failure.
     ///
     /// A floor that moves is advanced through the namespace's writer session
@@ -260,9 +259,7 @@ impl Scheduler {
             return;
         }
         let options = AdvanceRetentionFloorOptions {
-            target: RetentionTarget::Window {
-                default_window_ms: inner.config.retention_window_ms,
-            },
+            target: RetentionTarget::Window,
         };
         // Boxed so the spawned scheduler's `Send` check does not recurse
         // through every engine future the advance awaits.

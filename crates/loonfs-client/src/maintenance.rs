@@ -222,7 +222,8 @@ impl Client {
     }
 
     /// Sets the namespace's retention window, or clears it when
-    /// `retention_window_ms` is `None`, so that the server's window applies.
+    /// `retention_window_ms` is `None`, so that the server's maintenance
+    /// sweep doesn't advance the namespace's floor.
     ///
     /// Retrying this request starts a distinct attempt.
     pub async fn set_retention_window(

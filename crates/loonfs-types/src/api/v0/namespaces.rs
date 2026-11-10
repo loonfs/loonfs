@@ -16,9 +16,9 @@ pub struct CreateNamespaceRequest {
     /// The durable ID of the new namespace.
     pub namespace_id: NamespaceId,
     /// The namespace's retention window, in milliseconds, which must be positive. The reference
-    /// server's maintenance sweep then uses this window for the namespace instead of the server's
-    /// `retention_window_ms` setting. A `retention_window` maintenance run can change or clear the
-    /// window later.
+    /// server's maintenance sweep uses this window for the namespace. Without this field, the
+    /// namespace's window is the server's `retention_window_ms` setting, if the server has that
+    /// setting. A `retention_window` maintenance run can change or clear the window later.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(
         feature = "openapi",
@@ -66,9 +66,9 @@ pub struct NamespaceMetadata {
     /// The namespace's retention floor. A change feed request can set `after_seq` to this sequence
     /// or any later one, and the feed returns the changes committed after it.
     pub retention_floor_seq: ChangeSeq,
-    /// The namespace's retention window, in milliseconds. Only a namespace with its own window has
-    /// this field. The reference server's maintenance sweep uses the server's `retention_window_ms`
-    /// setting for a namespace that has no window of its own.
+    /// The namespace's retention window, in milliseconds. Only a namespace with a window has this
+    /// field. The reference server's maintenance sweep doesn't advance the floor of a namespace
+    /// without a window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub retention_window_ms: Option<u64>,

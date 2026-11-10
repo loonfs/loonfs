@@ -258,6 +258,11 @@ pub struct RuntimeConfig {
     /// reads when a tail reaches the age from
     /// [`MetadataMaintenanceReport::next_due_at_ms`](crate::MetadataMaintenanceReport::next_due_at_ms).
     pub idle_fold_after_ms: Option<NonZeroU64>,
+    /// Retention window, in milliseconds, that the runtime records in the
+    /// first manifest of each namespace that it creates without a window in
+    /// the request. Defaults to `None`, so such a namespace has no window. A
+    /// fork copies its source's window instead.
+    pub default_retention_window_ms: Option<NonZeroU64>,
 }
 
 impl Default for RuntimeConfig {
@@ -272,6 +277,7 @@ impl Default for RuntimeConfig {
             publication: PublicationPolicy::default(),
             inline_content: InlineContentPolicy::default(),
             idle_fold_after_ms: Some(DEFAULT_IDLE_FOLD_AFTER_MS),
+            default_retention_window_ms: None,
         }
     }
 }

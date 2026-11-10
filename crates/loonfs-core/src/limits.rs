@@ -311,26 +311,26 @@ pub const NAMESPACE_RETIREMENT_GRACE_WINDOW_MS: u64 =
 pub const FAMILY_ROOTS_READ_BUDGET_MS: u64 =
     NAMESPACE_RETIREMENT_GRACE_WINDOW_MS - GC_SAFETY_MARGIN_MS;
 
-pub use loonfs_types::limits::GC_DEFAULT_GRACE_WINDOW_MS;
+pub use loonfs_types::limits::{GC_DEFAULT_GRACE_WINDOW_MS, RETENTION_ADVANCE_MIN_COMMIT_AGE_MS};
 
 const _: () = assert!(GC_DEFAULT_GRACE_WINDOW_MS >= GC_MIN_GRACE_WINDOW_MS);
 
 /// A member that replaces or deletes a revision after a family root's
 /// collection started keeps the revision's rows until a retention advance
-/// passes that commit, a default grace window later, so the collection
-/// reads the member's current manifest with the reference still in it
-/// (format section 11.9).
-const _: () = assert!(FAMILY_ROOTS_READ_BUDGET_MS < GC_DEFAULT_GRACE_WINDOW_MS);
+/// passes that commit, at least the advance's minimum commit age later, so
+/// the collection reads the member's current manifest with the reference
+/// still in it (format section 11.9).
+const _: () = assert!(FAMILY_ROOTS_READ_BUDGET_MS < RETENTION_ADVANCE_MIN_COMMIT_AGE_MS);
 
 /// A retention advance moves the floor only past commits older than the
-/// default grace, so a revision stays referenced for at least that long
-/// after a commit replaces it. A view at most the revalidation bound old,
-/// and a direct transfer URL it issued, read content that was referenced
-/// when the view was checked, and the margin keeps it referenced until the
-/// URL ends.
+/// advance's minimum commit age, so a revision stays referenced for at least
+/// that long after a commit replaces it. A view at most the revalidation
+/// bound old, and a direct transfer URL it issued, read content that was
+/// referenced when the view was checked, and the margin keeps it referenced
+/// until the URL ends.
 const _: () = assert!(
     READ_REVALIDATION_BOUND_MS + DIRECT_TRANSFER_URL_TTL_MS + GC_SAFETY_MARGIN_MS
-        <= GC_DEFAULT_GRACE_WINDOW_MS
+        <= RETENTION_ADVANCE_MIN_COMMIT_AGE_MS
 );
 
 /// Most parts one direct multipart upload may cut into. This is the

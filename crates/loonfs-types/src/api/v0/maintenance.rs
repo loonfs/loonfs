@@ -46,8 +46,8 @@ pub struct AdvanceRetentionResponse {
 #[serde(deny_unknown_fields)]
 pub struct SetRetentionWindowRequest {
     /// The namespace's new retention window, in milliseconds, which must be positive. Without it,
-    /// the job clears the namespace's window, and the reference server's `retention_window_ms`
-    /// setting applies to the namespace again.
+    /// the job clears the namespace's window, and the reference server's maintenance sweep no
+    /// longer advances the namespace's floor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(
         feature = "openapi",
@@ -63,7 +63,7 @@ pub struct SetRetentionWindowResponse {
     /// The namespace whose retention window the job set or cleared.
     pub namespace_id: NamespaceId,
     /// The namespace's retention window, in milliseconds. It's absent when the namespace has no
-    /// window of its own.
+    /// window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub retention_window_ms: Option<u64>,
