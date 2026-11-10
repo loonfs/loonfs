@@ -1,7 +1,8 @@
 //! Retention advances through floor objects: the order of a session's
 //! undeletes around an advance in its queue, an undelete that takes the
-//! number that another runtime's floor object was planned for, and an
-//! advance by another runtime that a session's undelete collides with.
+//! number that another runtime's floor object was planned for, an advance
+//! by another runtime that a session's undelete collides with, and a read
+//! from a cached head after a floor object.
 
 use super::*;
 use loonfs_types::format::manifest::NamespaceManifestPayload;
@@ -509,5 +510,90 @@ async fn an_advance_without_a_session_folds_its_floor_object_after_a_session_ope
         advanced.retention_floor_seq,
         "the fold after the advance covers the floor object"
     );
+    writer.shutdown().await.expect("shutdown");
+}
+
+/// The deletion sequences that a strong listing of the namespace's trash
+/// returns.
+async fn listed_deletions(namespace: &crate::Namespace<crate::Writable>) -> Vec<ChangeSeq> {
+    namespace
+        .list_trash_with_options(&crate::ListTrashOptions {
+            consistency: Some(crate::Consistency::Strong),
+        })
+        .page()
+        .await
+        .expect("list the trash")
+        .entries
+        .into_iter()
+        .map(|entry| entry.deletion_seq)
+        .collect()
+}
+
+/// Checks that a strong read in a runtime with a cached head finds the floor
+/// of a floor object that no manifest records yet. The reader lists a
+/// deletion, another runtime's advance creates its floor object and waits at
+/// the put of the manifest that folds the floor object, and the reader's
+/// next listing leaves the expired deletion out.
+#[tokio::test]
+async fn a_read_from_a_cached_head_finds_an_unfolded_floor_object() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let clock = Arc::new(ManualClock::at_system_time());
+    let writer = runtime_at(store.clone(), "writer-a", &clock).await;
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    writer
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("create");
+    let namespace = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    create_directories(&namespace, "deleted").await;
+    let (_, deletion_seq) = delete_a_directory(&namespace, "deleted").await;
+    let gated = Arc::new(BlockingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::prefix(metadata_manifest_prefix(&namespace_id)),
+        OperationSelector::PutCreateIfAbsent,
+    ));
+    let maintainer_clock = Arc::new(ManualClock::at_system_time());
+    maintainer_clock.advance_ms(crate::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS);
+    let maintainer = runtime_at(
+        gated.clone() as SharedStore,
+        "maintainer",
+        &maintainer_clock,
+    )
+    .await;
+    let maintenance = maintainer.maintenance(loonfs_test_support::ids::writer_id("maintainer"));
+    maintenance
+        .fold_wal(&namespace_id)
+        .await
+        .expect("fold the deletion");
+    let reader = runtime_at(store.clone(), "reader", &clock).await;
+    let reads = reader
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    assert_eq!(listed_deletions(&reads).await, [deletion_seq]);
+
+    gated.block_next();
+    let advance = tokio::spawn({
+        let maintenance = maintenance.clone();
+        let namespace_id = namespace_id.clone();
+        async move { maintenance.advance_retention_floor(&namespace_id).await }
+    });
+    gated.wait_until_blocked().await;
+    assert_eq!(
+        current_manifest(store.as_ref(), &namespace_id)
+            .await
+            .retention_floor_seq,
+        ChangeSeq(0),
+        "no manifest records the floor yet"
+    );
+    assert_eq!(listed_deletions(&reads).await, []);
+    gated.release();
+
+    let advanced = advance.await.expect("join").expect("the advance");
+    assert!(advanced.retention_floor_seq >= deletion_seq);
+    reader.shutdown().await.expect("shutdown");
+    maintainer.shutdown().await.expect("shutdown");
     writer.shutdown().await.expect("shutdown");
 }

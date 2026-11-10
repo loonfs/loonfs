@@ -66,11 +66,13 @@ pub struct CachedHead {
 
 impl CachedHead {
     /// The durable order that [`HeadAndWalTailCache::replace_head`] compares
-    /// heads in: head sequence, then manifest number.
-    fn order(&self) -> (ChangeSeq, ManifestNo) {
+    /// heads in: head sequence, then manifest number, then WAL number. A
+    /// floor object moves the WAL number alone.
+    fn order(&self) -> (ChangeSeq, ManifestNo, WalNo) {
         (
             self.read_basis.head.seq,
             self.read_basis.basis.manifest_no(),
+            self.read_basis.head.wal_no,
         )
     }
 
@@ -245,7 +247,9 @@ impl HeadAndWalTailCache {
     /// the cached head, and returns the head that a read starts from.
     ///
     /// A head is newer when its sequence is higher, or when its sequence is
-    /// the same and its basis is a later manifest.
+    /// the same and its basis is a later manifest, or when both are the same
+    /// and its WAL number is higher. A floor object raises the WAL number
+    /// and the head's retention floor, and nothing else.
     ///
     /// - A candidate below the cached head changes nothing, and the read
     ///   starts from the cached head.
@@ -628,6 +632,25 @@ mod tests {
         }
         let cached = cache.get_head(&namespace("demo")).expect("a cached head");
         assert_eq!(order(&cached), (6, 1));
+    }
+
+    /// Checks that a candidate at the cached head's sequence and manifest
+    /// with a higher WAL number, which is the head after a floor object,
+    /// becomes the cached head, and that the head before the floor object
+    /// doesn't replace it.
+    #[test]
+    fn a_head_after_a_floor_object_replaces_the_cached_head() {
+        let now = crate::test_support::observed_now();
+        let cache = HeadAndWalTailCache::unshared(1 << 20);
+        cache.replace_head(head_at(5, 1, &now));
+        let mut after_floor_object = head_at(5, 1, &now);
+        after_floor_object.read_basis.head.wal_no = WalNo(6);
+        after_floor_object.read_basis.head.retention_floor_seq = ChangeSeq(3);
+        let installed = cache.replace_head(after_floor_object);
+        assert_eq!(installed.read_basis.head.retention_floor_seq, ChangeSeq(3));
+        let kept = cache.replace_head(head_at(5, 1, &now));
+        assert_eq!(kept.read_basis.head.wal_no, WalNo(6));
+        assert_eq!(kept.read_basis.head.retention_floor_seq, ChangeSeq(3));
     }
 
     /// Checks that a candidate equal to the cached head takes the newer of
