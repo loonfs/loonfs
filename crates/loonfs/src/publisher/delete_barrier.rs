@@ -84,7 +84,7 @@ impl NamespacePublisher {
     /// publications govern its tombstone swap too.
     ///
     /// The deletion folds the tail before its tombstone, with the
-    /// namespace's fold turn in exclusive mode, so it waits for any other
+    /// namespace's fold lock in exclusive mode, so it waits for any other
     /// fold of the namespace instead of folding the same tail.
     async fn delete_through_engine(
         &self,
