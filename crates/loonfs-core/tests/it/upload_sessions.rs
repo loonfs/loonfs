@@ -26,6 +26,19 @@ use std::path::Path;
 use std::sync::Arc;
 use tempfile::tempdir;
 
+/// Runs one collection of the pool of `namespace_id`.
+async fn collect_pool<S: ObjectStore>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    options: &loonfs_core::GcOptions,
+    clock: &loonfs_core::time::OperationClock,
+) -> loonfs_core::Result<loonfs_types::PoolGcResponse> {
+    let pool_id = loonfs_core::test_support::load_pool_id(store, namespace_id).await;
+    loonfs_core::test_support::pool_store(store, &pool_id)
+        .gc(None, options, clock)
+        .await
+}
+
 /// Reads an upload session's record and its outcome record, if it has one.
 async fn read_upload_records<S: ObjectStore + ?Sized>(
     store: &S,
@@ -450,8 +463,7 @@ mod streamed_content {
                 ..context.clone()
             };
             if forget_before_resume {
-                namespace_store(&store, &namespace_id)
-                    .gc(None, &options, &aged.clock())
+                collect_pool(&store, &namespace_id, &options, &aged.clock())
                     .await
                     .expect("collect aborted session");
                 assert!(store.get(&session_key, None).await.expect("get").is_none());
@@ -465,10 +477,14 @@ mod streamed_content {
             result.expect_err("aborted session cannot stage").code(),
             ErrorCode::UploadNotFound
         );
-        namespace_store(&store, &namespace_id)
-            .gc(None, &loonfs_core::GcOptions::default(), &aged.clock())
-            .await
-            .expect("repeat GC after late content write");
+        collect_pool(
+            &store,
+            &namespace_id,
+            &loonfs_core::GcOptions::default(),
+            &aged.clock(),
+        )
+        .await
+        .expect("repeat GC after late content write");
         assert!(store.get(&session_key, None).await.expect("get").is_none());
         assert!(
             store.get(&content_key, None).await.expect("get").is_none(),
@@ -540,8 +556,7 @@ mod streamed_content {
                 now_ms: expires_at_ms + options.grace_window_ms + 1,
                 ..context.clone()
             };
-            namespace_store(&store, &namespace_id)
-                .gc(None, &options, &expired.clock())
+            collect_pool(&store, &namespace_id, &options, &expired.clock())
                 .await
                 .expect("GC aborts expired implicit session");
             let (_, aborted) = read_upload_records(&store, &namespace_id, &session.upload_id).await;
@@ -557,8 +572,7 @@ mod streamed_content {
                 ..context.clone()
             };
             if forget_before_resume {
-                namespace_store(&store, &namespace_id)
-                    .gc(None, &options, &aged.clock())
+                collect_pool(&store, &namespace_id, &options, &aged.clock())
                     .await
                     .expect("forget expired implicit owner");
                 assert!(store.get(&session_key, None).await.expect("get").is_none());
@@ -572,10 +586,14 @@ mod streamed_content {
             result.expect_err("expired owner cannot complete").code(),
             ErrorCode::UploadNotFound
         );
-        namespace_store(&store, &namespace_id)
-            .gc(None, &loonfs_core::GcOptions::default(), &aged.clock())
-            .await
-            .expect("GC after failed late completion");
+        collect_pool(
+            &store,
+            &namespace_id,
+            &loonfs_core::GcOptions::default(),
+            &aged.clock(),
+        )
+        .await
+        .expect("GC after failed late completion");
         assert!(store.get(&session_key, None).await.expect("get").is_none());
         assert!(
             store.get(&content_key, None).await.expect("get").is_none(),
@@ -1411,8 +1429,7 @@ mod direct_multipart {
             writer_id: context.writer_id.clone(),
             now_ms: expires_at_ms + options.grace_window_ms + 1,
         };
-        namespace_store(&store, &session.namespace_id)
-            .gc(None, &options, &expired.clock())
+        collect_pool(&store, &session.namespace_id, &options, &expired.clock())
             .await
             .expect("garbage collection");
 

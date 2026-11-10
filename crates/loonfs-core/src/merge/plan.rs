@@ -171,7 +171,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             .drain()
             .filter(|(content_ref, _)| applied.contains(content_ref))
             .map(|(content_ref, layout)| {
-                PreparedContent::for_family_member(
+                PreparedContent::for_pool_member(
                     self.namespace.namespace_id.clone(),
                     content_ref,
                     layout,

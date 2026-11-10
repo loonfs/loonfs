@@ -124,6 +124,7 @@ error_codes! {
     RouteNotFound => "route_not_found",
     MethodNotAllowed => "method_not_allowed",
     NamespaceNotFound => "namespace_not_found",
+    PoolNotFound => "pool_not_found",
     NamespaceDeleted => "namespace_deleted",
     NamespaceExists => "namespace_exists",
     SnapshotNotFound => "snapshot_not_found",
@@ -189,6 +190,7 @@ impl ErrorCode {
             ErrorCode::RangeNotSatisfiable => ErrorKind::RangeNotSatisfiable,
             ErrorCode::NotSupported => ErrorKind::NotSupported,
             ErrorCode::NamespaceNotFound
+            | ErrorCode::PoolNotFound
             | ErrorCode::SnapshotNotFound
             | ErrorCode::PathNotFound
             | ErrorCode::InodeNotFound
@@ -270,6 +272,7 @@ impl ErrorCode {
             | ErrorCode::RouteNotFound
             | ErrorCode::MethodNotAllowed
             | ErrorCode::NamespaceNotFound
+            | ErrorCode::PoolNotFound
             | ErrorCode::NamespaceDeleted
             | ErrorCode::NamespaceExists
             | ErrorCode::SnapshotNotFound
@@ -363,6 +366,7 @@ impl ErrorCode {
             | ErrorCode::ContentNotMaterialized
             | ErrorCode::MaintenanceRequired
             | ErrorCode::UploadNotFound
+            | ErrorCode::PoolNotFound
             | ErrorCode::UploadAlreadyCompleted
             | ErrorCode::UploadContentConflict
             | ErrorCode::RebootstrapRequired
@@ -409,6 +413,7 @@ impl ErrorCode {
             | ErrorCode::RouteNotFound
             | ErrorCode::MethodNotAllowed
             | ErrorCode::NamespaceNotFound
+            | ErrorCode::PoolNotFound
             | ErrorCode::NamespaceDeleted
             | ErrorCode::NamespaceExists
             | ErrorCode::SnapshotNotFound

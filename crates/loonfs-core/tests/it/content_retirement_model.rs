@@ -1,10 +1,9 @@
 //! Independent exploration of namespace retirement and fork record deletion.
 //! The deadline is measured from the call clock. The budget bounds how far
 //! behind that clock can be at the moment of publication. The three
-//! namespaces form one fork family, whose root (namespace 0) stores the
-//! content of every member under its prefix, so a fork's retirement releases
-//! its source record and only the root's retirement makes content
-//! collectable.
+//! namespaces are members of one pool, whose first member is namespace 0, so
+//! a fork's retirement releases its source record, and the pool's content is
+//! collectable once the first member is retired and the pool has no members.
 
 use std::collections::HashSet;
 
@@ -28,7 +27,7 @@ struct Record {
 struct Model {
     namespaces: [Option<Status>; 3],
     records: [Option<Record>; 3],
-    /// Whether the family root's retirement swept the family's content.
+    /// Whether the first member is retired, so that the pool has no members.
     collectable: bool,
     capabilities_until: [u64; 3],
     calls: [Option<u64>; 3],
@@ -131,8 +130,8 @@ impl Model {
                 deadline: started + GRACE,
             });
         }
-        // A fork's prefix stores no content, so only the family root's
-        // retirement sweeps content.
+        // Each fork pins its source, so the first member is retired last, and
+        // the pool has no members from then on.
         self.collectable |= retired && namespace == 0;
     }
 

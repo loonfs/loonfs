@@ -586,7 +586,7 @@ async fn merge_a_forks_file() -> (tempfile::TempDir, MergedFile) {
             content: loonfs_types::FileContent::Ref(content_ref.clone()),
         }],
     );
-    let proof = PreparedContent::for_family_member(main.clone(), content_ref, layout, u64::MAX);
+    let proof = PreparedContent::for_pool_member(main.clone(), content_ref, layout, u64::MAX);
     let candidate = CommitCandidate::prepared(create, vec![proof]).with_merge(
         MergeRecord {
             source_namespace_id: fork.clone(),

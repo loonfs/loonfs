@@ -392,9 +392,6 @@ fn a_collection_counts_what_it_reclaimed_and_retained() {
         namespace_id: loonfs_test_support::ids::namespace_id("demo"),
         deleted: loonfs_types::DeletedObjectCounts {
             wal_objects: 3,
-            content_objects: 5,
-            temporary_objects: 11,
-            retired_content_objects: 13,
             ..loonfs_types::DeletedObjectCounts::default()
         },
         deleted_checkpoints_by_owner: loonfs_types::DeletedCheckpointsByOwner { fork: 2, user: 3 },
@@ -405,12 +402,21 @@ fn a_collection_counts_what_it_reclaimed_and_retained() {
         listed_bytes: 0,
         next_reclamation_at_ms: None,
         reclaimable_at_ms: None,
-        skipped: Vec::new(),
+    };
+    let pool_gc = crate::PoolGcResponse {
+        deleted: loonfs_types::PoolDeletedObjectCounts {
+            content_objects: 5,
+            temporary_objects: 11,
+            upload_sessions: 13,
+        },
+        ..crate::PoolGcResponse::empty(loonfs_types::PoolId::generate())
     };
 
     instruments.gc.record_collection(&gc);
     gc.deleted.wal_objects = 1;
     instruments.gc.record_collection(&gc);
+    instruments.gc.record_pool_collection(&pool_gc);
+    instruments.gc.record_pool_collection(&pool_gc);
 
     let snapshot = recorder.snapshot();
     assert_eq!(
@@ -432,12 +438,12 @@ fn a_collection_counts_what_it_reclaimed_and_retained() {
     assert_eq!(counter(&snapshot, "loonfs.gc.retained", &[]), 4);
     // Every family registers at construction, so a scrape names the
     // whole reclaimable vocabulary rather than only what has happened.
-    assert_eq!(snapshot.by_name("loonfs.gc.reclaimed").count(), 10);
+    assert_eq!(snapshot.by_name("loonfs.gc.reclaimed").count(), 9);
     for (category, expected) in [
         ("deleted_fork_checkpoints", 4),
         ("deleted_expired_checkpoints", 6),
         ("deleted_temporary_objects", 22),
-        ("deleted_retired_content_objects", 26),
+        ("deleted_upload_sessions", 26),
     ] {
         assert_eq!(
             counter(&snapshot, "loonfs.gc.reclaimed", &[("category", category)]),

@@ -19,7 +19,6 @@ async fn collect_aged_wal(
     );
     crate::test_support::namespace_store(&aged, namespace_id)
         .gc(
-            None,
             &options,
             &WriterAt {
                 now_ms: options.grace_window_ms + 1,

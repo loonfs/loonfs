@@ -229,6 +229,22 @@ pub fn namespace_store<S>(store: S, namespace_id: &NamespaceId) -> NamespaceStor
     )
 }
 
+/// Returns `pool_id`'s components over `store`, with the components of
+/// [`namespace_store`].
+pub fn pool_store<S>(store: S, pool_id: &PoolId) -> crate::PoolStore<S> {
+    crate::PoolStore::new(
+        store,
+        pool_id.clone(),
+        Arc::new(MetadataSegmentCache::unshared(0)),
+        Arc::new(crate::cache::HeadAndWalTailCache::unshared(0)),
+        Arc::new(crate::cache::ObjectCache::unshared(0, 0)),
+        Arc::new(crate::time::SystemWallClock),
+        std_timer(),
+        Arc::new(content_writes()),
+        MetadataRunPolicy::default(),
+    )
+}
+
 /// The decoded-block budget of [`segment_cache`], large enough that no test
 /// fixture evicts a block.
 const TEST_SEGMENT_CACHE_BYTES: usize = 64 * 1024 * 1024;
@@ -250,6 +266,26 @@ pub fn namespace_store_with_segment_cache<S>(
         segment_cache: Arc::new(segment_cache()),
         ..namespace_store(store, namespace_id)
     }
+}
+
+/// Writes the record of `pool_id` with `first_member_id` as its first member,
+/// created at `created_at_ms`, for a test that writes a namespace's first
+/// manifest without a create call.
+#[cfg(test)]
+pub(crate) async fn write_pool_record<S: ObjectStore>(
+    store: S,
+    pool_id: &PoolId,
+    first_member_id: &NamespaceId,
+    created_at_ms: u64,
+) {
+    namespace_store(store, first_member_id)
+        .write_pool_record(&loonfs_types::format::control::PoolRecordPayload {
+            pool_id: pool_id.clone(),
+            first_member_id: first_member_id.clone(),
+            created_at_ms,
+        })
+        .await
+        .expect("write the pool record");
 }
 
 /// Returns the pool that the current manifest of `namespace_id` records, for a

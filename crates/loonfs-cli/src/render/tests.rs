@@ -641,22 +641,23 @@ fn gc_summaries_report_counts_retention_and_namespace_retirement() {
 
     let mut pass = GcResponse::empty(NamespaceId::parse("demo").expect("namespace id"));
     pass.deleted.wal_objects = 2;
-    pass.deleted.upload_sessions = 3;
-    pass.deleted.content_objects = 1;
-    pass.deleted.retired_content_objects = 7;
+    pass.deleted.manifests = 1;
     pass.deleted_checkpoints_by_owner.fork = 2;
     for _ in 0..4 {
         pass.retain(RetainedReason::WithinGraceWindow);
     }
-    pass.retain(RetainedReason::UploadSessionWindow);
+    pass.retain(RetainedReason::CheckpointNotDeletable);
     pass.next_reclamation_at_ms = Some(1_700_000_000_000);
 
     let summary = gc_summary(&pass);
+    assert!(summary.contains("2 wal objects"), "{summary}");
+    assert!(summary.contains("1 manifests"), "{summary}");
+    assert!(summary.contains("2 fork checkpoints"), "{summary}");
     assert!(
-        summary.contains("1 content objects, 7 retired content objects"),
+        summary.contains("mostly within_grace_window: 4"),
         "{summary}"
     );
-    assert!(summary.contains("2 fork checkpoints"), "{summary}");
+    assert!(!summary.contains("content objects"), "{summary}");
     assert!(!summary.contains("namespace can be reclaimed"), "{summary}");
     pass.deleted.extension_segments = 3;
     let summary = gc_summary(&pass);
@@ -681,21 +682,9 @@ fn gc_summaries_report_counts_retention_and_namespace_retirement() {
     let empty = gc_summary(&GcResponse::empty(
         NamespaceId::parse("demo").expect("namespace id"),
     ));
-    assert!(
-        empty.contains("0 content objects, 0 retired content objects"),
-        "{empty}"
-    );
     assert!(!empty.contains("namespace is retired"), "{empty}");
     assert!(empty.contains("0 fork checkpoints, 0 snapshots"), "{empty}");
     assert!(!empty.contains("skipped"), "{empty}");
-
-    pass.skipped = vec![loonfs_types::GcSkippedWork::ContentSweepFamilyBudget];
-    assert_eq!(
-        gc_summary(&pass).lines().last(),
-        Some(
-            "skipped the content sweep: the fork family's roots weren't all read within the budget"
-        )
-    );
 }
 
 #[test]

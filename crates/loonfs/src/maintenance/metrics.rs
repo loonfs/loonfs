@@ -4,7 +4,7 @@ use crate::metrics::labels::{LabeledCounters, MetricLabel};
 use crate::metrics::{
     seconds_from_ms, CounterHandle, HistogramHandle, MetricsRecorder, LATENCY_SECONDS_BOUNDARIES,
 };
-use crate::GcResponse;
+use crate::{GcResponse, PoolGcResponse};
 use loonfs_core::CompactionUnitOutcome;
 use std::sync::Arc;
 
@@ -39,10 +39,11 @@ impl MetricLabel for CompactionOutcome {
 }
 
 /// One reclaimable family: its label, and the count a collection reports for it.
-type GcKind = (&'static str, fn(&GcResponse) -> u64);
+type GcKind<R> = (&'static str, fn(&R) -> u64);
 
-/// Counts each deletion once, with pins grouped by owner.
-const GC_CATEGORIES: [GcKind; 10] = [
+/// Counts each deletion of a namespace's collection once, with pins grouped by
+/// owner.
+const GC_CATEGORIES: [GcKind<GcResponse>; 6] = [
     ("deleted_wal_objects", |gc| gc.deleted.wal_objects),
     ("deleted_metadata_segments", |gc| {
         gc.deleted.metadata_segments
@@ -57,13 +58,14 @@ const GC_CATEGORIES: [GcKind; 10] = [
     ("deleted_expired_checkpoints", |gc| {
         gc.deleted_checkpoints_by_owner.user
     }),
+];
+
+/// Counts each deletion of a pool's collection once.
+const POOL_GC_CATEGORIES: [GcKind<PoolGcResponse>; 3] = [
     ("deleted_upload_sessions", |gc| gc.deleted.upload_sessions),
     ("deleted_content_objects", |gc| gc.deleted.content_objects),
     ("deleted_temporary_objects", |gc| {
         gc.deleted.temporary_objects
-    }),
-    ("deleted_retired_content_objects", |gc| {
-        gc.deleted.retired_content_objects
     }),
 ];
 
@@ -168,21 +170,27 @@ impl CompactionInstruments {
 /// Collection instruments, one counter per reclaimable family.
 pub(crate) struct GcInstruments {
     reclaimed: Vec<Arc<dyn CounterHandle>>,
+    pool_reclaimed: Vec<Arc<dyn CounterHandle>>,
     retained: Arc<dyn CounterHandle>,
 }
 
 impl GcInstruments {
     pub(crate) fn register(recorder: &dyn MetricsRecorder) -> Self {
+        let reclaimed = |category: &'static str| {
+            recorder.register_counter(
+                "loonfs.gc.reclaimed",
+                "Objects one collection reclaimed, by family",
+                &[("category", category)],
+            )
+        };
         Self {
             reclaimed: GC_CATEGORIES
                 .iter()
-                .map(|(category, _)| {
-                    recorder.register_counter(
-                        "loonfs.gc.reclaimed",
-                        "Objects one collection reclaimed, by family",
-                        &[("category", *category)],
-                    )
-                })
+                .map(|(category, _)| reclaimed(category))
+                .collect(),
+            pool_reclaimed: POOL_GC_CATEGORIES
+                .iter()
+                .map(|(category, _)| reclaimed(category))
                 .collect(),
             retained: recorder.register_counter(
                 "loonfs.gc.retained",
@@ -198,6 +206,22 @@ impl GcInstruments {
     /// caller can drop the response.
     pub(crate) fn record_collection(&self, gc: &GcResponse) {
         for (category, count) in GC_CATEGORIES.iter().zip(self.reclaimed.iter()) {
+            let reclaimed = (category.1)(gc);
+            if reclaimed > 0 {
+                count.increment(reclaimed);
+            }
+        }
+        if gc.retained.total() > 0 {
+            self.retained.increment(gc.retained.total());
+        }
+    }
+
+    /// Reports what one collection of a pool reclaimed and retained.
+    ///
+    /// Every runtime collection path records its counts here before its
+    /// caller can drop the response.
+    pub(crate) fn record_pool_collection(&self, gc: &PoolGcResponse) {
+        for (category, count) in POOL_GC_CATEGORIES.iter().zip(self.pool_reclaimed.iter()) {
             let reclaimed = (category.1)(gc);
             if reclaimed > 0 {
                 count.increment(reclaimed);

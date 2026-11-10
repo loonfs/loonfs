@@ -379,7 +379,7 @@ fn a_merges_bound_includes_the_layouts_of_its_proofs() {
             )]),
         )
     };
-    let proof = crate::storage::content_admission::PreparedContent::for_family_member(
+    let proof = crate::storage::content_admission::PreparedContent::for_pool_member(
         main,
         content_ref,
         layout,

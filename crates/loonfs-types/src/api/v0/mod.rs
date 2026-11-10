@@ -30,13 +30,15 @@ pub use downloads::{
 pub use errors::{ActiveWriter, CommittedReceipt, ErrorDetails, ErrorResponse};
 pub use gc::{
     DeletedCheckpointsByOwner, DeletedObjectCounts, GcRequest, GcResponse, GcSkippedWork,
+    PoolDeletedObjectCounts, PoolGcResponse, PoolRetainedCandidates, PoolRetainedReason,
     RetainedCandidates, RetainedReason,
 };
 pub use maintenance::{
     AdvanceRetentionRequest, AdvanceRetentionResponse, MetadataMaintenanceOutcome,
     MetadataMaintenanceRequest, MetadataMaintenanceResponse, MetadataSkippedWork,
     RecoverAdministratorRequest, RecoverAdministratorResponse, RunMaintenanceRequest,
-    RunMaintenanceResponse, SetRetentionWindowRequest, SetRetentionWindowResponse,
+    RunMaintenanceResponse, RunPoolMaintenanceRequest, RunPoolMaintenanceResponse,
+    SetRetentionWindowRequest, SetRetentionWindowResponse,
 };
 pub use merges::{
     MergeBound, MergeConflict, MergeConflictKind, MergeConflictRevision, MergeConflictVersion,

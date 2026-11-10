@@ -98,7 +98,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "content_changed",
     "content_objects",
     "content_ref",
-    "content_sweep_family_budget",
+    "content_sweep_pool_budget",
     "content_sweep_unreadable_member",
     "content_token",
     "content_tokens",

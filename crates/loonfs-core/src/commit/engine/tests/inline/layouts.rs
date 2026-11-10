@@ -750,7 +750,7 @@ async fn collection_lists_content_once_and_keeps_a_shared_base_of_another_chain(
     let aged = MetadataMapStore::aged(store.clone(), KeyPredicate::any());
     let options = GcOptions::default();
     store.reset();
-    let report = crate::test_support::namespace_store(&aged, &namespace_id)
+    let report = crate::test_support::pool_store(&aged, &pool_id)
         .gc(
             None,
             &options,
@@ -808,7 +808,7 @@ async fn collection_lists_content_once_and_keeps_a_shared_base_of_another_chain(
     // The compaction after the advance drops the replaced revisions and the
     // chains that only they referred to.
     prune_revisions(&store, &namespace_id).await;
-    let report = crate::test_support::namespace_store(&aged, &namespace_id)
+    let report = crate::test_support::pool_store(&aged, &pool_id)
         .gc(
             None,
             &options,
@@ -859,13 +859,12 @@ async fn compact_all(store: &RecordingStore<LocalFsStore>, namespace_id: &Namesp
 /// Collects with every object aged past the grace.
 async fn collect_aged(
     store: &Arc<RecordingStore<LocalFsStore>>,
-    namespace_id: &NamespaceId,
     context: &WriterAt,
-) -> loonfs_types::GcResponse {
+) -> loonfs_types::PoolGcResponse {
     use crate::gc::GcOptions;
     let aged = MetadataMapStore::aged(store.clone(), KeyPredicate::any());
     let options = GcOptions::default();
-    crate::test_support::namespace_store(&aged, namespace_id)
+    crate::test_support::pool_store(&aged, &pool_id(store).await)
         .gc(
             None,
             &options,
@@ -1026,8 +1025,8 @@ async fn collection_keeps_shared_objects_that_a_restore_names_across_a_floor_adv
     // revision content IDs. Content IDs are random, so in about one run in
     // ten the filter reports a false positive, the layout row stays, and the
     // collections keep the replacement's content.
-    let first = collect_aged(&store, &namespace_id, &context).await;
-    let second = collect_aged(&store, &namespace_id, &context).await;
+    let first = collect_aged(&store, &context).await;
+    let second = collect_aged(&store, &context).await;
     assert!(
         first.deleted.content_objects + second.deleted.content_objects <= 1,
         "at most the deleted copy's replacement is collected: {first:?}, {second:?}"
@@ -1531,7 +1530,7 @@ async fn a_pending_reference_keeps_its_chain_through_a_floor_advance() {
             chain_layout_rows(manifest).await > 0,
             "the basis refers to the chain"
         );
-        collect_aged(&store, &namespace_id, &context).await;
+        collect_aged(&store, &context).await;
         for extent in &carried.extents {
             let key =
                 crate::storage::content_location::extent_object_key(&pool_id(&store).await, extent);

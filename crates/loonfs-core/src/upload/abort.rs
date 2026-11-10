@@ -1,7 +1,7 @@
 //! Aborting an upload session, and releasing the provider objects of a
 //! session that never completed.
 
-use super::records::OutcomeCreation;
+use super::records::{create_upload_outcome, OutcomeCreation};
 use super::session::{authorize_upload_subject, ensure_session_subject, upload_mode};
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
@@ -36,10 +36,13 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 let outcome = UploadOutcome::Aborted {
                     aborted_at_ms: clock.request_at_ms(),
                 };
-                match self
-                    .namespace
-                    .create_upload_outcome(catalog.pool_id(), &loaded.session, &outcome)
-                    .await?
+                match create_upload_outcome(
+                    &self.namespace.store,
+                    catalog.pool_id(),
+                    &loaded.session,
+                    &outcome,
+                )
+                .await?
                 {
                     OutcomeCreation::Created => clock.request_at_ms(),
                     OutcomeCreation::Existing(existing) => repeated_abort(&existing, upload_id)?,

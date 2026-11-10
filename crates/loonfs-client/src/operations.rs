@@ -145,6 +145,8 @@ mod tests {
         ("list_checkpoints", LIST_CHECKPOINTS),
         ("get_checkpoint", GET_CHECKPOINT),
         ("run_maintenance", RUN_MAINTENANCE),
+        // The client has no method for a pool's runs, so it has no constant.
+        ("run_pool_maintenance", Operation::once(Method::POST)),
         ("probe_store", PROBE_STORE),
         ("grep", GREP),
         ("get_grep_index", GET_GREP_INDEX),

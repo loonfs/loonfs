@@ -286,7 +286,6 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                 let collected =
                     loonfs_core::test_support::namespace_store(object_store.as_ref(), &source)
                         .gc(
-                            None,
                             &GcOptions {
                                 grace_window_ms: GC_DEFAULT_GRACE_WINDOW_MS,
                             },
@@ -302,6 +301,22 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                 assert!(collected.deleted.wal_objects > 0, "{collected:?}");
                 assert!(collected.deleted.metadata_segments > 0, "{collected:?}");
                 assert!(collected.deleted.manifests > 0, "{collected:?}");
+                let pool_id = loonfs_core::test_support::load_pool_id(&object_store, &source).await;
+                loonfs_core::test_support::pool_store(object_store.as_ref(), &pool_id)
+                    .gc(
+                        None,
+                        &GcOptions {
+                            grace_window_ms: GC_DEFAULT_GRACE_WINDOW_MS,
+                        },
+                        &WriterAt {
+                            writer_id: loonfs_types::WriterId::parse("retained-views-gc")
+                                .expect("writer id"),
+                            now_ms,
+                        }
+                        .clock(),
+                    )
+                    .await
+                    .expect("collect aged content");
             }
             _ => {}
         }

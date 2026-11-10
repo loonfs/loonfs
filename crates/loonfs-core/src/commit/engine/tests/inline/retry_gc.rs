@@ -65,7 +65,6 @@ async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_com
     );
     let report = crate::test_support::namespace_store(&aged, &namespace_id)
         .gc(
-            None,
             &options,
             &WriterAt {
                 now_ms: options.grace_window_ms + 1,

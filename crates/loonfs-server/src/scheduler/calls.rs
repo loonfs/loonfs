@@ -1,5 +1,6 @@
-//! The scheduler's claim on a namespace, and the metadata, retention,
-//! garbage collection, and index calls that a namespace's steps make.
+//! The scheduler's claim on a namespace, the metadata, retention, garbage
+//! collection, and index calls that a namespace's steps make, and the
+//! collection call that a sweep makes on a pool.
 
 use crate::scheduler::contain;
 use crate::scheduler::lock;
@@ -15,7 +16,7 @@ use futures::FutureExt as _;
 use loonfs::SharedObjectStore;
 use loonfs::{
     AdvanceRetentionFloorOptions, ChangeSeq, ErrorCode, GcOptions, MetadataMaintenanceOutcome,
-    NamespaceId, RetentionTarget,
+    NamespaceId, PoolId, RetentionTarget,
 };
 use loonfs_grep::{
     GrepBuildOutcome, GrepError, GrepProgress, GrepPublishOutcome, GrepReorganizeOutcome, GrepSteps,
@@ -236,6 +237,33 @@ impl Scheduler {
             held.host_state.collected_at_ms = inner.timer.monotonic_now_ms();
         }
         gone
+    }
+
+    /// Makes one collection call on a pool.
+    ///
+    /// A pool whose record is gone is skipped without a failure, because a
+    /// create call can delete its pool record after the listing found it.
+    pub(super) async fn gc_pool(&self, pool_id: &PoolId) {
+        let inner = &self.inner;
+        if inner.stop.is_cancelled() {
+            return;
+        }
+        let result = contain(
+            inner
+                .maintenance
+                .gc_pool_with_options(pool_id, &GcOptions::default())
+                .map(|result| result.map_err(|error| CallFailure::error(error.code(), error))),
+        )
+        .await;
+        match result {
+            Ok(_) => {}
+            Err(failure)
+                if matches!(
+                    failure.code(),
+                    ErrorCode::PoolNotFound | ErrorCode::ShuttingDown
+                ) => {}
+            Err(failure) => self.record_pool_failure(pool_id, &failure),
+        }
     }
 
     /// Advances the namespace's retention floor to the last commit at or

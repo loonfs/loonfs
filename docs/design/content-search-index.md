@@ -1,6 +1,6 @@
 # Content search index
 
-[Grep across a fork family](grep-fork-family.md) describes the index's postings, its row families, pruning, and the order of a query's results. The index records content values instead of file revisions, a posting refers to a value by its position in the value table of the posting's run, and matches are ordered by content value. This note describes the approach, the index's lifecycle, and collection.
+[Grep across a pool](grep-across-a-pool.md) describes the index's postings, its row families, pruning, and the order of a query's results. The index records content values instead of file revisions, a posting refers to a value by its position in the value table of the posting's run, and matches are ordered by content value. This note describes the approach, the index's lifecycle, and collection.
 
 LoonFS supports grep-style regular-expression queries through a derived content index. The index narrows down the files that a query needs to read, and then the query checks those files against the original pattern. LoonFS maintains the index separately from metadata, so a file's metadata commit doesn't wait until its content has been indexed.
 
@@ -51,9 +51,9 @@ This section describes the posting rows that the index stores.
 
 The tokenizer folds ASCII letters to lowercase, and then extracts every overlapping three-byte window. Grams are byte sequences, not Unicode characters. This folding supports common case-insensitive ASCII searches without storing separate postings for each case, but it doesn't implement general Unicode case folding.
 
-A posting identifies a content value and doesn't contain a path, so a rename changes the paths in results without rewriting any postings. [Indexing content, not revisions](grep-fork-family.md#indexing-content-not-revisions) describes the posting rows and the value table of each run.
+A posting identifies a content value and doesn't contain a path, so a rename changes the paths in results without rewriting any postings. [Indexing content, not revisions](grep-across-a-pool.md#indexing-content-not-revisions) describes the posting rows and the value table of each run.
 
-A fork inherits its source's index. The fork's first manifest copies grep's entry, and the fork pin protects the inherited segments, which stay in the source's prefix. Grep reads the source's commits that the inherited index doesn't cover through the fork pin, and after that it indexes only the fork's own commits. [Grep across a fork family](grep-fork-family.md) describes the rules.
+A fork inherits its source's index. The fork's first manifest copies grep's entry, and the fork pin protects the inherited segments, which stay in the source's prefix. Grep reads the source's commits that the inherited index doesn't cover through the fork pin, and after that it indexes only the fork's own commits. [Grep across a pool](grep-across-a-pool.md) describes the rules.
 
 ## Segments and grep's entry
 
@@ -66,7 +66,7 @@ namespaces/{owner_namespace_id}/extensions/grep/
 └── segments/{segment_id}.sst.zst
 ```
 
-The index's state is grep's entry in the namespace manifest (see [Extensions](../specs/format.md#124-extensions)). The entry contains the lifecycle state, the index's runs with their segment descriptors, and any in-progress reorganization. The index's run numbers are allocated from the manifest's `next_run_no` when grep publishes a change. Every core publication copies the entry forward, so the index needs no manifests, hint, or discovery of its own. [Grep across a fork family](grep-fork-family.md) explains why.
+The index's state is grep's entry in the namespace manifest (see [Extensions](../specs/format.md#124-extensions)). The entry contains the lifecycle state, the index's runs with their segment descriptors, and any in-progress reorganization. The index's run numbers are allocated from the manifest's `next_run_no` when grep publishes a change. Every core publication copies the entry forward, so the index needs no manifests, hint, or discovery of its own. [Grep across a pool](grep-across-a-pool.md) explains why.
 
 A run of index steps changes a copy of the entry in memory (the "pending entry") and publishes the change in a manifest of its own:
 
@@ -179,7 +179,7 @@ Why aren't rows with equal keys split across steps? If a step split that group a
 
 ### Old postings
 
-A base-level reorganization drops the postings of a content value that no retained revision references, as [Pruning the index](grep-fork-family.md#pruning-the-index) describes.
+A base-level reorganization drops the postings of a content value that no retained revision references, as [Pruning the index](grep-across-a-pool.md#pruning-the-index) describes.
 
 ## Queries
 
@@ -206,7 +206,7 @@ By default, LoonFS rejects a valid pattern that has no useful required grams (su
 
 ### Candidate selection and verification
 
-Each page of results uses one read view, and [Querying](grep-fork-family.md#querying) describes how the query turns posting batches into candidate files, checks each file against that read view, and verifies the content.
+Each page of results uses one read view, and [Querying](grep-across-a-pool.md#querying) describes how the query turns posting batches into candidate files, checks each file against that read view, and verifies the content.
 
 Path-prefix filtering applies to the resolved path, not to a path cached when the posting was created. The response contains line-oriented matches, not a streaming file response.
 

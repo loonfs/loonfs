@@ -205,11 +205,11 @@ async fn content_reclaimed_during_view_load_cannot_be_published() {
         let options = GcOptions {
             grace_window_ms: GC_MIN_GRACE_WINDOW_MS,
         };
-        crate::test_support::namespace_store(&aged, &namespace_id)
+        crate::test_support::pool_store(&aged, &pool_id)
             .gc(None, &options, &reclaimed.clock())
             .await
             .expect("gc removes the session record");
-        let report = crate::test_support::namespace_store(&aged, &namespace_id)
+        let report = crate::test_support::pool_store(&aged, &pool_id)
             .gc(None, &options, &reclaimed.clock())
             .await
             .expect("gc reclaims the content");

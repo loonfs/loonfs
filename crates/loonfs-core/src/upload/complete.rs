@@ -3,7 +3,7 @@
 
 use super::direct::validate_upload_checksum;
 use super::proxied::find_proxied_content_ref;
-use super::records::OutcomeCreation;
+use super::records::{create_upload_outcome, OutcomeCreation};
 use super::session::{
     authorize_upload_subject, ensure_session_open, ensure_session_subject, upload_mode,
 };
@@ -95,10 +95,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             completed_at_ms: now_ms,
             content_ref: verified.clone(),
         };
-        let standing = match self
-            .create_upload_outcome(pool_id, session, &outcome)
-            .await?
-        {
+        let standing = match create_upload_outcome(&self.store, pool_id, session, &outcome).await? {
             OutcomeCreation::Created => outcome,
             OutcomeCreation::Existing(existing) => existing,
         };

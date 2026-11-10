@@ -19,10 +19,11 @@ async fn one_collection_deletes_an_aged_upload_and_every_expired_snapshot_among_
         }),
     );
     let setup = context(1_000);
-    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
+    let pool_id = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
         .create()
         .await
-        .expect("bootstrap");
+        .expect("bootstrap")
+        .pool_id;
     let permanent = create_checkpoint(&store, &namespace_id, &setup)
         .await
         .expect("permanent pin");
@@ -50,7 +51,6 @@ async fn one_collection_deletes_an_aged_upload_and_every_expired_snapshot_among_
             .expect("expired pin");
     }
     let session = crate::test_support::proxied_upload_session(&namespace_id, 2_000);
-    let pool_id = crate::test_support::load_pool_id(&store, &namespace_id).await;
     let session_key = crate::test_support::write_upload_records(
         &store,
         &pool_id,
@@ -61,15 +61,14 @@ async fn one_collection_deletes_an_aged_upload_and_every_expired_snapshot_among_
     )
     .await;
     store.reset();
+    let now = context(2_000 + GRACE_MS);
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &context(2_000 + GRACE_MS).clock())
+        .gc(&options(), &now.clock())
         .await
         .expect("complete collection");
-    assert_eq!(report.deleted.upload_sessions, 1);
     assert_eq!(report.deleted_checkpoints_by_owner.user, 1025);
     assert_eq!(report.retained.checkpoint_not_deletable, 1);
-    // The pins, and the session's two records.
-    assert_eq!(store.counts().deletes, 1028);
+    assert_eq!(store.counts().deletes, 1025);
     let operations = store.take();
     assert_eq!(
         operations
@@ -89,17 +88,35 @@ async fn one_collection_deletes_an_aged_upload_and_every_expired_snapshot_among_
             _ => None,
         })
         .collect();
-    let pool_id = crate::test_support::load_pool_id(&store, &namespace_id).await;
     assert_eq!(
         listings,
         vec![
-            // Root content before reading the WAL tail, and sweep the sessions.
-            upload_session_prefix(&pool_id),
             pin_prefix(&namespace_id),
             metadata_manifest_prefix(&namespace_id),
             wal_prefix(&namespace_id),
             metadata_segment_prefix(&namespace_id),
             extensions_prefix(&namespace_id),
+            pin_prefix(&namespace_id),
+        ]
+    );
+    store.reset();
+    let report = collect_pool(&store, &pool_id, &now).await;
+    assert_eq!(report.deleted.upload_sessions, 1);
+    // The session's two records, and the cleanup of its unpublished content.
+    assert_eq!(store.counts().deletes, 3);
+    let listings: Vec<_> = store
+        .take()
+        .into_iter()
+        .filter_map(|operation| match operation {
+            RecordedOperation::List { prefix } => Some(prefix),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        listings,
+        vec![
+            // Root content before reading the WAL tail, and sweep the sessions.
+            upload_session_prefix(&pool_id),
             pin_prefix(&namespace_id),
             content_prefix(&pool_id),
             temporary_prefix(&pool_id),

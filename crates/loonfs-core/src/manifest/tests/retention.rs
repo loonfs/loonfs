@@ -1553,7 +1553,6 @@ async fn an_expired_pin_serves_no_reads_but_stays_until_a_collection_deletes_it(
     // The collection after the grace deletes the record.
     crate::test_support::namespace_store(&store, &namespace_id)
         .gc(
-            None,
             &crate::gc::GcOptions::default(),
             &writer_at(
                 "expired",
@@ -1598,7 +1597,7 @@ async fn a_pin_without_a_ttl_is_held_until_it_is_deleted() {
     distant.now_ms = u64::MAX / 2;
     for _ in 0..3 {
         crate::test_support::namespace_store(&store, &namespace_id)
-            .gc(None, &crate::gc::GcOptions::default(), &distant.clock())
+            .gc(&crate::gc::GcOptions::default(), &distant.clock())
             .await
             .expect("collection");
     }
@@ -3171,7 +3170,7 @@ async fn a_floor_past_a_pin_keeps_its_manifest_and_runs_readable_until_deletion(
         .await;
     let aged = writer_at("gc", u64::MAX / 2);
     crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &crate::gc::GcOptions::default(), &aged.clock())
+        .gc(&crate::gc::GcOptions::default(), &aged.clock())
         .await
         .expect("collect past the floor");
     assert_eq!(
@@ -3199,7 +3198,7 @@ async fn a_floor_past_a_pin_keeps_its_manifest_and_runs_readable_until_deletion(
     .await
     .expect("delete pin");
     crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &crate::gc::GcOptions::default(), &aged.clock())
+        .gc(&crate::gc::GcOptions::default(), &aged.clock())
         .await
         .expect("collect deleted basis");
     assert!(store

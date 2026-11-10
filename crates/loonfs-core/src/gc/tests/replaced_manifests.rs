@@ -38,7 +38,7 @@ async fn seed_segments<S: ObjectStore>(store: &S, namespace_id: &NamespaceId) ->
     let namespace = crate::test_support::namespace_store(store, namespace_id);
     namespace.raise_hint_to_current_manifest().await;
     namespace
-        .gc(None, &options(), &context(NOW_MS).clock())
+        .gc(&options(), &context(NOW_MS).clock())
         .await
         .expect("collect the earlier manifests");
     let previous = namespace
@@ -162,7 +162,7 @@ async fn a_replaced_manifest_and_its_own_segments_go_at_the_first_pass_once_old_
         },
     );
     let report = crate::test_support::namespace_store(&recent, &namespace_id)
-        .gc(None, &options(), &context(NOW_MS).clock())
+        .gc(&options(), &context(NOW_MS).clock())
         .await
         .expect("collection");
     assert!(!exists(&store, &previous.object_key).await);
@@ -225,7 +225,7 @@ async fn a_replaced_manifest_and_its_segments_stay_within_their_grace_windows() 
         let options = GcOptions { grace_window_ms };
         let collect = async |at_ms| {
             crate::test_support::namespace_store(&young, &namespace_id)
-                .gc(None, &options, &context(at_ms).clock())
+                .gc(&options, &context(at_ms).clock())
                 .await
                 .expect("collection")
         };
@@ -279,7 +279,7 @@ async fn a_pinned_replaced_manifest_keeps_itself_and_its_segments_until_the_pin_
     let dropped = dropped_segments(&previous, &current);
 
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &context(NOW_MS).clock())
+        .gc(&options(), &context(NOW_MS).clock())
         .await
         .expect("collection with the pin");
     assert!(exists(&store, &previous.object_key).await);
@@ -292,7 +292,7 @@ async fn a_pinned_replaced_manifest_keeps_itself_and_its_segments_until_the_pin_
         .await
         .expect("release the pin");
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &context(NOW_MS).clock())
+        .gc(&options(), &context(NOW_MS).clock())
         .await
         .expect("collection after the release");
     assert!(!exists(&store, &previous.object_key).await);
@@ -351,7 +351,7 @@ async fn a_pass_reads_no_replaced_manifest() {
     // Every manifest is younger than the grace.
     let now_ms = now_after_newest_object(&store, &namespace_id, 1).await;
     let report = crate::test_support::namespace_store(&recorded, &namespace_id)
-        .gc(None, &options(), &context(now_ms).clock())
+        .gc(&options(), &context(now_ms).clock())
         .await
         .expect("collection");
     let read: BTreeSet<_> = recorded

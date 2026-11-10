@@ -1,52 +1,22 @@
-//! Sweep candidates against the live set loaded for this call.
-use super::deletes::DeletedCounter;
+//! The decisions of a namespace's collection about the objects that it lists
+//! under the namespace's prefix.
+
+use super::deletes::{Counter, Decision};
 use super::families::CandidateFamily;
 use super::live_set::LiveSet;
-use super::pins::{GraceAge, PinSweep};
-use super::session_cache::CompletedUploadSessionCache;
-use super::uploads::{
-    retain_undated, sweep_completed_session, ListedUpload, ListedUploadKind, OutcomeListing,
-    UploadSessionSweep,
-};
+use super::pins::PinSweep;
 use crate::error::Result;
 use crate::namespace::store::NamespaceStore;
 use crate::time::OperationClock;
 use loonfs_objectstore::{ListedObject, ObjectStore};
-use loonfs_types::{PoolId, RetainedReason, UploadId};
+use loonfs_types::{GcResponse, RetainedReason};
 use std::sync::atomic::{AtomicU64, Ordering};
-
-pub(super) enum Decision {
-    Retain {
-        reason: RetainedReason,
-        reclaimable_at_ms: Option<u64>,
-    },
-    Delete {
-        key: String,
-        counter: DeletedCounter,
-    },
-    /// Deletes an ended upload session's records from the prefix of
-    /// `pool_id`, in the order that
-    /// [`crate::upload::records::delete_upload_session_records`] requires.
-    DeleteUploadSession {
-        pool_id: PoolId,
-        upload_id: UploadId,
-    },
-    Gone,
-}
-
-/// Whether the collection's live set references one listed content object.
-#[derive(Clone, Copy)]
-pub(super) enum ContentReference {
-    Referenced,
-    Unreferenced,
-}
 
 pub(super) struct Sweep<'a, S: ObjectStore> {
     pub(super) namespace: &'a NamespaceStore<S>,
     pub(super) grace_window_ms: u64,
     pub(super) clock: &'a OperationClock,
     pub(super) live: &'a LiveSet,
-    pub(super) session_cache: Option<&'a CompletedUploadSessionCache>,
     /// The bytes of the listed objects that reached this sweep, as the
     /// listings reported them.
     pub(super) listed_bytes: AtomicU64,
@@ -57,8 +27,9 @@ impl<S: ObjectStore> Sweep<'_, S> {
         &self,
         family: CandidateFamily,
         entry: ListedObject,
-    ) -> Result<Decision> {
-        self.add_listed_bytes(entry.size_bytes);
+    ) -> Result<Decision<GcResponse>> {
+        self.listed_bytes
+            .fetch_add(entry.size_bytes, Ordering::Relaxed);
         if !family.recognizes(&entry.key) {
             return Ok(self.retain(RetainedReason::UnrecognizedKey, None));
         }
@@ -68,14 +39,19 @@ impl<S: ObjectStore> Sweep<'_, S> {
         if self.live.protects(family, &entry.key) {
             return Ok(self.retain(RetainedReason::Referenced, None));
         }
-        Ok(self.sweep_aged(entry, family.min_age_ms(self.grace_window_ms), deleted))
+        Ok(Decision::aged(
+            entry,
+            family.min_age_ms(self.grace_window_ms),
+            self.clock.request_at_ms(),
+            deleted,
+        ))
     }
 
-    async fn process_pin(&self, key: String) -> Result<Decision> {
-        // A family root's collection read its pin records while it loaded its roots.
-        // A record changes only when an unexpired user pin is extended, so a
-        // record that the collection read earlier leads to the same decision as one
-        // that it reads now.
+    async fn process_pin(&self, key: String) -> Result<Decision<GcResponse>> {
+        // The collection read its pin records while it loaded its roots. A
+        // record changes only when an unexpired user pin is extended, so a
+        // record that the collection read earlier leads to the same decision
+        // as one that it reads now.
         let decision = match self.live.pin_records.get(&key) {
             Some(record) => {
                 self.namespace
@@ -88,7 +64,7 @@ impl<S: ObjectStore> Sweep<'_, S> {
                     .await?
             }
         };
-        let counter: DeletedCounter = match decision {
+        let counter: Counter<GcResponse> = match decision {
             PinSweep::DeleteFork => |report| &mut report.deleted_checkpoints_by_owner.fork,
             PinSweep::DeleteUser => |report| &mut report.deleted_checkpoints_by_owner.user,
             PinSweep::Gone => return Ok(Decision::Gone),
@@ -96,153 +72,17 @@ impl<S: ObjectStore> Sweep<'_, S> {
                 return Ok(self.retain(RetainedReason::CheckpointNotDeletable, reclaimable_at_ms));
             }
         };
-        Ok(Decision::Delete { key, counter })
-    }
-
-    /// Determines what to do with one upload session's records.
-    pub(super) async fn upload(&self, listed: &ListedUpload) -> Result<Decision> {
-        self.add_listed_bytes(listed.size_bytes);
-        match &listed.kind {
-            ListedUploadKind::Session {
-                upload_id,
-                outcome_listing,
-            } => {
-                self.process_upload_session(upload_id.clone(), *outcome_listing)
-                    .await
-            }
-            // An outcome record without its session record is deleted only
-            // once it's at least the grace window old by the listing's
-            // modification time, the age rule of the other unreferenced
-            // families. A listing isn't a snapshot, so it can miss the
-            // session record of a session that was created and ended while
-            // the listing ran. Deleting that session's new outcome would make
-            // the session read as open, and a later collection would abort it and
-            // delete content that a commit might reference. That outcome was
-            // created after the collection started, so it's younger than the window.
-            ListedUploadKind::OrphanOutcome { entry } => Ok(self.sweep_aged(
-                entry.clone(),
-                self.grace_window_ms,
-                |report| &mut report.deleted.upload_sessions,
-            )),
-            ListedUploadKind::Unrecognized => {
-                Ok(self.retain(RetainedReason::UnrecognizedKey, None))
-            }
-        }
-    }
-
-    async fn process_upload_session(
-        &self,
-        upload_id: UploadId,
-        outcome_listing: OutcomeListing,
-    ) -> Result<Decision> {
-        let sweep = match self.live.completed_sessions.get(&upload_id) {
-            // The collection listed this session as completed before the walk, so its
-            // namespace's status decides it, including when a finished walk
-            // didn't find the namespace because it has been retired.
-            Some(session) => {
-                let sweep = self
-                    .live
-                    .find_retirement_status(&session.namespace_id)
-                    .map_or_else(retain_undated, |status| {
-                        sweep_completed_session(
-                            status,
-                            self.clock.request_at_ms(),
-                            session.completed_at_ms,
-                        )
-                    });
-                // The sweep adds a kept session to the cache, so a later collection
-                // doesn't read its record. Adding it here instead of when the
-                // record is read means that this collection's inserts can't evict an
-                // entry that its own listing hasn't looked up yet.
-                if let (Some(cache), UploadSessionSweep::Retain { .. }) =
-                    (self.session_cache, sweep)
-                {
-                    cache.insert(upload_id.clone(), session.clone());
-                }
-                sweep
-            }
-            // An open session can end during the collection, and an aborted
-            // session's cleanup needs its session record, so the sweep reads
-            // these records again.
-            None => {
-                let Some(state) = self
-                    .namespace
-                    .load_swept_session(&self.live.pool_id, &upload_id, outcome_listing)
-                    .await?
-                else {
-                    return Ok(self.retain(RetainedReason::UploadSessionUndecided, None));
-                };
-                self.namespace
-                    .sweep_upload_session(self.grace_window_ms, self.live, self.clock, &state)
-                    .await?
-            }
-        };
-        if let (Some(cache), UploadSessionSweep::Delete) = (self.session_cache, sweep) {
-            cache.invalidate(&upload_id);
-        }
-        Ok(match sweep {
-            UploadSessionSweep::Delete => Decision::DeleteUploadSession {
-                pool_id: self.live.pool_id.clone(),
-                upload_id,
-            },
-            UploadSessionSweep::Retain { reclaimable_at_ms } => self.retain(
-                match reclaimable_at_ms {
-                    Some(_) => RetainedReason::UploadSessionWindow,
-                    None => RetainedReason::UploadSessionUndecided,
-                },
-                reclaimable_at_ms,
-            ),
+        Ok(Decision::Delete {
+            keys: vec![key],
+            counter,
         })
     }
 
-    pub(super) fn content_candidate(
+    fn retain(
         &self,
-        entry: ListedObject,
-        reference: ContentReference,
-    ) -> Decision {
-        self.add_listed_bytes(entry.size_bytes);
-        if !CandidateFamily::Content.recognizes(&entry.key) {
-            return self.retain(RetainedReason::UnrecognizedKey, None);
-        }
-        match reference {
-            ContentReference::Referenced => self.retain(RetainedReason::Referenced, None),
-            ContentReference::Unreferenced => {
-                self.sweep_aged(entry, self.grace_window_ms, |report| {
-                    &mut report.deleted.content_objects
-                })
-            }
-        }
-    }
-
-    fn sweep_aged(
-        &self,
-        entry: ListedObject,
-        grace_window_ms: u64,
-        counter: DeletedCounter,
-    ) -> Decision {
-        let age = GraceAge::of(
-            entry.last_modified_at_ms,
-            grace_window_ms,
-            self.clock.request_at_ms(),
-        );
-        match age.retained_reason() {
-            Some(reason) => self.retain(reason, None),
-            None => Decision::Delete {
-                key: entry.key,
-                counter,
-            },
-        }
-    }
-
-    fn retain(&self, reason: RetainedReason, reclaimable_at_ms: Option<u64>) -> Decision {
-        Decision::Retain {
-            reason,
-            reclaimable_at_ms: reclaimable_at_ms
-                .filter(|at_ms| *at_ms > self.clock.request_at_ms()),
-        }
-    }
-
-    fn add_listed_bytes(&self, size_bytes: u64) {
-        self.listed_bytes.fetch_add(size_bytes, Ordering::Relaxed);
+        reason: RetainedReason,
+        reclaimable_at_ms: Option<u64>,
+    ) -> Decision<GcResponse> {
+        Decision::retain(reason, reclaimable_at_ms, self.clock.request_at_ms())
     }
 }

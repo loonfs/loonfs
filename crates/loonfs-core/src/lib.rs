@@ -98,6 +98,7 @@ mod object_cache;
 mod options;
 mod permit_pool;
 mod phase;
+mod pool_store;
 mod read_working_memory;
 mod recency;
 mod segment;
@@ -229,6 +230,7 @@ pub use path::read::{
 };
 pub use permit_pool::{BudgetPermit, PermitPool, PermitPoolObserver, PoolCounts};
 pub use phase::Phase;
+pub use pool_store::PoolStore;
 pub use segment::{MetadataFamilyGroup, MetadataRunPolicy};
 pub use snapshot::{
     CheckpointPageCursor, ListSnapshotFilesOptions, SnapshotFile, SnapshotFilesPage,
