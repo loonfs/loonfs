@@ -18,7 +18,7 @@ This section describes pools and pool records, how a namespace is created, the p
 
 ### Pools and pool records
 
-A pool's ID (`pool_id`) is `pul_` followed by the 26-character body that every generated LoonFS ID has (see [Numbered objects and generated IDs](../specs/format.md#23-numbered-objects-and-generated-ids)), for example `pul_3s0drmj8em84yb4mnetqkz2j0x`. Every manifest records the namespace's pool (`pool_id`). A [namespace](../specs/glossary.md#namespace) created without a source records a pool ID that its create call generates, and a [fork](../specs/glossary.md#fork) copies the value from the pinned source manifest. The value can't change. A "member" of a pool is a namespace whose manifest records that pool, until the namespace is [retired](../specs/glossary.md#namespace-retirement).
+A pool's ID (`pool_id`) is `pool_` followed by the 26-character body that every generated LoonFS ID has (see [Numbered objects and generated IDs](../specs/format.md#23-numbered-objects-and-generated-ids)), for example `pool_3s0drmj8em84yb4mnetqkz2j0x`. Every manifest records the namespace's pool (`pool_id`). A [namespace](../specs/glossary.md#namespace) created without a source records a pool ID that its create call generates, and a [fork](../specs/glossary.md#fork) copies the value from the pinned source manifest. The value can't change. A "member" of a pool is a namespace whose manifest records that pool, until the namespace is [retired](../specs/glossary.md#namespace-retirement).
 
 A pool stores these objects under its own prefix:
 
@@ -37,7 +37,7 @@ A content reference contains a content ID, a size, and a checksum, and no pool, 
 
 Inside a pool, a fork and a [merge](../specs/glossary.md#merge) use references and copy no file bytes. No operation adds a reference to another pool's content, and content moves between pools by an upload (see [Cross-namespace copies and moves](../specs/format.md#97-cross-namespace-copies-and-moves)).
 
-For example, creating `main` generates `pul_3s0drmj8em84yb4mnetqkz2j0x`. Forking `main` into `sandbox`, and `sandbox` into `trial`, writes no pool key, and all three manifests record that pool ID. A file that `sandbox` uploads is stored at `pools/pul_3s0drmj8em84yb4mnetqkz2j0x/content/con_014d2pf2dbsqqg28t5cy4tqkff`, and after `sandbox` is merged into `main`, a revision in `main` refers to the same object.
+For example, creating `main` generates `pool_3s0drmj8em84yb4mnetqkz2j0x`. Forking `main` into `sandbox`, and `sandbox` into `trial`, writes no pool key, and all three manifests record that pool ID. A file that `sandbox` uploads is stored at `pools/pool_3s0drmj8em84yb4mnetqkz2j0x/content/con_014d2pf2dbsqqg28t5cy4tqkff`, and after `sandbox` is merged into `main`, a revision in `main` refers to the same object.
 
 Why does a pool have its own ID and prefix instead of using a namespace's? If one namespace's prefix stored the content of every member, that namespace would have to be retired last for a reason that has nothing to do with its own data. Its collections would have to keep running after it's deleted, and its retirement would delete every member's content. With a pool prefix, no namespace stores another namespace's content, and no namespace's collection or retirement acts on that content.
 
@@ -87,7 +87,7 @@ A pool also has no members when its create call failed, or when another create c
 
 The collection deletes the pool record in the second case, and not in the first. After a failed create, the pool record is the only object under the pool's prefix, and the first collection after the creation grace deletes the record. A pool whose first member is retired keeps its pool record, and each later collection of the pool finds no members and applies the same rules.
 
-For example, suppose that `main`, `sandbox`, and `trial` are all deleted. `trial` is retired first, which deletes its pin on `sandbox`, and then `sandbox` is retired, which deletes its pin on `main`. Once `main` is retired, a collection of `pul_3s0drmj8em84yb4mnetqkz2j0x` finds no members. It deletes every content object and temporary object whose provider age is at least the grace window, it deletes the pool's upload records under the rules in [Upload-session cleanup](../specs/format.md#116-upload-session-cleanup), and it keeps the pool record.
+For example, suppose that `main`, `sandbox`, and `trial` are all deleted. `trial` is retired first, which deletes its pin on `sandbox`, and then `sandbox` is retired, which deletes its pin on `main`. Once `main` is retired, a collection of `pool_3s0drmj8em84yb4mnetqkz2j0x` finds no members. It deletes every content object and temporary object whose provider age is at least the grace window, it deletes the pool's upload records under the rules in [Upload-session cleanup](../specs/format.md#116-upload-session-cleanup), and it keeps the pool record.
 
 A namespace's own collection covers its manifests, WAL objects, metadata and extension segments, pins, and its own temporary objects. It never lists content objects or upload records. Retiring a fork deletes the fork's source pin and nothing else, and no namespace's retirement deletes content.
 
