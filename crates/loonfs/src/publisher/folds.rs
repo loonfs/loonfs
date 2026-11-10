@@ -1,6 +1,6 @@
 //! The one fold path of each namespace in a writable runtime, and the locks
-//! that keep a namespace's folds apart from each other and from its pins, and
-//! its compaction units apart.
+//! that keep a namespace's folds apart from each other and from its pins, its
+//! compaction units apart, and its hint raises apart.
 
 use super::registry::NamespaceChange;
 use super::worker::elapsed_ms_from;
@@ -18,8 +18,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::sync::{Mutex as AsyncMutex, RwLock, RwLockReadGuard};
 use tracing::Instrument;
 
-/// The fold turn, the fold rounds, and the compaction lock of one namespace
-/// in this runtime.
+/// The fold turn, the fold rounds, the compaction lock, and the hint raise
+/// lock of one namespace in this runtime.
 ///
 /// A fold takes the fold turn in exclusive mode before it decides that a
 /// fold is due, and keeps it until it has moved the session's position, so
@@ -31,13 +31,17 @@ use tracing::Instrument;
 /// request arrived covers every commit acknowledged before the request, so
 /// the requests that wait for one fold share the next one. A compaction
 /// unit takes the compaction lock before it plans, so two units never plan
-/// from the same manifest. The turn and the compaction lock are `tokio`
-/// locks, because a fold, a pin, and a unit keep them across store requests.
+/// from the same manifest. A hint raise takes the raise lock before it reads
+/// the hint, so a raise to a newer manifest never loses its compare-and-swap
+/// to this runtime's raise to an older manifest. The turn and both locks are
+/// `tokio` locks, because a fold, a pin, a unit, and a raise keep them across
+/// store requests.
 #[derive(Default)]
 pub(crate) struct NamespaceTurns {
     pub(super) fold: RwLock<()>,
     rounds: Mutex<FoldRounds>,
     pub(crate) compaction: AsyncMutex<()>,
+    pub(super) hint_raise: AsyncMutex<()>,
 }
 
 #[derive(Default)]
