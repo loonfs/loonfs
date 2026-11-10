@@ -523,7 +523,9 @@ impl Maintenance {
     /// object is one item of the session's queue, after the commits admitted
     /// before it, and the session's later commits are validated against the
     /// new floor. Otherwise, the call creates the floor object itself and
-    /// opens no session. A writer session in another runtime isn't fenced.
+    /// opens no session, and it drops the position of a session that opened
+    /// in this runtime meanwhile, so the fold after it reads the floor
+    /// object from the store. A writer session in another runtime isn't fenced.
     /// Its next put collides with the floor object, and it plans again
     /// against the new floor.
     ///
@@ -555,7 +557,15 @@ impl Maintenance {
                         .await
                     {
                         Some(report) => report?,
-                        None => store.publish_floor_object(&planned, target).await?,
+                        None => {
+                            let report = store.publish_floor_object(&planned, target).await?;
+                            // A session that opened in this runtime after the
+                            // check above keeps a position that may end below
+                            // the floor object, and a fold from that position
+                            // would miss the floor object.
+                            self.publisher.drop_session_position(namespace_id).await;
+                            report
+                        }
                     },
                 };
                 if report.retention_floor_seq > report.manifest_retention_floor_seq {

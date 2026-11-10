@@ -534,6 +534,16 @@ impl PublisherRegistry {
     /// within the revalidation bound (see
     /// [`NamespacePublisher::current_position`]), or `None` when this runtime
     /// has no such position for the namespace.
+    /// Drops the position of the namespace's writer session in this
+    /// runtime, if the runtime has one, once no other task has the session's
+    /// engine locked. The session's next unit runs discovery, and a fold
+    /// without a position loads the tail from the store.
+    pub(crate) async fn drop_session_position(&self, namespace_id: &NamespaceId) {
+        if let Some(publisher) = self.live_publisher(namespace_id) {
+            publisher.change_position(PositionChange::Drop).await;
+        }
+    }
+
     pub(crate) fn current_position(&self, namespace_id: &NamespaceId) -> Option<WriterPosition> {
         self.live_publisher(namespace_id)?.current_position()
     }

@@ -440,3 +440,74 @@ async fn an_advance_by_another_runtime_leaves_a_session_on_the_old_floor_unfence
     maintainer.shutdown().await.expect("shutdown");
     writer.shutdown().await.expect("shutdown");
 }
+
+/// Checks that an advance that finds no session, and so creates its floor
+/// object itself, folds the floor object even when a session opens in the
+/// same runtime and commits before the floor object's discovery. The
+/// session's position ends below the floor object, so the advance drops it,
+/// and when the advance returns, the current manifest records the floor.
+#[tokio::test]
+async fn an_advance_without_a_session_folds_its_floor_object_after_a_session_opens() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let clock = Arc::new(ManualClock::at_system_time());
+    let seed = runtime_at(
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore,
+        "seed",
+        &clock,
+    )
+    .await;
+    let actor = loonfs_test_support::test_actor();
+    seed.create_namespace(&namespace_id, &actor)
+        .await
+        .expect("create");
+    create_directories(
+        &seed.open_namespace(&namespace_id).expect("open namespace"),
+        "history",
+    )
+    .await;
+    seed.maintenance(loonfs_test_support::ids::writer_id("seed"))
+        .fold_wal(&namespace_id)
+        .await
+        .expect("fold the history");
+    seed.shutdown().await.expect("shutdown");
+    clock.advance_ms(crate::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS);
+    // The direct path checks the planned manifest's segments after it finds
+    // no session and before its discovery, so the gate parks it there.
+    let gated = Arc::new(BlockingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::metadata_segment(),
+        OperationSelector::Head,
+    ));
+    let writer = runtime_at(gated.clone() as SharedStore, "writer-a", &clock).await;
+    let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("writer-a"));
+
+    gated.block_next();
+    let advance = tokio::spawn({
+        let maintenance = maintenance.clone();
+        let namespace_id = namespace_id.clone();
+        async move { maintenance.advance_retention_floor(&namespace_id).await }
+    });
+    gated.wait_until_blocked().await;
+    let namespace = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    create_directories(&namespace, "later").await;
+    assert!(writer
+        .mode
+        .publisher
+        .current_position(&namespace_id)
+        .is_some());
+    gated.release();
+
+    let advanced = advance.await.expect("join").expect("the advance");
+    assert!(advanced.retention_floor_seq > ChangeSeq(0));
+    assert_eq!(
+        current_manifest(gated.inner(), &namespace_id)
+            .await
+            .retention_floor_seq,
+        advanced.retention_floor_seq,
+        "the fold after the advance covers the floor object"
+    );
+    writer.shutdown().await.expect("shutdown");
+}

@@ -739,7 +739,32 @@ fn starts_with_tip_confirmation(
 async fn a_quiet_writer_confirms_its_tip_with_a_wal_head_and_then_a_manifest_head() {
     let directory = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = gated_store(&directory, KeyPredicate::prefix(wal_prefix(&namespace_id)));
+    // The gate logs the key of every HEAD when the request is sent, before
+    // any response, and parks the next WAL HEAD when it's armed.
+    let sent_heads = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let store = RecordingStore::new(
+        BlockingStore::matching(LocalFsStore::new(directory.path()).expect("store"), {
+            let sent_heads = Arc::clone(&sent_heads);
+            let wal = wal_prefix(&namespace_id);
+            move |context| {
+                if !OperationSelector::Head.matches(context.kind()) {
+                    return false;
+                }
+                sent_heads
+                    .lock()
+                    .expect("the log lock should not be poisoned")
+                    .push(context.key().to_owned());
+                context.key().starts_with(&wal)
+            }
+        }),
+        KeyPredicate::any(),
+    );
+    let sent = || {
+        sent_heads
+            .lock()
+            .expect("the log lock should not be poisoned")
+            .clone()
+    };
     let (mut engine, timer, writer) = writer_after_one_publish(&store, &namespace_id).await;
     for name in ["beta", "gamma", "delta"] {
         publish_one(&mut engine, &writer, name).await;
@@ -747,22 +772,35 @@ async fn a_quiet_writer_confirms_its_tip_with_a_wal_head_and_then_a_manifest_hea
 
     timer.advance_ms(WAL_PUBLISH_BUDGET_MS + 1);
     store.reset();
+    sent_heads
+        .lock()
+        .expect("the log lock should not be poisoned")
+        .clear();
     store.inner().block_next();
     let (_, ()) = futures::join!(publish_one(&mut engine, &writer, "epsilon"), async {
-        // The log records each request when its response arrives. While
-        // the WAL HEAD waits for its response, no other request is
-        // answered, so the manifest HEAD isn't sent alongside it.
+        // The WAL HEAD's response is held here. A manifest HEAD sent
+        // alongside the WAL HEAD would be in the log of sent requests.
         store.inner().wait_until_blocked().await;
         for _ in 0..16 {
             tokio::task::yield_now().await;
         }
-        let answered = store.snapshot();
+        let held = sent();
         assert!(
-            answered.is_empty(),
-            "the manifest HEAD waits for the WAL response: {answered:?}"
+            matches!(held.as_slice(), [wal] if wal.starts_with(&wal_prefix(&namespace_id))),
+            "only the WAL HEAD is sent before its response: {held:?}"
         );
         store.inner().release();
     });
+    let heads = sent();
+    assert!(
+        matches!(
+            heads.as_slice(),
+            [_, manifest] if manifest.starts_with(
+                &loonfs_objectstore::keys::metadata_manifest_prefix(&namespace_id)
+            )
+        ),
+        "the manifest HEAD follows the WAL response: {heads:?}"
+    );
     // The tail contains a fence and four commits, and none of it is read
     // again.
     let operations = store.take();

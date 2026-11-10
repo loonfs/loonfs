@@ -13,7 +13,7 @@ use loonfs_objectstore::{local_fs_store::LocalFsStore, ObjectStore};
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::{
     replace_object, BlockingStore, ConcurrencyWatchStore, FailStore, InjectedError, KeyPredicate,
-    MetadataMapStore, OperationSelector, RecordingStore,
+    MetadataMapStore, OperationSelector, RecordedOperation, RecordingStore,
 };
 use loonfs_types::format::wal::{decode_wal_object_envelope_zstd, encode_wal_object_envelope_zstd};
 use loonfs_types::options::AttributeInclusion;
@@ -789,11 +789,25 @@ async fn a_confirmation_after_a_collected_floor_object_never_writes_the_emptied_
             metadata
         },
     );
-    let store = BlockingStore::new(
-        store,
-        KeyPredicate::prefix(wal_prefix(&namespace_id)),
-        OperationSelector::Head,
-    );
+    // The recording store logs each request when its response arrives. The
+    // gate above it logs each manifest HEAD when the request is sent, and
+    // parks the next WAL HEAD when it's armed.
+    let store = RecordingStore::new(store, KeyPredicate::manifest(&namespace_id));
+    let sent_manifest_heads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let store = BlockingStore::matching(store, {
+        let sent_manifest_heads = Arc::clone(&sent_manifest_heads);
+        let wal = wal_prefix(&namespace_id);
+        let manifests = KeyPredicate::manifest(&namespace_id);
+        move |context| {
+            if !OperationSelector::Head.matches(context.kind()) {
+                return false;
+            }
+            if manifests.matches(context.key()) {
+                sent_manifest_heads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            context.key().starts_with(&wal)
+        }
+    });
     crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context(1_000))
         .create()
         .await
@@ -828,11 +842,28 @@ async fn a_confirmation_after_a_collected_floor_object_never_writes_the_emptied_
         .expect("another process creates a floor object");
 
     timer.advance_ms(crate::limits::WAL_PUBLISH_BUDGET_MS + 1);
+    store.inner().reset();
+    sent_manifest_heads.store(0, std::sync::atomic::Ordering::SeqCst);
     store.block_next();
     let (mut published, ()) = futures::join!(
         engine.publish_batch(vec![directory("after")], &clock),
         async {
             store.wait_until_blocked().await;
+            // A manifest HEAD sent before the WAL response is answered here,
+            // before the fold, so it finds no successor.
+            for _ in 0..16 {
+                tokio::task::yield_now().await;
+            }
+            while sent_manifest_heads.load(std::sync::atomic::Ordering::SeqCst)
+                > store
+                    .inner()
+                    .snapshot()
+                    .iter()
+                    .filter(|operation| matches!(operation, RecordedOperation::Head { .. }))
+                    .count()
+            {
+                tokio::task::yield_now().await;
+            }
             namespace.fold_wal().await.expect("fold the floor object");
             let aged = WriterAt {
                 now_ms: grace + 1,
