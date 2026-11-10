@@ -57,7 +57,8 @@ pub(crate) struct NamespaceCreateArgs {
     pub administrators: Vec<PrincipalId>,
     /// The namespace's retention window, in milliseconds. The server's
     /// maintenance sweep keeps this many milliseconds of the namespace's
-    /// history, in place of the server's `retention_window_ms`.
+    /// history. Without this option, the namespace's window is the server's
+    /// `retention_window_ms` setting, if the server has that setting.
     /// `loonfs maintenance retention window` can change or clear the window
     /// later.
     #[arg(long)]

@@ -84,8 +84,8 @@ pub(crate) enum MaintenanceRetentionCommand {
     /// Set or clear the namespace's retention window.
     ///
     /// The server's maintenance sweep keeps this much of the namespace's
-    /// history instead of applying the server's own window. Once the
-    /// namespace's window is cleared, the server's window applies again.
+    /// history. Once the namespace's window is cleared, the sweep doesn't
+    /// advance the namespace's floor.
     Window(MaintenanceRetentionWindowArgs),
 }
 
@@ -129,7 +129,8 @@ pub(crate) struct MaintenanceRetentionWindowArgs {
     /// The namespace's new retention window, in milliseconds.
     #[arg(long, required_unless_present = "clear", conflicts_with = "clear")]
     pub retention_window_ms: Option<NonZeroU64>,
-    /// Clear the namespace's window, so that the server's setting applies.
+    /// Clear the namespace's window, so that the sweep doesn't advance the
+    /// namespace's floor.
     #[arg(long)]
     pub clear: bool,
 }

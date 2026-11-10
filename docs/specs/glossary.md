@@ -226,7 +226,11 @@ The sequence number below which a namespace's history is no longer guaranteed. A
 
 ### Retention window
 
-A namespace setting, in milliseconds, for how much recent history a scheduled retention advance keeps. The reference server's [sweep](#sweep) advances each namespace's [retention floor](#retention-floor) to the last commit made at or before the current time minus the window. It uses the namespace's own window if the namespace's manifest sets `retention_window_ms`, and the server's `retention_window_ms` setting otherwise. For example, a namespace with a 7-day window keeps at least 7 days of revisions and recoverable deletions. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
+A namespace setting, in milliseconds, for how much recent history a scheduled retention advance keeps. The reference server's [sweep](#sweep) advances each namespace's [retention floor](#retention-floor) to the last commit made at or before the current time minus the window. The sweep reads the window from the namespace's manifest (`retention_window_ms`), and it doesn't advance the floor of a namespace without a window. When a create request doesn't include a window, the server records its own `retention_window_ms` setting as the new namespace's window. For example, a namespace with a 7-day window keeps at least 7 days of revisions and recoverable deletions. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
+
+### Minimum commit age
+
+How old a commit has to be before a retention advance can move the [retention floor](#retention-floor) past that commit, which is one hour (`RETENTION_ADVANCE_MIN_COMMIT_AGE_MS`). A reader that opened a file revision can keep reading that revision after a later commit replaces the revision, so LoonFS keeps the replaced revision readable for at least an hour after the replacing commit. For example, if a commit replaces a file's revision at 9:00, an advance at 9:30 stops below that commit, and an advance at 10:00 or later can move the floor past the commit. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
 
 ### Control object
 

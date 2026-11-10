@@ -323,7 +323,8 @@ pub struct NamespaceManifestPayload {
     /// The namespace's access mode, which can't be changed.
     pub access: NamespaceAccess,
     /// The namespace's retention window in milliseconds, which a scheduled
-    /// retention advance uses instead of its host's setting. Unlike the
+    /// retention advance uses. A namespace without a window isn't advanced
+    /// on a schedule. Unlike the
     /// access mode, a successor can change it (see [Advancing the retention
     /// floor](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#101-advancing-the-retention-floor)).
     #[serde(default, skip_serializing_if = "Option::is_none")]

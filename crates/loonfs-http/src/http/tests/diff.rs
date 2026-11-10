@@ -161,10 +161,10 @@ async fn the_route_serves_pages_that_a_client_follows_to_the_end() {
 #[tokio::test]
 async fn a_diff_below_the_floor_returns_its_from_seq_and_the_floor() {
     let fixture = fixture().await;
-    // The floor passes a commit once it's one grace window old, so this
+    // The floor passes a commit once it's an hour old, so this
     // engine's clock is that far ahead of the writer's.
     let clock = Arc::new(ManualClock::at_system_time());
-    clock.advance_ms(loonfs::GC_DEFAULT_GRACE_WINDOW_MS);
+    clock.advance_ms(loonfs::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS);
     let maintenance = loonfs_core::NamespaceWriterEngine::writer(
         loonfs_core::test_support::namespace_store_with_wall_clock(
             fixture.store.clone(),

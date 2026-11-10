@@ -172,7 +172,8 @@ Namespace management
                             [--retention-window-ms <ms>] [--actor-id <stable-id>]
     Create a new empty namespace. --retention-window-ms sets how many
     milliseconds of the namespace's history the server's maintenance sweep
-    keeps, in place of the server's retention_window_ms
+    keeps. Without this option, the namespace's window is the server's
+    retention_window_ms setting, if the server has that setting
 
   loonfs namespace show [namespace]
     Show the selected namespace's status, creator, and retention window
@@ -427,10 +428,10 @@ Maintenance
   loonfs maintenance retention window (--retention-window-ms <ms> | --clear)
     Set or clear the namespace's retention window. The server's
     maintenance sweep keeps this much of the namespace's history, in
-    milliseconds, instead of applying the server's retention_window_ms.
-    --clear removes the namespace's window, so that the server's window
-    applies again. The new window takes effect at the sweep's next full
-    pass, and the command doesn't move the floor itself.
+    milliseconds. --clear removes the namespace's window, so the sweep
+    doesn't advance the namespace's floor. The new window takes effect at
+    the sweep's next full pass, and the command doesn't move the floor
+    itself.
 
   loonfs maintenance gc [--grace-window-ms <ms>]
     Run one complete pass and print its report. Each call reads the current

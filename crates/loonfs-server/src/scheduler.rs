@@ -14,7 +14,7 @@ use loonfs_objectstore::ObjectStoreError;
 use loonfs_types::{EffectiveLimit, MonotonicTimer};
 use std::collections::HashMap;
 use std::future::Future;
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::num::NonZeroUsize;
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -159,10 +159,9 @@ pub enum GarbageCollection {
 ///
 /// A sweep also advances each active namespace's retention floor to the last
 /// commit at or before the current time minus the namespace's retention
-/// window, or minus `retention_window_ms` for a namespace that has no window
-/// of its own. The advance reads the namespace's window from the manifest
-/// that it loads to find the floor, so a namespace with neither window costs
-/// that one load and publishes nothing. The session steps don't advance the
+/// window. The advance reads the namespace's window from the manifest that
+/// it loads to find the floor, so a namespace without a window costs that
+/// one load and publishes nothing. The session steps don't advance the
 /// floor on their own schedule, because an advance checks that the
 /// manifest's segments exist and publishes a manifest, and a window measured
 /// in days needs no finer schedule than the sweep. A namespace whose floor
@@ -204,9 +203,6 @@ pub(crate) struct SchedulerConfig {
     pub(crate) metadata_retry_interval_ms: u64,
     pub(crate) gc_interval_ms: u64,
     pub(crate) sweep_interval_ms: u64,
-    /// The server's retention window, which applies to each namespace
-    /// without a window of its own.
-    pub(crate) retention_window_ms: Option<NonZeroU64>,
     pub(crate) idle_session_close_after_ms: u64,
 }
 

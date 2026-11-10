@@ -598,8 +598,8 @@ pub struct CreateNamespaceOptions {
     /// The access mode, which can't be changed after the namespace is created.
     pub access: NamespaceAccess,
     /// The namespace's retention window, which a host's scheduled retention
-    /// advance uses instead of the host's own setting, or `None` when the
-    /// host's window applies.
+    /// advance uses, or `None` for the runtime's default window, if the
+    /// runtime has a default.
     pub retention_window_ms: Option<NonZeroU64>,
     /// Whether creating a namespace that already exists succeeds and returns
     /// the existing namespace's state.

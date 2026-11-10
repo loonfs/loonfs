@@ -8,7 +8,7 @@ use super::published::PublicationReport;
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result, WriterFence};
 use crate::in_flight::STORE_READS_IN_FLIGHT;
-use crate::limits::GC_DEFAULT_GRACE_WINDOW_MS;
+use crate::limits::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS;
 use crate::metadata::manifest_index::commits_after_page;
 use crate::namespace::control::{ensure_namespace_live, LoadedManifest};
 use crate::namespace::store::NamespaceStore;
@@ -25,8 +25,8 @@ use std::num::NonZeroU64;
 /// Where a retention advance moves the floor.
 ///
 /// The floor never moves down and never passes the folded manifest head.
-/// Whatever the target, the advance also treats [`GC_DEFAULT_GRACE_WINDOW_MS`]
-/// before its clock as a cutoff, so the floor stops at or below the last
+/// Whatever the target, the advance also treats
+/// [`RETENTION_ADVANCE_MIN_COMMIT_AGE_MS`] before its clock as a cutoff, so the floor stops at or below the last
 /// commit at or before that time, found by the same walk as a
 /// [`Self::Cutoff`] target (format spec, "Advancing the retention floor"). A
 /// target at or below the current floor leaves the floor where it is.
@@ -47,18 +47,13 @@ pub enum RetentionTarget {
         cutoff_at_ms: u64,
     },
     /// The last commit committed at or before the current time minus the
-    /// namespace's retention window, or minus `default_window_ms` when the
-    /// namespace has no window. With neither window, the floor stays where it
-    /// is.
+    /// namespace's retention window. When the namespace has no window, the
+    /// floor stays where it is.
     ///
     /// The advance reads the namespace's window from the manifest it loads
     /// to find the target, so a host that advances floors on a schedule
     /// needs no extra request to read each namespace's window.
-    Window {
-        /// The window for a namespace that has no window of its own, such as
-        /// a host's setting.
-        default_window_ms: Option<NonZeroU64>,
-    },
+    Window,
 }
 
 async fn verify_manifest_segments_exist<S: ObjectStore + ?Sized>(
@@ -103,14 +98,14 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// Plans where a retention advance toward `target` moves the floor of
     /// `current`, and publishes nothing (format spec, "Advancing the
     /// retention floor"). The plan uses the namespace's wall clock as the
-    /// current time for the grace-window check and for a
+    /// current time for the minimum commit age and for a
     /// [`RetentionTarget::Window`] cutoff.
     ///
     /// The plan makes no request when the target is at or below the floor.
     /// Otherwise, it reads commits upward from the floor once, and it stops
     /// at the target or at the first commit after the cutoff, which is the
     /// earlier of the target's own cutoff, if it has one, and the current
-    /// time minus the grace.
+    /// time minus the minimum commit age.
     pub async fn plan_retention_floor(
         &self,
         current: &LoadedManifest,
@@ -119,25 +114,20 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let now_ms = self.start_clock().request_at_ms();
         let manifest = current.payload();
         ensure_namespace_live(&manifest.namespace_id, manifest.status)?;
-        let grace_cutoff_at_ms = now_ms.saturating_sub(GC_DEFAULT_GRACE_WINDOW_MS);
+        let age_cutoff_at_ms = now_ms.saturating_sub(RETENTION_ADVANCE_MIN_COMMIT_AGE_MS);
         let (through, cutoff_at_ms) = match target {
-            RetentionTarget::Head => (manifest.head_seq, grace_cutoff_at_ms),
-            RetentionTarget::Seq(seq) => (seq.min(manifest.head_seq), grace_cutoff_at_ms),
+            RetentionTarget::Head => (manifest.head_seq, age_cutoff_at_ms),
+            RetentionTarget::Seq(seq) => (seq.min(manifest.head_seq), age_cutoff_at_ms),
             RetentionTarget::Cutoff { cutoff_at_ms } => {
-                (manifest.head_seq, cutoff_at_ms.min(grace_cutoff_at_ms))
+                (manifest.head_seq, cutoff_at_ms.min(age_cutoff_at_ms))
             }
-            RetentionTarget::Window { default_window_ms } => {
-                match manifest.retention_window_ms.or(default_window_ms) {
-                    Some(window_ms) => (
-                        manifest.head_seq,
-                        now_ms
-                            .saturating_sub(window_ms.get())
-                            .min(grace_cutoff_at_ms),
-                    ),
-                    // With neither window, the floor stays where it is.
-                    None => (manifest.retention_floor_seq, grace_cutoff_at_ms),
-                }
-            }
+            RetentionTarget::Window => match manifest.retention_window_ms {
+                Some(window_ms) => (
+                    manifest.head_seq,
+                    now_ms.saturating_sub(window_ms.get()).min(age_cutoff_at_ms),
+                ),
+                None => (manifest.retention_floor_seq, age_cutoff_at_ms),
+            },
         };
         if through <= manifest.retention_floor_seq {
             return Ok(RetentionPlan::Stays(manifest.retention_floor_seq));

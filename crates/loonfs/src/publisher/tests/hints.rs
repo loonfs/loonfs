@@ -331,7 +331,7 @@ async fn every_publication_raises_the_hint_to_its_manifest() {
         }
         if matches!(publication, Publication::RetentionAdvance) {
             maintenance.fold_wal(&namespace_id).await.expect("fold");
-            clock.advance_ms(crate::GC_DEFAULT_GRACE_WINDOW_MS);
+            clock.advance_ms(crate::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS);
         }
         writer.drain().await.expect("drain");
         let before = current_manifest_no(store.as_ref(), &namespace_id).await;

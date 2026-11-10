@@ -227,7 +227,6 @@ impl Scheduler {
             metadata_retry_interval_ms = config.metadata_retry_interval_ms,
             gc_interval_ms = config.gc_interval_ms,
             sweep_interval_ms = config.sweep_interval_ms,
-            retention_window_ms = config.retention_window_ms.map(std::num::NonZeroU64::get),
             max_concurrent_maintenance = config.max_concurrent_maintenance.get(),
             maintains_grep_index = inner.grep.is_some(),
             "maintenance scheduler started"

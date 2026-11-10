@@ -150,11 +150,11 @@ pub(crate) fn assert_matches_golden_token(name: &str, actual: &str) {
 }
 
 /// Returns the wall-clock reading at which a commit stamped at
-/// `committed_at_ms` is one default garbage collection grace window old, so a
+/// `committed_at_ms` is one retention advance minimum commit age old, so a
 /// retention advance measured at that reading can pass the commit.
 #[cfg(test)]
 pub(crate) fn grace_elapsed_after(committed_at_ms: u64) -> u64 {
-    committed_at_ms + crate::limits::GC_DEFAULT_GRACE_WINDOW_MS
+    committed_at_ms + crate::limits::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS
 }
 
 /// A writer ID and the wall-clock time that a test's operations run at.

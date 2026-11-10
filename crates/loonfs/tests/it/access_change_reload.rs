@@ -476,10 +476,10 @@ async fn writes_after_maintenance_on_the_same_runtime_reload_nothing() {
                 drop(deleted.await.expect(call));
             }
             "advance_retention_floor" => {
-                // Every commit so far is now one grace window old.
+                // Every commit so far is now an hour old.
                 fixture
                     .wall_clock
-                    .advance_ms(loonfs::GC_DEFAULT_GRACE_WINDOW_MS);
+                    .advance_ms(loonfs::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS);
                 let advanced = maintenance.advance_retention_floor(namespace_id).await;
                 assert!(advanced.expect(call).retention_floor_seq.0 > 0, "{call}");
             }

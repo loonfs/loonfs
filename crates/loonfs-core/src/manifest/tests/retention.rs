@@ -356,7 +356,7 @@ async fn an_advance_stops_below_the_first_commit_younger_than_the_grace_window()
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    let grace_ms = crate::limits::GC_DEFAULT_GRACE_WINDOW_MS;
+    let grace_ms = crate::limits::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS;
     let now_ms = 10 * grace_ms;
     // Commit 3 is stamped before commit 2, and commits 5 and 6 are stamped
     // after `now_ms`.
@@ -619,7 +619,7 @@ fn cache_for_a_walk() -> MetadataSegmentCache {
 /// one ranged GET for each refill of commit blocks that it reaches.
 #[tokio::test]
 async fn an_advance_sends_one_get_for_each_refill_of_commit_blocks_up_to_where_it_stops() {
-    let grace_ms = crate::limits::GC_DEFAULT_GRACE_WINDOW_MS;
+    let grace_ms = crate::limits::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS;
     let now_ms = 10 * grace_ms;
     for (target, expected_floor, last_read) in [
         // Commit 65 is the first commit younger than the window, so the walk
@@ -673,7 +673,7 @@ async fn an_advance_sends_one_get_for_each_refill_of_commit_blocks_up_to_where_i
 /// namespace is, and leaves the floor where it is.
 #[tokio::test]
 async fn an_advance_reads_one_commit_row_when_the_first_commit_above_the_floor_is_young() {
-    let grace_ms = crate::limits::GC_DEFAULT_GRACE_WINDOW_MS;
+    let grace_ms = crate::limits::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS;
     let now_ms = 10 * grace_ms;
     // With no old commits, the namespace is fresh, and the walk reads commit
     // 1. With 13 old commits, a first advance moves the floor to 13, and the
@@ -723,33 +723,43 @@ async fn an_advance_reads_one_commit_row_when_the_first_commit_above_the_floor_i
 /// older than the grace window reads the commits up to that cutoff once.
 #[tokio::test]
 async fn a_cutoff_or_a_window_older_than_the_grace_window_reads_the_commits_once() {
-    let grace_ms = crate::limits::GC_DEFAULT_GRACE_WINDOW_MS;
+    let grace_ms = crate::limits::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS;
     let now_ms = 10 * grace_ms;
-    for target in [
-        RetentionTarget::Cutoff {
-            cutoff_at_ms: now_ms - 5 * grace_ms / 2,
-        },
-        RetentionTarget::Window {
-            default_window_ms: std::num::NonZeroU64::new(5 * grace_ms / 2),
-        },
+    for (target, retention_window_ms) in [
+        (
+            RetentionTarget::Cutoff {
+                cutoff_at_ms: now_ms - 5 * grace_ms / 2,
+            },
+            None,
+        ),
+        (
+            RetentionTarget::Window,
+            std::num::NonZeroU64::new(5 * grace_ms / 2),
+        ),
     ] {
         // Commits 1 to 64 are older than the target's cutoff, and commits 65
         // to 128 are between that cutoff and the grace window's.
         let history =
             LongCommitHistory::new(&[(64, now_ms - 3 * grace_ms), (64, now_ms - 2 * grace_ms)])
                 .await;
-        let floor = crate::test_support::NamespaceFixture::new(
+        let engine = crate::test_support::NamespaceFixture::new(
             &history.store,
             &history.namespace_id,
             &crate::test_support::writer_at("test-writer", now_ms),
         )
         .with_segment_cache()
-        .engine()
-        .advance_retention_floor(target)
-        .await
-        .expect("advance the floor")
-        .response
-        .retention_floor_seq;
+        .engine();
+        engine
+            .set_retention_window(retention_window_ms)
+            .await
+            .expect("set the window");
+        history.store.reset();
+        let floor = engine
+            .advance_retention_floor(target)
+            .await
+            .expect("advance the floor")
+            .response
+            .retention_floor_seq;
         assert_eq!(floor, ChangeSeq(64), "{target:?}");
         // The walk's later refills find the index and the blocks that an
         // earlier one fetched in the block cache.
@@ -762,7 +772,7 @@ async fn a_cutoff_or_a_window_older_than_the_grace_window_reads_the_commits_once
 }
 
 #[tokio::test]
-async fn a_window_advance_prefers_the_namespace_window_and_keeps_the_floor_without_one() {
+async fn a_window_advance_uses_the_namespace_window_and_keeps_the_floor_without_one() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -770,7 +780,7 @@ async fn a_window_advance_prefers_the_namespace_window_and_keeps_the_floor_witho
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    let hour_ms = crate::limits::GC_DEFAULT_GRACE_WINDOW_MS;
+    let hour_ms = crate::limits::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS;
     let now_ms = 5 * hour_ms;
     for (path, committed_at_ms) in [
         ("/a.txt", 2 * hour_ms),
@@ -799,16 +809,16 @@ async fn a_window_advance_prefers_the_namespace_window_and_keeps_the_floor_witho
     let set_window =
         |window_ms: Option<u64>| engine.set_retention_window(window_ms.and_then(window));
 
-    // Each step sets the namespace's window, then advances at five hours
-    // with a default window. The cutoffs are five hours minus the window
-    // that applies, and all three commits are at least an hour old.
-    for (namespace_window_ms, default_window_ms, expected_floor) in [
-        (None, None, ChangeSeq(0)),
-        (None, Some(5 * hour_ms / 2), ChangeSeq(1)),
-        // The namespace's window applies, so the cutoff is 3.5 hours, not 2.5.
-        (Some(3 * hour_ms / 2), Some(5 * hour_ms / 2), ChangeSeq(2)),
-        // Once the window is cleared, the default applies again.
-        (None, Some(hour_ms / 2), ChangeSeq(3)),
+    // Each step sets the namespace's window, then advances at five hours.
+    // The cutoffs are five hours minus the window, and all three commits are
+    // at least an hour old.
+    for (namespace_window_ms, expected_floor) in [
+        (None, ChangeSeq(0)),
+        (Some(5 * hour_ms / 2), ChangeSeq(1)),
+        (Some(3 * hour_ms / 2), ChangeSeq(2)),
+        // Once the window is cleared, the floor stays where it is.
+        (None, ChangeSeq(2)),
+        (Some(hour_ms / 2), ChangeSeq(3)),
     ] {
         let set = set_window(namespace_window_ms)
             .await
@@ -827,9 +837,7 @@ async fn a_window_advance_prefers_the_namespace_window_and_keeps_the_floor_witho
             "setting the window that the namespace has publishes nothing"
         );
         assert_eq!(current_manifest_no(&store, &namespace_id).await, before);
-        let target = RetentionTarget::Window {
-            default_window_ms: default_window_ms.and_then(window),
-        };
+        let target = RetentionTarget::Window;
         let floor = crate::test_support::NamespaceFixture::new(
             &store,
             &namespace_id,
