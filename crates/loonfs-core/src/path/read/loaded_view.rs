@@ -63,11 +63,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             visible_seq <= head.seq,
             "a read context should read at or below its head"
         );
-        let retention_floor_seq = loaded_basis
-            .segments
-            .manifest()
-            .payload()
-            .retention_floor_seq;
+        let retention_floor_seq = head.retention_floor_seq;
         if visible_seq < retention_floor_seq {
             return Err(CoreError::RebootstrapRequired {
                 below: HistoryPosition::ReadSeq {
@@ -89,6 +85,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     namespace_id: self.namespace_id.clone(),
                     manifest_no,
                     head_seq: head.seq,
+                    wal_no: head.wal_no,
                 };
                 self.head_and_wal_tail_cache
                     .get_or_load_tail(&cache_key, || async {
@@ -158,8 +155,10 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         self.visible_seq
     }
 
+    /// Returns the view's retention floor, the head's (format spec,
+    /// "Replaying the visible WAL").
     pub(crate) fn retention_floor_seq(&self) -> ChangeSeq {
-        self.segments.manifest().payload().retention_floor_seq
+        self.head.retention_floor_seq
     }
 
     #[cfg(test)]
@@ -236,7 +235,12 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     }
 
     pub(crate) fn metadata_view(&self) -> MetadataView<'_, '_, S> {
-        MetadataView::over_loaded_basis(&self.segments, &self.wal_tail, self.visible_seq)
+        MetadataView::over_loaded_basis(
+            &self.head,
+            &self.segments,
+            &self.wal_tail,
+            self.visible_seq,
+        )
     }
 
     /// Returns the view of this basis at `visible_seq`, a retained sequence
@@ -246,7 +250,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             visible_seq <= self.head.seq,
             "a view of a loaded basis should be at or below the basis's head"
         );
-        MetadataView::over_loaded_basis(&self.segments, &self.wal_tail, visible_seq)
+        MetadataView::over_loaded_basis(&self.head, &self.segments, &self.wal_tail, visible_seq)
     }
 }
 

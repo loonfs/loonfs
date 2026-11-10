@@ -234,6 +234,7 @@ fn validation_context(metadata_state: &MetadataState, seq: ChangeSeq) -> TestVal
         }),
         wal_no: loonfs_types::WalNo(0),
         folded_wal_no: loonfs_types::WalNo(0),
+        retention_floor_seq: ChangeSeq(0),
         status: NamespaceStatus::Active {},
     };
     TestValidationContext {

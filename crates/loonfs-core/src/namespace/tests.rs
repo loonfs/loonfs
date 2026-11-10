@@ -381,20 +381,13 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
                 .fold_wal()
                 .await
                 .expect("replace manifest");
-            // The writer session's floor, published under its epoch.
-            let folded = crate::test_support::namespace_store(store.inner(), &namespace_id)
-                .load_current_manifest()
+            // A manifest after the fold, so the fold's manifest isn't current.
+            crate::test_support::NamespaceFixture::new(store.inner(), &namespace_id, &context())
+                .engine()
+                .set_retention_window(std::num::NonZeroU64::new(60_000))
                 .await
-                .expect("load the fold's manifest");
-            crate::test_support::namespace_store(store.inner(), &namespace_id)
-                .publish_retention_floor(
-                    None,
-                    folded.payload().writer_epoch,
-                    folded.payload().head_seq,
-                )
-                .await
-                .expect("advance floor");
-            // The runtime that published the fold and the floor raises the
+                .expect("set the retention window");
+            // The runtime that published the fold and the window raises the
             // hint after them, while the raise to manifest 2 is still pending.
             crate::test_support::namespace_store(store.inner(), &namespace_id)
                 .raise_hint(ManifestNo(4), None)

@@ -1,5 +1,5 @@
 //! Undelete validation against the retention floor of a writer session's
-//! basis, around a retention advance that the session makes itself.
+//! position, around a floor object that the session creates itself.
 
 use super::*;
 use loonfs_types::FilesystemChange;
@@ -83,14 +83,15 @@ async fn delete<S: ObjectStore>(
     (inode_id, deleted.committed_seq)
 }
 
-/// Checks that a session's own retention advance orders the session's
-/// undeletes around it. An undelete before the advance is folded into the
-/// manifest before the floor moves, even when the advance expires the
-/// deletion it restored. After the advance, an undelete of a deletion at or
-/// below the new floor returns `not_deleted`, and one above it succeeds. The
-/// session keeps its writer epoch throughout.
+/// Checks that a session's own floor object orders the session's undeletes
+/// around the new floor. The floor object follows the session's tip, the
+/// position's floor rises at once, so an undelete of a deletion at the new
+/// floor returns `not_deleted` before any manifest records the floor, and
+/// one above it succeeds. The fold that covers the floor object records the
+/// floor, and it contains the undelete made before the advance. The session
+/// claims no epoch for the advance.
 #[tokio::test]
-async fn a_sessions_advance_orders_its_undeletes_around_the_floor() {
+async fn a_sessions_floor_object_orders_its_undeletes_around_the_floor() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("undelete-floor").expect("valid namespace id");
@@ -110,25 +111,30 @@ async fn a_sessions_advance_orders_its_undeletes_around_the_floor() {
     )
     .await
     .expect("an undelete before the advance");
-    let epoch = engine
-        .acquire_position(&context("writer").clock())
+    let before = engine.writer_position().expect("a position");
+    let planned = engine
+        .namespace
+        .load_current_manifest()
         .await
-        .expect("the session's epoch")
-        .writer_epoch;
+        .expect("the planned manifest");
 
-    let (folded, advanced) = advance_in_session(&mut engine, expired_seq).await;
-    assert!(
-        folded.folded_wal_no
-            >= crate::test_support::namespace_store(&store, &namespace_id)
-                .load_read_state()
-                .await
-                .expect("read the head")
-                .wal_no,
-        "the fold covers the session's tip"
+    let report = engine
+        .publish_floor_object(&planned, expired_seq, &context("writer").clock())
+        .await
+        .expect("create the floor object");
+    let after = engine.writer_position().expect("the position moves");
+    assert_eq!(report.retention_floor_seq, expired_seq);
+    assert_eq!(report.manifest_retention_floor_seq, ChangeSeq(0));
+    assert_eq!(
+        after.read_basis.head.wal_no.0,
+        before.read_basis.head.wal_no.0 + 1
     );
-    assert!(advanced.manifest.head_seq >= restored_commit.committed_seq);
-    assert_eq!(advanced.retention_floor_seq, expired_seq);
-    assert_eq!(advanced.writer_epoch, epoch, "the session keeps its epoch");
+    assert_eq!(after.read_basis.head.seq, before.read_basis.head.seq);
+    assert_eq!(after.retention_floor_seq(), expired_seq);
+    assert_eq!(
+        after.read_basis.head.writer_epoch, before.read_basis.head.writer_epoch,
+        "the advance claims no epoch"
+    );
 
     let error = publish(
         &mut engine,
@@ -137,6 +143,15 @@ async fn a_sessions_advance_orders_its_undeletes_around_the_floor() {
     .await
     .expect_err("an undelete at the new floor");
     assert_eq!(error.code(), ErrorCode::NotDeleted, "{error:?}");
+    let folded = engine
+        .namespace
+        .fold_wal_tail(engine.writer_position(), &context("writer").clock())
+        .await
+        .expect("fold")
+        .manifest;
+    assert_eq!(folded.retention_floor_seq, expired_seq);
+    assert!(folded.manifest.head_seq >= restored_commit.committed_seq);
+    engine.record_manifest_published(folded);
     let (above, above_seq) = delete(&mut engine, "above").await;
     publish(&mut engine, undelete("undelete-above", above, above_seq))
         .await

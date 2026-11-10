@@ -6,6 +6,7 @@ use super::wal_object_key;
 use super::{
     ValidatedWalObject, ValidatedWalTail, WalObjectError, WalTailLoadError, WalTailLoadRequest,
 };
+use crate::control_object::ControlObjectLoadError;
 use crate::error::MetadataProjectionLoadError;
 use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::metadata::MetadataState;
@@ -81,6 +82,25 @@ pub(super) async fn load_wal_object<S: ObjectStore + ?Sized>(
         object_key,
         envelope,
     }
+}
+
+/// Returns whether the WAL object at `wal_no` exists, with one HEAD request
+/// and no read of the object's bytes.
+pub(crate) async fn wal_object_exists<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    wal_no: WalNo,
+) -> Result<bool, ControlObjectLoadError> {
+    let object_key = wal_object_key(namespace_id, &wal_no);
+    Ok(store
+        .head(&object_key)
+        .await
+        .map_err(|error| ControlObjectLoadError::Store {
+            object_key: object_key.clone(),
+            message: error.public_message().into_owned(),
+            kind: error.kind(),
+        })?
+        .is_some())
 }
 
 /// Reads consecutive numbered objects after a position, each validated as

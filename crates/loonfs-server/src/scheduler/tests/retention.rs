@@ -34,9 +34,9 @@ pub(super) const WINDOW_MS: u64 = 30 * DAY_MS;
 const NAMESPACE_WINDOW_MS: u64 = 15 * DAY_MS;
 
 /// Requests the advance costs in a sweep of an idle namespace whose floor
-/// already reached its cutoff, or that has no window: one load of the
-/// current manifest. The docs quote this number.
-const IDLE_ADVANCE_REQUESTS: usize = 4;
+/// already reached its cutoff, or that has no window: one discovery of the
+/// current manifest and the WAL tail after it. The docs quote this number.
+const IDLE_ADVANCE_REQUESTS: usize = 6;
 
 /// A config with every default, and `window_ms` as its retention window.
 pub(super) fn retention_config(window_ms: Option<u64>) -> ServerConfig {
@@ -550,7 +550,7 @@ async fn an_idle_sweep_costs_the_same_requests_whichever_window_applies() {
         )
         .await;
         // The first sweep moves the floor to the head when a window applies,
-        // which claims the writer epoch, fences, and folds, and it collects
+        // which creates a floor object and folds it, and it collects
         // what the seed left behind. Each publication raises the hint, so
         // each sweep collects the manifests that the previous sweep replaced.
         for _ in 0..3 {
@@ -587,8 +587,8 @@ async fn an_idle_sweep_costs_the_same_requests_whichever_window_applies() {
             requests.push(sweep.len());
         }
 
-        // The advance's share of the sweep is one load of the current
-        // manifest.
+        // The advance's share of the sweep is one discovery of the current
+        // manifest and the WAL tail after it.
         store.reset();
         let target = RetentionTarget::Window;
         server
@@ -652,12 +652,12 @@ async fn writer_epoch(
 }
 
 /// Checks the three ways a sweep's advance runs. A namespace with a live
-/// session advances under that session's writer epoch, a namespace with no
-/// session gets one that claims the next epoch, writes one fence, folds once,
-/// and publishes the floor, and a namespace whose floor would not move gets
-/// no session and no write.
+/// session gets a floor object from that session's queue, a namespace with
+/// no session gets a floor object from the sweep without a session, and each
+/// is folded once, with no claim and no new writer epoch. A namespace whose
+/// floor would not move gets no write.
 #[tokio::test]
-async fn a_sweeps_advance_runs_in_the_namespaces_session_or_opens_one() {
+async fn a_sweeps_advance_creates_a_floor_object_with_or_without_a_session() {
     let directory = tempdir().expect("tempdir");
     let store = Arc::new(RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("local store"),
@@ -720,24 +720,24 @@ async fn a_sweeps_advance_runs_in_the_namespaces_session_or_opens_one() {
     assert_eq!(
         writer_epoch(store.as_ref(), &held_id).await,
         epochs_before[0],
-        "the held session advances under its own epoch"
+        "the held session keeps its epoch"
     );
     assert_eq!(
         manifest_and_wal_puts(&operations, &held_id),
-        (1, 0),
-        "the held session's folded tail needs no fold, so the floor is its one write"
+        (1, 1),
+        "one floor object and the fold that records the floor"
     );
 
     assert_eq!(server.retention_floor(&idle_id).await, idle_seq);
     assert_eq!(
         writer_epoch(store.as_ref(), &idle_id).await,
-        epochs_before[1] + 1,
-        "the session opened for the advance claims the next epoch"
+        epochs_before[1],
+        "the advance claims no epoch"
     );
     assert_eq!(
         manifest_and_wal_puts(&operations, &idle_id),
-        (3, 1),
-        "one claim, one fence, one fold, and one advance"
+        (1, 1),
+        "one floor object and the fold that records the floor"
     );
 
     assert_eq!(server.retention_floor(&recent_id).await, recent_floor);
@@ -746,7 +746,7 @@ async fn a_sweeps_advance_runs_in_the_namespaces_session_or_opens_one() {
         (0, 0),
         "a floor that would not move writes nothing"
     );
-    // The session opened for the idle namespace's advance ends with it.
+    // The advance opened no session for the idle namespace.
     server.wait_for_open_sessions(1).await;
     drop(held);
 }

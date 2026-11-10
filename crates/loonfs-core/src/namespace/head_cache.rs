@@ -16,14 +16,21 @@ use crate::manifest::{move_read_basis, PublishedManifest};
 use crate::namespace::basis::ReadBasis;
 use crate::time::Observation;
 use crate::wal::ProjectedWalTail;
-use loonfs_types::{ChangeSeq, ManifestNo, NamespaceId};
+use loonfs_types::{ChangeSeq, ManifestNo, NamespaceId, WalNo};
 use std::sync::Arc;
 
+/// Identifies one projected WAL tail, the tail above a manifest that ends
+/// at a head.
+///
+/// The head's WAL number is part of the key, because a WAL object with no
+/// commits, such as a floor object, moves the head without changing its
+/// sequence.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct WalTailCacheKey {
     pub namespace_id: NamespaceId,
     pub manifest_no: ManifestNo,
     pub head_seq: ChangeSeq,
+    pub wal_no: WalNo,
 }
 
 impl DecodedBlockKey for WalTailCacheKey {
@@ -328,6 +335,7 @@ impl HeadAndWalTailCache {
             namespace_id: namespace_id.clone(),
             manifest_no: read_basis.basis.manifest_no(),
             head_seq: read_basis.head.seq,
+            wal_no: read_basis.head.wal_no,
         };
         let mut read_basis = cached.read_basis.clone();
         let Some(mut tail) = self.get_tail(&tail_key(&read_basis)) else {
@@ -445,6 +453,7 @@ mod tests {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
             manifest_no: ManifestNo(7),
             head_seq: ChangeSeq(12),
+            wal_no: WalNo(12),
         };
         let actors = [
             ActorId::parse("auth0|x").expect("actor id"),
@@ -514,6 +523,7 @@ mod tests {
                     seq: ChangeSeq(seq),
                     wal_no: WalNo(seq),
                     folded_wal_no: WalNo(0),
+                    retention_floor_seq: ChangeSeq(0),
                 },
                 basis: MetadataBasis::new(ManifestRef {
                     owner_namespace_id: namespace_id,
@@ -747,6 +757,7 @@ mod tests {
             namespace_id: demo.clone(),
             manifest_no: ManifestNo(1),
             head_seq: ChangeSeq(6),
+            wal_no: WalNo(6),
         };
         cache.insert_tail(tail_key, Arc::new(ProjectedWalTail::default()));
         let (release, released) = watch::channel(false);
@@ -792,6 +803,7 @@ mod tests {
             namespace_id: demo.clone(),
             manifest_no: ManifestNo(1),
             head_seq: ChangeSeq(6),
+            wal_no: WalNo(6),
         };
         cache.insert_tail(tail_key, Arc::new(ProjectedWalTail::default()));
         let published = published_at(2, &now);
@@ -886,6 +898,7 @@ mod tests {
                 namespace_id: namespace("demo"),
                 manifest_no: ManifestNo(index as u64),
                 head_seq: ChangeSeq(5),
+                wal_no: WalNo(5),
             };
             cache.insert_tail(key, Arc::new(ProjectedWalTail::from_rows(rows)));
         }
@@ -980,6 +993,7 @@ mod tests {
             namespace_id: namespace("demo"),
             manifest_no: ManifestNo(1),
             head_seq: ChangeSeq(5),
+            wal_no: WalNo(5),
         };
         let tail = Arc::new(ProjectedWalTail::default());
         cache.insert_tail(key.clone(), Arc::clone(&tail));

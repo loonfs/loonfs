@@ -19,9 +19,16 @@ pub struct NamespaceReadState {
     pub seq: ChangeSeq,
     pub wal_no: WalNo,
     pub folded_wal_no: WalNo,
+    /// The retention floor of the view at this head: the manifest's
+    /// `retention_floor_seq`, raised by each floor object in the WAL tail
+    /// that replay read to reach the head (format spec, "Replaying the
+    /// visible WAL").
+    pub retention_floor_seq: ChangeSeq,
 }
 
 impl NamespaceReadState {
+    /// Returns the head after the WAL object `payload`, whose floor is the
+    /// higher of this head's floor and the floor that a floor object records.
     pub(crate) fn after_wal_object(
         &self,
         payload: &loonfs_types::format::wal::WalObjectPayload,
@@ -29,6 +36,11 @@ impl NamespaceReadState {
         Self {
             seq: payload.head_seq,
             wal_no: payload.wal_no,
+            retention_floor_seq: payload
+                .retention_floor_seq
+                .map_or(self.retention_floor_seq, |floor| {
+                    floor.max(self.retention_floor_seq)
+                }),
             ..self.clone()
         }
     }
@@ -54,6 +66,7 @@ impl From<&NamespaceManifestPayload> for NamespaceReadState {
             seq: manifest.head_seq,
             wal_no: manifest.folded_wal_no,
             folded_wal_no: manifest.folded_wal_no,
+            retention_floor_seq: manifest.retention_floor_seq,
         }
     }
 }

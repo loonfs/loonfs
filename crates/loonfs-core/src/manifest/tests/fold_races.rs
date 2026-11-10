@@ -22,7 +22,7 @@ use loonfs_types::{ContentId, DeleteDirectoryBehavior, WalNo, WriterEpoch};
 enum Rival {
     CompactorClaim,
     Compaction,
-    RetentionAdvance,
+    RetentionWindow,
     ExtensionPublication,
     Fold(Box<WriterPosition>),
 }
@@ -46,23 +46,18 @@ impl Rival {
                     crate::test_support::compact_every_group(store, namespace_id).await;
                 assert!(compactions > 0, "the compaction rival should publish");
             }
-            Self::RetentionAdvance => {
-                // The floor's publication by the holder of the writer epoch,
-                // which changes nothing but the floor.
-                let namespace = crate::test_support::namespace_store(store, namespace_id);
-                let current = namespace
-                    .load_current_manifest()
-                    .await
-                    .expect("load the current manifest");
-                let published = namespace
-                    .publish_retention_floor(
-                        None,
-                        current.payload().writer_epoch,
-                        current.payload().head_seq,
-                    )
-                    .await
-                    .expect("publish the floor");
-                assert!(published.published.is_some(), "the floor moves");
+            Self::RetentionWindow => {
+                // A window change, which changes nothing but the window.
+                let published = crate::test_support::NamespaceFixture::new(
+                    store,
+                    namespace_id,
+                    &crate::test_support::writer_at("test-writer", 0),
+                )
+                .engine()
+                .set_retention_window(std::num::NonZeroU64::new(60_000))
+                .await
+                .expect("set the retention window");
+                assert!(published.published.is_some(), "the window changes");
             }
             Self::ExtensionPublication => {
                 let fixture = crate::test_support::NamespaceFixture::new(
@@ -279,7 +274,7 @@ async fn a_fold_that_loses_to_a_compaction_reads_no_wal_object() {
     for rival in [
         Rival::Compaction,
         Rival::CompactorClaim,
-        Rival::RetentionAdvance,
+        Rival::RetentionWindow,
         Rival::ExtensionPublication,
     ] {
         let mut writer = Writer::open().await;

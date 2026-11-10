@@ -68,6 +68,15 @@ pub enum WalCodecError {
         /// Format rule violated by the merge record.
         reason: &'static str,
     },
+    /// Reports a floor object with records, or with a retention floor above
+    /// its `head_seq`.
+    #[error("invalid WAL floor object `{wal_no}`: {reason}")]
+    InvalidWalFloorObject {
+        /// The rejected WAL object's number.
+        wal_no: WalNo,
+        /// Format rule violated by the floor object.
+        reason: &'static str,
+    },
 }
 
 /// Version 1: a zstd-compressed CBOR envelope document that contains the payload as
@@ -107,6 +116,7 @@ pub const WAL_OBJECT_OVERHEAD_BYTES: usize = cbor_map_bytes(&[
     ("writer_epoch", 9),
     ("head_seq", 9),
     ("records", 9),
+    ("retention_floor_seq", 9),
 ]);
 
 // CBOR strings, collections, and u64 values need at most nine header bytes.
@@ -448,6 +458,11 @@ pub struct WalObjectPayload {
     pub head_seq: ChangeSeq,
     /// Logical commits in contiguous ascending sequence order.
     pub records: Vec<WalCommitPayload>,
+    /// The retention floor that a floor object records, omitted from every
+    /// other WAL object. A floor object has no records, and its floor is at
+    /// most its `head_seq`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention_floor_seq: Option<ChangeSeq>,
 }
 
 /// A WAL object decoded through its checked durable codec.
@@ -475,6 +490,7 @@ pub(crate) fn encode_wal_payload_cbor(
     validate_wal_revision_layouts(payload)?;
     validate_wal_bind_revisions(payload)?;
     validate_wal_merges(payload)?;
+    validate_wal_floor_object(payload)?;
     let mut encoded = Vec::new();
     into_writer(payload, &mut encoded)
         .map_err(|err| EnvelopeCodecError::PayloadEncode(err.to_string()))?;
@@ -542,6 +558,7 @@ fn decode_wal_object_envelope_zstd_with_limit(
     validate_wal_revision_layouts(&payload)?;
     validate_wal_bind_revisions(&payload)?;
     validate_wal_merges(&payload)?;
+    validate_wal_floor_object(&payload)?;
 
     Ok(WalObjectEnvelope {
         payload_checksum: document.payload_checksum,
@@ -746,6 +763,25 @@ fn validate_wal_merges(payload: &WalObjectPayload) -> Result<(), WalCodecError> 
     Ok(())
 }
 
+/// Requires a floor object to have no records and a retention floor at or
+/// below its `head_seq`.
+fn validate_wal_floor_object(payload: &WalObjectPayload) -> Result<(), WalCodecError> {
+    let Some(retention_floor_seq) = payload.retention_floor_seq else {
+        return Ok(());
+    };
+    let reason = if !payload.records.is_empty() {
+        "a floor object has no records"
+    } else if retention_floor_seq > payload.head_seq {
+        "`retention_floor_seq` is above `head_seq`"
+    } else {
+        return Ok(());
+    };
+    Err(WalCodecError::InvalidWalFloorObject {
+        wal_no: payload.wal_no,
+        reason,
+    })
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -862,6 +898,7 @@ mod tests {
             writer_epoch: WriterEpoch(1),
             head_seq: ChangeSeq(lengths.len() as u64),
             records,
+            retention_floor_seq: None,
         }
     }
 
@@ -1095,6 +1132,7 @@ mod tests {
             writer_epoch: WriterEpoch(crate::MAX_PUBLIC_INTEGER),
             head_seq: ChangeSeq(crate::MAX_PUBLIC_INTEGER),
             records: Vec::new(),
+            retention_floor_seq: Some(ChangeSeq(crate::MAX_PUBLIC_INTEGER)),
         })
         .expect("encode");
         let document = zstd::stream::decode_all(encoded.as_bytes()).expect("decompress");

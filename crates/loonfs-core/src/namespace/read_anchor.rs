@@ -9,10 +9,12 @@ use crate::namespace::control::{LoadedHint, LoadedManifest};
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
 use crate::segment::MetadataSegmentCache;
-use crate::wal::{discover_tail, DiscoveredTail, ProjectedWalTail, ValidatedWalTail};
+use crate::wal::{
+    discover_tail, wal_object_exists, DiscoveredTail, ProjectedWalTail, ValidatedWalTail,
+};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::ManifestRef;
-use loonfs_types::{ChangeSeq, ManifestNo, WriterEpoch};
+use loonfs_types::{ChangeSeq, ManifestNo, WalNo, WriterEpoch};
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
@@ -27,8 +29,10 @@ pub struct NamespaceReadAnchor {
 }
 
 impl NamespaceReadAnchor {
+    /// Returns the retention floor of the anchor's view: the manifest's
+    /// floor, raised by the floor objects in the anchor's WAL tail.
     pub fn retention_floor_seq(&self) -> ChangeSeq {
-        self.manifest.retention_floor_seq()
+        self.read_state.retention_floor_seq
     }
 
     pub fn basis(&self) -> MetadataBasis {
@@ -130,6 +134,32 @@ impl<S: ObjectStore> NamespaceStore<S> {
             return Ok(false);
         };
         self.manifest_exists(next).await
+    }
+
+    /// Returns whether a WAL object exists at the number after `tip`, or the
+    /// manifest numbered `manifest_no` has a successor, which is a tip
+    /// confirmation (format spec, "Publication and group commit").
+    ///
+    /// The confirmation observes the tip in the order that discovery does: a
+    /// HEAD request for the WAL number after `tip`, and only after its
+    /// response, a HEAD request for the manifest number after
+    /// `manifest_no`. If an object had been created at the WAL number and
+    /// collected before the WAL response, a manifest that folded the object
+    /// was published before that response, so the manifest request finds
+    /// it. Sent together, the two requests would have no order, and that
+    /// manifest could be published between them. The manifest request isn't
+    /// sent when the WAL request finds an object.
+    pub(crate) async fn tip_has_successor(
+        &self,
+        tip: WalNo,
+        manifest_no: ManifestNo,
+    ) -> Result<bool, ControlObjectLoadError> {
+        if let Ok(next) = tip.successor() {
+            if wal_object_exists(&self.store, &self.namespace_id, next).await? {
+                return Ok(true);
+            }
+        }
+        self.manifest_has_successor(manifest_no).await
     }
 
     /// Returns the manifests above `basis`, oldest first, for a position at

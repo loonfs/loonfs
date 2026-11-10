@@ -121,9 +121,11 @@ fn keep_commit_history_row(row: MetadataRow, floor_seq: ChangeSeq) -> Option<Met
 /// inode that an expired deletion hides before they reach the operator. The
 /// operator processes this order without retaining the complete history.
 ///
-/// Only the holder of the writer epoch advances the floor, after it has
-/// folded every commit validated against the old floor, so every restore
-/// that copied a revision the advance passed is already folded into the basis
+/// A manifest records a floor only through the fold that covers the floor's
+/// floor object, which also folds every WAL object below the floor object,
+/// and a writer validates every restore above the floor object against the
+/// new floor, so every restore that copied a revision the advance passed is
+/// already folded into the basis
 /// ([format section 10.3](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#103-row-retention-during-a-base-compaction)).
 #[derive(Debug)]
 pub(crate) struct WholeStateRetention {

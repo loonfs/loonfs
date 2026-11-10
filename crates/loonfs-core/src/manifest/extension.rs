@@ -85,8 +85,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     ///
     /// After a lost put, the change is rebuilt over the manifest that won
     /// when that manifest's entry of `name` is the basis's (both can be
-    /// absent), because a fold, a compaction, a claim, or a retention advance
-    /// copies the entry and leaves the change valid. When the entry differs,
+    /// absent), because a fold, a compaction, or a claim copies the entry and
+    /// leaves the change valid. When the entry differs,
     /// another process planned a change from a different state, so the call
     /// returns [`ExtensionPublication::Superseded`] and publishes nothing
     /// (format spec, "Extensions"). The report includes the manifest that the

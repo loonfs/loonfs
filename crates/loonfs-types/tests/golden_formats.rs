@@ -435,6 +435,7 @@ fn sample_wal_payload() -> WalObjectPayload {
             deltas,
             inline_content: Vec::new(),
         }],
+        retention_floor_seq: None,
     }
 }
 
@@ -544,6 +545,17 @@ fn sample_wal_merge_payload() -> WalObjectPayload {
     let mut payload = sample_wal_payload();
     payload.records[0].merge = Some(sample_merge());
     payload
+}
+
+/// A floor object: a WAL object with no records that records a retention
+/// floor at or below its `head_seq`.
+fn sample_wal_floor_payload() -> WalObjectPayload {
+    WalObjectPayload {
+        wal_no: WalNo(3),
+        records: Vec::new(),
+        retention_floor_seq: Some(ChangeSeq(1)),
+        ..sample_wal_payload()
+    }
 }
 
 fn sample_manifest_payload() -> NamespaceManifestPayload {
@@ -821,6 +833,22 @@ fn wal_object_merge_golden_decodes_to_sample() {
         decode_wal_object_envelope_zstd(&rezstd(&read_golden("wal_object_merge.v1.cbor")))
             .expect("decode golden WAL object with a merge record");
     assert_eq!(decoded.into_payload(), sample_wal_merge_payload());
+}
+
+#[test]
+fn wal_object_floor_document_matches_golden_bytes() {
+    let encoded = encode_wal_object_envelope_zstd(sample_wal_floor_payload())
+        .expect("encode a floor object")
+        .into_bytes();
+    assert_matches_golden("wal_object_floor.v1.cbor", &unzstd(&encoded));
+}
+
+#[test]
+fn wal_object_floor_golden_decodes_to_sample() {
+    let decoded =
+        decode_wal_object_envelope_zstd(&rezstd(&read_golden("wal_object_floor.v1.cbor")))
+            .expect("decode golden floor object");
+    assert_eq!(decoded.into_payload(), sample_wal_floor_payload());
 }
 
 // The golden is the decompressed document. The stored object is that document
@@ -1717,6 +1745,38 @@ fn wal_decode_rejects_a_basis_floor() {
         WalCodecError::Envelope(EnvelopeCodecError::PayloadDecode(message))
             if message.contains("unknown field") && message.contains("basis_floor_seq")
     );
+}
+
+/// A floor object records no commits, and its floor is at most its
+/// `head_seq`, so the decoder rejects a retention floor next to records or
+/// above `head_seq`.
+#[test]
+fn wal_decode_rejects_a_floor_object_with_records_or_a_floor_above_its_head() {
+    let with_records = wal_document_with_payload_edit(&sample_wal_payload(), |payload| {
+        cbor_map_of(payload).push((
+            ciborium::Value::from("retention_floor_seq"),
+            ciborium::Value::from(1),
+        ));
+    });
+    let above_head = wal_document_with_payload_edit(&sample_wal_floor_payload(), |payload| {
+        let head_seq = sample_wal_floor_payload().head_seq.0;
+        for (key, value) in cbor_map_of(payload) {
+            if key.as_text() == Some("retention_floor_seq") {
+                *value = ciborium::Value::from(head_seq + 1);
+            }
+        }
+    });
+    for (document, expected) in [
+        (with_records, "a floor object has no records"),
+        (above_head, "`retention_floor_seq` is above `head_seq`"),
+    ] {
+        let error = decode_wal_object_envelope_zstd(&document)
+            .expect_err("an invalid floor object must be rejected");
+        assert_matches!(
+            error,
+            WalCodecError::InvalidWalFloorObject { reason, .. } if reason == expected
+        );
+    }
 }
 
 #[test]

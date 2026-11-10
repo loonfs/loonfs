@@ -25,7 +25,7 @@ pub use self::fold::{next_run_no_after, FoldWalOutcome, FoldWalResponse, FoldedW
 pub use self::load::load_position_basis;
 pub(crate) use self::published::move_read_basis;
 pub use self::published::{PublicationReport, PublishedManifest};
-pub use self::retention::{RetentionPlan, RetentionTarget};
+pub use self::retention::{FloorObjectReport, RetentionPlan, RetentionTarget};
 pub use self::statistics::NamespaceStatistics;
 
 pub(crate) use self::load::{

@@ -128,9 +128,10 @@ async fn a_fold_moves_the_read_position_to_its_manifest() {
 }
 
 /// Checks that a retention advance through maintenance runs in the
-/// namespace's session: it moves the position onto the advance's manifest,
-/// and the session's next commit publishes under the same epoch, validated
-/// against the advanced floor.
+/// namespace's session: its floor object moves the position's tip and floor,
+/// the fold after it moves the position onto the manifest that records the
+/// floor, and the session's next commit publishes under the same epoch,
+/// validated against the advanced floor.
 #[tokio::test]
 async fn an_advance_moves_the_sessions_position_onto_its_manifest() {
     let temp_dir = tempdir().expect("tempdir");
@@ -181,21 +182,21 @@ async fn an_advance_moves_the_sessions_position_onto_its_manifest() {
             .basis
             .manifest_no(),
         current_manifest_no(&store, &namespace_id).await,
-        "the advance moves the position onto its manifest"
+        "the advance's fold moves the position onto its manifest"
     );
 
     commit("after").await.expect("commit");
     assert_eq!(
         writer_epoch(&store, &namespace_id).await,
         epoch,
-        "the session advanced the floor under its own epoch"
+        "the advance claims no epoch"
     );
     assert_eq!(
         writer
             .core
             .writer_position(&namespace_id)
             .expect("a position after the commit")
-            .retention_floor_seq,
+            .retention_floor_seq(),
         before.committed_seq
     );
     writer.shutdown().await.expect("shutdown");

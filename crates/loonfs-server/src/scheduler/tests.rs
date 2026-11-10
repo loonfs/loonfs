@@ -1109,12 +1109,14 @@ enum Grep {
 }
 
 /// Requests one idle namespace costs in a sweep: a sweep that does not
-/// collect garbage, then one that does, and how many of the latter are lists. The
-/// docs quote these numbers.
+/// collect garbage, then one that does, and how many of the latter are lists.
+/// The retention advance plans from the view, so its share includes a GET of
+/// the WAL number after the manifest and a second manifest HEAD. The docs
+/// quote these numbers.
 const IDLE_SWEEP_REQUESTS: [(Grep, usize, usize, usize); 3] = [
-    (Grep::NotMaintained, 10, 25, 9),
-    (Grep::Maintained, 14, 29, 9),
-    (Grep::Enabled, 15, 30, 9),
+    (Grep::NotMaintained, 12, 27, 9),
+    (Grep::Maintained, 16, 31, 9),
+    (Grep::Enabled, 17, 32, 9),
 ];
 
 #[tokio::test(start_paused = true)]

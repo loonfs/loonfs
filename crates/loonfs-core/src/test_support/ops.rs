@@ -333,6 +333,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     .collect(),
                 inline_content,
             }],
+            retention_floor_seq: None,
         };
         let object =
             encode_wal_object_envelope_zstd(payload).expect("a test WAL object should encode");
@@ -346,48 +347,56 @@ impl<S: ObjectStore> NamespaceStore<S> {
 }
 
 impl<S: ObjectStore> crate::engine::NamespaceEngine<S, crate::engine::Writable> {
-    /// Advances the retention floor toward `target` with the runtime's three
-    /// steps, for a test of core without a runtime (format spec, "Advancing
-    /// the retention floor").
+    /// Advances the retention floor toward `target` as a runtime without a
+    /// writer session for the namespace does, for a test of core without a
+    /// runtime (format spec, "Advancing the retention floor").
     ///
-    /// The advance plans the floor from the current manifest, and returns
-    /// that manifest's floor without another request when the floor would
-    /// not move. Otherwise, it acquires the writer epoch under this engine's
-    /// writer ID, as a runtime does for a namespace it has no writer session
-    /// for, folds the WAL tail, and publishes the floor under the epoch, in
-    /// that order, and commits nothing. A writer session with an older epoch
-    /// then returns `writer_fenced` to its next publication. The report
-    /// includes the manifest that records the new floor.
+    /// The advance plans the floor from the current manifest and the WAL
+    /// tail after it, and returns the view's floor when the floor would not
+    /// move. Otherwise, it creates a floor object at the WAL tip and claims
+    /// no epoch. Then, when no manifest records the view's floor, it folds
+    /// the WAL tail, and the report includes the fold's manifest, which
+    /// records the floor.
     pub async fn advance_retention_floor(
         &self,
         target: crate::manifest::RetentionTarget,
     ) -> Result<crate::manifest::PublicationReport<loonfs_types::AdvanceRetentionResponse>> {
-        let current = self.namespace.load_current_manifest().await?;
-        let response = |retention_floor_seq| loonfs_types::AdvanceRetentionResponse {
-            namespace_id: self.namespace.namespace_id.clone(),
-            retention_floor_seq,
-        };
-        let floor = match self
+        let anchor = self
             .namespace
-            .plan_retention_floor(&current, target)
+            .load_live_read_anchor(crate::time::Observation::now(std::sync::Arc::clone(
+                &self.namespace.timer,
+            )))
+            .await?;
+        let planned = anchor.current_manifest();
+        let report = match self
+            .namespace
+            .plan_retention_floor(planned, anchor.retention_floor_seq(), target)
             .await?
         {
-            crate::manifest::RetentionPlan::Stays(floor) => {
-                return Ok(crate::manifest::PublicationReport {
-                    response: response(floor),
-                    published: None,
-                })
+            crate::manifest::RetentionPlan::Stays(retention_floor_seq) => {
+                crate::manifest::FloorObjectReport {
+                    retention_floor_seq,
+                    manifest_retention_floor_seq: planned.retention_floor_seq(),
+                }
             }
-            crate::manifest::RetentionPlan::Moves(floor) => floor,
+            crate::manifest::RetentionPlan::Moves(floor) => {
+                self.namespace.publish_floor_object(planned, floor).await?
+            }
         };
-        let acquisition = self.namespace.acquire_writer(self.writer_id()).await?;
-        self.namespace
-            .fold_wal_tail(None, &self.namespace.start_clock())
-            .await?;
-        let published = self
-            .namespace
-            .publish_retention_floor(None, acquisition.writer.writer_epoch, floor)
-            .await?;
-        Ok(published.map(response))
+        let published = if report.retention_floor_seq > report.manifest_retention_floor_seq {
+            self.namespace
+                .fold_wal_tail(None, &self.namespace.start_clock())
+                .await?
+                .published()
+        } else {
+            None
+        };
+        Ok(crate::manifest::PublicationReport {
+            response: loonfs_types::AdvanceRetentionResponse {
+                namespace_id: self.namespace.namespace_id.clone(),
+                retention_floor_seq: report.retention_floor_seq,
+            },
+            published,
+        })
     }
 }

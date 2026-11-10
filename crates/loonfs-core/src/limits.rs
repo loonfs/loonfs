@@ -185,8 +185,7 @@ pub const PROVIDER_PUBLICATION_REQUEST_BOUND_MS: u64 =
 pub const WAL_PUBLISH_BUDGET_MS: u64 = 5 * 60 * 1000;
 
 /// Self-enforced budget for one metadata publication: a fold, a compaction
-/// step, a claim, a deletion, a fork installation, a retention advance, or a
-/// grep step.
+/// step, a claim, a deletion, a fork installation, or a grep step.
 ///
 /// It runs from the start of the publication, before the publisher loads the
 /// manifest it builds on, until the manifest put-if-absent is initiated. A

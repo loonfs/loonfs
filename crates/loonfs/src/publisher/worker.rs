@@ -110,10 +110,10 @@ impl NamespacePublisher {
                     }
                 }
                 WorkItem::RetentionAdvance(pending) => {
-                    // An advance folds, so it's bounded by its fold permit
-                    // alone, as a delete is.
-                    drop(publication);
+                    // An advance is one WAL put, so it's bounded by the
+                    // publication permit, as a batch is.
                     self.execute_retention_advance(pending).await;
+                    drop(publication);
                 }
             }
         }

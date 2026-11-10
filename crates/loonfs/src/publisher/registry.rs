@@ -7,12 +7,13 @@ use crate::publish::CommitCandidate;
 use crate::runtime_core::{HeadPositions, ReadPositionSlot, RuntimeCore};
 use crate::trace::phase_event;
 use crate::{
-    AdvanceRetentionResponse, CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, Error,
-    ErrorCode, Result, SharedObjectStore, WriterState,
+    CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, Error, ErrorCode, Result,
+    SharedObjectStore, WriterState,
 };
 use futures::future::BoxFuture;
+use loonfs_core::control::LoadedManifest;
 use loonfs_core::publish::{NamespaceCommitEngine, WriterPosition};
-use loonfs_core::{Phase, PublicationReport, PublishedManifest};
+use loonfs_core::{FloorObjectReport, Phase, PublicationReport, PublishedManifest};
 use loonfs_types::Commit;
 use loonfs_types::{ChangeSeq, ManifestNo, NamespaceId};
 use std::collections::HashMap;
@@ -165,17 +166,6 @@ impl NamespaceSession {
         options: DeleteNamespaceOptions,
     ) -> Result<DeleteNamespaceResponse> {
         self.publisher.submit_delete(options).await
-    }
-
-    /// Submits an advance of the retention floor to `target`, sequenced like
-    /// a deletion: mutations admitted before it publish first, and are
-    /// folded before the floor moves, and mutations admitted after it are
-    /// validated against the new floor.
-    pub(crate) async fn submit_retention_advance(
-        &self,
-        target: ChangeSeq,
-    ) -> Result<AdvanceRetentionResponse> {
-        self.publisher.submit_retention_advance(target).await
     }
 
     pub(crate) fn state(&self) -> NamespaceSessionStatus {
@@ -500,6 +490,25 @@ impl PublisherRegistry {
 
     pub(super) fn live_publisher(&self, namespace_id: &NamespaceId) -> Option<NamespacePublisher> {
         self.shared.live_publisher(namespace_id)
+    }
+
+    /// Submits an advance of the retention floor to `target`, planned from
+    /// `planned`, to the queue of the namespace's writer session in this
+    /// runtime, and returns `None` without submitting when the runtime has
+    /// no writer session for the namespace that admits work and isn't
+    /// fenced.
+    ///
+    /// The queue orders the advance like a deletion: commits admitted before
+    /// it publish first, and commits admitted after it are validated against
+    /// the new floor.
+    pub(crate) async fn submit_retention_advance(
+        &self,
+        namespace_id: &NamespaceId,
+        planned: LoadedManifest,
+        target: ChangeSeq,
+    ) -> Option<Result<FloorObjectReport>> {
+        let publisher = self.live_publisher(namespace_id)?;
+        publisher.submit_retention_advance(planned, target).await
     }
 
     /// Returns the writer sessions that this runtime's reads start from.
