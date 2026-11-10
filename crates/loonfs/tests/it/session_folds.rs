@@ -342,34 +342,32 @@ enum HeadPin {
     Fork,
 }
 
-/// Checks that a snapshot or a fork whose fold a fold of the namespace's
-/// session replaces before the pin is verified folds and pins again through
-/// the namespace's fold path. The pin put is parked while the session folds
-/// the commits after the pin's fold. The retry's fold then starts from the
-/// session's position, so it reads no WAL object, and each content object is
-/// written once.
+/// Checks that a fold of the namespace's session waits for a snapshot's or a
+/// fork's pin until the pin is verified, so the pin isn't written again. The
+/// pin put is parked while more commits make the session's fold due. No
+/// manifest is published while the pin is parked, the pin keeps the
+/// manifest of its own fold, and the session's fold publishes once the pin
+/// returns.
 #[tokio::test]
-async fn a_snapshot_or_a_fork_whose_fold_is_replaced_retries_through_the_fold_path() {
+async fn a_sessions_fold_waits_for_a_snapshot_or_a_fork_to_verify_its_pin() {
     for head_pin in [HeadPin::Snapshot, HeadPin::Fork] {
-        pin_after_a_replaced_fold(head_pin).await;
+        fold_beside_a_parked_pin(head_pin).await;
     }
 }
 
-async fn pin_after_a_replaced_fold(head_pin: HeadPin) {
-    let fork_id = namespace_id("pin-retry-fork");
-    let namespace_id = namespace_id("pin-retry");
+async fn fold_beside_a_parked_pin(head_pin: HeadPin) {
+    let fork_id = namespace_id("pin-wait-fork");
+    let namespace_id = namespace_id("pin-wait");
+    let pins = KeyPredicate::prefix(loonfs_objectstore::keys::pin_prefix(&namespace_id));
     let blocking = Arc::new(BlockingStore::new(
         MemoryStore::new(ChecksumAlgorithm::Crc64nvme),
-        KeyPredicate::prefix(loonfs_objectstore::keys::pin_prefix(&namespace_id)),
+        pins.clone(),
         OperationSelector::Put,
     ));
     let store = Arc::new(RecordingStore::new(blocking.clone(), KeyPredicate::any()));
     let runtime = LoonFs::builder_with_store(store.clone())
-        .writer_id(writer_id("pin-retry"))
+        .writer_id(writer_id("pin-wait"))
         .session_fold_at_wal_objects(FOLD_AT_WAL_OBJECTS)
-        .config(RuntimeConfig {
-            ..RuntimeConfig::default()
-        })
         .build()
         .await
         .expect("runtime");
@@ -390,13 +388,22 @@ async fn pin_after_a_replaced_fold(head_pin: HeadPin) {
             }
         }
     };
-    store.reset();
+    let current_manifest_no = || async {
+        runtime
+            .maintenance(writer_id("pin-wait"))
+            .diagnostics(&namespace_id)
+            .await
+            .expect("diagnostics")
+            .current_manifest_no
+            .expect("a manifest")
+    };
     write(0, FILES - 1).await;
+    store.reset();
     blocking.block_next();
     let pinned = async {
         match head_pin {
             HeadPin::Snapshot => namespace
-                .create_snapshot("retried")
+                .create_snapshot("parked")
                 .await
                 .expect("the snapshot")
                 .snapshot_id
@@ -416,36 +423,29 @@ async fn pin_after_a_replaced_fold(head_pin: HeadPin) {
         _ = &mut pinned => panic!("{head_pin:?}: the pin finished without writing its record"),
         () = blocking.wait_until_blocked() => {}
     }
+    let folded = current_manifest_no().await;
+    let before = store.take();
     // The pin's fold folded the fence, so one more file than before brings
     // the tail to the fold trigger.
     write(FILES - 1, FILES + 1).await;
-    namespace.wait_for_fold().await.expect("the session's fold");
-    let folded = runtime
-        .maintenance(writer_id("pin-retry"))
-        .diagnostics(&namespace_id)
-        .await
-        .expect("diagnostics")
-        .current_manifest_no
-        .expect("a manifest");
-    let operations = store.take();
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    let parked = store.take();
+    assert_eq!(
+        write_keys(&parked, &KeyPredicate::manifest(&namespace_id)),
+        Vec::<String>::new(),
+        "{head_pin:?}: no fold publishes while the pin is parked"
+    );
     blocking.release();
     assert_eq!(pinned.await, folded, "{head_pin:?}");
-    let retry = store.take();
-    let wal_prefix = loonfs_objectstore::keys::wal_prefix(&namespace_id);
-    assert!(
-        retry
-            .iter()
-            .all(|operation| !operation.key().starts_with(&wal_prefix)),
-        "{head_pin:?}: the retry folds from the session's position: {retry:#?}"
-    );
-    let operations = [operations, retry].concat();
-    let content_puts = write_keys(&operations, &KeyPredicate::content_blob());
-    let distinct: BTreeSet<_> = content_puts.iter().collect();
-    assert_eq!(distinct.len(), 2 * FILES, "{head_pin:?}: {content_puts:#?}");
+    namespace.wait_for_fold().await.expect("the session's fold");
+    assert_eq!(current_manifest_no().await.0, folded.0 + 1, "{head_pin:?}");
+    let operations = [before, parked, store.take()].concat();
     assert_eq!(
-        content_puts.len(),
-        distinct.len(),
-        "{head_pin:?}: {content_puts:#?}"
+        write_keys(&operations, &pins).len(),
+        1,
+        "{head_pin:?}: one pin put"
     );
     runtime.shutdown().await.expect("shutdown");
 }

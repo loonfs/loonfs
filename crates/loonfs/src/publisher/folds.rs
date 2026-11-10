@@ -1,5 +1,6 @@
 //! The one fold path of each namespace in a writable runtime, and the locks
-//! that keep a namespace's folds apart and its compaction units apart.
+//! that keep a namespace's folds apart from each other and from its pins, and
+//! its compaction units apart.
 
 use super::registry::NamespaceChange;
 use super::worker::elapsed_ms_from;
@@ -13,28 +14,75 @@ use loonfs_core::time::OperationClock;
 use loonfs_core::{FoldedWalTail, MetadataCompactionCancellation, Phase};
 use loonfs_types::format::control::ManifestRef;
 use std::future::Future;
-use std::sync::Arc;
-use tokio::sync::Mutex as AsyncMutex;
+use std::sync::{Arc, Mutex, MutexGuard};
+use tokio::sync::{Mutex as AsyncMutex, RwLock, RwLockReadGuard};
 use tracing::Instrument;
 
-/// The fold lock and the compaction lock of one namespace in this runtime.
+/// The fold turn, the fold rounds, and the compaction lock of one namespace
+/// in this runtime.
 ///
-/// A fold takes the fold lock before it decides that a fold is due, and
-/// keeps it until it has moved the session's position, so two folds never
-/// fold the same tail. A compaction unit takes the compaction lock before it
-/// plans, so two units never plan from the same manifest. Both are `tokio`
-/// mutexes, because a fold and a unit keep their lock across store requests.
+/// A fold takes the fold turn in exclusive mode before it decides that a
+/// fold is due, and keeps it until it has moved the session's position, so
+/// two folds never fold the same tail. A pin takes the turn in shared mode
+/// from the moment it has a fold's manifest until its verification, so a
+/// fold in this runtime never replaces that manifest before the pin is
+/// verified, and any number of pins run at once. The fold rounds record
+/// which fold served a request: a fold that took its input after the
+/// request arrived covers every commit acknowledged before the request, so
+/// the requests that wait for one fold share the next one. A compaction
+/// unit takes the compaction lock before it plans, so two units never plan
+/// from the same manifest. The turn and the compaction lock are `tokio`
+/// locks, because a fold, a pin, and a unit keep them across store requests.
 #[derive(Default)]
 pub(crate) struct NamespaceTurns {
-    pub(super) fold: AsyncMutex<()>,
+    pub(super) fold: RwLock<()>,
+    rounds: Mutex<FoldRounds>,
     pub(crate) compaction: AsyncMutex<()>,
+}
+
+#[derive(Default)]
+struct FoldRounds {
+    started: u64,
+    last: Option<(u64, FoldedWalTail)>,
+}
+
+impl NamespaceTurns {
+    fn started(&self) -> u64 {
+        self.lock_rounds().started
+    }
+
+    fn folded_after(&self, arrival: u64) -> Option<FoldedWalTail> {
+        self.lock_rounds()
+            .last
+            .as_ref()
+            .filter(|(round, _)| *round > arrival)
+            .map(|(_, folded)| folded.clone())
+    }
+
+    fn start_round(&self) -> u64 {
+        let mut rounds = self.lock_rounds();
+        rounds.started += 1;
+        rounds.started
+    }
+
+    fn record(&self, round: u64, folded: &FoldedWalTail) {
+        self.lock_rounds().last = Some((round, folded.clone()));
+    }
+
+    fn lock_rounds(&self) -> MutexGuard<'_, FoldRounds> {
+        self.rounds
+            .lock()
+            .expect("the fold rounds lock should not be poisoned")
+    }
 }
 
 /// Which WAL tails [`PublisherRegistry::fold_namespace`] folds.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum FoldWhen {
     /// Any tail. A tail that's already folded is reported as
-    /// [`FoldWalOutcome::AlreadyCurrent`].
+    /// [`FoldWalOutcome::AlreadyCurrent`]. A fold of the namespace in this
+    /// runtime that took its input after the call arrived serves the call,
+    /// which then returns that fold's result and folds nothing.
     Always,
     /// A tail of at least `max_wal_tail_objects` WAL objects, a tail of at
     /// least `FOLD_AT_WAL_BYTES` unfolded WAL bytes, or a tail whose newest
@@ -72,16 +120,19 @@ impl NamespaceFold {
 impl PublisherRegistry {
     /// Folds the WAL tail of `namespace_id` when `when` finds a fold due.
     ///
-    /// Every fold of a namespace in this runtime runs here, under the
-    /// namespace's fold lock, so a fold waits for a fold in progress instead
-    /// of folding the same tail. The fold's input is the position of the
+    /// Every fold of a namespace in this runtime runs here, with the
+    /// namespace's fold turn in exclusive mode, so a fold waits for a fold in
+    /// progress instead of folding the same tail, and for the pins in
+    /// progress (see [`Self::pin_after_fold`]). Under [`FoldWhen::Always`], a
+    /// fold that took its input after the call arrived serves the call. The
+    /// fold's input is the position of the
     /// namespace's writer session while the session isn't fenced and the
     /// position is current (see [`NamespacePublisher::current_position`]),
     /// and otherwise the fold loads the tail from the store. A check that
-    /// the position answers takes no lock and no fold permit when nothing is
-    /// due, and the check runs again under the lock, because a fold that had
-    /// the lock may have folded the tail. Without a position, the check loads
-    /// the tail from the store, under the lock.
+    /// the position answers takes no turn and no fold permit when nothing is
+    /// due, and the check runs again under the turn, because a fold that had
+    /// the turn may have folded the tail. Without a position, the check loads
+    /// the tail from the store, under the turn.
     ///
     /// The fold waits for a fold permit, and it moves the session's position
     /// and the cached head onto the manifest that covers the tail, whether
@@ -93,9 +144,9 @@ impl PublisherRegistry {
         namespace_id: &NamespaceId,
         when: FoldWhen,
     ) -> Result<NamespaceFold> {
-        let session = self
-            .live_publisher(namespace_id)
-            .filter(|publisher| !publisher.session_is_fenced());
+        let turns = self.namespace_turns(namespace_id);
+        let arrival = turns.started();
+        let session = self.unfenced_publisher(namespace_id);
         let session = session.as_ref();
         if session
             .and_then(NamespacePublisher::current_position)
@@ -105,13 +156,29 @@ impl PublisherRegistry {
                 return Ok(not_due);
             }
         }
-        let turns = self.namespace_turns(namespace_id);
-        let _turn = turns.fold.lock().await;
+        let _turn = turns.fold.write().await;
+        if let FoldWhen::Always = when {
+            if let Some(folded) = turns.folded_after(arrival) {
+                return Ok(NamespaceFold::Folded(folded));
+            }
+        }
         if let Some(not_due) = self.fold_not_due(namespace_id, when, session).await? {
             return Ok(not_due);
         }
+        self.fold_under_turn(namespace_id, session, &turns)
+            .await
+            .map(NamespaceFold::Folded)
+    }
+
+    async fn fold_under_turn(
+        &self,
+        namespace_id: &NamespaceId,
+        session: Option<&NamespacePublisher>,
+        turns: &NamespaceTurns,
+    ) -> Result<FoldedWalTail> {
         let core = &self.shared.context.runtime_core;
         let _permit = core.fold_permit().await;
+        let round = turns.start_round();
         // Commits that the session published while the fold waited for its
         // permit are in the position now, so the fold folds them too.
         let input = session.and_then(NamespacePublisher::current_position);
@@ -135,6 +202,7 @@ impl PublisherRegistry {
             .finish_namespace_mutation(namespace_id, result, |_| NamespaceChange::Unchanged)
             .await?;
         self.move_views(namespace_id, folded.manifest.clone()).await;
+        turns.record(round, &folded);
         if folded.response.outcome == FoldWalOutcome::Published {
             if let Some(publisher) = self.live_publisher(namespace_id) {
                 publisher.fold_published.send_replace(());
@@ -142,7 +210,7 @@ impl PublisherRegistry {
             self.raise_hint(namespace_id, folded.response.manifest_no)
                 .await;
         }
-        Ok(NamespaceFold::Folded(folded))
+        Ok(folded)
     }
 
     /// Folds the WAL tail of `namespace_id` and runs `pin` at the manifest
@@ -150,10 +218,14 @@ impl PublisherRegistry {
     /// manifest replaced before its verification, for at most
     /// `MAX_CONTENTION_ATTEMPTS` pins.
     ///
-    /// Each fold is one of the namespace's folds (see
-    /// [`Self::fold_namespace`]), so a fold after a replaced pin waits for a
-    /// fold in progress instead of folding the same tail. The fold lock isn't
-    /// held while `pin` runs.
+    /// Each attempt uses a fold that took its input after the attempt
+    /// arrived, and folds only when no such fold has completed (see
+    /// [`Self::fold_namespace`]). The attempt keeps the namespace's fold turn
+    /// in shared mode from the moment it has the fold's manifest until `pin`
+    /// returns, so no fold in this runtime replaces the manifest before the
+    /// pin is verified, and other pins run at the same time. A compaction
+    /// unit, an extension's publication, or another process can still
+    /// replace the manifest, so the attempts stay.
     pub(crate) async fn pin_after_fold<T, Pin>(
         &self,
         namespace_id: &NamespaceId,
@@ -162,20 +234,54 @@ impl PublisherRegistry {
     where
         Pin: Future<Output = loonfs_core::Result<T>>,
     {
+        let turns = self.namespace_turns(namespace_id);
         let mut pins = 1;
         loop {
-            let folded = self
-                .fold_namespace(namespace_id, FoldWhen::Always)
-                .await?
-                .folded()
-                .expect("a fold of any tail runs");
-            match pin(folded.manifest.manifest).await {
+            let arrival = turns.started();
+            let (manifest, turn) = self.fold_for_pin(namespace_id, &turns, arrival).await?;
+            let pinned = pin(manifest).await;
+            drop(turn);
+            match pinned {
                 Err(CoreError::CheckpointUnavailable(_)) if pins < MAX_CONTENTION_ATTEMPTS => {
                     pins += 1;
                 }
                 pinned => return pinned.map_err(Error::from),
             }
         }
+    }
+
+    async fn fold_for_pin<'a>(
+        &self,
+        namespace_id: &NamespaceId,
+        turns: &'a NamespaceTurns,
+        arrival: u64,
+    ) -> Result<(ManifestRef, RwLockReadGuard<'a, ()>)> {
+        let shared = turns.fold.read().await;
+        if let Some(folded) = turns.folded_after(arrival) {
+            return Ok((folded.manifest.manifest, shared));
+        }
+        drop(shared);
+        // The exclusive turn is released, not downgraded. A pin that kept
+        // the turn from its fold would make the next waiter's exclusive turn
+        // wait for that pin, and the waiters would pin one at a time.
+        {
+            let _exclusive = turns.fold.write().await;
+            if turns.folded_after(arrival).is_none() {
+                let session = self.unfenced_publisher(namespace_id);
+                self.fold_under_turn(namespace_id, session.as_ref(), turns)
+                    .await?;
+            }
+        }
+        let shared = turns.fold.read().await;
+        let folded = turns
+            .folded_after(arrival)
+            .expect("a fold after the arrival should have completed under the exclusive turn");
+        Ok((folded.manifest.manifest, shared))
+    }
+
+    fn unfenced_publisher(&self, namespace_id: &NamespaceId) -> Option<NamespacePublisher> {
+        self.live_publisher(namespace_id)
+            .filter(|publisher| !publisher.session_is_fenced())
     }
 
     /// Returns what a fold under `when` reports without folding, or `None`
@@ -243,7 +349,7 @@ impl PublisherRegistry {
         }))
     }
 
-    /// Returns the fold and compaction locks of `namespace_id`.
+    /// Returns the fold turn and the compaction lock of `namespace_id`.
     pub(crate) fn namespace_turns(&self, namespace_id: &NamespaceId) -> Arc<NamespaceTurns> {
         self.shared.lock_state().turns(namespace_id)
     }
