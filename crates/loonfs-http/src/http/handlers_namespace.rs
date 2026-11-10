@@ -48,8 +48,8 @@ fn set_feature(capabilities: &mut CapabilityDocument, feature: &str, supported: 
 #[serde(deny_unknown_fields)]
 pub(super) struct DeleteNamespaceQuery {
     /// The caller's deletion ID for this request. A retry with the same deletion ID returns the
-    /// namespace ID and the final head, whatever its `expected_head_seq`.
-    #[cfg_attr(feature = "openapi", param(required = true))]
+    /// namespace ID and the final head, whatever its `expected_head_seq`. Without this parameter,
+    /// the server generates a deletion ID.
     deletion_id: Option<DeletionId>,
     /// The head sequence that the namespace must still have for the delete to succeed.
     expected_head_seq: Option<ChangeSeq>,
@@ -223,7 +223,7 @@ pub(super) async fn create_namespace(
             &CreateNamespaceOptions {
                 access: request.access,
                 retention_window_ms: request.retention_window_ms,
-                creation_id: Some(request.creation_id),
+                creation_id: request.creation_id,
                 ..Default::default()
             },
         )
@@ -333,20 +333,22 @@ pub(super) async fn delete_namespace(
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<DeleteNamespaceQuery>,
 ) -> Result<Json<loonfs_types::DeleteNamespaceResponse>, ApiResponseError> {
-    let deletion_id = required_query_param(query.deletion_id, "deletion_id")?;
     let options = DeleteNamespaceOptions {
         expected_head_seq: query.expected_head_seq,
-        deletion_id: Some(deletion_id.clone()),
+        deletion_id: query.deletion_id.clone(),
     };
     // The host opens a writer only for a live namespace, so a retry whose
     // first attempt deleted the namespace finds the tombstone here.
     let namespace = match state.open_writer(&namespace_id, subject.clone()).await {
         Ok(namespace) => namespace,
         Err(error) if error.code() == ErrorCode::NamespaceDeleted => {
+            let Some(deletion_id) = &query.deletion_id else {
+                return Err(error);
+            };
             return match state
                 .runtime_for(subject)
                 .namespace(&namespace_id)
-                .find_deletion(&deletion_id)
+                .find_deletion(deletion_id)
                 .await
                 .map_err(ApiResponseError::runtime)?
             {
@@ -406,7 +408,7 @@ pub(super) async fn fork_namespace(
             &actor_id,
             &loonfs::ForkNamespaceOptions {
                 snapshot_id: request.snapshot_id,
-                creation_id: Some(request.creation_id),
+                creation_id: request.creation_id,
             },
         )
         .await

@@ -1497,21 +1497,12 @@ conformanceTest("error_contract", async (activeHarness, testCase) => {
     assert.ok(caught.body.request_id != null);
 });
 
-/** Returns the creation ID that the suite sends for a create of `namespaceId`, so a repeated create is a retry of the same request. */
-function creationId(namespaceId: string): string {
-    return `${namespaceId}-create`;
-}
-
 conformanceTest("commit_replay", async (activeHarness, testCase) => {
     const [request, expected] = decodeCommitReplay(testCase);
-    // A create sent again with its creation ID returns the namespace.
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-        const created = await activeHarness.client.namespaces.create(
-            { namespace_id: request.namespace_id, creation_id: creationId(request.namespace_id) },
-            { headers: { "Loonfs-Actor": request.actor_id } },
-        );
-        assert.equal(created.namespace_id, request.namespace_id);
-    }
+    await activeHarness.client.namespaces.create(
+        { namespace_id: request.namespace_id },
+        { headers: { "Loonfs-Actor": request.actor_id } },
+    );
     const commit = directoryCommit(
         request.namespace_id,
         request.commit_id,
@@ -1631,7 +1622,7 @@ conformanceTest("commit_replay", async (activeHarness, testCase) => {
 conformanceTest("pagination", async (activeHarness, testCase) => {
     const [request, expected] = decodePagination(testCase);
     await activeHarness.client.namespaces.create(
-        { namespace_id: request.namespace_id, creation_id: creationId(request.namespace_id) },
+        { namespace_id: request.namespace_id },
         { headers: { "Loonfs-Actor": request.actor_id } },
     );
     await activeHarness.client.commits.create(
@@ -1709,7 +1700,7 @@ conformanceTest("pagination", async (activeHarness, testCase) => {
 conformanceTest("children_by_inode", async (activeHarness, testCase) => {
     const [request, expected] = decodeChildrenByInode(testCase);
     await activeHarness.client.namespaces.create(
-        { namespace_id: request.namespace_id, creation_id: creationId(request.namespace_id) },
+        { namespace_id: request.namespace_id },
         { headers: { "Loonfs-Actor": request.actor_id } },
     );
     await activeHarness.client.commits.create(
@@ -1824,7 +1815,7 @@ conformanceTest("inode_mutations", async (activeHarness, testCase) => {
     const namespaceId = request.namespace_id;
     const childPath = (name: string): string => `${request.directory}/${name}`;
     await client.namespaces.create(
-        { namespace_id: namespaceId, creation_id: creationId(namespaceId) },
+        { namespace_id: namespaceId },
         { headers: { "Loonfs-Actor": request.actor_id } },
     );
     await client.commits.create(
@@ -2082,7 +2073,7 @@ conformanceTest("inode_addressing", async (activeHarness, testCase) => {
             return true;
         };
 
-    await client.namespaces.create({ namespace_id: namespaceId, creation_id: creationId(namespaceId) }, actorHeaders);
+    await client.namespaces.create({ namespace_id: namespaceId }, actorHeaders);
     await client.commits.create(
         directoryCommit(namespaceId, "conf-inode-addressing-directory", request.directory),
         actorHeaders,
@@ -2274,7 +2265,7 @@ conformanceTest("snapshots", async (activeHarness, testCase) => {
     const currentBytes = new TextEncoder().encode(request.current_content_utf8);
 
     await client.namespaces.create(
-        { namespace_id: namespaceId, creation_id: creationId(namespaceId) },
+        { namespace_id: namespaceId },
         { headers: { "Loonfs-Actor": request.actor_id } },
     );
     await client.commits.create(
@@ -2567,7 +2558,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     context.after(() => proxy.close());
 
     await activeHarness.client.namespaces.create(
-        { namespace_id: request.namespace_id, creation_id: creationId(request.namespace_id) },
+        { namespace_id: request.namespace_id },
         { headers: { "Loonfs-Actor": request.actor_id } },
     );
     const namespaceBase = `${proxy.baseUrl}/v0/namespaces/${encodeURIComponent(request.namespace_id)}`;
@@ -2774,7 +2765,6 @@ test("proxy", { skip: environmentSkip }, async (context) => {
         },
         body: JSON.stringify({
             namespace_id: acl.namespace_id,
-            creation_id: creationId(acl.namespace_id),
             access: {
                 kind: "acl",
                 principal_scope: acl.principal_scope,
@@ -2933,7 +2923,7 @@ test("proxy", { skip: environmentSkip }, async (context) => {
 conformanceTest("changes", async (activeHarness, testCase) => {
     const [request, expected] = decodeChanges(testCase);
     await activeHarness.client.namespaces.create(
-        { namespace_id: request.namespace_id, creation_id: creationId(request.namespace_id) },
+        { namespace_id: request.namespace_id },
         { headers: { "Loonfs-Actor": request.actor_id } },
     );
     const committed = await activeHarness.client.commits.create(
@@ -3024,7 +3014,7 @@ conformanceTest("unknown_inode_kinds", async (_activeHarness, testCase) => {
 conformanceTest("upload_direct_put", async (activeHarness, testCase) => {
     const [request, expected] = decodeDirectPut(testCase);
     await activeHarness.client.namespaces.create(
-        { namespace_id: request.namespace_id, creation_id: creationId(request.namespace_id) },
+        { namespace_id: request.namespace_id },
         { headers: { "Loonfs-Actor": request.actor_id } },
     );
     const payload = new TextEncoder().encode(request.content_utf8);
@@ -3086,7 +3076,7 @@ conformanceTest("upload_direct_put", async (activeHarness, testCase) => {
 conformanceTest("upload_multipart", async (activeHarness, testCase) => {
     const [request, expected] = decodeMultipart(testCase);
     await activeHarness.client.namespaces.create(
-        { namespace_id: request.namespace_id, creation_id: creationId(request.namespace_id) },
+        { namespace_id: request.namespace_id },
         { headers: { "Loonfs-Actor": request.actor_id } },
     );
     const payload = bytePattern(request.content_pattern);
@@ -3218,7 +3208,7 @@ conformanceTest("upload_multipart", async (activeHarness, testCase) => {
 conformanceTest("upload_abort", async (activeHarness, testCase) => {
     const [request, expected] = decodeAbort(testCase);
     await activeHarness.client.namespaces.create(
-        { namespace_id: request.namespace_id, creation_id: creationId(request.namespace_id) },
+        { namespace_id: request.namespace_id },
         { headers: { "Loonfs-Actor": request.actor_id } },
     );
     const begin = await activeHarness.client.uploads.create({
@@ -3247,7 +3237,7 @@ conformanceTest("upload_abort", async (activeHarness, testCase) => {
 conformanceTest("download", async (activeHarness, testCase) => {
     const [request, expected] = decodeDownload(testCase);
     await activeHarness.client.namespaces.create(
-        { namespace_id: request.namespace_id, creation_id: creationId(request.namespace_id) },
+        { namespace_id: request.namespace_id },
         { headers: { "Loonfs-Actor": request.actor_id } },
     );
     const payload = new TextEncoder().encode(request.content_utf8);
@@ -3287,7 +3277,7 @@ conformanceTest("read_consistency", async (activeHarness, testCase) => {
     const client = activeHarness.client;
     const namespaceId = request.namespace_id;
     const actor = { headers: { "Loonfs-Actor": request.actor_id } };
-    await client.namespaces.create({ namespace_id: namespaceId, creation_id: creationId(namespaceId) }, actor);
+    await client.namespaces.create({ namespace_id: namespaceId }, actor);
     const puts: Array<[string, string]> = [
         [request.path, request.commit_ids.put],
         [request.deleted_path, request.commit_ids.put_deleted],
@@ -3384,7 +3374,7 @@ conformanceTest("append", async (activeHarness, testCase) => {
     const [request, expected] = decodeAppend(testCase);
     const client = activeHarness.client;
     const actor = { headers: { "Loonfs-Actor": request.actor_id } };
-    await client.namespaces.create({ namespace_id: request.namespace_id, creation_id: creationId(request.namespace_id) }, actor);
+    await client.namespaces.create({ namespace_id: request.namespace_id }, actor);
     const content = new TextEncoder().encode(request.content_utf8.repeat(request.content_repetitions));
     const appended = new TextEncoder().encode(request.appended_utf8);
     const whole = new Uint8Array(content.length + appended.length);
@@ -3540,7 +3530,7 @@ conformanceTest("append", async (activeHarness, testCase) => {
 conformanceTest("end_to_end", async (activeHarness, testCase) => {
     const [request, expected] = decodeEndToEnd(testCase);
     await activeHarness.client.namespaces.create(
-        { namespace_id: request.namespace_id, creation_id: creationId(request.namespace_id) },
+        { namespace_id: request.namespace_id },
         { headers: { "Loonfs-Actor": request.actor_id } },
     );
     const mkdir = await activeHarness.client.commits.create(

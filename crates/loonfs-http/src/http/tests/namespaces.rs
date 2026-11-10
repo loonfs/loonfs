@@ -112,7 +112,8 @@ async fn two_commits_to_one_namespace_use_one_writer_epoch() {
 
 /// Checks that a delete leaves no writer handle, that the same delete sent
 /// again returns the first response from the tombstone that the host's open
-/// finds, and that a delete without its deletion ID or with another one fails.
+/// finds, and that a delete of the deleted namespace without a deletion ID or
+/// with another one returns `namespace_deleted`.
 #[tokio::test]
 async fn a_deleted_namespace_leaves_no_writer_handle_in_the_host() {
     let (_directory, router, state, namespaces) = host("delete-host").await;
@@ -138,9 +139,9 @@ async fn a_deleted_namespace_leaves_no_writer_handle_in_the_host() {
             ErrorCode::NamespaceDeleted,
         ),
         (
-            format!("/v0/namespaces/{kept}"),
-            StatusCode::BAD_REQUEST,
-            ErrorCode::InvalidRequest,
+            format!("/v0/namespaces/{deleted}"),
+            StatusCode::GONE,
+            ErrorCode::NamespaceDeleted,
         ),
         (
             format!("/v0/namespaces/{kept}?deletion_id=Not%20an%20ID"),
@@ -191,10 +192,10 @@ async fn a_create_request_with_a_naming_field_is_rejected_and_leaves_no_writer_h
 }
 
 /// Checks that a create or a fork sent again with its creation ID returns the
-/// namespace, and that a create or a fork without a creation ID is
-/// `invalid_request`.
+/// namespace, and that a create or a fork without a creation ID succeeds once
+/// and returns `namespace_exists` when it's sent again.
 #[tokio::test]
-async fn a_create_or_fork_needs_a_creation_id_and_a_retry_returns_the_namespace() {
+async fn a_create_or_fork_sent_again_with_its_creation_id_returns_the_namespace() {
     let (_directory, router, _, _) = host("creation-id-host").await;
     let create = serde_json::json!({"namespace_id": "created", "creation_id": "job-1-create"});
     let fork = serde_json::json!({"new_namespace_id": "forked", "creation_id": "job-1-fork"});
@@ -215,13 +216,15 @@ async fn a_create_or_fork_needs_a_creation_id_and_a_retry_returns_the_namespace(
         ),
         (
             "/v0/namespaces/created/forks",
-            serde_json::json!({"new_namespace_id": "other"}),
+            serde_json::json!({"new_namespace_id": "other-fork"}),
         ),
     ] {
+        let (status, _) = send(&router, Method::POST, uri, body.to_string()).await;
+        assert_eq!(status, StatusCode::OK, "{uri}");
         let (status, body) = send(&router, Method::POST, uri, body.to_string()).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+        assert_eq!(status, StatusCode::CONFLICT, "{uri}");
         let error: loonfs_types::ErrorResponse = serde_json::from_slice(&body).expect("error body");
-        assert_eq!(error.code, ErrorCode::InvalidRequest.as_str(), "{uri}");
+        assert_eq!(error.code, ErrorCode::NamespaceExists.as_str(), "{uri}");
     }
 }
 

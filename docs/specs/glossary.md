@@ -58,11 +58,11 @@ An identifier for a commit, chosen by the client, that makes retries safe. It's 
 
 ### Creation ID
 
-An identifier that the caller generates for one request that creates or forks a namespace, such as `job-4182-create`. LoonFS stores the creation ID in the namespace's first manifest and copies the ID into every later manifest, so a retry of the request can find the ID for as long as the namespace exists. A create or fork that finds an active namespace with its own creation ID returns the namespace as it is now, and a create or fork that finds another creation ID returns `namespace_exists`. The Rust client generates a creation ID when the caller doesn't provide one, and sends the same ID on every attempt of one call. See [Creating a namespace](format.md#91-creating-a-namespace).
+An identifier for one request that creates or forks a namespace, such as `job-4182-create`. The caller generates the ID, and LoonFS generates one for a request without an ID. LoonFS stores the creation ID in the namespace's first manifest and copies the ID into every later manifest, so a retry of the request can find the ID for as long as the namespace exists. A create or fork that finds an active namespace with its own creation ID returns the namespace as it is now, and a create or fork that finds another creation ID returns `namespace_exists`. The Rust client generates a creation ID when the caller doesn't provide one, and sends the same ID on every attempt of one call. See [Creating a namespace](format.md#91-creating-a-namespace).
 
 ### Deletion ID
 
-An identifier that the caller generates for one request that deletes a namespace, such as `job-4182-delete`. LoonFS stores the deletion ID in the [namespace tombstone](#namespace-tombstone). A delete that finds a tombstone with its own deletion ID returns the namespace ID and the final head, and a delete that finds another deletion ID returns `namespace_deleted`. See [Deleting a namespace](format.md#94-deleting-a-namespace).
+An identifier for one request that deletes a namespace, such as `job-4182-delete`. The caller generates the ID, and LoonFS generates one for a request without an ID. LoonFS stores the deletion ID in the [namespace tombstone](#namespace-tombstone). A delete that finds a tombstone with its own deletion ID returns the namespace ID and the final head, and a delete that finds another deletion ID returns `namespace_deleted`. See [Deleting a namespace](format.md#94-deleting-a-namespace).
 
 ### Commit receipt
 

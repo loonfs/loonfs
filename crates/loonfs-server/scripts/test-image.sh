@@ -192,7 +192,7 @@ CREATE_STATUS="$(status_code --request POST \
   --header "Authorization: Bearer $AUTH_TOKEN" \
   --header 'Content-Type: application/json' \
   --header 'Loonfs-Actor: loonfs-image-test' \
-  --data "{\"namespace_id\":\"$NAMESPACE\",\"creation_id\":\"image-test-create\"}" \
+  --data "{\"namespace_id\":\"$NAMESPACE\"}" \
   "$BASE_URL/v0/namespaces")"
 [[ "$CREATE_STATUS" == "200" ]] \
   || fail "POST /v0/namespaces answered $CREATE_STATUS, expected 200"

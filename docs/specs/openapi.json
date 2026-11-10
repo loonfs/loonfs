@@ -962,7 +962,7 @@
           },
           "creation_id": {
             "$ref": "#/components/schemas/CreationId",
-            "description": "The caller's creation ID for this request. A retry with the same creation ID returns the\nnamespace as it is now."
+            "description": "The caller's creation ID for this request. A retry with the same creation ID returns the\nnamespace as it is now. Without this field, the server generates a creation ID."
           },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
@@ -976,7 +976,6 @@
           }
         },
         "required": [
-          "creation_id",
           "namespace_id"
         ],
         "type": "object"
@@ -2796,7 +2795,7 @@
         "properties": {
           "creation_id": {
             "$ref": "#/components/schemas/CreationId",
-            "description": "The caller's creation ID for this request. A retry with the same creation ID returns the\nfork as it is now."
+            "description": "The caller's creation ID for this request. A retry with the same creation ID returns the\nfork as it is now. Without this field, the server generates a creation ID."
           },
           "new_namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
@@ -2808,7 +2807,6 @@
           }
         },
         "required": [
-          "creation_id",
           "new_namespace_id"
         ],
         "type": "object"
@@ -6056,10 +6054,10 @@
             }
           },
           {
-            "description": "The caller's deletion ID for this request. A retry with the same deletion ID returns the\nnamespace ID and the final head, whatever its `expected_head_seq`.",
+            "description": "The caller's deletion ID for this request. A retry with the same deletion ID returns the\nnamespace ID and the final head, whatever its `expected_head_seq`. Without this parameter,\nthe server generates a deletion ID.",
             "in": "query",
             "name": "deletion_id",
-            "required": true,
+            "required": false,
             "schema": {
               "$ref": "#/components/schemas/DeletionId"
             }

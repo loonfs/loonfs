@@ -1078,7 +1078,7 @@ The first manifest of a namespace has these values:
 | --- | --- | --- |
 | Manifest number | 1 | 1 |
 | Namespace ID, creation time, `created_by` | From the request | From the request |
-| Creation ID | From the request | From the request |
+| Creation ID | From the request, or generated | From the request, or generated |
 | Access mode | From the request | From the source (see [Forking a namespace](#92-forking-a-namespace)) |
 | Retention window | From the request if the request includes `retention_window_ms`, and otherwise the host's default window (if the host has a default window) | From the pinned source manifest, if that manifest sets `retention_window_ms` |
 | Status | Active | Active |
@@ -1269,7 +1269,7 @@ To create a namespace, LoonFS:
 2. Writes the hint, pointing to manifest 1, with put-if-absent. A new hint means a new namespace ID, and LoonFS then writes manifest 1 with put-if-absent.
 3. If the hint already exists, reads the existing namespace state through it (see [Resolving the metadata basis](#41-resolving-the-metadata-basis)), and compares the current manifest's creation ID with the request's. A tombstone returns `namespace_deleted`. An active manifest with the request's creation ID returns the namespace as it is now, and an active manifest with another creation ID returns `namespace_exists` (or the namespace's current summary, with `allow_existing`). Corruption and read errors aren't absence. A hint whose manifest 1 is missing belongs to a creation that failed before it wrote manifest 1, and LoonFS then writes manifest 1 with put-if-absent. If that put is refused, it reads the state again and compares the creation IDs in the same way.
 
-The "creation ID" (`creation_id`) is an identifier that the caller generates for one request that creates or forks a namespace (see [Creation ID](glossary.md#creation-id)). Every later manifest copies the creation ID, so a retry of the request finds the ID in the current manifest after garbage collection deletes manifest 1. A retry in a later request builds a manifest 1 with a different creation time, so LoonFS recognizes the retry by the creation ID, not by comparing bytes.
+The "creation ID" (`creation_id`) is an identifier for one request that creates or forks a namespace (see [Creation ID](glossary.md#creation-id)). The caller generates the ID, and LoonFS generates one for a request without an ID. Every later manifest copies the creation ID, so a retry of the request finds the ID in the current manifest after garbage collection deletes manifest 1. A retry in a later request builds a manifest 1 with a different creation time, so LoonFS recognizes the retry by the creation ID, not by comparing bytes.
 
 The hint decides whether the ID is new, because the hint lives as long as the namespace. Manifest 1 can't decide, because garbage collection can delete it once a newer manifest replaces it and the grace window passes (see [Reference roots](#112-reference-roots)), so a missing manifest 1 doesn't mean a missing namespace. If two processes create the same ID at the same time, the one whose hint put succeeds writes manifest 1, the other reads a hint without a manifest and writes manifest 1 too, and the one whose manifest 1 put succeeds creates the namespace. A hint written before that put doesn't mean the namespace exists, because its writer might have failed before it wrote manifest 1.
 

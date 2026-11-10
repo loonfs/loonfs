@@ -16,8 +16,10 @@ pub struct CreateNamespaceRequest {
     #[serde(default = "NamespaceAccess::unrestricted")]
     pub access: NamespaceAccess,
     /// The caller's creation ID for this request. A retry with the same creation ID returns the
-    /// namespace as it is now.
-    pub creation_id: CreationId,
+    /// namespace as it is now. Without this field, the server generates a creation ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub creation_id: Option<CreationId>,
     /// The durable ID of the new namespace.
     pub namespace_id: NamespaceId,
     /// The namespace's retention window, in milliseconds, which must be positive. The reference
@@ -38,8 +40,10 @@ pub struct CreateNamespaceRequest {
 #[serde(deny_unknown_fields)]
 pub struct ForkNamespaceRequest {
     /// The caller's creation ID for this request. A retry with the same creation ID returns the
-    /// fork as it is now.
-    pub creation_id: CreationId,
+    /// fork as it is now. Without this field, the server generates a creation ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub creation_id: Option<CreationId>,
     /// The durable ID of the new namespace that the fork creates.
     pub new_namespace_id: NamespaceId,
     /// An unexpired snapshot to fork from. Without it, the fork starts from the current head.
@@ -294,13 +298,21 @@ mod tests {
             "source_namespace_id": "other"
         }))
         .expect_err("a source namespace field on a fork request should be rejected");
-        serde_json::from_value::<CreateNamespaceRequest>(serde_json::json!({
-            "namespace_id": "demo",
-        }))
-        .expect_err("a create request without a creation ID should be rejected");
-        serde_json::from_value::<ForkNamespaceRequest>(serde_json::json!({
-            "new_namespace_id": "demo",
-        }))
-        .expect_err("a fork request without a creation ID should be rejected");
+        assert_eq!(
+            serde_json::from_value::<CreateNamespaceRequest>(serde_json::json!({
+                "namespace_id": "demo",
+            }))
+            .expect("a create request without a creation ID decodes")
+            .creation_id,
+            None
+        );
+        assert_eq!(
+            serde_json::from_value::<ForkNamespaceRequest>(serde_json::json!({
+                "new_namespace_id": "demo",
+            }))
+            .expect("a fork request without a creation ID decodes")
+            .creation_id,
+            None
+        );
     }
 }
