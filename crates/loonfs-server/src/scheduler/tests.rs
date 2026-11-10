@@ -278,6 +278,12 @@ async fn seed_writer(store: &SharedObjectStore) -> (LoonFs<Writable>, u64) {
 }
 
 /// Creates a namespace whose WAL tail holds one unfolded commit.
+///
+/// The commit returns before the writer raises the hint to the manifest that
+/// claimed the writer epoch, so the seed waits for the writer to finish that
+/// raise. A later publication's raise would otherwise sometimes lose its
+/// compare-and-swap to the commit's raise and leave the hint one manifest
+/// behind.
 async fn seed_unfolded_tail(writer: &LoonFs<Writable>, namespace_id: &NamespaceId) {
     writer
         .create_namespace(namespace_id, &test_actor())
@@ -289,6 +295,7 @@ async fn seed_unfolded_tail(writer: &LoonFs<Writable>, namespace_id: &NamespaceI
         .put_file("/tail.txt", b"unfolded", &test_actor())
         .await
         .expect("write the tail");
+    writer.drain().await.expect("raise the hint");
 }
 
 /// Returns the manifest number that the namespace's hint records.

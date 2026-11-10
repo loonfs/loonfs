@@ -36,7 +36,12 @@ impl ExecutionBudgetInstruments {
                 ),
                 merges: recorder.register_gauge(
                     "loonfs.execution_budget.admitted_merges",
-                    "Merges admitted and not yet settled, at most one",
+                    "Merges admitted and not yet settled",
+                    &[],
+                ),
+                merge_bytes: recorder.register_gauge(
+                    "loonfs.execution_budget.admitted_merge_bytes",
+                    "Bytes of the merge allowance that admitted merges reserve",
                     &[],
                 ),
                 rejections: recorder.register_counter(
@@ -109,15 +114,18 @@ pub(crate) struct AdmissionInstruments {
     requests: Arc<dyn GaugeHandle>,
     bytes: Arc<dyn GaugeHandle>,
     merges: Arc<dyn GaugeHandle>,
+    merge_bytes: Arc<dyn GaugeHandle>,
     rejections: Arc<dyn CounterHandle>,
 }
 
 impl AdmissionInstruments {
-    pub(crate) fn report(&self, requests: usize, bytes: usize, merges: usize) {
+    pub(crate) fn report(&self, requests: usize, bytes: usize, merges: usize, merge_bytes: usize) {
         self.requests
             .set(i64::try_from(requests).unwrap_or(i64::MAX));
         self.bytes.set(i64::try_from(bytes).unwrap_or(i64::MAX));
         self.merges.set(i64::try_from(merges).unwrap_or(i64::MAX));
+        self.merge_bytes
+            .set(i64::try_from(merge_bytes).unwrap_or(i64::MAX));
     }
 
     pub(crate) fn rejection(&self) {

@@ -202,41 +202,6 @@ async fn a_raise_that_loses_its_swap_leaves_the_publication_and_the_other_raise(
     fixture.writer.shutdown().await.expect("shut down");
 }
 
-/// Checks that this runtime's raises of one hint run one at a time, so a
-/// raise to a newer manifest doesn't lose its compare-and-swap to a raise to
-/// an older manifest.
-#[tokio::test(start_paused = true)]
-async fn a_raise_waits_for_this_runtimes_other_raise_of_the_same_hint() {
-    let mut fixture = RaiseFixture::new().await;
-    // The claim's raise and the fold's raise fail, so the hint stays below
-    // both manifests.
-    fixture.store.inner().inner().fail_next(2);
-    fixture.commit().await;
-    fixture.writer.drain().await.expect("drain");
-    assert_eq!(fixture.commit_and_fold().await, 3);
-    assert_eq!(fixture.hint().await, 1);
-    let registry = fixture.writer.mode.publisher.clone();
-    // The gate parks the raise to the fold's manifest after it has read the
-    // hint.
-    fixture.store.block_next();
-    let newer = registry.raise_hint(&fixture.namespace_id, ManifestNo(3));
-    let older = async {
-        fixture.store.wait_until_blocked().await;
-        // The raise to the claim's manifest can't read the hint while the
-        // other raise is parked, so this wait ends at its bound, which the
-        // paused clock reaches once both raises wait.
-        let _ = bounded(
-            Duration::from_secs(1),
-            registry.raise_hint(&fixture.namespace_id, ManifestNo(2)),
-        )
-        .await;
-        fixture.store.release();
-    };
-    tokio::join!(newer, older);
-    assert_eq!(fixture.hint().await, 3);
-    fixture.writer.shutdown().await.expect("shut down");
-}
-
 /// Checks that a reader that starts at a hint that lags, and probes forward
 /// to the newer manifest, doesn't write the hint.
 #[tokio::test]

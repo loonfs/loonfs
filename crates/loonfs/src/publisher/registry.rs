@@ -70,19 +70,18 @@ pub(super) struct RegistryShared {
 pub(super) struct RegistryState {
     pub(super) closed: bool,
     pub(super) sessions: HashMap<NamespaceId, LiveSession>,
-    /// The fold, compaction, and hint raise locks of the namespaces that a
-    /// session, a fold, a compaction unit, or a hint raise in this runtime
-    /// has. Strong: the table owns the locks. Adding an entry removes every
-    /// entry that no caller has, so the table lists at most one entry more
-    /// than the most callers that had entries at once since the last
-    /// addition, and a session keeps its namespace's entry for the session's
-    /// life.
+    /// The fold and compaction locks of the namespaces that a session, a
+    /// fold, or a compaction unit in this runtime has. Strong: the table
+    /// owns the locks. Adding an entry removes every entry that no caller
+    /// has, so the table lists at most one entry more than the most callers
+    /// that had entries at once since the last addition, and a session keeps
+    /// its namespace's entry for the session's life.
     turns: HashMap<NamespaceId, Arc<NamespaceTurns>>,
 }
 
 impl RegistryState {
-    /// Returns the locks of `namespace_id`, adding an entry when the table
-    /// has none.
+    /// Returns the fold and compaction locks of `namespace_id`, adding an
+    /// entry when the table has none.
     pub(super) fn turns(&mut self, namespace_id: &NamespaceId) -> Arc<NamespaceTurns> {
         if let Some(turns) = self.turns.get(namespace_id) {
             return Arc::clone(turns);
@@ -109,10 +108,19 @@ pub(crate) struct NamespaceSession {
     pub(super) publisher: NamespacePublisher,
 }
 
-/// The merge slot that a merge keeps from before its plan until its commit
-/// settles, so the merge allowance covers the merge's planning and its
-/// publication.
-pub(crate) struct MergeSlot(Arc<AdmissionPermit>);
+/// A merge's reservation of the merge allowance, which the merge keeps from
+/// before its plan until its commit settles, so the allowance covers the
+/// merge's planning and its publication. The reservation grows while the
+/// merge plans and doesn't shrink.
+pub(crate) struct MergeReservation(Arc<AdmissionPermit>);
+
+impl MergeReservation {
+    /// Returns the merge allowance with this reservation, which the merge
+    /// planner checks and grows.
+    pub(crate) fn allowance(&self) -> loonfs_core::MergeAllowance {
+        self.0.merge_allowance()
+    }
+}
 
 impl Drop for NamespaceSession {
     fn drop(&mut self) {
@@ -131,28 +139,22 @@ impl NamespaceSession {
         self.publisher.submit_candidate(candidate).await
     }
 
-    /// Takes the merge slot for a merge, before the merge is planned.
-    /// Another merge, into any namespace that shares the execution budget,
-    /// including a retry of this merge, gets `commit_queue_full` until the
-    /// slot is dropped.
-    pub(crate) fn acquire_merge_slot(&self) -> Result<MergeSlot> {
-        Ok(MergeSlot(self.publisher.acquire_merge_slot()?))
+    /// Reserves a merge's share of the merge allowance, before the merge is
+    /// planned. When the reservations of other merges, into any namespace
+    /// that shares the execution budget, leave no room, the merge gets
+    /// `server_busy`.
+    pub(crate) fn reserve_merge(&self) -> Result<MergeReservation> {
+        Ok(MergeReservation(self.publisher.reserve_merge()?))
     }
 
-    /// Submits a merge under `slot`. Admitted work continues if the caller is
-    /// cancelled.
+    /// Submits a merge under `reservation`. Admitted work continues if the
+    /// caller is cancelled.
     pub(crate) async fn submit_merge(
         &self,
         candidate: CommitCandidate,
-        slot: &MergeSlot,
+        reservation: &MergeReservation,
     ) -> Result<Commit> {
-        self.publisher.submit_merge(candidate, &slot.0).await
-    }
-
-    /// Returns the merge allowance that admission checks a merge against,
-    /// which the merge planner checks as it plans.
-    pub(crate) fn merge_allowance(&self) -> loonfs_core::MergeAllowance {
-        self.publisher.merge_allowance()
+        self.publisher.submit_merge(candidate, &reservation.0).await
     }
 
     /// Submits a namespace deletion, sequenced as a barrier: mutations
@@ -251,15 +253,12 @@ impl RegistryShared {
 
     /// Raises the namespace's hint to `manifest_no`, a manifest that this
     /// runtime published, with one read of the hint and one compare-and-swap
-    /// (format spec, "The current manifest and WAL tip"), after this
-    /// runtime's other raises of the hint have finished.
+    /// (format spec, "The current manifest and WAL tip").
     ///
     /// A failed raise, or one that loses its compare-and-swap, is logged and
     /// ignored. The hint can then stay behind the newest manifest until the
     /// next publication raises it, and discovery probes past a hint that lags.
     pub(super) async fn raise_hint(&self, namespace_id: &NamespaceId, manifest_no: ManifestNo) {
-        let turns = self.lock_state().turns(namespace_id);
-        let _raise = turns.hint_raise.lock().await;
         if let Err(error) = self
             .context
             .runtime_core

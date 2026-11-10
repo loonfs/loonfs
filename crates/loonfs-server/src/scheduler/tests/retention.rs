@@ -530,6 +530,9 @@ async fn an_idle_sweep_costs_the_same_requests_whichever_window_applies() {
             .put_file("/old.txt", b"history", &test_actor())
             .await
             .expect("write a file");
+        // The fold's raise of the hint could lose its compare-and-swap to
+        // the commit's raise, so the commit's raise finishes first.
+        writer.drain().await.expect("raise the hint");
         writer
             .maintenance(writer_id("before-the-server"))
             .fold_wal(&namespace_id)

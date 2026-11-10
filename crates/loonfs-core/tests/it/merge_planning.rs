@@ -44,10 +44,7 @@ impl Family {
             fork: namespace_id("main-fork"),
             writer: default_writer(),
             subject,
-            allowance: MergeAllowance {
-                max_bytes: usize::MAX,
-                peak_per_planned_byte: 3,
-            },
+            allowance: MergeAllowance::unshared(usize::MAX, 3),
         }
     }
 
@@ -194,7 +191,7 @@ impl Family {
                 &fork_context,
                 request,
                 self.writer.now_ms,
-                self.allowance,
+                self.allowance.clone(),
             )
             .await?
             .into_candidate()?;
@@ -218,7 +215,7 @@ impl Family {
                 &read_context(&self.store, &self.fork).await,
                 &self.request("plan", through_seq),
                 self.writer.now_ms,
-                self.allowance,
+                self.allowance.clone(),
             )
             .await
     }
@@ -844,7 +841,7 @@ async fn the_plan_returns_the_writers_error_for_the_subjects_missing_rights() {
             &read_context(&family.store, &family.fork).await,
             &family.request("hidden", None),
             family.writer.now_ms,
-            family.allowance,
+            family.allowance.clone(),
         )
         .await
         .expect_err("the plan checks the subject's rights");
@@ -994,10 +991,7 @@ async fn a_merge_over_the_allowance_is_too_large_before_its_conflicts() {
     let mut family = Family::new().await;
     // A file create plans about 4,850 bytes, which the allowance is charged
     // three times, so 64 KiB admits only a few creates.
-    family.allowance = MergeAllowance {
-        max_bytes: 64 * 1024,
-        peak_per_planned_byte: 3,
-    };
+    family.allowance = MergeAllowance::unshared(64 * 1024, 3);
     for index in 0..16 {
         family
             .fork()
@@ -1043,10 +1037,7 @@ async fn a_first_commit_over_the_allowance_has_no_split_hint() {
     let mut family = Family::new().await;
     // A directory's attribute update bounds about 66 KB, and the allowance is
     // charged three times that.
-    family.allowance = MergeAllowance {
-        max_bytes: 64 * 1024,
-        peak_per_planned_byte: 3,
-    };
+    family.allowance = MergeAllowance::unshared(64 * 1024, 3);
     family
         .commit_all(
             &family.fork,
@@ -1984,7 +1975,7 @@ async fn a_namespace_that_isnt_a_fork_of_main_is_refused() {
             &read_context(&family.store, &other).await,
             &request,
             family.writer.now_ms,
-            family.allowance,
+            family.allowance.clone(),
         )
         .await
         .expect_err("not a fork");

@@ -3,7 +3,7 @@
 //! ([design note](https://github.com/loonfs/loonfs/blob/main/docs/design/merge.md#rebasing)).
 
 use super::merges::{missing_fork, MergeOutcome, PlannedMerge};
-use crate::publisher::MergeSlot;
+use crate::publisher::MergeReservation;
 use crate::trace::{self, operation_span};
 use crate::{
     ActorId, CommitId, Consistency, CoreError, CreationId, Error, LoonFs, MergeConflict,
@@ -171,8 +171,8 @@ impl Namespace<Writable> {
                 };
                 let planned = self.plan_replay(&request, None).await?;
                 let conflicts = match self
-                    .commit_merge(&request, planned, |request, slot| {
-                        Box::pin(async move { self.plan_replay(&request, Some(slot)).await })
+                    .commit_merge(&request, planned, |request, reservation| {
+                        Box::pin(async move { self.plan_replay(&request, Some(reservation)).await })
                     })
                     .await?
                 {
@@ -199,11 +199,11 @@ impl Namespace<Writable> {
     pub(crate) async fn plan_replay(
         &self,
         request: &MergeRequest,
-        slot: Option<MergeSlot>,
+        reservation: Option<MergeReservation>,
     ) -> Result<PlannedMerge<Vec<MergeConflict>>> {
         let source_namespace_id = &request.source_namespace_id;
         // Boxed so the replay's future stays within the compiler's layout depth.
-        self.plan_commit(request, slot, |new_fork| {
+        self.plan_commit(request, reservation, |new_fork, allowance| {
             Box::pin(async move {
                 let new_fork = &new_fork;
                 let basis = self
@@ -246,7 +246,7 @@ impl Namespace<Writable> {
                             &source.context,
                             request,
                             prepared_at_ms,
-                            self.session().merge_allowance(),
+                            allowance,
                         )
                         .await?;
                     let record = plan.record().clone();

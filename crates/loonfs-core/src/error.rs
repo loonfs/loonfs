@@ -199,6 +199,10 @@ pub enum CoreError {
     ContentPreparation(#[from] ContentPreparationError),
     #[error("commit queue is full; slow down and retry")]
     CommitQueueFull,
+    /// A merge can't reserve its share of the merge allowance, because other
+    /// merges' reservations use the allowance.
+    #[error("server busy: the merge allowance is in use by other merges")]
+    ServerBusy,
     #[error("writer session for namespace `{namespace_id}` is closed; new work is not admitted")]
     WriterSessionClosed { namespace_id: NamespaceId },
     /// The service is shutting down. New requests are rejected, while requests
@@ -515,6 +519,7 @@ impl CoreError {
             CoreError::MergeConflict { .. } => ErrorCode::MergeConflict,
             CoreError::ContentPreparation(_) => ErrorCode::ContentNotPrepared,
             CoreError::CommitQueueFull => ErrorCode::CommitQueueFull,
+            CoreError::ServerBusy => ErrorCode::ServerBusy,
             CoreError::WriterSessionClosed { .. } => ErrorCode::WriterSessionClosed,
             CoreError::ShuttingDown => ErrorCode::ShuttingDown,
             CoreError::ContentNotMaterialized { .. } => ErrorCode::ContentNotMaterialized,
@@ -623,6 +628,7 @@ impl CoreError {
             | CoreError::InvalidMerge { .. }
             | CoreError::ContentPreparation(_)
             | CoreError::CommitQueueFull
+            | CoreError::ServerBusy
             | CoreError::WriterSessionClosed { .. }
             | CoreError::ShuttingDown
             | CoreError::ContentNotMaterialized { .. }

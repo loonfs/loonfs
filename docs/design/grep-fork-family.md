@@ -9,7 +9,7 @@ A [fork](../specs/glossary.md#fork) inherits its source's index and can be searc
 - **A fork's index starts at the fork point.** The fork's grep steps index the fork's own commits, and also the source's last few commits before the fork point if the source's index hadn't reached them. After a [merge](../specs/glossary.md#merge) into main, grep indexes only what the merge brought in.
 - **The index is pruned.** A base-level reorganization drops the postings of a content value that no retained revision references.
 
-[Content search index](content-search-index.md) describes the tokenizer, the eligibility rule, the planner, the three-tier reorganization, the bounded steps, and the lifecycle. In this note, "the index" means the grep index. "The watermark" means the sequence through which the index covers a namespace's commits (`built_through_seq`). "The source" means the namespace that a fork was forked from. A "grep step" is any step that publishes the grep entry in the core manifest: a backfill step, a build step, or a reorganization step.
+[Content search index](content-search-index.md) describes the tokenizer, the eligibility rule, the planner, the three-tier reorganization, the bounded steps, and the lifecycle. In this note, "the index" means the grep index. "The watermark" means the sequence through which the index covers a namespace's commits (`built_through_seq`). "The source" means the namespace that a fork was forked from. A "grep step" is any step that changes the grep entry in the core manifest: a backfill step, a build step, or a reorganization step.
 
 ## The problem
 
@@ -113,7 +113,7 @@ Why are extension runs listed in the core manifest? An inherited index needs thr
 
 ## Building the index
 
-Enabling the index publishes a `backfilling` entry with a user pin on the namespace head. Each backfill step lists files from the pin in inode order, reads each current revision's content reference, writes a `content_revisions` row for the revision, skips a value that `texts` already records, tokenizes the rest, and publishes new delta segments and the cursor in the next core manifest. The final step publishes `active` at the captured sequence and deletes the pin.
+Enabling the index publishes a `backfilling` entry with a user pin on the namespace head. Each backfill step lists files from the pin in inode order, reads each current revision's content reference, writes a `content_revisions` row for the revision, skips a value that `texts` already records, tokenizes the rest, and records new delta segments and the cursor in the pending entry, which grep publishes in a core manifest once for each maintenance interval. The final step records `active` at the captured sequence, and grep deletes the pin after it publishes that entry.
 
 A build step on an active index reads the change feed from its cursor. For each `file_created` or `content_changed` event, the step takes the event's content reference, writes a `content_revisions` row for the revision, and skips the value if `texts` records it. Otherwise, the step reads the content, checks eligibility, tokenizes the content, and writes postings and a `texts` row. Moves, deletes, and restores publish no content and need no postings. The cursor advances in the same publication as the segments. A build step plans its content budget from the sizes that the events record, before it looks up `texts`, so it can stop early on values that `texts` already records. Consulting `texts` costs a grep step one filter probe for each segment and a block read on a hit.
 

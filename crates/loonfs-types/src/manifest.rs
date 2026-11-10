@@ -351,7 +351,8 @@ pub struct NamespaceManifestPayload {
     pub manifest_no: ManifestNo,
     /// Stops a stale streaming compactor at its next check when a newer runtime claims it.
     /// Streaming compaction rebuilds a whole family group and publishes once at the end.
-    /// Grep publishes each bounded step, so a lost race costs only one step.
+    /// Grep publishes the steps of one maintenance interval together, so a lost race costs
+    /// that interval's steps.
     pub compactor_epoch: CompactorEpoch,
     /// Folded head, or the final namespace sequence on deletion.
     pub head_seq: ChangeSeq,

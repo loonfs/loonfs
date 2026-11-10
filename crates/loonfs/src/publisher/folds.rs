@@ -1,6 +1,6 @@
 //! The one fold path of each namespace in a writable runtime, and the locks
-//! that keep a namespace's folds apart from each other and from its pins, its
-//! compaction units apart, and its hint raises apart.
+//! that keep a namespace's folds apart from each other and from its pins, and
+//! its compaction units apart.
 
 use super::registry::NamespaceChange;
 use super::worker::elapsed_ms_from;
@@ -18,12 +18,12 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::sync::{Mutex as AsyncMutex, RwLock, RwLockReadGuard};
 use tracing::Instrument;
 
-/// The fold turn, the fold rounds, the compaction lock, and the hint raise
-/// lock of one namespace in this runtime.
+/// The fold lock, the fold rounds, and the compaction lock of one namespace
+/// in this runtime.
 ///
-/// A fold takes the fold turn in exclusive mode before it decides that a
+/// A fold takes the fold lock in exclusive mode before it decides that a
 /// fold is due, and keeps it until it has moved the session's position, so
-/// two folds never fold the same tail. A pin takes the turn in shared mode
+/// two folds never fold the same tail. A pin takes the lock in shared mode
 /// from the moment it has a fold's manifest until its verification, so a
 /// fold in this runtime never replaces that manifest before the pin is
 /// verified, and any number of pins run at once. The fold rounds record
@@ -31,17 +31,13 @@ use tracing::Instrument;
 /// request arrived covers every commit acknowledged before the request, so
 /// the requests that wait for one fold share the next one. A compaction
 /// unit takes the compaction lock before it plans, so two units never plan
-/// from the same manifest. A hint raise takes the raise lock before it reads
-/// the hint, so a raise to a newer manifest never loses its compare-and-swap
-/// to this runtime's raise to an older manifest. The turn and both locks are
-/// `tokio` locks, because a fold, a pin, a unit, and a raise keep them across
-/// store requests.
+/// from the same manifest. The fold lock and the compaction lock are `tokio`
+/// locks, because a fold, a pin, and a unit keep them across store requests.
 #[derive(Default)]
 pub(crate) struct NamespaceTurns {
     pub(super) fold: RwLock<()>,
     rounds: Mutex<FoldRounds>,
     pub(crate) compaction: AsyncMutex<()>,
-    pub(super) hint_raise: AsyncMutex<()>,
 }
 
 #[derive(Default)]
@@ -125,18 +121,18 @@ impl PublisherRegistry {
     /// Folds the WAL tail of `namespace_id` when `when` finds a fold due.
     ///
     /// Every fold of a namespace in this runtime runs here, with the
-    /// namespace's fold turn in exclusive mode, so a fold waits for a fold in
+    /// namespace's fold lock in exclusive mode, so a fold waits for a fold in
     /// progress instead of folding the same tail, and for the pins in
     /// progress (see [`Self::pin_after_fold`]). Under [`FoldWhen::Always`], a
     /// fold that took its input after the call arrived serves the call. The
     /// fold's input is the position of the
     /// namespace's writer session while the session isn't fenced and the
     /// position is current (see [`NamespacePublisher::current_position`]),
-    /// and otherwise the fold loads the tail from the store. A check that
-    /// the position answers takes no turn and no fold permit when nothing is
-    /// due, and the check runs again under the turn, because a fold that had
-    /// the turn may have folded the tail. Without a position, the check loads
-    /// the tail from the store, under the turn.
+    /// and otherwise the fold loads the tail from the store. A check against
+    /// the position takes no fold lock and no fold permit when nothing is
+    /// due, and the check runs again under the fold lock, because a fold that
+    /// had the lock may have folded the tail. Without a position, the check
+    /// loads the tail from the store, under the fold lock.
     ///
     /// The fold waits for a fold permit, and it moves the session's position
     /// and the cached head onto the manifest that covers the tail, whether
@@ -224,7 +220,7 @@ impl PublisherRegistry {
     ///
     /// Each attempt uses a fold that took its input after the attempt
     /// arrived, and folds only when no such fold has completed (see
-    /// [`Self::fold_namespace`]). The attempt keeps the namespace's fold turn
+    /// [`Self::fold_namespace`]). The attempt keeps the namespace's fold lock
     /// in shared mode from the moment it has the fold's manifest until `pin`
     /// returns, so no fold in this runtime replaces the manifest before the
     /// pin is verified, and other pins run at the same time. A compaction
@@ -265,9 +261,10 @@ impl PublisherRegistry {
             return Ok((folded.manifest.manifest, shared));
         }
         drop(shared);
-        // The exclusive turn is released, not downgraded. A pin that kept
-        // the turn from its fold would make the next waiter's exclusive turn
-        // wait for that pin, and the waiters would pin one at a time.
+        // The fold lock is released from exclusive mode, not downgraded to
+        // shared mode. If a pin kept the lock from its fold, the next
+        // waiter's exclusive lock would wait for that pin, and the waiters
+        // would pin one at a time.
         {
             let _exclusive = turns.fold.write().await;
             if turns.folded_after(arrival).is_none() {
@@ -279,7 +276,7 @@ impl PublisherRegistry {
         let shared = turns.fold.read().await;
         let folded = turns
             .folded_after(arrival)
-            .expect("a fold after the arrival should have completed under the exclusive turn");
+            .expect("a fold after the arrival should have completed under the fold lock");
         Ok((folded.manifest.manifest, shared))
     }
 
@@ -353,7 +350,7 @@ impl PublisherRegistry {
         }))
     }
 
-    /// Returns the fold turn and the compaction lock of `namespace_id`.
+    /// Returns the fold lock and the compaction lock of `namespace_id`.
     pub(crate) fn namespace_turns(&self, namespace_id: &NamespaceId) -> Arc<NamespaceTurns> {
         self.shared.lock_state().turns(namespace_id)
     }
