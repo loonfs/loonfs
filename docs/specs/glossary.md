@@ -18,7 +18,7 @@ A small object that records the number of a recent manifest, so readers know whe
 
 ### WAL
 
-The write-ahead log: a namespace's sequence of numbered, immutable WAL objects. Each WAL object contains one or more commits, or a single [fence](#fence). Successfully writing the next WAL object to object storage commits every record contained in that WAL object. See [Publishing a commit](format.md#6-publishing-a-commit).
+The write-ahead log: a namespace's sequence of numbered, immutable WAL objects. Each WAL object contains one or more commits, a single [fence](#fence), or a [floor object](#floor-object). Successfully writing the next WAL object to object storage commits every record contained in that WAL object. See [Publishing a commit](format.md#6-publishing-a-commit).
 
 ### WAL tip
 
@@ -222,7 +222,7 @@ The process that rewrites a namespace's metadata runs into fewer runs, and drops
 
 ### Retention floor
 
-The sequence number below which a namespace's history is no longer guaranteed. Above the floor, every file's history is complete. At or below it, each visible file keeps at least its newest revision, and so does a deleted file while its deletion is recoverable. Compaction can remove the older rows at or below the floor (superseded bindings, old revisions, old attribute and access states, and commit receipts). A deletion at or below the floor has expired, so it can't be restored, and if its latest event is still `set`, a base compaction removes the rows that it hides. For example, if the floor is 20, a deletion at sequence 10 that nobody restored has expired, and the next base compaction of each family group removes the rows of the inodes that the deletion hides. A retention advance moves the floor forward, and the floor never moves back. Only the holder of the namespace's [writer epoch](#writer-epoch) advances the floor, after it has folded every commit validated against the old floor, so no restore of an expired deletion can be committed after the advance. A pin below the floor still protects its manifest. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
+The sequence number below which a namespace's history is no longer guaranteed. Above the floor, every file's history is complete. At or below it, each visible file keeps at least its newest revision, and so does a deleted file while its deletion is recoverable. Compaction can remove the older rows at or below the floor (superseded bindings, old revisions, old attribute and access states, and commit receipts). A deletion at or below the floor has expired, so it can't be restored, and if its latest event is still `set`, a base compaction removes the rows that it hides. For example, if the floor is 20, a deletion at sequence 10 that nobody restored has expired, and the next base compaction of each family group removes the rows of the inodes that the deletion hides. A retention advance moves the floor forward, and the floor never moves back. The advance writes the new floor to the WAL as a [floor object](#floor-object), so the WAL orders the advance against every restore, and the fold that covers the floor object records the new floor in a manifest. A [read view's](#read-view) floor is the manifest's floor, raised by the floor objects in the view's WAL tail. For example, if the manifest's floor is 5 and the WAL tail contains a floor object with floor 20, the view's floor is 20, and a restore of a deletion at sequence 10 returns `not_deleted`. A pin below the floor still protects its manifest. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
 
 ### Retention window
 
@@ -240,7 +240,7 @@ A small object used for discovery, retained views, or upload state: the hint, pi
 
 ### Read view
 
-The namespace state that one read sees (or a group of related reads in one request). A read view exists only in memory, and it doesn't protect anything from garbage collection.
+The namespace state that one read sees (or a group of related reads in one request). A read view exists only in memory, and it doesn't protect anything from garbage collection. A read view has its own [retention floor](#retention-floor), which is the manifest's floor raised by the [floor objects](#floor-object) in the WAL tail that the view replays. For example, if the manifest's floor is 5 and the tail contains a floor object with floor 20, the view's floor is 20, so a deletion at sequence 10 has expired in that view.
 
 ### Metadata basis
 
@@ -289,7 +289,7 @@ A replay of a fork's unmerged commits onto a new fork of the namespace that the 
 
 ### Writer position
 
-The head that a writer session plans its next commit against, together with the manifest that head was read against. The session's process keeps the writer position in memory, and reads in that process start from it instead of from a cached view, so they send no WAL probe. The process moves the position to each commit before it acknowledges the commit, and to each manifest it publishes itself. For example, after the session commits sequence 43 above manifest 5, an `eventual` `stat` in the same process reads at sequence 43 against manifest 5 without sending a request. The session's manifest check finds a manifest published above the position's. The position moves onto one with the session's writer epoch, and a new writer's claim drops it. A `strong` read waits for the check, and an `eventual` read waits for it once the read's maximum staleness has passed since the position's last check. See [Replaying the visible WAL](format.md#42-replaying-the-visible-wal).
+The head that a writer session plans its next commit against, together with the manifest that head was read against. The session's process keeps the writer position in memory, and reads in that process start from it instead of from a cached view, so they send no WAL probe. Another writer has to publish a claim manifest before it can commit, and the session's manifest check finds that claim. A [floor object](#floor-object) from another process changes only the [retention floor](#retention-floor), so reads can use the earlier floor until the session's next discovery, or until the manifest check finds the fold that covers the floor object. The process moves the position to each commit before it acknowledges the commit, and to each manifest it publishes itself. For example, after the session commits sequence 43 above manifest 5, an `eventual` `stat` in the same process reads at sequence 43 against manifest 5 without sending a request. The session's manifest check finds a manifest published above the position's. The position moves onto a manifest with the session's writer epoch, unless that manifest folds past the position's tip (its `folded_wal_no` is above the tip, because its fold covered a WAL object that the session hasn't read). A new writer's claim, or a manifest that folds past the tip, drops the position, and the session runs discovery. A `strong` read waits for the check, and an `eventual` read waits for it once the read's maximum staleness has passed since the position's last check. See [Replaying the visible WAL](format.md#42-replaying-the-visible-wal).
 
 ### Consistency
 
@@ -319,7 +319,7 @@ A process's claim on the right to commit to a namespace, identified by its write
 
 ### Writer epoch
 
-A counter in the manifest that increases each time a new writer session takes over. A writer session with an older epoch can't commit once the newer session's fence is written.
+A counter in the manifest that increases each time a new writer session takes over. A writer session with an older epoch can't commit once the newer session's fence is written. A [floor object](#floor-object) copies the writer epoch of the manifest that its creator's discovery loaded, so creating a floor object doesn't change the epoch or fence a writer.
 
 ### Epoch claim
 
@@ -327,7 +327,11 @@ A manifest publication that increases the writer epoch or the compactor epoch by
 
 ### Fence
 
-A WAL object with no commits. A new writer session publishes a fence as part of starting up, so that it can begin committing with its writer epoch. Once the fence is written, a writer session with an older epoch can't commit.
+A WAL object with no commits. A new writer session publishes a fence as part of starting up, so that it can begin committing with its writer epoch. Once the fence is written, a writer session with an older epoch can't commit. (A [floor object](#floor-object) is also a WAL object with no commits, but it keeps the writer epoch of the current manifest, so it fences no writer.)
+
+### Floor object
+
+A WAL object with no commits that records a new [retention floor](#retention-floor) in its `retention_floor_seq`. A retention advance creates a floor object at the next WAL number, so the WAL orders the advance against every restore. Any process can create a floor object without claiming the [writer epoch](#writer-epoch), and a floor object doesn't fence the namespace's [writer session](#writer-session). A writer whose commit collides with a floor object runs discovery and validates its batch again against the new floor. For example, if the WAL tip is WAL object 30 at sequence 140, an advance of the floor to 20 creates WAL object 31 with `head_seq` 140, no commits, and `retention_floor_seq` 20, and the fold that covers WAL object 31 publishes a manifest with floor 20. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
 
 ### Compactor epoch
 
@@ -335,7 +339,7 @@ A counter in the manifest, like the writer epoch, that stops a compaction from p
 
 ### Maintainer
 
-The role that folds a namespace's WAL, compacts its metadata, publishes an extension's entry, and collects its garbage. The other role is the writer, which commits, deletes the namespace, and advances its [retention floor](#retention-floor), under the [writer epoch](#writer-epoch). Any process can be a namespace's maintainer, with or without the writer session. A compaction claims the compactor epoch first, and a fold or an extension's publication publishes under the current compactor epoch without a claim. A process without a writer session that advances the floor acquires the writer epoch first, with a claim and a fence (see [Advancing the retention floor](format.md#101-advancing-the-retention-floor)). See [Maintenance roles](../design/maintenance-roles.md) for the two roles and [Publishing a manifest](format.md#72-publishing-a-manifest).
+The role that folds a namespace's WAL, compacts its metadata, publishes an extension's entry, advances its [retention floor](#retention-floor), and collects its garbage. The other role is the writer, which commits and deletes the namespace, under the [writer epoch](#writer-epoch). Any process can be a namespace's maintainer, with or without the writer session. A compaction claims the compactor epoch first, and a fold or an extension's publication publishes under the current compactor epoch without a claim. A retention advance creates a [floor object](#floor-object) with the current writer epoch, copied from the manifest without a claim (see [Advancing the retention floor](format.md#101-advancing-the-retention-floor)). See [Maintenance roles](../design/maintenance-roles.md) for the two roles and [Publishing a manifest](format.md#72-publishing-a-manifest).
 
 ### Job
 

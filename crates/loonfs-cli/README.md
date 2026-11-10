@@ -421,9 +421,9 @@ Maintenance
     Unix time in milliseconds. Whatever the target, the floor doesn't
     pass a commit that's less than one hour old, and the output shows the
     floor that the advance reached. An embedded advance against a bucket
-    opens a writer session, which takes the namespace's writer epoch, so a
-    server's session for that namespace returns writer_fenced to its next
-    request.
+    writes the new floor to the namespace's WAL as a floor object and
+    claims no writer epoch, so a server's session for that namespace isn't
+    fenced.
 
   loonfs maintenance retention window (--retention-window-ms <ms> | --clear)
     Set or clear the namespace's retention window. The server's
