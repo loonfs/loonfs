@@ -448,12 +448,17 @@ async fn a_retry_after_commit_queue_full_returns_the_original_commit() {
 
 #[tokio::test]
 async fn errors_that_the_loop_cant_act_on_fail_the_session() {
-    let cases: [(&str, Vec<Answer>, ErrorCode); 3] = [
+    let cases: [(&str, Vec<Answer>, ErrorCode); 4] = [
         (
-            "a namespace that keeps changing past the retry limit",
-            std::iter::repeat_with(|| Answer::refused(ErrorCode::StaleHead))
+            "a busy server past the retry limit",
+            std::iter::repeat_with(|| Answer::refused(ErrorCode::ServerBusy))
                 .take(MAX_MERGE_ATTEMPTS)
                 .collect(),
+            ErrorCode::ServerBusy,
+        ),
+        (
+            "a namespace that changed after each of the server's plans",
+            vec![Answer::refused(ErrorCode::StaleHead)],
             ErrorCode::StaleHead,
         ),
         (

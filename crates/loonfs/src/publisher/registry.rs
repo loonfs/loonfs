@@ -109,10 +109,19 @@ pub(crate) struct NamespaceSession {
     pub(super) publisher: NamespacePublisher,
 }
 
-/// The merge slot that a merge keeps from before its plan until its commit
-/// settles, so the merge allowance covers the merge's planning and its
-/// publication.
-pub(crate) struct MergeSlot(Arc<AdmissionPermit>);
+/// A merge's reservation of the merge allowance, which the merge keeps from
+/// before its plan until its commit settles, so the allowance covers the
+/// merge's planning and its publication. The reservation grows while the
+/// merge plans and doesn't shrink.
+pub(crate) struct MergeReservation(Arc<AdmissionPermit>);
+
+impl MergeReservation {
+    /// Returns the merge allowance with this reservation, which the merge
+    /// planner checks and grows.
+    pub(crate) fn allowance(&self) -> loonfs_core::MergeAllowance {
+        self.0.merge_allowance()
+    }
+}
 
 impl Drop for NamespaceSession {
     fn drop(&mut self) {
@@ -131,28 +140,22 @@ impl NamespaceSession {
         self.publisher.submit_candidate(candidate).await
     }
 
-    /// Takes the merge slot for a merge, before the merge is planned.
-    /// Another merge, into any namespace that shares the execution budget,
-    /// including a retry of this merge, gets `commit_queue_full` until the
-    /// slot is dropped.
-    pub(crate) fn acquire_merge_slot(&self) -> Result<MergeSlot> {
-        Ok(MergeSlot(self.publisher.acquire_merge_slot()?))
+    /// Reserves a merge's share of the merge allowance, before the merge is
+    /// planned. When the reservations of other merges, into any namespace
+    /// that shares the execution budget, leave no room, the merge gets
+    /// `server_busy`.
+    pub(crate) fn reserve_merge(&self) -> Result<MergeReservation> {
+        Ok(MergeReservation(self.publisher.reserve_merge()?))
     }
 
-    /// Submits a merge under `slot`. Admitted work continues if the caller is
-    /// cancelled.
+    /// Submits a merge under `reservation`. Admitted work continues if the
+    /// caller is cancelled.
     pub(crate) async fn submit_merge(
         &self,
         candidate: CommitCandidate,
-        slot: &MergeSlot,
+        reservation: &MergeReservation,
     ) -> Result<Commit> {
-        self.publisher.submit_merge(candidate, &slot.0).await
-    }
-
-    /// Returns the merge allowance that admission checks a merge against,
-    /// which the merge planner checks as it plans.
-    pub(crate) fn merge_allowance(&self) -> loonfs_core::MergeAllowance {
-        self.publisher.merge_allowance()
+        self.publisher.submit_merge(candidate, &reservation.0).await
     }
 
     /// Submits a namespace deletion, sequenced as a barrier: mutations

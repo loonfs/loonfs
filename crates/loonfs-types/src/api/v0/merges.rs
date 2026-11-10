@@ -230,8 +230,8 @@ pub struct MergeConflictRevision {
 pub enum MergeBound {
     /// One WAL object, which stores the merge's commit alone.
     WalObject,
-    /// The server's merge allowance, which limits the estimated peak memory of the one merge
-    /// that the server admits at a time.
+    /// The server's merge allowance, which limits the estimated peak memory of the merges that
+    /// the server plans and publishes at the same time.
     MergeAllowance,
     /// The number of inodes that one WAL object could contain operations for. The commits in the
     /// merge's range touched more inodes than that.

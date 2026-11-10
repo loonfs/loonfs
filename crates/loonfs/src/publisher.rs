@@ -45,7 +45,7 @@ use loonfs_core::MetadataCompactionCancellation;
 use loonfs_types::{ChangeSeq, CommitId, ManifestNo, NamespaceId};
 use queue::{InFlightRequest, WorkItem};
 pub use registry::{CloseNamespaceReport, NamespaceSessionStatus};
-pub(crate) use registry::{MergeSlot, NamespaceChange, NamespaceSession, PublisherRegistry};
+pub(crate) use registry::{MergeReservation, NamespaceChange, NamespaceSession, PublisherRegistry};
 use registry::{PositionChange, RegistryShared};
 use session_tasks::{SessionTask, WorkerHandle};
 use std::collections::{HashMap, VecDeque};

@@ -206,19 +206,15 @@ impl NamespacePublisher {
             .acquire_candidate(&self.namespace_id, candidate)
     }
 
-    /// Takes the merge slot for a merge, before the merge is planned, so
-    /// that the merge allowance covers the merge's planning and its
-    /// publication. A retry of a merge that's still in flight gets
-    /// `commit_queue_full`, as any other merge does while the slot is taken,
-    /// so the budget never keeps two plans of one merge.
-    pub(crate) fn acquire_merge_slot(
-        &self,
-    ) -> std::result::Result<Arc<AdmissionPermit>, CoreError> {
+    /// Reserves a merge's share of the merge allowance, before the merge is
+    /// planned, so that the allowance covers the merge's planning and its
+    /// publication.
+    pub(crate) fn reserve_merge(&self) -> std::result::Result<Arc<AdmissionPermit>, CoreError> {
         drop(self.admitted_session(&self.lock_state())?);
-        self.context.admission.acquire_merge(&self.namespace_id)
+        self.context.admission.reserve_merge(&self.namespace_id)
     }
 
-    /// Submits a merge under the merge slot that `permit` keeps, and checks
+    /// Submits a merge under the reservation that `permit` keeps, and checks
     /// the merge against one WAL object and the merge allowance first.
     ///
     /// Once the merge enters the queue, cancelling the caller only drops
@@ -230,9 +226,11 @@ impl NamespacePublisher {
     ) -> Result<Commit> {
         drop(self.admitted_session(&self.lock_state())?);
         let candidate = PreparedCandidate::new(candidate);
-        self.context
-            .admission
-            .validate_merge(&candidate.candidate, candidate.wal_record_bytes_upper_bound)?;
+        PublicationAdmission::validate_merge(
+            &candidate.candidate,
+            candidate.wal_record_bytes_upper_bound,
+            permit,
+        )?;
         submit_with_admission(
             &self.namespace_id,
             candidate,
@@ -250,11 +248,6 @@ impl NamespacePublisher {
             },
         )
         .await
-    }
-
-    /// Returns the merge allowance that admission checks a merge against.
-    pub(crate) fn merge_allowance(&self) -> loonfs_core::MergeAllowance {
-        self.context.admission.merge_allowance()
     }
 
     pub(super) fn admit(

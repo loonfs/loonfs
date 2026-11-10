@@ -2,6 +2,7 @@
 //! one of them
 //! ([design note](https://github.com/loonfs/loonfs/blob/main/docs/design/merge.md#the-split-hint)).
 
+use super::memory::PlanningMemory;
 use super::net_change::{fork_layout, inode_change, touched_inodes, InodeChange};
 use super::operations::{
     access_update, attributes_update, binding_change, create_plan, revision_update, InodePlan,
@@ -13,29 +14,12 @@ use crate::error::{CoreError, MergeBound, Result};
 use crate::metadata::MetadataView;
 use crate::path::read::LoadedMetadataView;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::wal::{MAX_WAL_OBJECT_BYTES, WAL_OBJECT_OVERHEAD_BYTES};
 use loonfs_types::{ChangeSeq, InodeId, NamespaceId};
 
 /// How many times the split hint bisects the fork's commit sequences. With
 /// the probe of the first unmerged commit alone, the hint measures at most
 /// four ranges, each with one computation of the fork's net change.
 const SPLIT_BISECTIONS: usize = 3;
-
-/// Returns `merge_too_large` when a merge whose planned WAL bytes are
-/// `planned_bytes` doesn't fit one WAL object, or when its estimated peak
-/// doesn't fit `allowance`.
-pub fn check_planned_bytes(planned_bytes: usize, allowance: MergeAllowance) -> Result<()> {
-    let document_bytes = planned_bytes.saturating_add(WAL_OBJECT_OVERHEAD_BYTES);
-    if document_bytes > MAX_WAL_OBJECT_BYTES {
-        return Err(CoreError::MergeTooLarge {
-            bound: MergeBound::WalObject,
-            estimated_bytes: document_bytes,
-            max_bytes: MAX_WAL_OBJECT_BYTES,
-            split_at_seq: None,
-        });
-    }
-    allowance.check(planned_bytes)
-}
 
 /// Returns `result` with the split hint added to its refusal for one WAL
 /// object or `allowance`, when the refusal has none.
@@ -47,7 +31,7 @@ pub(super) async fn with_split_hint<T, S: ObjectStore + ?Sized>(
     fork_view: &LoadedMetadataView<'_, S>,
     (after_seq, through_seq): (ChangeSeq, ChangeSeq),
     fields_bytes: usize,
-    allowance: MergeAllowance,
+    allowance: &MergeAllowance,
 ) -> Result<T> {
     match result {
         Err(CoreError::MergeTooLarge {
@@ -59,8 +43,14 @@ pub(super) async fn with_split_hint<T, S: ObjectStore + ?Sized>(
             bound,
             estimated_bytes,
             max_bytes,
-            split_at_seq: split_hint(fork_view, after_seq, through_seq, fields_bytes, allowance)
-                .await?,
+            split_at_seq: split_hint(
+                fork_view,
+                after_seq,
+                through_seq,
+                fields_bytes,
+                &allowance.unshared_copy(),
+            )
+            .await?,
         }),
         result => result,
     }
@@ -76,7 +66,7 @@ async fn split_hint<S: ObjectStore + ?Sized>(
     after_seq: ChangeSeq,
     through_seq: ChangeSeq,
     fields_bytes: usize,
-    allowance: MergeAllowance,
+    allowance: &MergeAllowance,
 ) -> Result<Option<ChangeSeq>> {
     let mut search = SplitSearch::new(after_seq, through_seq);
     // The search ends after at most four probes.
@@ -149,9 +139,9 @@ impl SplitSearch {
 
 /// Returns whether the fork's net change over its commits after `after_seq`
 /// through `through_seq` fits one WAL object and `allowance`, measured from
-/// the fork alone as [`check_planned_bytes`] measures a merge's planned
-/// bytes. `fields_bytes` bounds the commit's fields other than its
-/// operations, as it does for the merge.
+/// the fork alone as a merge's plan measures its planned bytes and its
+/// working bytes (see [`MergeAllowance::check`]). `fields_bytes` bounds the
+/// commit's fields other than its operations, as it does for the merge.
 ///
 /// The measure is the plan of a merge of the net change into a namespace
 /// whose rows are the fork's own at the range's start. A merge into another
@@ -164,21 +154,42 @@ async fn net_change_fits<S: ObjectStore + ?Sized>(
     after_seq: ChangeSeq,
     through_seq: ChangeSeq,
     fields_bytes: usize,
-    allowance: MergeAllowance,
+    allowance: &MergeAllowance,
 ) -> Result<bool> {
+    match measure_net_change(fork_view, after_seq, through_seq, fields_bytes, allowance).await {
+        Ok(()) => Ok(true),
+        Err(CoreError::MergeTooLarge {
+            bound: MergeBound::WalObject | MergeBound::MergeAllowance,
+            ..
+        }) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// Measures the fork's net change for [`net_change_fits`], and returns
+/// `merge_too_large` at the first inode that takes the measure over a bound.
+async fn measure_net_change<S: ObjectStore + ?Sized>(
+    fork_view: &LoadedMetadataView<'_, S>,
+    after_seq: ChangeSeq,
+    through_seq: ChangeSeq,
+    fields_bytes: usize,
+    allowance: &MergeAllowance,
+) -> Result<()> {
     let fork = &fork_view.head().namespace_id;
     let end = fork_view.metadata_view_at(through_seq);
     let start = fork_view.metadata_view_at(after_seq);
-    let (mut ours, mut before) = (StateReader::new(end), StateReader::new(start));
+    let memory = PlanningMemory::new(allowance.clone());
+    let (mut ours, mut before) = (
+        StateReader::new(end, &memory),
+        StateReader::new(start, &memory),
+    );
     let mut planned_bytes = fields_bytes;
-    for inode_id in touched_inodes(end, after_seq).await? {
-        let Some(change) = inode_change(&mut ours, &mut before, fork, inode_id).await? else {
-            continue;
+    for inode_id in touched_inodes(end, after_seq, &memory).await? {
+        let plan = match inode_change(&mut ours, &mut before, fork, inode_id).await? {
+            Some(change) => net_change_plan(start, fork, inode_id, &change).await?,
+            None => None,
         };
-        let Some(plan) = net_change_plan(start, fork, inode_id, &change).await? else {
-            continue;
-        };
-        for operation in plan.operations() {
+        for operation in plan.iter().flat_map(InodePlan::operations) {
             let layout_extents = match operation.content_ref() {
                 Some(content_ref) => Some(fork_layout(end, fork, content_ref).await?.extents.len()),
                 None => None,
@@ -186,11 +197,9 @@ async fn net_change_fits<S: ObjectStore + ?Sized>(
             planned_bytes =
                 planned_bytes.saturating_add(merge_operation_bytes(&operation, layout_extents));
         }
-        if check_planned_bytes(planned_bytes, allowance).is_err() {
-            return Ok(false);
-        }
+        memory.check_planned(planned_bytes)?;
     }
-    Ok(true)
+    Ok(())
 }
 
 /// Returns the plan of a merge of the fork's change to one inode into a

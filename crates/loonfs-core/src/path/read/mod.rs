@@ -10,7 +10,7 @@ mod trash;
 mod tree_listing;
 
 pub(crate) use current_files::{
-    ensure_stat_batch_within_cap, resolve_visible_inode, stat_current_files_by_inode,
+    ensure_stat_batch_within_cap, resolve_visible_inode, stat_current_files_by_inode, AncestorPaths,
 };
 pub use current_files::{CurrentFile, CurrentFileState};
 pub(crate) use file_reads::{ensure_within_read_limit, file_content_ref};
