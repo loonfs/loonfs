@@ -70,19 +70,18 @@ pub(super) struct RegistryShared {
 pub(super) struct RegistryState {
     pub(super) closed: bool,
     pub(super) sessions: HashMap<NamespaceId, LiveSession>,
-    /// The fold, compaction, and hint raise locks of the namespaces that a
-    /// session, a fold, a compaction unit, or a hint raise in this runtime
-    /// has. Strong: the table owns the locks. Adding an entry removes every
-    /// entry that no caller has, so the table lists at most one entry more
-    /// than the most callers that had entries at once since the last
-    /// addition, and a session keeps its namespace's entry for the session's
-    /// life.
+    /// The fold and compaction locks of the namespaces that a session, a
+    /// fold, or a compaction unit in this runtime has. Strong: the table
+    /// owns the locks. Adding an entry removes every entry that no caller
+    /// has, so the table lists at most one entry more than the most callers
+    /// that had entries at once since the last addition, and a session keeps
+    /// its namespace's entry for the session's life.
     turns: HashMap<NamespaceId, Arc<NamespaceTurns>>,
 }
 
 impl RegistryState {
-    /// Returns the locks of `namespace_id`, adding an entry when the table
-    /// has none.
+    /// Returns the fold and compaction locks of `namespace_id`, adding an
+    /// entry when the table has none.
     pub(super) fn turns(&mut self, namespace_id: &NamespaceId) -> Arc<NamespaceTurns> {
         if let Some(turns) = self.turns.get(namespace_id) {
             return Arc::clone(turns);
@@ -251,15 +250,12 @@ impl RegistryShared {
 
     /// Raises the namespace's hint to `manifest_no`, a manifest that this
     /// runtime published, with one read of the hint and one compare-and-swap
-    /// (format spec, "The current manifest and WAL tip"), after this
-    /// runtime's other raises of the hint have finished.
+    /// (format spec, "The current manifest and WAL tip").
     ///
     /// A failed raise, or one that loses its compare-and-swap, is logged and
     /// ignored. The hint can then stay behind the newest manifest until the
     /// next publication raises it, and discovery probes past a hint that lags.
     pub(super) async fn raise_hint(&self, namespace_id: &NamespaceId, manifest_no: ManifestNo) {
-        let turns = self.lock_state().turns(namespace_id);
-        let _raise = turns.hint_raise.lock().await;
         if let Err(error) = self
             .context
             .runtime_core
