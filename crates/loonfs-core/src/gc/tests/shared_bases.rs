@@ -270,12 +270,11 @@ async fn a_false_match_of_an_extent_filter_stays_until_no_root_lists_its_segment
         .expect("read the extent filter")
         .expect("the segment");
     let filter = decode_filter_block(&stored, &handle).expect("decode the extent filter");
-    // The filter has the minimum 64 bits for two names, so about one name in
-    // 200 matches it by chance.
-    let orphan = (0..2_000_000)
-        .map(|index| ContentId::parse(format!("con_7{index:025}")).expect("orphan id"))
-        .find(|content_id| filter.may_contain(content_id.as_str()))
-        .expect("a name that the filter matches by chance");
+    // The filter has the minimum 4,096 bits for two names, so about one name
+    // in 900,000 matches it by chance. This name is the first match among the
+    // names `con_7{index:025}`.
+    let orphan = ContentId::parse("con_70000000000000000004909343").expect("orphan id");
+    assert!(filter.may_contain(orphan.as_str()));
     let orphan = content_blob(&namespace_id, &orphan);
     store
         .put_if_absent(&orphan, Bytes::from_static(b"orphan"))
