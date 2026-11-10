@@ -31,11 +31,11 @@ A "creation ID" (`creation_id`) is an identifier that the caller generates for o
 | Fork a namespace | Creation ID (`creation_id`) | The fork's first manifest, copied in the same way | The fork's current summary |
 | Delete a namespace | Deletion ID (`deletion_id`) | The tombstone's `status`, beside `deleted_at_ms` | The namespace ID and final head, as the first delete returned |
 
-The IDs follow the commit ID's rules. The HTTP API requires the field, and the SDKs and the embedded API generate an ID when the caller doesn't supply an ID, as `CommitOptions::commit_id_or_generate` does for a commit. Both IDs use the commit ID's grammar (1 to 128 lowercase ASCII letters, digits, dots, underscores, or hyphens, starting with a letter or a digit). The namespace summary doesn't include the creation ID.
+The IDs follow the commit ID's rules. The HTTP API requires the field, and so do the generated SDKs, as they do for `commit_id`. The Rust client and the embedded API generate an ID when the caller doesn't supply an ID, as `CommitOptions::commit_id_or_generate` does for a commit. Both IDs use the commit ID's grammar (1 to 128 lowercase ASCII letters, digits, dots, underscores, or hyphens, starting with a letter or a digit). The namespace summary doesn't include the creation ID.
 
 For example, a caller creates the namespace `demo` with the creation ID `job-4182-create`. Manifest 1 is written, but the response is lost. The caller sends the same request again, and LoonFS finds manifest 1 with the creation ID `job-4182-create`, so the retry returns the namespace's summary with `head_seq` 0.
 
-Warning: a generated ID makes a retry safe only if the caller keeps the ID between attempts. If an SDK call generates a new ID on each call, a second call is a new request, and a create returns `namespace_exists`. The client library retries with the same ID, and a caller that retries after a restart saves the ID with the rest of the request.
+Warning: a generated ID makes a retry safe only if the caller keeps the ID between attempts. The Rust client generates one ID for each call and sends that ID on every attempt of the call. A second call generates another ID, so the second call is a new request, and a create returns `namespace_exists`. A caller that retries after a restart saves the ID with the rest of the request.
 
 Why aren't these IDs called request IDs? The API already uses "request ID" for the `req_...` value that the server generates for each HTTP request and returns in the `x-request-id` header. That value is diagnostic, and each retry has a different `req_...` value.
 
