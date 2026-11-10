@@ -305,6 +305,65 @@ async fn retrieving_a_snapshot_in_an_acl_namespace_requires_an_administrator_sub
     }
 }
 
+/// Checks that a retried delete of an ACL namespace returns the first
+/// deletion's result only to an administrator: another subject with the
+/// tombstone's deletion ID gets `namespace_deleted`.
+#[tokio::test]
+async fn a_retried_delete_in_an_acl_namespace_requires_an_administrator_subject() {
+    let temp_dir = tempdir().expect("tempdir");
+    let (router, _state) = test_app(
+        test_options(&temp_dir.path().join("store"), "delete-retry-acl"),
+        TestAppOptions::default(),
+    )
+    .await
+    .expect("app");
+    let response = router
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/v0/namespaces",
+            Some(
+                r#"{"creation_id":"test-create","namespace_id":"demo-acl","access":{"kind":"acl","principal_scope":"org","root_grants":{"team":["admin"]}}}"#,
+            ),
+            &[],
+        ))
+        .await
+        .expect("create namespace response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let subject = |principals| {
+        vec![
+            ("Loonfs-Subject", "usr_ada"),
+            ("Loonfs-Principal-Scope", "org"),
+            ("Loonfs-Principals", principals),
+        ]
+    };
+    let uri = "/v0/namespaces/demo-acl?deletion_id=job-4182-delete";
+    let response = router
+        .clone()
+        .oneshot(request("DELETE", uri, None, &subject("team")))
+        .await
+        .expect("delete response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let first = json_body(response).await;
+
+    let response = router
+        .clone()
+        .oneshot(request("DELETE", uri, None, &subject("nobody")))
+        .await
+        .expect("retry by another subject");
+    assert_eq!(response.status(), StatusCode::GONE);
+    let error: ErrorResponse = serde_json::from_value(json_body(response).await).expect("error");
+    assert_eq!(error.code, ErrorCode::NamespaceDeleted.as_str());
+
+    let response = router
+        .clone()
+        .oneshot(request("DELETE", uri, None, &subject("team")))
+        .await
+        .expect("retry by the administrator");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(json_body(response).await, first);
+}
+
 #[tokio::test]
 async fn an_acl_namespace_refuses_a_subject_from_another_scope() {
     let temp_dir = tempdir().expect("tempdir");

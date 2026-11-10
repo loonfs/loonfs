@@ -435,7 +435,11 @@ impl LoonFs<Writable> {
     /// by an earlier attempt of the same request, and the call returns the
     /// target as it is now without creating a fork pin. Any other existing
     /// target returns `namespace_exists`, or `namespace_deleted` when the
-    /// target was deleted.
+    /// target was deleted. A fork attempt that fails after that check loads
+    /// the target once more, and returns the target when the target exists
+    /// with the fork's creation ID, because another attempt of the same
+    /// request created the target in the meantime. Otherwise the call
+    /// returns the attempt's error.
     pub async fn fork_namespace_with_options(
         &self,
         source_namespace_id: &NamespaceId,
@@ -455,7 +459,7 @@ impl LoonFs<Writable> {
                 {
                     return Ok(existing);
                 }
-                match options.snapshot_id.as_ref() {
+                let forked = match options.snapshot_id.as_ref() {
                     Some(snapshot_id) => {
                         let result = self
                             .engine(source_namespace_id)
@@ -482,6 +486,15 @@ impl LoonFs<Writable> {
                         )
                         .await
                     }
+                };
+                match forked {
+                    Err(error) => {
+                        match self.find_fork_target(new_namespace_id, creation_id).await {
+                            Ok(Some(existing)) => Ok(existing),
+                            _ => Err(error),
+                        }
+                    }
+                    forked => forked,
                 }
             },
         )

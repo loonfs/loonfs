@@ -9,7 +9,7 @@ use loonfs::{
     SharedObjectStore, Writable,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_test_support::stores::{BlockingStore, KeyPredicate, RecordingStore};
+use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationSelector, RecordingStore};
 use std::num::NonZeroU64;
 use std::sync::{Arc, Barrier};
 use tempfile::tempdir;
@@ -136,6 +136,61 @@ async fn a_retried_fork_and_a_retried_delete_return_their_first_results() {
         reopened.delete_with_options(&delete("job-2-delete")).await,
         ErrorCode::NamespaceDeleted,
     );
+}
+
+/// Checks that a fork attempt that fails after its check of the target
+/// returns the target when another attempt of the same request created the
+/// target. The late attempt pauses at its first read of the source's pins,
+/// the other attempt forks, the snapshot is deleted, and the late attempt's
+/// pin creation then fails with `snapshot_not_found`.
+#[tokio::test]
+async fn a_fork_attempt_that_fails_after_its_request_created_the_target_returns_the_target() {
+    let temp_dir = tempdir().expect("tempdir");
+    let source = NamespaceId::parse("snapshot-source").expect("namespace id");
+    let target = NamespaceId::parse("snapshot-fork").expect("namespace id");
+    let blocking = Arc::new(BlockingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("create store"),
+        KeyPredicate::prefix(loonfs_objectstore::keys::pin_prefix(&source)),
+        OperationSelector::Read,
+    ));
+    let late_writer = writer(blocking.clone(), "late-fork").await;
+    let other_writer = writer(
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("create store")),
+        "first-fork",
+    )
+    .await;
+    let actor = loonfs_test_support::test_actor();
+    create_namespace(&late_writer, &source).await;
+    let snapshot = late_writer
+        .open_namespace(&source)
+        .expect("open the source")
+        .create_snapshot("base")
+        .await
+        .expect("snapshot");
+    let options = ForkNamespaceOptions {
+        snapshot_id: Some(snapshot.snapshot_id.clone()),
+        creation_id: Some(CreationId::parse("job-1-fork").expect("creation ID")),
+    };
+    blocking.block_next();
+    let (late, first) = tokio::join!(
+        late_writer.fork_namespace_with_options(&source, &target, &actor, &options),
+        async {
+            blocking.wait_until_blocked().await;
+            let first = other_writer
+                .fork_namespace_with_options(&source, &target, &actor, &options)
+                .await
+                .expect("the first attempt forks");
+            other_writer
+                .open_namespace(&source)
+                .expect("open the source")
+                .delete_snapshot(&snapshot.snapshot_id)
+                .await
+                .expect("delete the snapshot");
+            blocking.release();
+            first
+        }
+    );
+    assert_eq!(late.expect("the late attempt returns the fork"), first);
 }
 
 #[tokio::test]

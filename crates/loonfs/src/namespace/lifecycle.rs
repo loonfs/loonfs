@@ -22,13 +22,19 @@ impl<M: crate::Mode> Namespace<M> {
     }
 
     /// Returns the namespace ID and the final head when the namespace's
-    /// current manifest is a tombstone with `deletion_id`, and `None`
-    /// otherwise.
+    /// current manifest is a tombstone with `deletion_id` and this handle's
+    /// subject passes the administrator check that a delete applies, and
+    /// `None` otherwise.
     ///
     /// A delete that finds the namespace deleted calls this, so a retry of
     /// the delete that published the tombstone returns the namespace ID and
     /// the final head, whichever check found the tombstone first
     /// ([design note](https://github.com/loonfs/loonfs/blob/main/docs/design/retrying-creates-and-deletes.md#deleting-a-namespace)).
+    /// The administrator check reads the root's access rows from the
+    /// tombstone, as a snapshot deletion after the namespace's deletion does.
+    /// A subject that isn't an administrator gets `None`, as a delete with
+    /// another deletion ID does, so the result doesn't show whether the
+    /// deletion ID matched.
     pub async fn find_deletion(
         &self,
         deletion_id: &DeletionId,
@@ -36,6 +42,11 @@ impl<M: crate::Mode> Namespace<M> {
         trace::in_operation(
             operation_span!(self.core, "find_deletion", self.namespace_id),
             async {
+                match self.ensure_administrator().await {
+                    Ok(()) => {}
+                    Err(error) if error.code() == ErrorCode::Forbidden => return Ok(None),
+                    Err(error) => return Err(error),
+                }
                 let _permit = self.core.read_permit().await;
                 Ok(self
                     .core

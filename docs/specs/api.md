@@ -1406,12 +1406,12 @@ For example, `DELETE /v0/namespaces/demo?deletion_id=job-4182-delete&expected_he
 }
 ```
 
-A delete that finds a tombstone with its own deletion ID returns the namespace ID and the final head, whatever `expected_head_seq` it sends, including a different value from the first request. So if the response above is lost, the same request sent again returns the same body, and a request with the deletion ID `job-5000-delete` returns `namespace_deleted`. A commit differs. A retried commit with a changed precondition returns `commit_id_reuse_conflict`, because the commit ID identifies the whole request. The server compares the deletion IDs wherever a delete finds the tombstone, whether that's the open of the namespace's writer session or the deletion's own check that the namespace is live.
+A delete that finds a tombstone with its own deletion ID returns the namespace ID and the final head, whatever `expected_head_seq` it sends, including a different value from the first request. So if the response above is lost, the same request sent again returns the same body, and a request with the deletion ID `job-5000-delete` returns `namespace_deleted`. A commit differs. A retried commit with a changed precondition returns `commit_id_reuse_conflict`, because the commit ID identifies the whole request. The server compares the deletion IDs wherever a delete finds the tombstone, whether that's the open of the namespace's writer session or the deletion's own check that the namespace is live. A retry also has to pass the administrator check that a delete of the live namespace applies, which the server evaluates against the root's access rows in the tombstone. A caller that fails the check gets `namespace_deleted`, the same response as a delete with another deletion ID, so the response doesn't show whether the deletion ID matched.
 
 A commit can succeed without its acknowledgement reaching the caller, and deletion doesn't retroactively change that outcome. The reference server resolves its queue in admission order:
 
 - Requests admitted before the delete are published first.
-- Requests admitted after the delete fail with `namespace_deleted`.
+- Requests admitted after the delete fail with `namespace_deleted`, except a delete with the tombstone's deletion ID, which returns the namespace ID and the final head.
 - If the delete ends up failing its precondition, no request is rejected because of it.
 
 Why do the checkpoint inventory and snapshot deletion still work after deletion? A snapshot without an expiry keeps its manifest until it's deleted, so it has to stay discoverable and deletable after the namespace is deleted.
@@ -2671,7 +2671,7 @@ The response contains the new namespace's initial state. Its head sequence and r
 
 The required `creation_id` field identifies the request, as it does for a create (see [Creating and forking namespaces](#creating-and-forking-namespaces)). The server loads the target before it writes a source pin. If the target is active with the request's creation ID, the server returns the fork as it is now. If the target is active with another creation ID, the server returns `namespace_exists`, and if the target ID is deleted, the server returns `namespace_deleted`. If the fork pin can't be verified, the server returns `checkpoint_unavailable`, and no target namespace is installed.
 
-If two attempts with the same creation ID overlap (for example, because a client retried after a timeout while the first attempt was still running), each attempt writes a fork pin, and the attempt whose manifest 1 put loses finds the target with its own creation ID. That attempt deletes its own fork pin, because the fork's manifest refers to the other attempt's pin, and returns the fork as it is now. The source keeps one fork pin.
+If two attempts with the same creation ID overlap (for example, because a client retried after a timeout while the first attempt was still running), each attempt writes a fork pin, and the attempt whose manifest 1 put loses finds the target with its own creation ID. That attempt deletes its own fork pin, because the fork's manifest refers to the other attempt's pin, and returns the fork as it is now. The source keeps one fork pin. Any fork attempt that fails after the server's first load of the target loads the target once more, and returns the fork as it is now when the target is active with the request's creation ID (for example, when the snapshot was deleted after another attempt of the same request created the fork), and the attempt's error otherwise.
 
 ### 6.14 `POST /merges`
 
