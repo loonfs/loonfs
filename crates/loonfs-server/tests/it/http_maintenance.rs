@@ -2,7 +2,7 @@
 //! operations.
 
 use crate::common::http_split_support::*;
-use crate::common::{collect_checkpoints, start_server};
+use crate::common::{assert_api_code, collect_checkpoints, start_server};
 use bytes::Bytes;
 use loonfs_client::{ClientError, NamespacePath};
 use loonfs_objectstore::keys::metadata_manifest_object;
@@ -12,8 +12,8 @@ use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::replace_object;
 use loonfs_types::{
-    ChangeSeq, Checkpoint, CheckpointOwner, DeleteSnapshotResponse, ErrorResponse, ManifestNo,
-    PinId, Snapshot,
+    ChangeSeq, Checkpoint, CheckpointOwner, DeleteSnapshotResponse, ErrorCode, ErrorResponse,
+    ManifestNo, PinId, PoolId, Snapshot,
 };
 use tempfile::tempdir;
 
@@ -455,6 +455,46 @@ async fn http_maintenance_gc_is_explicit_and_retains_young_namespaces() {
 
     let bytes = client.read_file(&target).await.expect("read file");
     assert_eq!(bytes, b"hello gc\n");
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn client_gc_pool_collects_a_namespace_pool_and_rejects_a_pool_without_a_record() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-pool-gc",
+        "http-maintenance-pool-gc",
+    ))
+    .await;
+    let client = harness.client.clone();
+    let namespace = namespace_id("demo");
+    let pool_id = client
+        .create_namespace(&namespace, &loonfs_test_support::test_actor())
+        .await
+        .expect("create namespace")
+        .pool_id;
+
+    let report = client.gc_pool(&pool_id).await.expect("collect the pool");
+    assert_eq!(report.pool_id, pool_id);
+    assert_eq!(
+        report.deleted,
+        loonfs_types::PoolDeletedObjectCounts::default()
+    );
+
+    assert_api_code(
+        client
+            .gc_pool_with_options(
+                &PoolId::generate(),
+                &loonfs_client::GcOptions {
+                    grace_window_ms: 86_400_000,
+                },
+            )
+            .await,
+        404,
+        ErrorCode::PoolNotFound,
+    );
 
     harness.server.abort();
 }

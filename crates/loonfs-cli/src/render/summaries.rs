@@ -157,28 +157,69 @@ fn gc_deleted_counts(report: &GcResponse) -> [(&'static str, u64); 6] {
     ]
 }
 
-fn push_top_retention_reason(summary: &mut String, response: &GcResponse) {
-    if let Some((reason, count)) = response.retained.top_reason() {
-        summary.push_str(&format!("; mostly {reason}: {count}"));
-    }
-}
-
 pub(super) fn gc_summary(report: &GcResponse) -> String {
-    let deleted = gc_deleted_counts(report)
-        .into_iter()
-        .map(|(family, count)| format!("{count} {family}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let mut summary = format!(
-        "gc deleted {deleted} ({} retained)",
-        report.retained.total()
+    let mut summary = gc_counts_summary(
+        gc_deleted_counts(report),
+        report.retained.total(),
+        report.retained.top_reason(),
     );
-    push_top_retention_reason(&mut summary, report);
     if let Some(deadline) = report.reclaimable_at_ms {
         summary.push_str(&format!(
             "\nnamespace can be retired at or after {} after pin cleanup; only fork pins can hold it beyond this deadline",
             format_utc_ms(deadline)
         ));
+    }
+    summary
+}
+
+pub(super) fn pool_gc_summary(report: &PoolGcResponse) -> String {
+    let deleted = &report.deleted;
+    let mut lines = vec![
+        gc_counts_summary(
+            [
+                ("content objects", deleted.content_objects),
+                ("upload sessions", deleted.upload_sessions),
+                ("temporary objects", deleted.temporary_objects),
+            ],
+            report.retained.total(),
+            report.retained.top_reason(),
+        ),
+        format!("listed {} bytes under the pool", report.listed_bytes),
+    ];
+    if let Some(next_reclamation_at_ms) = report.next_reclamation_at_ms {
+        lines.push(format!(
+            "next reclamation at {}",
+            format_utc_ms(next_reclamation_at_ms)
+        ));
+    }
+    lines.extend(report.skipped.iter().map(|reason| {
+        match reason {
+            GcSkippedWork::ContentSweepPoolBudget => {
+                "skipped the content sweep: the pass couldn't read every pool member's roots within its budget"
+            }
+            GcSkippedWork::ContentSweepUnreadableMember => {
+                "skipped the content sweep: the pass couldn't read one pool member's roots"
+            }
+            GcSkippedWork::Unknown => "skipped work for a reason unknown to this CLI",
+        }
+        .to_owned()
+    }));
+    lines.join("\n")
+}
+
+fn gc_counts_summary<const N: usize>(
+    deleted: [(&'static str, u64); N],
+    retained: u64,
+    top_reason: Option<(&'static str, u64)>,
+) -> String {
+    let deleted = deleted
+        .into_iter()
+        .map(|(family, count)| format!("{count} {family}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut summary = format!("gc deleted {deleted} ({retained} retained)");
+    if let Some((reason, count)) = top_reason {
+        summary.push_str(&format!("; mostly {reason}: {count}"));
     }
     summary
 }

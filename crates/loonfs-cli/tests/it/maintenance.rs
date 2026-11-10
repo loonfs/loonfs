@@ -123,6 +123,72 @@ fn maintenance_gc_retires_a_deleted_namespace_instead_of_refusing() {
     assert_eq!(json_error(&metadata)["code"], "namespace_deleted");
 }
 
+#[test]
+fn maintenance_pool_gc_collects_a_given_pool_or_the_selected_namespace_pool() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    let created = harness.run(&["--json", "namespace", "create", "demo"]);
+    assert_success(&created);
+    let pool_id = json_data(&created)["pool_id"]
+        .as_str()
+        .expect("pool id")
+        .to_owned();
+
+    // No namespace is selected yet, so this run reads only the given pool.
+    let given = harness.run(&[
+        "maintenance",
+        "pool",
+        "gc",
+        &pool_id,
+        "--grace-window-ms",
+        "86400000",
+    ]);
+    assert_success(&given);
+    let human = stdout_string(&given);
+    let mut lines = human.lines();
+    let first = lines.next().expect("summary line");
+    assert!(
+        first.starts_with(&format!(
+            "gc for {pool_id}: gc deleted 0 content objects, 0 upload sessions, \
+             0 temporary objects ("
+        )),
+        "{human}"
+    );
+    let listed = lines.next().expect("listed bytes line");
+    assert!(
+        listed.starts_with("listed ") && listed.ends_with(" bytes under the pool"),
+        "{human}"
+    );
+
+    assert_success(&harness.run(&["use", "demo"]));
+    let shown = stdout_string(&harness.run(&["namespace", "show"]));
+    assert!(
+        shown.lines().any(|line| line == format!("pool: {pool_id}")),
+        "{shown}"
+    );
+    let selected = harness.run(&["--json", "maintenance", "pool", "gc"]);
+    assert_success(&selected);
+    let data = json_data(&selected);
+    assert_eq!(data["kind"], "gc");
+    assert_eq!(data["pool_id"], pool_id.as_str());
+    assert_eq!(
+        data["deleted"],
+        serde_json::json!({"content_objects": 0, "upload_sessions": 0, "temporary_objects": 0})
+    );
+    assert!(data["listed_bytes"].as_u64().is_some(), "{data}");
+    assert!(data.get("skipped").is_none(), "{data}");
+
+    let missing = harness.run(&[
+        "--json",
+        "maintenance",
+        "pool",
+        "gc",
+        "pool_3s0drmj8em84yb4mnetqkz2j0x",
+    ]);
+    assert_failure(&missing);
+    assert_eq!(json_error(&missing)["code"], "pool_not_found");
+}
+
 /// Returns the hint's manifest number and the current manifest number of
 /// the namespace `demo` in the harness's default profile.
 async fn hint_and_current(harness: &Harness) -> (u64, u64) {

@@ -5,7 +5,7 @@ use super::cli::{Cli, Command, ConfigCommand, TopLevelCommand};
 use super::filesystem::AccessCommand;
 use super::maintenance::{
     MaintenanceCheckpointCommand, MaintenanceCommand, MaintenanceIndexCommand,
-    MaintenanceRetentionCommand, MaintenanceStoreCommand,
+    MaintenancePoolCommand, MaintenanceRetentionCommand, MaintenanceStoreCommand,
 };
 use super::namespace::{NamespaceCommand, SnapshotCommand};
 use super::profile::ProfileCommand;
@@ -80,6 +80,7 @@ command_kinds! {
     MaintenanceRetentionWindow => "maintenance_retention_window",
     MaintenanceMetadata => "maintenance_metadata",
     MaintenanceGc => "maintenance_gc",
+    MaintenancePoolGc => "maintenance_pool_gc",
     MaintenanceStoreProbe => "maintenance_store_probe",
     MaintenanceIndexEnable => "maintenance_index_enable",
     MaintenanceIndexDisable => "maintenance_index_disable",
@@ -176,6 +177,9 @@ impl Command {
                     }
                 },
                 MaintenanceCommand::Gc(_) => CommandKind::MaintenanceGc,
+                MaintenanceCommand::Pool { command } => match command {
+                    MaintenancePoolCommand::Gc(_) => CommandKind::MaintenancePoolGc,
+                },
                 MaintenanceCommand::Store { command } => match command {
                     MaintenanceStoreCommand::Probe => CommandKind::MaintenanceStoreProbe,
                 },

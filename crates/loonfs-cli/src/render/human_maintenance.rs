@@ -9,7 +9,8 @@ use loonfs_merge::{
 use loonfs_types::{
     ChangeSeq, DeleteNamespaceResponse, DeleteSnapshotResponse, GrepIndex, ListChangesResponse,
     ListCheckpointsResponse, ListSnapshotsResponse, MetadataMaintenanceOutcome,
-    MetadataSkippedWork, NamespaceMetadata, RunMaintenanceResponse, Snapshot, StoreProbeResponse,
+    MetadataSkippedWork, NamespaceMetadata, RunMaintenanceResponse, RunPoolMaintenanceResponse,
+    Snapshot, StoreProbeResponse,
 };
 use loonfs_types::{MergeConflict, MergeConflictKind};
 
@@ -34,12 +35,13 @@ pub(super) fn human_namespace_status(namespace: &NamespaceMetadata) -> String {
     };
     format!(
         "{} @ seq {} (retention floor {})\ncreated_by: {}\naccess: {access}\n\
-         retention_window_ms: {}",
+         retention_window_ms: {}\npool: {}",
         namespace.namespace_id,
         namespace.head_seq.0,
         namespace.retention_floor_seq.0,
         namespace.created_by,
         retention_window(namespace.retention_window_ms),
+        namespace.pool_id,
     )
 }
 
@@ -196,6 +198,15 @@ pub(super) fn human_maintenance_ran(ran: &MaintenanceRan) -> String {
             ),
         },
         RunMaintenanceResponse::Unknown => "maintenance job unknown to this CLI".to_owned(),
+    }
+}
+
+pub(super) fn human_pool_maintenance_ran(response: &RunPoolMaintenanceResponse) -> String {
+    match response {
+        RunPoolMaintenanceResponse::Gc(gc) => {
+            format!("gc for {}: {}", gc.pool_id, pool_gc_summary(gc))
+        }
+        RunPoolMaintenanceResponse::Unknown => "maintenance job unknown to this CLI".to_owned(),
     }
 }
 

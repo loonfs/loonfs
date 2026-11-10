@@ -85,6 +85,7 @@ pub(crate) const GET_NAMESPACE_DIAGNOSTICS: Operation = Operation::retry(Method:
 pub(crate) const LIST_CHECKPOINTS: Operation = Operation::retry(Method::GET);
 pub(crate) const GET_CHECKPOINT: Operation = Operation::retry(Method::GET);
 pub(crate) const RUN_MAINTENANCE: Operation = Operation::once(Method::POST);
+pub(crate) const RUN_POOL_MAINTENANCE: Operation = Operation::once(Method::POST);
 pub(crate) const PROBE_STORE: Operation = Operation::once(Method::POST);
 pub(crate) const GREP: Operation = Operation::retry(Method::GET);
 pub(crate) const GET_GREP_INDEX: Operation = Operation::retry(Method::GET);
@@ -145,8 +146,7 @@ mod tests {
         ("list_checkpoints", LIST_CHECKPOINTS),
         ("get_checkpoint", GET_CHECKPOINT),
         ("run_maintenance", RUN_MAINTENANCE),
-        // The client has no method for a pool's runs, so it has no constant.
-        ("run_pool_maintenance", Operation::once(Method::POST)),
+        ("run_pool_maintenance", RUN_POOL_MAINTENANCE),
         ("probe_store", PROBE_STORE),
         ("grep", GREP),
         ("get_grep_index", GET_GREP_INDEX),

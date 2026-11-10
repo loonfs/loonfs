@@ -12,7 +12,7 @@ use loonfs_types::{
     AbsolutePath, CapabilityDocument, ChangeSeq, CommitId, DeleteNamespaceResponse,
     DeleteSnapshotResponse, FileRevision, GrepIndex, GrepMatch, InodeId, ListChangesResponse,
     ListCheckpointsResponse, ListSnapshotsResponse, NamespaceId, NamespaceMetadata, PathEntry,
-    RunMaintenanceResponse, Snapshot, StoreProbeResponse,
+    RunMaintenanceResponse, RunPoolMaintenanceResponse, Snapshot, StoreProbeResponse,
 };
 use serde::{Deserialize, Serialize};
 
@@ -335,6 +335,8 @@ pub(crate) enum CommandData {
     StreamedToStdout,
     #[serde(untagged)]
     MaintenanceRan(MaintenanceRan),
+    #[serde(untagged)]
+    PoolMaintenanceRan(RunPoolMaintenanceResponse),
 }
 
 impl CommandData {

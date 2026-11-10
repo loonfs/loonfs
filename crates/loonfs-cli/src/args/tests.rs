@@ -332,6 +332,7 @@ fn management_command_model_uses_noun_families() {
             "index",
             "retention",
             "gc",
+            "pool",
             "store",
         ],
     );
@@ -341,6 +342,7 @@ fn management_command_model_uses_noun_families() {
         &["enable", "disable", "status"],
     );
     assert_subcommands(subcommand(maintenance, "retention"), &["advance", "window"]);
+    assert_subcommands(subcommand(maintenance, "pool"), &["gc"]);
     assert_subcommands(subcommand(maintenance, "store"), &["probe"]);
 }
 
