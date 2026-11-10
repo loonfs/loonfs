@@ -329,6 +329,7 @@ fn covers_tail(current: &NamespaceManifestPayload, head: &NamespaceReadState) ->
     current.folded_wal_no >= head.wal_no && current.head_seq >= head.seq
 }
 
+#[derive(Clone)]
 pub struct FoldedWalTail {
     pub response: FoldWalResponse,
     /// The manifest that covers the tail after the call: the one it

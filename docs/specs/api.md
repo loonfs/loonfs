@@ -2705,7 +2705,7 @@ Representative response:
 | `commit_id` | The merge's idempotency key. |
 | `message` | Optional. An annotation that's part of the merge's identity. |
 
-The response is the merge's commit, with its `merge` record, as for every route that commits. The events are the ones that the merge's operations produced, and an empty net change has no events. A large merge is one large WAL object, and reads replay the merge from this namespace's WAL tail until a [fold](glossary.md#fold) writes the tail into a manifest, so the server folds the tail through the merge before it responds. If the merge has already run for half of the request deadline (`request_deadline_ms` in the reference server), the server skips that fold, and the tail waits for the fold trigger like any other tail.
+The response is the merge's commit, with its `merge` record, as for every route that commits. The events are the ones that the merge's operations produced, and an empty net change has no events. A large merge is one large WAL object, and reads replay the merge from this namespace's WAL tail until a [fold](glossary.md#fold) writes the tail into a manifest. The merge's WAL object counts toward this namespace's fold triggers like any commit, so the writer session's own fold folds a large merge.
 
 To merge a fork, the server:
 
@@ -2718,7 +2718,6 @@ To merge a fork, the server:
 7. Computes the fork's net change over the range and the commit's planned size, and returns `merge_too_large` with a split hint (described below) if the range's commits touched more inodes than one WAL object could contain an operation for, or if the commit wouldn't fit one WAL object or the merge allowance.
 8. Classifies the change against this namespace's head under the conflict rule ([Validation](format.md#62-validation)), and returns `merge_conflict` if any inode conflicts.
 9. Commits the merge as the only commit in its WAL object. If the commit fails because this namespace changed after the plan, with a code from the table below, the server keeps the slot, goes back to step 1, and plans the same range again, up to three times, before it returns the commit's error. A later plan reports a row that changed in between, and that isn't the fork's own, as `merge_conflict`. For example, a name that another inode took is a `name` conflict. Another merge of the fork that committed in between makes the later plan return `merge_range_conflict`.
-10. Folds this namespace's tail through the merge, unless the request has used half of its deadline.
 
 A refused merge commits nothing. The size check comes before the conflict check, so a conflict always refers to a range that fits one commit.
 

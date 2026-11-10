@@ -207,3 +207,92 @@ async fn dropped_creations_return_their_fold_permits() {
     store.release();
     writer.shutdown().await.expect("shut down writer");
 }
+
+/// Returns how many folds the runtime that reports to `recorder` has run.
+fn folds_run(recorder: &DefaultMetricsRecorder) -> u64 {
+    let snapshot = recorder.snapshot();
+    let entry = snapshot
+        .by_name("loonfs.publisher.wal_fold_seconds")
+        .next()
+        .expect("the fold duration is registered");
+    match entry.value {
+        MetricValue::Histogram { count, .. } => count,
+        ref other => panic!("expected a histogram, found {other:?}"),
+    }
+}
+
+/// Checks that the snapshots that wait for a fold in progress share one
+/// fold after it. The first snapshot's fold is parked at its manifest put,
+/// three more snapshots arrive, and one more commit is published. The three
+/// snapshots then pin the manifest of one fold, which folds the commit, so
+/// two folds run and two manifests are published after the park.
+#[tokio::test]
+async fn snapshots_that_wait_for_a_fold_share_the_next_fold() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("shared-fold").expect("namespace id");
+    let store = Arc::new(blocking_fold_store(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        metadata_manifest_prefix(&namespace_id),
+    ));
+    let recorder = Arc::new(DefaultMetricsRecorder::new());
+    let writer = crate::LoonFs::builder_with_store(store.clone())
+        .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
+        .metrics_recorder(recorder.clone())
+        .build()
+        .await
+        .expect("build writer");
+    let actor = loonfs_test_support::test_actor();
+    writer
+        .create_namespace(&namespace_id, &actor)
+        .await
+        .expect("create namespace");
+    let namespace = writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace");
+    namespace
+        .put_file("/before.txt", b"before", &actor)
+        .await
+        .expect("a commit before the folds");
+    let created = writer
+        .maintenance(loonfs_test_support::ids::writer_id("writer-a"))
+        .diagnostics(&namespace_id)
+        .await
+        .expect("diagnostics")
+        .current_manifest_no
+        .expect("a manifest");
+    let folds_before = folds_run(&recorder);
+    let snapshot = |name: &'static str| {
+        let namespace = namespace.clone();
+        tokio::spawn(async move { namespace.create_snapshot(name).await })
+    };
+
+    store.block_next();
+    let first = snapshot("first");
+    store.wait_until_blocked().await;
+    let waiting = ["second", "third", "fourth"].map(snapshot);
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    namespace
+        .put_file("/after.txt", b"after", &actor)
+        .await
+        .expect("a commit beside the parked fold");
+    store.release();
+
+    let first = bounded(Duration::from_secs(10), first)
+        .await
+        .expect("the first snapshot finishes")
+        .expect("join the first snapshot")
+        .expect("the first snapshot");
+    assert_eq!(first.snapshot_id.manifest_no().0, created.0 + 1);
+    for snapshot in waiting {
+        let snapshot = bounded(Duration::from_secs(10), snapshot)
+            .await
+            .expect("the snapshot finishes")
+            .expect("join the snapshot")
+            .expect("the snapshot");
+        assert_eq!(snapshot.snapshot_id.manifest_no().0, created.0 + 2);
+    }
+    assert_eq!(folds_run(&recorder) - folds_before, 2);
+    writer.shutdown().await.expect("shut down writer");
+}

@@ -1,11 +1,10 @@
 //! Merging a fork into a writable [`Namespace`]: the receipt lookup, the
-//! merge slot, the checks, the fork's fold, the plan, the commit, and the
-//! fold of the namespace. Also the next-range query, which reads where a
-//! fork's next merge starts.
+//! merge slot, the checks, the fork's fold, the plan, and the commit. Also
+//! the next-range query, which reads where a fork's next merge starts.
 
 use crate::pinned_read::PinnedRead;
 use crate::publish::CommitCandidate;
-use crate::publisher::{FoldWhen, MergeSlot};
+use crate::publisher::MergeSlot;
 use crate::trace::{self, operation_span};
 use crate::{
     ActorId, Commit, CommitId, Consistency, CoreError, Error, MergeForkOptions, Mode, Namespace,
@@ -126,12 +125,8 @@ impl Namespace<Writable> {
     /// merge, and folds neither namespace. When the commit fails because
     /// this namespace changed after the plan, the merge plans again, up to
     /// three times, and then returns the commit's error. A later plan reports a changed row that isn't the
-    /// fork's own as `merge_conflict`. After the
-    /// commit, the merge folds this namespace's WAL tail through it, unless
-    /// the merge has already run for the runtime's
-    /// [`merge_fold_budget_ms`](crate::PublicationPolicy::merge_fold_budget_ms),
-    /// in which case the tail waits for the fold trigger like any other
-    /// tail. The subject of
+    /// fork's own as `merge_conflict`. The merge's WAL object counts toward
+    /// this namespace's fold triggers like any commit. The subject of
     /// this handle has to be able to read each inode whose change the merge
     /// applies in the fork, and needs the rights in this namespace that each
     /// planned operation needs. A runtime whose merge allowance
@@ -148,7 +143,6 @@ impl Namespace<Writable> {
             operation_span!(self.core, "merge_fork", self.namespace_id),
             async {
                 self.core.ensure_merges_enabled()?;
-                let started_at_ms = self.core.timer().monotonic_now_ms();
                 let request = MergeRequest {
                     source_namespace_id: source_namespace_id.clone(),
                     through_seq: options.through_seq,
@@ -158,18 +152,12 @@ impl Namespace<Writable> {
                     message: options.message.clone(),
                 };
                 let planned = self.plan_merge(&request, None).await?;
-                let outcome = self
+                let (MergeOutcome::Found(commit) | MergeOutcome::Committed { commit, .. }) = self
                     .commit_merge(&request, planned, |request, slot| {
                         Box::pin(async move { self.plan_merge(&request, Some(slot)).await })
                     })
                     .await?;
-                match outcome {
-                    MergeOutcome::Found(commit) => Ok(commit),
-                    MergeOutcome::Committed { commit, .. } => {
-                        self.fold_after_merge(started_at_ms).await;
-                        Ok(commit)
-                    }
-                }
+                Ok(commit)
             },
         )
         .await
@@ -340,43 +328,6 @@ impl Namespace<Writable> {
             None => candidate,
         };
         self.session().submit_merge(candidate, slot).await
-    }
-
-    /// Folds this namespace's WAL tail through the merge's commit, within
-    /// what is left of the merge's fold budget. A failed fold doesn't fail
-    /// the merge, which is committed, and the tail waits for the fold
-    /// trigger like any other tail.
-    async fn fold_after_merge(&self, started_at_ms: u64) {
-        let elapsed_ms = self
-            .core
-            .timer()
-            .monotonic_now_ms()
-            .saturating_sub(started_at_ms);
-        let remaining_ms = self
-            .core
-            .config()
-            .publication
-            .merge_fold_budget_ms
-            .saturating_sub(elapsed_ms);
-        if remaining_ms == 0 {
-            return;
-        }
-        // When the budget runs out first, the dropped fold leaves the segments
-        // that it wrote unlisted by any manifest, and garbage collection
-        // removes them, as it does the output of an abandoned compaction
-        // unit.
-        tokio::select! {
-            folded = self.mode.publisher.fold_namespace(&self.namespace_id, FoldWhen::Always) => {
-                if let Err(error) = folded {
-                    tracing::warn!(
-                        namespace_id = %self.namespace_id,
-                        %error,
-                        "the fold after a merge failed, and the tail waits for the fold trigger"
-                    );
-                }
-            }
-            () = crate::publisher::sleep_ms(remaining_ms) => {}
-        }
     }
 
     /// Folds the fork, pins the manifest that covers its tail, and reads the
