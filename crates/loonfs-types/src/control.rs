@@ -1,12 +1,12 @@
 //! Durable control-object shapes: the discovery hint,
-//! pins, upload session and outcome records, and their envelopes
+//! pins, upload session and outcome records, pool records, and their envelopes
 //! ([Appendix A.4](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a4-control-and-manifest-payloads)).
 
 use crate::envelope::EnvelopeCodecError;
 use crate::WriterId;
 use crate::{
     ChangeSeq, ChecksumAlgorithm, CommitId, ContentId, ContentRef, ManifestNo, NamespaceId,
-    PayloadChecksum, PinId, SubjectId, UploadId,
+    PayloadChecksum, PinId, PoolId, SubjectId, UploadId,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -26,15 +26,18 @@ pub enum ControlObjectKind {
     UploadSession,
     /// Records how one upload session ended.
     UploadOutcome,
+    /// Records the creation of one pool.
+    PoolRecord,
 }
 
 impl ControlObjectKind {
     /// Lists every registered control-object family in stable registry order.
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::Hint,
         Self::Pin,
         Self::UploadSession,
         Self::UploadOutcome,
+        Self::PoolRecord,
     ];
 
     /// Returns the durable format version for this control object kind.
@@ -49,6 +52,7 @@ impl ControlObjectKind {
             Self::Pin => 1,
             Self::UploadSession => 1,
             Self::UploadOutcome => 1,
+            Self::PoolRecord => 1,
         }
     }
 
@@ -59,6 +63,7 @@ impl ControlObjectKind {
             Self::Pin => "pin",
             Self::UploadSession => "upload_session",
             Self::UploadOutcome => "upload_outcome",
+            Self::PoolRecord => "pool_record",
         }
     }
 
@@ -396,6 +401,24 @@ pub struct UploadOutcomePayload {
     pub upload_id: UploadId,
     /// How the session ended.
     pub outcome: UploadOutcome,
+}
+
+/// The record that a namespace's create call writes when the call generates
+/// a pool.
+///
+/// LoonFS writes the record once, with put-if-absent, after the namespace's
+/// hint and before manifest 1, and never changes the record.
+///
+/// See [pools and pool records](https://github.com/loonfs/loonfs/blob/main/docs/design/pools.md#pools-and-pool-records).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PoolRecordPayload {
+    /// The pool that the record describes.
+    pub pool_id: PoolId,
+    /// The namespace that was created with the pool, the pool's first member.
+    pub first_member_id: NamespaceId,
+    /// The create call's request clock, in unix milliseconds.
+    pub created_at_ms: u64,
 }
 
 /// Control state decoded through its checked durable codec.

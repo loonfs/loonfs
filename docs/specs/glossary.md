@@ -234,7 +234,7 @@ How old a commit has to be before a retention advance can move the [retention fl
 
 ### Control object
 
-A small object used for discovery, retained views, or upload state: the hint, pins, and the session and outcome records of upload sessions. Each kind has its own update rules (for example, the hint only changes by compare-and-swap, and an upload record is never changed after it's written).
+A small object used for discovery, retained views, upload state, or a pool's creation: the hint, pins, the session and outcome records of upload sessions, and [pool records](#pool-record). Each kind has its own update rules (for example, the hint only changes by compare-and-swap, and an upload record is never changed after it's written).
 
 ## Reads and retained views
 
@@ -278,6 +278,10 @@ The member of a [fork family](#fork-family) that was created without a source. E
 ### Pool
 
 A set of namespaces that share one set of content objects, together with the key prefix that stores those objects (`pools/{pool_id}/`). A pool is identified by a generated pool ID, such as `pool_3s0drmj8em84yb4mnetqkz2j0x`. Every manifest records the namespace's pool (`pool_id`). A namespace created without a source records a pool ID that its create call generates, and a fork records its source's pool, so every member of a [fork family](#fork-family) records one pool. The pool's prefix stores the content objects and upload records of every namespace in the pool, and the temporary objects of content assemblies, so one content reference identifies the same object in every namespace in the pool, and a fork or a merge shares content without copying bytes. For example, if `main` records `pool_3s0drmj8em84yb4mnetqkz2j0x` and `sandbox` is a fork of `main`, a file that `sandbox` uploads is stored under `pools/pool_3s0drmj8em84yb4mnetqkz2j0x/content/`, and a revision in `main` can refer to the same object after a merge. See [Pools](../design/pools.md).
+
+### Pool record
+
+A control object that records the creation of one [pool](#pool), stored at `pools/{pool_id}/pool.json`. A create call that generates a pool writes the pool record once, with put-if-absent, after the namespace's hint and before manifest 1, so every pool that a manifest records has a pool record. The record contains the pool's ID (`pool_id`), the namespace that was created with the pool, which is the pool's first member (`first_member_id`), and the create call's request clock (`created_at_ms`). A fork joins its source's pool and writes no pool record. For example, creating `main` with the pool `pool_3s0drmj8em84yb4mnetqkz2j0x` writes `pools/pool_3s0drmj8em84yb4mnetqkz2j0x/pool.json` with `first_member_id` `main`. See [Pools and pool records](../design/pools.md#pools-and-pool-records) and [Creating a namespace](format.md#91-creating-a-namespace).
 
 ### Merge
 

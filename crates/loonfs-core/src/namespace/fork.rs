@@ -154,7 +154,14 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             fork_basis,
             source_manifest.payload(),
         );
-        if let Err(error) = target.create_manifest(manifest.clone(), &clock).await {
+        let installed = async {
+            target.publish_first_hint().await?;
+            target
+                .publish_first_manifest(manifest.clone(), &clock)
+                .await
+        }
+        .await;
+        if let Err(error) = installed {
             if matches!(
                 error,
                 CoreError::NamespaceExists { .. } | CoreError::NamespaceDeleted { .. }

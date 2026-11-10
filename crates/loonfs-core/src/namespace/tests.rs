@@ -4,9 +4,10 @@ use crate::commit::engine::NamespaceCommitEngine;
 use crate::manifest::tests::control_requests;
 use crate::test_support::WriterAt;
 use crate::wal::tests::publish;
+use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_objectstore::{
-    keys::{hint, metadata_manifest_object, metadata_manifest_prefix, wal_prefix},
+    keys::{hint, metadata_manifest_object, metadata_manifest_prefix, pool_record, wal_prefix},
     local_fs_store::LocalFsStore,
     ObjectStore,
 };
@@ -14,8 +15,10 @@ use loonfs_test_support::stores::{
     BlockingStore, FailStore, InjectedError, KeyPredicate, OperationSelector, RecordedOperation,
     RecordingStore,
 };
+use loonfs_types::format::control::PoolRecordPayload;
 use loonfs_types::options::AttributeInclusion;
 use loonfs_types::{ErrorCode, ManifestNo, NamespaceId};
+use std::assert_matches;
 use tempfile::tempdir;
 
 impl<S: ObjectStore> crate::namespace::store::NamespaceStore<S> {
@@ -31,6 +34,20 @@ impl<S: ObjectStore> crate::namespace::store::NamespaceStore<S> {
 
 fn context() -> WriterAt {
     crate::test_support::writer_at("writer", 1_000)
+}
+
+/// Returns the key of every pool record in `store`.
+async fn pool_record_keys<S: ObjectStore>(store: &S) -> Vec<String> {
+    store
+        .list_prefix("pools/")
+        .await
+        .expect("list the pools")
+        .into_iter()
+        .filter(|key| {
+            parse_object_key(key)
+                .is_some_and(|parsed| parsed.family() == DurableObjectFamily::PoolRecord)
+        })
+        .collect()
 }
 
 #[test]
@@ -93,13 +110,19 @@ async fn two_creations_race_at_manifest_one() {
         store.release();
         result
     });
-    winner.expect("winner");
+    let winner = winner.expect("winner");
     assert_eq!(loser.expect_err("loser").code(), ErrorCode::NamespaceExists);
+    assert_eq!(
+        pool_record_keys(&store).await,
+        vec![pool_record(&winner.pool_id)],
+        "the loser deletes its own pool record"
+    );
 }
 
 /// Checks that a create and a fork each return the state that their manifest
 /// 1 records, and that neither reads the new namespace: the put of manifest 1
-/// decides whether it exists.
+/// decides whether it exists. A create writes its pool record after the hint
+/// and before manifest 1, and a fork writes no pool record.
 #[tokio::test]
 async fn a_new_namespace_returns_the_state_its_first_manifest_records() {
     let directory = tempdir().expect("directory");
@@ -113,12 +136,36 @@ async fn a_new_namespace_returns_the_state_its_first_manifest_records() {
         .create()
         .await
         .expect("create");
+    let operations = store.take();
     assert_eq!(
-        control_requests(&source, &store.take()),
+        operations
+            .iter()
+            .filter(|operation| matches!(operation, RecordedOperation::Put { .. }))
+            .map(RecordedOperation::key)
+            .collect::<Vec<_>>(),
+        [
+            hint(&source),
+            pool_record(&created.pool_id),
+            metadata_manifest_object(&source, &ManifestNo(1)),
+        ]
+    );
+    assert_eq!(
+        control_requests(&source, &operations),
         vec![
             ("put", hint(&source)),
             ("put", metadata_manifest_object(&source, &ManifestNo(1))),
         ]
+    );
+    assert_eq!(
+        crate::test_support::namespace_store(&store, &source)
+            .load_pool_record(&created.pool_id)
+            .await
+            .expect("load the pool record"),
+        Some(PoolRecordPayload {
+            pool_id: created.pool_id.clone(),
+            first_member_id: source.clone(),
+            created_at_ms: created.created_at_ms,
+        })
     );
     assert_eq!(
         created,
@@ -149,13 +196,17 @@ async fn a_new_namespace_returns_the_state_its_first_manifest_records() {
         )
         .await
         .expect("fork");
+    let operations = store.take();
     assert_eq!(
-        control_requests(&target, &store.take()),
+        control_requests(&target, &operations),
         vec![
             ("put", hint(&target)),
             ("put", metadata_manifest_object(&target, &ManifestNo(1))),
         ]
     );
+    assert!(operations
+        .iter()
+        .all(|operation| !operation.key().starts_with("pools/")));
     assert!(forked.fork_basis.is_some());
     assert_eq!(
         forked,
@@ -166,8 +217,11 @@ async fn a_new_namespace_returns_the_state_its_first_manifest_records() {
     );
 }
 
+/// Checks that identical bytes at manifest 1 confirm a create and a fork
+/// after a lost response, and that a create of the existing namespace with
+/// `allow_existing` deletes its own pool record.
 #[tokio::test]
-async fn an_ambiguous_first_manifest_confirms_only_a_forks_creation() {
+async fn an_ambiguous_first_manifest_confirms_a_create_and_a_fork() {
     let directory = tempdir().expect("directory");
     let source = NamespaceId::parse("source").expect("source");
     let target = NamespaceId::parse("target").expect("target");
@@ -182,16 +236,11 @@ async fn an_ambiguous_first_manifest_confirms_only_a_forks_creation() {
     .apply_then_fail();
     store.fail_next(1);
     let actor_id = loonfs_test_support::test_actor();
-    let error = crate::test_support::NamespaceFixture::new(&store, &source, &context())
+    let created = crate::test_support::NamespaceFixture::new(&store, &source, &context())
         .create()
         .await
-        .expect_err("plain create cannot prove authorship from matching bytes");
-    assert_eq!(error.code(), ErrorCode::NamespaceExists);
+        .expect("the pool ID proves authorship from matching bytes");
     assert_eq!(store.attempts(), 1);
-    let existing = crate::test_support::namespace_store(&store, &source)
-        .load_metadata()
-        .await
-        .expect("created namespace");
     let adopted = crate::test_support::NamespaceFixture::new(&store, &source, &context())
         .engine()
         .bootstrap_namespace(
@@ -203,10 +252,14 @@ async fn an_ambiguous_first_manifest_confirms_only_a_forks_creation() {
         )
         .await
         .expect("allow existing returns the created namespace");
-    assert_eq!(adopted, existing);
+    assert_eq!(adopted, created);
+    assert_eq!(
+        pool_record_keys(&store).await,
+        vec![pool_record(&created.pool_id)]
+    );
     store.fail_next(1);
     let fixture = crate::test_support::NamespaceFixture::new(&store, &source, &context());
-    let created = fixture
+    let forked = fixture
         .engine()
         .fork_namespace(
             &target,
@@ -217,9 +270,70 @@ async fn an_ambiguous_first_manifest_confirms_only_a_forks_creation() {
         )
         .await
         .expect("fork source pin proves authorship from matching bytes");
-    assert!(created.fork_basis.is_some());
+    assert!(forked.fork_basis.is_some());
     assert_eq!(store.attempts(), 1);
     assert_eq!(store.remaining(), 0);
+}
+
+/// Checks that a create whose pool record put fails writes no manifest 1, and
+/// that a create whose manifest put has an unknown outcome keeps its pool
+/// record. Each leaves the hint, so a later create of the ID succeeds.
+#[tokio::test]
+async fn a_failed_create_keeps_only_a_pool_record_that_a_manifest_might_record() {
+    let namespace_id = NamespaceId::parse("created").expect("namespace");
+    let manifest_key = metadata_manifest_object(&namespace_id, &ManifestNo(1));
+    let pool_records = KeyPredicate::family(DurableObjectFamily::PoolRecord);
+    for (keys, error, writes_pool_record) in [
+        (
+            pool_records.clone(),
+            InjectedError::Transport("request lost".to_owned()),
+            false,
+        ),
+        (pool_records, InjectedError::PreconditionFailed, false),
+        (
+            KeyPredicate::exact(&manifest_key),
+            InjectedError::Transport("request lost".to_owned()),
+            true,
+        ),
+    ] {
+        let directory = tempdir().expect("directory");
+        let store = FailStore::new(
+            LocalFsStore::new(directory.path()).expect("store"),
+            keys,
+            OperationSelector::PutCreateIfAbsent,
+            error.clone(),
+        );
+        store.fail_next(1);
+        let failed = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context())
+            .create()
+            .await
+            .expect_err("the create fails");
+        let records = pool_record_keys(store.inner()).await;
+        if writes_pool_record {
+            assert_matches!(
+                failed,
+                crate::CoreError::OutcomeUnknown { object_key, .. } if object_key == manifest_key
+            );
+            assert_eq!(records.len(), 1);
+        } else {
+            assert_matches!(
+                failed,
+                crate::CoreError::Store { object_key, .. }
+                    if parse_object_key(&object_key)
+                        .is_some_and(|parsed| parsed.family() == DurableObjectFamily::PoolRecord),
+                "{error:?}"
+            );
+            assert!(records.is_empty(), "{error:?}");
+        }
+        for (key, exists) in [(hint(&namespace_id), true), (manifest_key.clone(), false)] {
+            let stored = store.inner().head(&key).await.expect("head");
+            assert_eq!(stored.is_some(), exists, "`{key}` after {error:?}");
+        }
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context())
+            .create()
+            .await
+            .expect("a later create of the ID succeeds");
+    }
 }
 
 #[tokio::test]
