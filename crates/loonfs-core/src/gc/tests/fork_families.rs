@@ -214,12 +214,12 @@ async fn content_that_only_a_member_view_refers_to_stays_through_every_generatio
     let family = family(&store, &["root", "fork", "grandchild"]).await;
     let root = &family[0];
     let mut referenced = Vec::new();
-    for member in &family[1..] {
-        let content_id = ContentId::generate();
+    for (member, number) in family[1..].iter().zip(1..) {
+        let content_id = numbered_content_id(number);
         referenced.push(plant(&store, root, &content_id).await);
         publish_layout(&store, member, &content_id).await;
     }
-    let unreferenced = plant(&store, root, &ContentId::generate()).await;
+    let unreferenced = plant(&store, root, &numbered_content_id(3)).await;
     let aged = aged_context(&store, &family).await;
     store.reset();
     let report = crate::test_support::namespace_store(&store, root)
@@ -455,7 +455,8 @@ async fn a_deleted_root_with_a_live_fork_sweeps_unreferenced_content() {
     let store = LocalFsStore::new(directory.path()).expect("store");
     let family = family(&store, &["root"]).await;
     let root = &family[0];
-    let shared = put_file_content(&store, root, "/shared", b"shared").await;
+    let shared =
+        put_file_content_with_id(&store, root, "/shared", b"shared", numbered_content_id(1)).await;
     let fork_id = NamespaceId::parse("fork").expect("namespace");
     fork(&store, root, &fork_id).await;
     crate::test_support::NamespaceFixture::new(&store, root, &context(1_000))
@@ -463,7 +464,7 @@ async fn a_deleted_root_with_a_live_fork_sweeps_unreferenced_content() {
         .delete_namespace(DeleteNamespaceOptions::default())
         .await
         .expect("delete the root");
-    let unreferenced = plant(&store, root, &ContentId::generate()).await;
+    let unreferenced = plant(&store, root, &numbered_content_id(2)).await;
     let aged = aged_context(&store, &[root.clone(), fork_id.clone()]).await;
     let report = crate::test_support::namespace_store(&store, root)
         .gc(None, &options(), &aged.clock())

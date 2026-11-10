@@ -35,12 +35,12 @@ async fn overlapping_retirement_retries_a_lost_pin_delete_and_preserves_a_live_s
             .expect("fork");
     }
     for number in 0..3 {
-        write_test_file(
+        put_file_content_with_id(
             &inner,
             &target,
             &format!("/owned-{number}"),
-            &format!("owned-{number}"),
-            &setup,
+            b"owned",
+            numbered_content_id(3 + number),
         )
         .await;
     }

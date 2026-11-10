@@ -271,7 +271,7 @@ async fn a_false_match_of_an_extent_filter_stays_until_no_root_lists_its_segment
         .expect("the segment");
     let filter = decode_filter_block(&stored, &handle).expect("decode the extent filter");
     // The filter has the minimum 64 bits for two names, so about one name in
-    // 40,000 matches it by chance.
+    // 200 matches it by chance.
     let orphan = (0..2_000_000)
         .map(|index| ContentId::parse(format!("con_7{index:025}")).expect("orphan id"))
         .find(|content_id| filter.may_contain(content_id.as_str()))
@@ -318,7 +318,7 @@ async fn an_extent_of_a_superseded_layout_row_stays_until_no_root_lists_its_segm
         KeyPredicate::any(),
     );
     let namespace_id = NamespaceId::parse("superseded-layout").expect("namespace");
-    let chain = ContentId::generate();
+    let chain = numbered_content_id(1);
     let layout = |object, size_bytes, committed_seq| ContentLayoutRecord {
         content_id: chain.clone(),
         size_bytes,

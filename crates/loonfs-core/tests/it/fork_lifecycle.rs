@@ -13,7 +13,7 @@ use loonfs_objectstore::keys::{content_blob, hint, metadata_manifest_object, pin
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_objectstore::{ObjectStore, PutMode};
-use loonfs_test_support::ids::{commit_id, namespace_id};
+use loonfs_test_support::ids::{commit_id, namespace_id, numbered_content_id};
 use loonfs_test_support::stores::{
     replace_object, BlockingStore, FailStore, InjectedError, KeyPredicate, LostCreateStore,
     MetadataMapStore, OperationSelector, RecordedOperation, RecordingStore,
@@ -1726,18 +1726,21 @@ async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_cont
     let setup = default_writer();
     let source = namespace_id("template");
     let sibling = namespace_id("sibling");
-    seed_source_namespace_for_fork(&store, &source, &setup).await;
+    NamespaceFixture::new(&store, &source, &setup)
+        .create()
+        .await
+        .expect("bootstrap source namespace");
+    let write = async |namespace_id: &NamespaceId, path, bytes, number| {
+        NamespaceFixture::new(&store, namespace_id, &setup)
+            .write_file_bytes_with_content_id(path, bytes, numbered_content_id(number))
+            .await
+            .expect("write a file");
+    };
+    write(&source, "/docs/shared.txt", b"base", 1).await;
     fork_namespace(&store, &source, &sibling, &setup)
         .await
         .expect("fork sibling");
-    NamespaceFixture::new(&store, &sibling, &setup)
-        .write_file_bytes(
-            "/docs/sibling.txt",
-            b"sibling",
-            Some(&commit_id("sibling-write")),
-        )
-        .await
-        .expect("write sibling");
+    write(&sibling, "/docs/sibling.txt", b"sibling", 2).await;
     let source_file = read_file_bytes(&store, &source, "/docs/shared.txt")
         .await
         .expect("source");
@@ -1756,10 +1759,7 @@ async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_cont
         fork_namespace(&store, &source, &leaf, &setup)
             .await
             .expect("fork leaf");
-        NamespaceFixture::new(&store, &leaf, &setup)
-            .write_file_bytes("/docs/own.txt", b"leaf", Some(&commit_id("leaf-write")))
-            .await
-            .expect("write leaf");
+        write(&leaf, "/docs/own.txt", b"leaf", 3 + number).await;
         submit_operation(
             &store,
             &leaf,
