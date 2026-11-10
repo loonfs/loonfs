@@ -160,7 +160,7 @@ pub(super) fn human_maintenance_ran(ran: &MaintenanceRan) -> String {
             lines.extend(metadata.skipped.iter().map(|reason| {
                 match reason {
                     MetadataSkippedWork::ExpiredRowRemovalWalkLimit => {
-                        "kept the rows that expired deletions hide: the kept inode walk reached its limit of 4,096 open directories"
+                        "skipped the removal of rows that expired deletions hide: the kept inode walk reached its limit of 4,096 open directories"
                     }
                     MetadataSkippedWork::Unknown => "skipped work for a reason unknown to this CLI",
                 }

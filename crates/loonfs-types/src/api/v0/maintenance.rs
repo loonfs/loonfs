@@ -178,8 +178,8 @@ pub struct MetadataMaintenanceResponse {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum MetadataSkippedWork {
-    /// A compaction unit kept every row that an expired deletion hides, because the walk that
-    /// finds the kept inodes reached its limit of 4,096 open directories.
+    /// A compaction unit skipped the removal of the rows that an expired deletion hides, because
+    /// the walk that finds the kept inodes reached its limit of 4,096 open directories.
     ExpiredRowRemovalWalkLimit,
     /// A reason from a newer server.
     #[serde(other)]

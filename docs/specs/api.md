@@ -840,7 +840,7 @@ The result also includes `skipped` when a unit that the job published stopped pa
 
 | Reason | What the job skipped | What the operator can do |
 | --- | --- | --- |
-| `expired_row_removal_walk_limit` | A base compaction kept every row that an expired deletion hides, because the walk that finds the kept inodes would have needed more than 4,096 directory cursors at once (see [Row retention during a base compaction](format.md#103-row-retention-during-a-base-compaction)). | Move part of the deeply nested tree closer to the root. The next base compaction of each family group removes the hidden rows once the walk fits within the limit. |
+| `expired_row_removal_walk_limit` | A base compaction skipped the removal of the rows that an expired deletion hides, because the walk that finds the kept inodes would have needed more than 4,096 directory cursors at once (see [Row retention during a base compaction](format.md#103-row-retention-during-a-base-compaction)). | Move part of the deeply nested tree closer to the root. The next base compaction of each family group removes the hidden rows once the walk fits within the limit. |
 
 A compaction unit can take minutes, so a `metadata` job can too. The reference server exempts maintenance jobs from its request deadline. A client sends the request once, because `run_maintenance` isn't idempotent. After a `due` outcome, the client runs the job again later, as the reference server's scheduler does for a namespace that's still due.
 

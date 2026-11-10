@@ -880,19 +880,19 @@ async fn create_directory_chain<S: ObjectStore>(
 }
 
 /// Checks that a base compaction whose kept inode walk reaches its limit
-/// publishes, keeps every row that an expired deletion hides, and reports
-/// that it skipped removing them.
+/// publishes, keeps a revision that an expired deletion hides, and reports
+/// that it skipped the removal of hidden rows.
 ///
-/// The walk drops a directory's cursor before it descends into the
-/// directory's last child, so a chain of directories of any depth uses one
-/// cursor. In the chain that this test builds, every directory has a second
+/// Once the walk has read a directory's last row, it drops the directory's
+/// cursor before it descends into the directory's last child, so a chain of
+/// small directories uses one cursor at any depth. In the chain that this test builds, every directory has a second
 /// entry after the child it descends into (`f` after `d`, and the root's
 /// `keep.txt` after the chain's top), so every directory keeps its cursor. The
 /// walk reaches the limit when it reads the directory at depth 4,095, with
 /// the root's cursor and 4,095 others on the stack, and finds a child
 /// directory.
 #[tokio::test]
-async fn a_compaction_whose_kept_inode_walk_reaches_its_limit_keeps_every_row() {
+async fn a_compaction_whose_kept_inode_walk_reaches_its_limit_skips_hidden_row_removal() {
     let temp = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp.path()).expect("store");
     let namespace_id = NamespaceId::parse("walk-limit").expect("namespace id");
