@@ -21,8 +21,8 @@ use std::future::Future;
 pub(crate) trait MetadataVisibilityReads {
     type Error: From<VisiblePathError>;
 
-    /// The retention floor of the view's manifest. A deletion at or below it
-    /// has expired in the view
+    /// The view's retention floor. A deletion at or below it has expired in
+    /// the view
     /// ([format section 1.6](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#16-file-and-subtree-deletion)).
     fn retention_floor_seq(&self) -> ChangeSeq;
 
@@ -544,8 +544,9 @@ impl MetadataState {
 impl MetadataVisibilityReads for MetadataStateReads<'_> {
     type Error = VisiblePathError;
 
-    /// In-memory state has no manifest, so like a new namespace's first
-    /// manifest, it has a floor of 0 and no deletion in it has expired.
+    /// In-memory state has no manifest and no floor object, so like a new
+    /// namespace's first manifest, it has a floor of 0 and no deletion in it
+    /// has expired.
     fn retention_floor_seq(&self) -> ChangeSeq {
         ChangeSeq(0)
     }

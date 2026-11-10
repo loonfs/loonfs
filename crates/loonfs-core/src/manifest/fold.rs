@@ -133,8 +133,11 @@ impl<S: ObjectStore> NamespaceStore<S> {
 
     /// Folds the WAL tail and publishes the next manifest as the maintainer.
     ///
-    /// The manifest copies both epochs from its predecessor (format spec,
-    /// "Publishing a manifest"). A writer session passes the tail
+    /// The manifest copies both epochs from its predecessor, and its
+    /// retention floor is the higher of its predecessor's floor and the
+    /// floors of the floor objects that the fold covers (format spec,
+    /// "Publishing a manifest"). A tail of floor objects and no commits is
+    /// folded too, into a manifest with no new run. A writer session passes the tail
     /// it keeps as `held`, and every other caller passes `None`, which loads the
     /// tail from the store. A tail passed as `held` whose last check is at the revalidation
     /// bound is discarded, and the tail is loaded from the store too: a check
@@ -311,12 +314,17 @@ impl<S: ObjectStore> NamespaceStore<S> {
         };
 
         let previous = projection.manifest_segments.manifest().payload();
+        // The head's floor includes every floor object in the tail that the
+        // fold covers (format spec, "Publishing a manifest").
         Ok(NamespaceManifestPayload {
             activity,
             head_seq,
             writer_epoch: projection.head.writer_epoch,
             next_run_no,
             folded_wal_no: projection.head.wal_no,
+            retention_floor_seq: previous
+                .retention_floor_seq
+                .max(projection.head.retention_floor_seq),
             ..previous
                 .successor(runs)
                 .map_err(|_| no_manifest_after(previous.manifest_no))?

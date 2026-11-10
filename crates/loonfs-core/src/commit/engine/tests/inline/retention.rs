@@ -104,9 +104,9 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
         )
         .await
         .expect("pin the original history");
-    // The session advances the floor itself, so it keeps its epoch for the
-    // replay below.
-    let (_, floor) =
+    // The session advances the floor itself, through a floor object at its
+    // tip, so it keeps its position for the replay below.
+    let floor =
         crate::commit::engine::tests::advance_in_session(&mut engine, original.committed_seq).await;
     assert_eq!(floor.retention_floor_seq, original.committed_seq);
     compact_and_check_pair(
@@ -157,7 +157,6 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
     assert_eq!(
         crate::commit::engine::tests::advance_in_session(&mut engine, later.committed_seq)
             .await
-            .1
             .retention_floor_seq,
         later.committed_seq
     );

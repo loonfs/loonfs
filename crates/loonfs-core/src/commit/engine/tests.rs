@@ -477,7 +477,8 @@ async fn a_successful_put_refreshes_the_observation_the_next_budget_runs_from() 
     // More than the budget has passed since the first observation, but only
     // 2 ms since the last successful put, so the third publish rediscovers
     // nothing. Its basis has gone more than a budget unconfirmed, so before
-    // its put it makes one HEAD of the next manifest number and nothing else.
+    // its put it confirms its tip with a HEAD of the next WAL number and one
+    // of the next manifest number, and nothing else.
     let operations = store.take();
     assert!(
         !operations
@@ -489,11 +490,12 @@ async fn a_successful_put_refreshes_the_observation_the_next_budget_runs_from() 
         .iter()
         .filter(|operation| matches!(operation, RecordedOperation::Head { .. }))
         .collect();
-    assert_matches!(
-        heads.as_slice(),
-        [RecordedOperation::Head { key }] if key.starts_with(
-            &loonfs_objectstore::keys::metadata_manifest_prefix(&namespace_id)
-        ),
+    assert!(
+        heads.len() == 2
+            && starts_with_tip_confirmation(
+                &heads.into_iter().cloned().collect::<Vec<_>>(),
+                &namespace_id
+            ),
         "{operations:?}"
     );
 }
@@ -707,11 +709,62 @@ fn is_head_under(operation: &RecordedOperation, prefix: &str) -> bool {
     matches!(operation, RecordedOperation::Head { key } if key.starts_with(prefix))
 }
 
+/// Returns whether `operations` start with a tip confirmation: a HEAD of a
+/// WAL number, then a HEAD of a manifest number.
+fn starts_with_tip_confirmation(
+    operations: &[RecordedOperation],
+    namespace_id: &NamespaceId,
+) -> bool {
+    matches!(
+        operations,
+        [wal, manifest, ..]
+            if is_head_under(wal, &wal_prefix(namespace_id))
+                && is_head_under(
+                    manifest,
+                    &loonfs_objectstore::keys::metadata_manifest_prefix(namespace_id)
+                )
+    )
+}
+
+/// Checks that a quiet writer confirms its tip with a HEAD of the next WAL
+/// number, then a HEAD of the next manifest number, in that order and one
+/// after the other, and reads none of its tail again. A writer whose WAL
+/// HEAD finds a floor object at the next number runs discovery before it
+/// plans, and writes its commit above the floor object.
 #[tokio::test]
-async fn a_quiet_writer_confirms_its_tip_with_one_head() {
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test checks the key of the confirmation's WAL HEAD"
+)]
+async fn a_quiet_writer_confirms_its_tip_with_a_wal_head_and_then_a_manifest_head() {
     let directory = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = gated_store(&directory, KeyPredicate::new(|_| false));
+    // The gate logs the key of every HEAD when the request is sent, before
+    // any response, and parks the next WAL HEAD when it's armed.
+    let sent_heads = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let store = RecordingStore::new(
+        BlockingStore::matching(LocalFsStore::new(directory.path()).expect("store"), {
+            let sent_heads = Arc::clone(&sent_heads);
+            let wal = wal_prefix(&namespace_id);
+            move |context| {
+                if !OperationSelector::Head.matches(context.kind()) {
+                    return false;
+                }
+                sent_heads
+                    .lock()
+                    .expect("the log lock should not be poisoned")
+                    .push(context.key().to_owned());
+                context.key().starts_with(&wal)
+            }
+        }),
+        KeyPredicate::any(),
+    );
+    let sent = || {
+        sent_heads
+            .lock()
+            .expect("the log lock should not be poisoned")
+            .clone()
+    };
     let (mut engine, timer, writer) = writer_after_one_publish(&store, &namespace_id).await;
     for name in ["beta", "gamma", "delta"] {
         publish_one(&mut engine, &writer, name).await;
@@ -719,31 +772,87 @@ async fn a_quiet_writer_confirms_its_tip_with_one_head() {
 
     timer.advance_ms(WAL_PUBLISH_BUDGET_MS + 1);
     store.reset();
-    publish_one(&mut engine, &writer, "epsilon").await;
-    // The tail holds a fence and four commits, and none of it is read
-    // again: a HEAD of the next manifest number, then the put.
-    let operations = store.take();
-    assert_matches!(
-        operations.as_slice(),
-        [
-            RecordedOperation::Head { key: successor },
-            RecordedOperation::Put {
-                key: written,
-                mode: loonfs_objectstore::PutMode::CreateIfAbsent,
-                ..
-            },
-        ] if successor.starts_with(
+    sent_heads
+        .lock()
+        .expect("the log lock should not be poisoned")
+        .clear();
+    store.inner().block_next();
+    let (_, ()) = futures::join!(publish_one(&mut engine, &writer, "epsilon"), async {
+        // The WAL HEAD's response is held here. A manifest HEAD sent
+        // alongside the WAL HEAD would be in the log of sent requests.
+        store.inner().wait_until_blocked().await;
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        let held = sent();
+        assert!(
+            matches!(held.as_slice(), [wal] if wal.starts_with(&wal_prefix(&namespace_id))),
+            "only the WAL HEAD is sent before its response: {held:?}"
+        );
+        store.inner().release();
+    });
+    let heads = sent();
+    assert!(
+        matches!(
+            heads.as_slice(),
+            [_, manifest] if manifest.starts_with(
                 &loonfs_objectstore::keys::metadata_manifest_prefix(&namespace_id)
             )
-            && written.starts_with(&wal_prefix(&namespace_id))
+        ),
+        "the manifest HEAD follows the WAL response: {heads:?}"
     );
+    // The tail contains a fence and four commits, and none of it is read
+    // again.
+    let operations = store.take();
+    assert!(
+        operations.len() == 3
+            && starts_with_tip_confirmation(&operations, &namespace_id)
+            && matches!(
+                &operations[2],
+                RecordedOperation::Put {
+                    key,
+                    mode: loonfs_objectstore::PutMode::CreateIfAbsent,
+                    ..
+                } if key.starts_with(&wal_prefix(&namespace_id))
+            ),
+        "{operations:?}"
+    );
+
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let tip = engine
+        .writer_position()
+        .expect("a position")
+        .read_basis
+        .head
+        .wal_no;
+    let planned = namespace.load_current_manifest().await.expect("planned");
+    namespace
+        .publish_floor_object(&planned, ChangeSeq(1))
+        .await
+        .expect("another process creates a floor object");
+    timer.advance_ms(WAL_PUBLISH_BUDGET_MS + 1);
+    store.reset();
+    publish_one(&mut engine, &writer, "zeta").await;
+    let operations = store.take();
+    let floor_object = loonfs_objectstore::keys::wal_object(
+        &namespace_id,
+        &tip.successor().expect("next WAL number"),
+    );
+    assert!(
+        matches!(&operations[0], RecordedOperation::Head { key } if *key == floor_object)
+            && operations[1].key() == loonfs_objectstore::keys::hint(&namespace_id),
+        "the writer runs discovery after it finds the floor object: {operations:?}"
+    );
+    let position = engine.writer_position().expect("a position");
+    assert_eq!(position.read_basis.head.wal_no.0, tip.0 + 2);
+    assert_eq!(position.retention_floor_seq(), ChangeSeq(1));
 }
 
 /// Checks that a writer that commits every few minutes for an hour, against
-/// a manifest that nothing replaces, sends one HEAD of the next manifest
-/// number on each commit whose basis was confirmed more than a budget
-/// earlier, and no other request before its put, so it never reads its WAL
-/// tail again.
+/// a manifest that nothing replaces, confirms its tip with a HEAD of the
+/// next WAL number and one of the next manifest number on each commit whose
+/// basis was confirmed more than a budget earlier, and sends no other
+/// request before its put, so it never reads its WAL tail again.
 ///
 /// Commits a whole budget apart check the basis when it's two budgets old,
 /// and the revalidation bound still trusts that check.
@@ -753,7 +862,6 @@ async fn a_steady_writer_checks_its_basis_once_a_budget_and_never_replays_its_ta
     for spacing_ms in [4 * 60 * 1000, WAL_PUBLISH_BUDGET_MS] {
         let directory = tempdir().expect("tempdir");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let manifests = loonfs_objectstore::keys::metadata_manifest_prefix(&namespace_id);
         let store = gated_store(&directory, KeyPredicate::new(|_| false));
         let (mut engine, timer, writer) = writer_after_one_publish(&store, &namespace_id).await;
         let mut confirmed_at_ms = 0;
@@ -771,15 +879,16 @@ async fn a_steady_writer_checks_its_basis_once_a_budget_and_never_replays_its_ta
                 .filter(|operation| {
                     operation.key() == loonfs_objectstore::keys::hint(&namespace_id)
                         || (operation.key().starts_with(&wal_prefix(&namespace_id))
-                            && !matches!(operation, RecordedOperation::Put { .. }))
+                            && !matches!(
+                                operation,
+                                RecordedOperation::Put { .. } | RecordedOperation::Head { .. }
+                            ))
                 })
                 .count();
             let (put, probes) = operations.split_last().expect("the put");
             assert!(
-                probes.len() == usize::from(due)
-                    && probes
-                        .iter()
-                        .all(|operation| is_head_under(operation, &manifests))
+                probes.len() == 2 * usize::from(due)
+                    && (!due || starts_with_tip_confirmation(probes, &namespace_id))
                     && matches!(
                         put,
                         RecordedOperation::Put {
@@ -828,18 +937,12 @@ async fn a_quiet_writer_finds_a_takeover_claim_and_is_fenced() {
             .code(),
         ErrorCode::WriterFenced
     );
+    // The confirmation's WAL HEAD finds the new writer's fence, so the
+    // writer runs discovery, which finds the new epoch.
     let operations = store.take();
     assert!(
-        is_head_under(
-            &operations[0],
-            &loonfs_objectstore::keys::metadata_manifest_prefix(&namespace_id)
-        ),
-        "{operations:?}"
-    );
-    assert!(
-        operations
-            .iter()
-            .any(|operation| operation.key() == loonfs_objectstore::keys::hint(&namespace_id)),
+        is_head_under(&operations[0], &wal_prefix(&namespace_id))
+            && operations[1].key() == loonfs_objectstore::keys::hint(&namespace_id),
         "{operations:?}"
     );
     assert_eq!(store.count(OperationSelector::Put), 0, "{operations:?}");
@@ -850,10 +953,13 @@ async fn a_quiet_writer_finds_a_takeover_claim_and_is_fenced() {
 /// writer drops its position, and its retry finds that it was fenced.
 ///
 /// Before the put, the writer sends no request within its publication
-/// budget, and one HEAD of the next manifest number after it.
+/// budget, and a tip confirmation after it.
 #[tokio::test]
 async fn a_takeover_after_the_last_check_is_found_by_the_put() {
-    for (quiet_ms, manifest_heads) in [(WAL_PUBLISH_BUDGET_MS, 0), (WAL_PUBLISH_BUDGET_MS + 1, 1)] {
+    for (quiet_ms, confirms) in [
+        (WAL_PUBLISH_BUDGET_MS, false),
+        (WAL_PUBLISH_BUDGET_MS + 1, true),
+    ] {
         let directory = tempdir().expect("tempdir");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let store = RecordingStore::new(
@@ -891,11 +997,8 @@ async fn a_takeover_after_the_last_check_is_found_by_the_put() {
         let operations = store.take();
         let (put, probes) = operations.split_last().expect("the put");
         assert!(
-            probes.len() == manifest_heads
-                && probes.iter().all(|operation| is_head_under(
-                    operation,
-                    &loonfs_objectstore::keys::metadata_manifest_prefix(&namespace_id)
-                ))
+            probes.len() == 2 * usize::from(confirms)
+                && (!confirms || starts_with_tip_confirmation(probes, &namespace_id))
                 && matches!(
                     put,
                     RecordedOperation::Put {
@@ -954,14 +1057,64 @@ async fn a_quiet_writer_finds_a_fold_and_commits_on_the_new_basis() {
     );
     let operations = store.take();
     assert!(
-        is_head_under(
-            &operations[0],
-            &loonfs_objectstore::keys::metadata_manifest_prefix(&namespace_id)
-        ) && operations[1..]
-            .iter()
-            .any(|operation| operation.key() == loonfs_objectstore::keys::hint(&namespace_id)),
+        starts_with_tip_confirmation(&operations, &namespace_id)
+            && operations[2..]
+                .iter()
+                .any(|operation| operation.key() == loonfs_objectstore::keys::hint(&namespace_id)),
         "{operations:?}"
     );
+}
+
+/// Checks the first writer rule: a session with tip `t` whose manifest
+/// probe finds another process's fold of a floor object at `t + 1` drops its
+/// position instead of moving onto the fold, and its next commit is written
+/// above `t + 1`, against the floor that the fold recorded.
+#[tokio::test]
+async fn a_session_drops_its_position_at_a_fold_past_its_tip() {
+    let directory = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let store = gated_store(&directory, KeyPredicate::new(|_| false));
+    let (mut engine, _timer, writer) = writer_after_one_publish(&store, &namespace_id).await;
+    let before = engine.writer_position().expect("a position");
+    let tip = before.read_basis.head.wal_no;
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let planned = namespace.load_current_manifest().await.expect("planned");
+    namespace
+        .publish_floor_object(&planned, ChangeSeq(1))
+        .await
+        .expect("another process creates a floor object");
+    let folded = namespace
+        .fold_wal_tail(
+            None,
+            &OperationClock::start(0, Arc::new(StdMonotonicTimer::default())),
+        )
+        .await
+        .expect("another process folds the floor object")
+        .manifest;
+    assert_eq!(
+        folded.folded_wal_no,
+        tip.successor().expect("next WAL number")
+    );
+
+    let moves = namespace
+        .same_epoch_manifests_above(
+            before.read_basis.basis.manifest(),
+            before.read_basis.head.writer_epoch,
+        )
+        .await
+        .expect("the probe's walk")
+        .expect("the fold has the session's epoch");
+    for manifest in moves {
+        engine.record_manifest_published(manifest);
+    }
+    assert!(
+        engine.writer_position().is_none(),
+        "the session drops its position"
+    );
+    publish_one(&mut engine, &writer, "beta").await;
+    let position = engine.writer_position().expect("a position");
+    assert_eq!(position.read_basis.head.wal_no.0, tip.0 + 2);
+    assert_eq!(position.retention_floor_seq(), ChangeSeq(1));
 }
 
 /// Checks that a writer at the write stop whose fold finds its tail already
@@ -1112,11 +1265,8 @@ async fn a_quiet_writer_reloads_after_its_own_compaction() {
         manifest.manifest.manifest_no
     );
     let operations = store.take();
-    assert!(is_head_under(
-        &operations[0],
-        &loonfs_objectstore::keys::metadata_manifest_prefix(&namespace_id)
-    ));
-    assert!(operations[1..]
+    assert!(starts_with_tip_confirmation(&operations, &namespace_id));
+    assert!(operations[2..]
         .iter()
         .any(|operation| operation.key() == loonfs_objectstore::keys::hint(&namespace_id)));
 }
@@ -1432,7 +1582,8 @@ async fn a_probe_answered_at_the_bound_after_the_last_confirmation_is_not_truste
         })
         .expect("successor check");
     assert!(
-        successor == 0
+        successor == 1
+            && starts_with_tip_confirmation(&operations, &namespace_id)
             && operations[successor + 1..]
                 .iter()
                 .any(|operation| operation.key() == loonfs_objectstore::keys::hint(&namespace_id)),
@@ -1609,21 +1760,24 @@ async fn publish_views_reuse_cached_segment_blocks_across_publishes() {
 }
 
 /// Advances the retention floor to `target` the way a writer session does:
-/// holds a position at the tip under the session's epoch, folds the tail,
-/// and publishes the floor under the epoch, moving the position onto each
-/// manifest. Returns the fold's manifest and the floor's manifest.
+/// creates a floor object at the position's tip as one unit of the session,
+/// folds the tail from the position, and moves the position onto the fold's
+/// manifest, which records the floor. Returns that manifest.
 pub(super) async fn advance_in_session<S: ObjectStore>(
     engine: &mut NamespaceCommitEngine<S>,
     target: ChangeSeq,
-) -> (
-    crate::manifest::PublishedManifest,
-    crate::manifest::PublishedManifest,
-) {
+) -> crate::manifest::PublishedManifest {
     let clock = OperationClock::start(0, Arc::new(StdMonotonicTimer::default()));
-    let acquired = engine
-        .acquire_position(&clock)
+    let planned = engine
+        .namespace
+        .load_current_manifest()
         .await
-        .expect("hold a position");
+        .expect("load the planned manifest");
+    let report = engine
+        .publish_floor_object(&planned, target, &clock)
+        .await
+        .expect("create the floor object");
+    assert_eq!(report.retention_floor_seq, target, "the floor moves");
     let folded = engine
         .namespace
         .fold_wal_tail(engine.writer_position(), &clock)
@@ -1631,13 +1785,5 @@ pub(super) async fn advance_in_session<S: ObjectStore>(
         .expect("fold")
         .manifest;
     engine.record_manifest_published(folded.clone());
-    let advanced = engine
-        .namespace
-        .publish_retention_floor(None, acquired.writer_epoch, target)
-        .await
-        .expect("publish the floor")
-        .published
-        .expect("the floor moves");
-    engine.record_manifest_published(advanced.clone());
-    (folded, advanced)
+    folded
 }

@@ -6,13 +6,12 @@ use super::admission::{AdmissionPermit, AdmittedWaiter, PublicationAdmission};
 use super::{NamespacePublisher, NamespacePublisherState};
 use crate::publish::CommitCandidate;
 use crate::trace::phase_event;
-use crate::{
-    AdvanceRetentionResponse, ChangeSeq, CoreError, DeleteNamespaceOptions,
-    DeleteNamespaceResponse, Result,
-};
+use crate::{ChangeSeq, CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, Result};
 use loonfs_core::commit::CommitFingerprint;
+use loonfs_core::control::LoadedManifest;
 use loonfs_core::limits::MAX_CONTENTION_ATTEMPTS;
 use loonfs_core::publish::WalPublishError;
+use loonfs_core::FloorObjectReport;
 use loonfs_core::Phase;
 use loonfs_types::format::wal::{MAX_WAL_OBJECT_BYTES, WAL_OBJECT_OVERHEAD_BYTES};
 use loonfs_types::Commit;
@@ -25,11 +24,13 @@ pub(super) struct PendingDelete {
     pub(super) waiters: Vec<AdmittedWaiter<Result<DeleteNamespaceResponse>>>,
 }
 
-/// A retention advance that waits in the queue: the floor it moves to, and
-/// the callers that wait for it.
+/// A retention advance that waits in the queue: the floor it moves to, the
+/// manifest that the floor was planned from, and the callers that wait for
+/// it.
 pub(super) struct PendingRetentionAdvance {
     pub(super) target: ChangeSeq,
-    pub(super) waiters: Vec<AdmittedWaiter<Result<AdvanceRetentionResponse>>>,
+    pub(super) planned: LoadedManifest,
+    pub(super) waiters: Vec<AdmittedWaiter<Result<FloorObjectReport>>>,
 }
 
 pub(super) enum WorkItem {
@@ -383,43 +384,55 @@ impl NamespacePublisher {
         Ok(receiver)
     }
 
-    /// Enqueues an advance of the retention floor to `target`, which
-    /// publishes after the work admitted before it and before the work
-    /// admitted after it (format spec, "Advancing the retention floor").
+    /// Enqueues an advance of the retention floor to `target`, planned from
+    /// `planned`, which creates its floor object after the work admitted
+    /// before it and before the work admitted after it (format spec,
+    /// "Advancing the retention floor"). Returns `None`, and enqueues
+    /// nothing, when the session admits no more work or is fenced.
     ///
     /// An advance queued behind another advance that's still waiting joins
     /// it, and the joined advance moves the floor to the higher of the two
     /// targets. Both callers share its outcome.
     pub(super) async fn submit_retention_advance(
         &self,
+        planned: LoadedManifest,
         target: ChangeSeq,
-    ) -> Result<AdvanceRetentionResponse> {
+    ) -> Option<Result<FloorObjectReport>> {
         let (sender, receiver) = oneshot::channel();
         {
             let mut state = self.lock_state();
-            let _session = self.admitted_session(&state)?;
-            let permit = self.context.admission.acquire(&self.namespace_id, 0)?;
+            let Ok(_session) = self.admitted_session(&state) else {
+                return None;
+            };
+            let permit = match self.context.admission.acquire(&self.namespace_id, 0) {
+                Ok(permit) => permit,
+                Err(error) => return Some(Err(error.into())),
+            };
             let sender = AdmittedWaiter::new(sender, &permit);
             match state.queue.back_mut() {
                 Some(WorkItem::RetentionAdvance(pending)) => {
-                    pending.target = pending.target.max(target);
+                    if target > pending.target {
+                        pending.target = target;
+                        pending.planned = planned;
+                    }
                     pending.waiters.push(sender);
                 }
                 _ => state
                     .queue
                     .push_back(WorkItem::RetentionAdvance(PendingRetentionAdvance {
                         target,
+                        planned,
                         waiters: vec![sender],
                     })),
             }
             self.spawn_worker_if_idle(&mut state);
         }
-        receiver.await.unwrap_or_else(|_| {
+        Some(receiver.await.unwrap_or_else(|_| {
             Err(CoreError::WalPublish(WalPublishError::OutcomeUnknown(
                 "publisher task stopped mid-advance".to_owned(),
             ))
             .into())
-        })
+        }))
     }
 
     fn trace_enqueue(&self, queue_depth: usize, reason: &'static str) {
@@ -520,7 +533,7 @@ async fn receive_delete(
 pub(super) struct QueuedWaiters {
     pub(super) commits: Vec<AdmittedWaiter<Result<Commit>>>,
     pub(super) deletes: Vec<AdmittedWaiter<Result<DeleteNamespaceResponse>>>,
-    pub(super) retention_advances: Vec<AdmittedWaiter<Result<AdvanceRetentionResponse>>>,
+    pub(super) retention_advances: Vec<AdmittedWaiter<Result<FloorObjectReport>>>,
 }
 
 /// Empties the queue and hands back every waiter it kept. Called once the

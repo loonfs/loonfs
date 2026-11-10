@@ -1,6 +1,5 @@
 //! Checkpoint retention, compaction, and publication budgets.
 
-use super::super::PublicationReport;
 use super::*;
 use crate::publish::SharedWriterSessionStatus;
 use crate::segment::block_memo::SessionBlockMemo;
@@ -257,7 +256,7 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
     assert_eq!(
         after.len(),
         wal_objects.len() + 1,
-        "the advance writes one WAL object, its fence"
+        "the advance writes one WAL object, its floor object"
     );
     assert!(store
         .head(&current_manifest_key(&store, &namespace_id).await)
@@ -1095,32 +1094,64 @@ async fn publish_directories<S: ObjectStore>(
     }
 }
 
-/// Advances the floor to the folded head, at a time when every commit is a
-/// grace window old.
-async fn advance_to_folded_head<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-) -> PublicationReport<loonfs_types::AdvanceRetentionResponse> {
-    crate::test_support::NamespaceFixture::new(
-        store,
-        namespace_id,
-        &crate::test_support::writer_at(
-            "test-writer",
-            crate::test_support::grace_elapsed_after(test_context().now_ms),
-        ),
+/// Creates and deletes the directory `/{name}` through `writer`, and returns
+/// the deleted inode and the deletion's sequence.
+async fn create_and_delete<S: ObjectStore>(
+    writer: &mut NamespaceCommitEngine<S>,
+    name: &str,
+) -> (InodeId, ChangeSeq) {
+    publish_directories(writer, name, 1).await;
+    let deleted = publish_one(
+        writer,
+        FilesystemOperation::DeletePath {
+            path: AbsolutePath::parse(format!("/{name}-0")).expect("path"),
+            behavior: loonfs_types::DeleteDirectoryBehavior::Recursive,
+            expected_inode_id: None,
+        },
     )
-    .engine()
-    .advance_retention_floor(RetentionTarget::Head)
     .await
-    .expect("advance the floor")
+    .expect("delete the directory");
+    let inode_id = deleted
+        .events
+        .iter()
+        .find_map(|event| match event {
+            loonfs_types::FilesystemChange::Deleted { inode_id, .. } => Some(*inode_id),
+            _ => None,
+        })
+        .expect("a delete reports its deletion");
+    (inode_id, deleted.committed_seq)
 }
 
-/// Checks that an advance without a writer session takes the writer epoch,
-/// folds the tail through the fence, and publishes the floor under its
-/// epoch, so the writer it took over returns `writer_fenced` and every
-/// commit that writer made is in the manifest before the advance.
+/// Publishes one commit of `operation` through `writer`.
+async fn publish_one<S: ObjectStore>(
+    writer: &mut NamespaceCommitEngine<S>,
+    operation: FilesystemOperation,
+) -> crate::error::Result<loonfs_types::Commit> {
+    writer
+        .publish_batch(
+            vec![CommitCandidate::new(CommitIntent::single(
+                CommitId::generate(),
+                loonfs_test_support::test_actor(),
+                None,
+                operation,
+            ))],
+            &test_context().clock(),
+        )
+        .await
+        .results
+        .pop()
+        .expect("one result")
+}
+
+/// Checks the second example of a retention advance in the WAL: a process
+/// without a writer session creates a floor object at the tip, and a writer
+/// session in another process then commits an undelete of a deletion below
+/// the new floor. The session's put collides with the floor object, the
+/// session replays the floor object, and the undelete returns
+/// `not_deleted`. The session isn't fenced, and its next commit is written
+/// above the floor object.
 #[tokio::test]
-async fn an_advance_without_a_session_takes_the_epoch_and_folds_before_the_floor() {
+async fn a_session_that_collides_with_a_floor_object_replays_it_and_isnt_fenced() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1132,130 +1163,182 @@ async fn an_advance_without_a_session_takes_the_epoch_and_folds_before_the_floor
         test_context().writer_id,
     )
     .writer_session(SharedWriterSessionStatus::default());
-    publish_directories(&mut writer, "folded", 2).await;
-    crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
-        .await
-        .expect("fold");
-    publish_directories(&mut writer, "unfolded", 1).await;
-    let before = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_current_manifest()
-        .await
-        .expect("load the manifest before the advance");
-
-    let advance = advance_to_folded_head(&store, &namespace_id).await;
-    assert_eq!(advance.response.retention_floor_seq, ChangeSeq(2));
+    let (gone, deletion_seq) = create_and_delete(&mut writer, "gone").await;
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
-    let advanced = namespace
+    let planned = namespace
         .load_current_manifest()
         .await
-        .expect("load the advance's manifest");
-    let head = namespace.load_read_state().await.expect("read the head");
-    assert_eq!(advanced.retention_floor_seq(), ChangeSeq(2));
-    assert_eq!(
-        advanced.payload().writer_epoch,
-        before
-            .payload()
-            .writer_epoch
-            .successor()
-            .expect("next epoch"),
-        "the advance claims the next epoch"
-    );
-    assert_eq!(
-        advanced.payload().head_seq,
-        ChangeSeq(3),
-        "the fold before the floor covers the unfolded commit"
-    );
-    assert_eq!(
-        advanced.folded_wal_no(),
-        head.wal_no,
-        "the fold covers the fence, and the advance commits nothing after it"
-    );
+        .expect("load the planned manifest");
 
-    // The writer's put collides with the fence, and its retry finds the
-    // advance's epoch.
-    let mut codes = Vec::new();
-    for _ in 0..2 {
-        let error = writer
-            .publish_batch(
-                vec![CommitCandidate::new(CommitIntent::single(
-                    CommitId::generate(),
-                    loonfs_test_support::test_actor(),
-                    None,
-                    FilesystemOperation::CreateDirectory {
-                        path: AbsolutePath::parse("/after").expect("path"),
-                        parents: false,
-                    },
-                ))],
-                &test_context().clock(),
-            )
-            .await
-            .results
-            .pop()
-            .expect("one result")
-            .expect_err("the writer the advance took over commits nothing");
-        codes.push(error.code());
-    }
-    assert_eq!(codes, [ErrorCode::StaleHead, ErrorCode::WriterFenced]);
+    let report = namespace
+        .publish_floor_object(&planned, deletion_seq)
+        .await
+        .expect("create the floor object");
+    assert_eq!(report.retention_floor_seq, deletion_seq);
+    assert_eq!(report.manifest_retention_floor_seq, ChangeSeq(0));
+    let floor_object = namespace.load_read_state().await.expect("read the head");
+    let undelete = || FilesystemOperation::Undelete {
+        inode_id: gone,
+        deletion_seq,
+        destination: loonfs_types::options::UndeleteDestination::Recorded,
+    };
+    let collided = publish_one(&mut writer, undelete())
+        .await
+        .expect_err("the put collides with the floor object");
+    assert_eq!(collided.code(), ErrorCode::StaleHead, "{collided:?}");
+    let refused = publish_one(&mut writer, undelete())
+        .await
+        .expect_err("the undelete is below the replayed floor");
+    assert_eq!(refused.code(), ErrorCode::NotDeleted, "{refused:?}");
+    publish_directories(&mut writer, "next", 1).await;
+
+    let head = namespace.load_read_state().await.expect("read the head");
+    assert_eq!(head.wal_no.0, floor_object.wal_no.0 + 1);
+    assert_eq!(head.writer_epoch, planned.payload().writer_epoch);
+    assert_eq!(head.retention_floor_seq, deletion_seq);
+    assert_eq!(
+        read_floor_seq(&store, &namespace_id).await,
+        ChangeSeq(0),
+        "no manifest records the floor before a fold"
+    );
 }
 
-/// Checks that a floor publication under an epoch that another writer has
-/// since claimed returns `writer_fenced` and publishes nothing, and that one
-/// whose target the current floor already reached publishes nothing either.
+/// Checks that a view that replays a floor object reports the floor before
+/// any manifest records it, so the change feed refuses a start below the
+/// floor. The fold that covers the floor object publishes the higher of its
+/// predecessor's floor and the floor object's, and a later floor object with
+/// a lower floor leaves the next fold's floor where it is.
 #[tokio::test]
-async fn a_floor_publication_refuses_another_writers_epoch() {
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test writes a floor object with a lower floor, which no process creates"
+)]
+async fn a_view_reports_a_floor_objects_floor_and_a_fold_publishes_the_higher_floor() {
+    use loonfs_types::format::wal::{encode_wal_object_envelope_zstd, WalObjectPayload};
+
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context)
+    bootstrap_namespace(&store, &namespace_id, &test_context())
         .await
         .expect("bootstrap");
-    for path in ["/a.txt", "/b.txt"] {
-        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
-            .write_file_bytes(path, b"body\n", None)
-            .await
-            .expect("commit");
-    }
+    let mut writer = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(&store, &namespace_id),
+        test_context().writer_id,
+    );
+    let (_, deletion_seq) = create_and_delete(&mut writer, "gone").await;
+    publish_directories(&mut writer, "after", 1).await;
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
-    let mine = namespace
-        .acquire_writer_epoch(&context.writer_id)
-        .await
-        .expect("acquire the writer epoch")
-        .writer_epoch;
-    namespace.fold_wal().await.expect("fold");
+    let planned = namespace.load_current_manifest().await.expect("planned");
     namespace
-        .acquire_writer_epoch(&context.writer_id)
+        .publish_floor_object(&planned, deletion_seq)
         .await
-        .expect("another writer takes the namespace over");
-    let unchanged = current_manifest_no(&store, &namespace_id).await;
+        .expect("create the floor object");
 
-    let error = namespace
-        .publish_retention_floor(None, mine, ChangeSeq(2))
+    let anchor = namespace
+        .load_read_anchor(crate::test_support::observed_now())
         .await
-        .expect_err("the epoch was taken over");
-    assert_matches!(&error, CoreError::WriterFenced(fence) if fence.fenced_epoch == mine);
-    assert_eq!(current_manifest_no(&store, &namespace_id).await, unchanged);
+        .expect("load the view");
+    assert_eq!(anchor.retention_floor_seq(), deletion_seq);
     assert_eq!(read_floor_seq(&store, &namespace_id).await, ChangeSeq(0));
+    let context = crate::RuntimeReadContext {
+        read_basis: crate::control::ReadBasis {
+            basis: anchor.basis(),
+            head: anchor.read_state.clone(),
+        },
+        tail: None,
+        visible_seq: None,
+    };
+    let error =
+        crate::NamespaceEngine::reader(crate::test_support::namespace_store(&store, &namespace_id))
+            .list_changes_after(
+                loonfs_types::ChangeFeedPosition::after(ChangeSeq(0)),
+                EffectiveLimit::new(std::num::NonZeroU32::new(4).expect("nonzero")),
+                loonfs_types::options::CommitSplitting::Whole,
+                &context,
+            )
+            .await
+            .expect_err("the feed starts below the view's floor");
+    assert_matches!(
+        error,
+        CoreError::RebootstrapRequired { retention_floor_seq, .. }
+            if retention_floor_seq == deletion_seq
+    );
 
-    let current = namespace
-        .load_current_manifest()
+    namespace.fold_wal().await.expect("fold the floor object");
+    assert_eq!(read_floor_seq(&store, &namespace_id).await, deletion_seq);
+    let head = namespace.load_read_state().await.expect("read the head");
+    let lower = WalObjectPayload {
+        namespace_id: namespace_id.clone(),
+        wal_no: head.wal_no.successor().expect("next WAL number"),
+        writer_epoch: head.writer_epoch,
+        head_seq: head.seq,
+        records: Vec::new(),
+        retention_floor_seq: Some(ChangeSeq(1)),
+    };
+    let key = loonfs_objectstore::keys::wal_object(&namespace_id, &lower.wal_no);
+    store
+        .put(
+            &key,
+            encode_wal_object_envelope_zstd(lower)
+                .expect("encode a floor object")
+                .into_bytes()
+                .into(),
+            loonfs_objectstore::PutMode::CreateIfAbsent,
+        )
         .await
-        .expect("load the current manifest")
-        .payload()
-        .writer_epoch;
-    let raised = namespace
-        .publish_retention_floor(None, current, ChangeSeq(1))
+        .expect("put a floor object with a lower floor");
+    namespace
+        .fold_wal()
         .await
-        .expect("raise the floor");
-    assert_eq!(raised.response, ChangeSeq(1));
-    assert!(raised.published.is_some());
-    let reached = namespace
-        .publish_retention_floor(None, mine, ChangeSeq(1))
-        .await
-        .expect("a target the floor reached");
-    assert_eq!(reached.response, ChangeSeq(1));
-    assert!(reached.published.is_none());
+        .expect("fold the lower floor object");
+    assert_eq!(read_floor_seq(&store, &namespace_id).await, deletion_seq);
+}
+
+/// Checks that two processes that advance the same namespace to different
+/// floors leave the higher floor, in either order. An advance whose target
+/// another process's floor object already reached writes nothing, and the
+/// fold after both advances publishes the higher floor.
+#[tokio::test]
+async fn two_advances_to_different_floors_leave_the_higher_floor() {
+    for (first, second) in [(ChangeSeq(2), ChangeSeq(1)), (ChangeSeq(1), ChangeSeq(2))] {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        bootstrap_namespace(&store, &namespace_id, &test_context())
+            .await
+            .expect("bootstrap");
+        let mut writer = NamespaceCommitEngine::new(
+            crate::test_support::namespace_store(&store, &namespace_id),
+            test_context().writer_id,
+        );
+        publish_directories(&mut writer, "dir", 2).await;
+        let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+        let planned = namespace
+            .load_current_manifest()
+            .await
+            .expect("load the planned manifest");
+        let tip = namespace
+            .load_read_state()
+            .await
+            .expect("read the head")
+            .wal_no;
+
+        namespace
+            .publish_floor_object(&planned, first)
+            .await
+            .expect("the first advance");
+        let report = namespace
+            .publish_floor_object(&planned, second)
+            .await
+            .expect("the second advance");
+        assert_eq!(report.retention_floor_seq, ChangeSeq(2));
+        let head = namespace.load_read_state().await.expect("read the head");
+        let floor_objects = if first > second { 1 } else { 2 };
+        assert_eq!(head.wal_no.0, tip.0 + floor_objects);
+        namespace.fold_wal().await.expect("fold");
+        assert_eq!(read_floor_seq(&store, &namespace_id).await, ChangeSeq(2));
+    }
 }
 
 /// Reads the files one checkpoint pins at the test clock, or the error that

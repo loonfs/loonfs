@@ -15,7 +15,7 @@ Each namespace is stored as six main kinds of objects:
 | Object | What it stores |
 | --- | --- |
 | Manifest | The namespace's identity and status, the current writer, the metadata runs that make up its files and directories, and its retention floor. Manifests are numbered. |
-| WAL object | Commits made after the most recent manifest, or a writer fence. WAL objects are numbered. |
+| WAL object | Commits made after the most recent manifest, a writer fence, or a "[floor object](glossary.md#floor-object)", which records a new retention floor and contains no commits. WAL objects are numbered. |
 | Hint | The number of a recent manifest, where readers start looking for the current one. |
 | Pin | A reference to one manifest that keeps it, and everything it lists, from being deleted. Snapshots and forks use pins. |
 | Metadata segment | Sorted metadata rows, in blocks that can be read independently. |
@@ -116,7 +116,7 @@ An expired snapshot still protects its manifest until garbage collection deletes
 | --- | --- |
 | Fold | Moves committed records from the WAL into new metadata segments, and publishes the next manifest. |
 | Compaction | Rewrites metadata runs into fewer runs and drops rows that are no longer needed, without changing any retained view. |
-| Retention advance | Moves the [retention floor](glossary.md#retention-floor) forward, after checking that the current manifest's segments exist. Compaction can then remove history at or below the floor. |
+| Retention advance | Moves the [retention floor](glossary.md#retention-floor) forward, after checking that the current manifest's segments exist. The advance writes the new floor to the WAL as a floor object, and the next fold records the floor in a manifest. Compaction can then remove history at or below the floor. |
 | Garbage collection | Deletes objects that nothing references anymore, once they're old enough. Each collection starts from a fresh list of what's still referenced. |
 
 Deleting a file records a subtree tombstone, which can be undone. Deleting a namespace publishes a final manifest with a deleted status. Neither one deletes shared content right away.

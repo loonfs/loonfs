@@ -879,25 +879,25 @@ async fn an_advance_that_moves_no_floor_loads_the_manifest_once_and_writes_nothi
         (
             ChangeSeq(1),
             [
-                (RetentionTarget::Seq(ChangeSeq(0)), 3),
-                (RetentionTarget::Seq(ChangeSeq(1)), 3),
+                (RetentionTarget::Seq(ChangeSeq(0)), 4),
+                (RetentionTarget::Seq(ChangeSeq(1)), 4),
                 // The scan reads commit 2 from the commits segment, and
                 // commit 2 is later than the cutoff.
-                (RetentionTarget::Cutoff { cutoff_at_ms: 0 }, 4),
+                (RetentionTarget::Cutoff { cutoff_at_ms: 0 }, 5),
             ],
         ),
         (
             ChangeSeq(2),
             [
-                (RetentionTarget::Head, 3),
-                (RetentionTarget::Seq(ChangeSeq(u64::MAX)), 3),
+                (RetentionTarget::Head, 4),
+                (RetentionTarget::Seq(ChangeSeq(u64::MAX)), 4),
                 // No folded commit is above the head, so the scan reads no
                 // segment.
                 (
                     RetentionTarget::Cutoff {
                         cutoff_at_ms: u64::MAX,
                     },
-                    3,
+                    4,
                 ),
             ],
         ),
@@ -951,10 +951,11 @@ async fn an_advance_that_moves_no_floor_loads_the_manifest_once_and_writes_nothi
                 .count();
             assert_eq!(
                 (loads, operations.len() - heads, heads),
-                (1, gets, 1),
-                "{target:?} loads the current manifest once (the hint, the manifest, a HEAD \
-                 request for the missing manifest after it, and the hint again): \
-                 {operations:?}"
+                (1, gets, 2),
+                "{target:?} loads the current manifest once and plans from the view after it \
+                 (the hint, the manifest, a HEAD request for the missing manifest after it, \
+                 the hint again, a GET of the missing WAL number after the manifest, and the \
+                 manifest HEAD again): {operations:?}"
             );
         }
     }

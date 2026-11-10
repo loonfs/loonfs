@@ -13,7 +13,7 @@ use loonfs_objectstore::{local_fs_store::LocalFsStore, ObjectStore};
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::stores::{
     replace_object, BlockingStore, ConcurrencyWatchStore, FailStore, InjectedError, KeyPredicate,
-    MetadataMapStore, OperationSelector, RecordingStore,
+    MetadataMapStore, OperationSelector, RecordedOperation, RecordingStore,
 };
 use loonfs_types::format::wal::{decode_wal_object_envelope_zstd, encode_wal_object_envelope_zstd};
 use loonfs_types::options::AttributeInclusion;
@@ -707,19 +707,12 @@ async fn a_fold_and_collection_during_tip_discovery_cannot_reuse_a_wal_number() 
             .fold_wal()
             .await
             .expect("fold old WAL");
-        // The writer's floor, published under its epoch.
-        let folded = crate::test_support::namespace_store(store.inner(), &namespace_id)
-            .load_current_manifest()
+        // A manifest after the fold, so the fold's manifest isn't current.
+        crate::test_support::NamespaceFixture::new(store.inner(), &namespace_id, &context(1_000))
+            .engine()
+            .set_retention_window(std::num::NonZeroU64::new(60_000))
             .await
-            .expect("load the fold's manifest");
-        crate::test_support::namespace_store(store.inner(), &namespace_id)
-            .publish_retention_floor(
-                None,
-                folded.payload().writer_epoch,
-                folded.payload().head_seq,
-            )
-            .await
-            .expect("advance floor");
+            .expect("set the retention window");
         let aged = WriterAt {
             now_ms: grace + 1,
             ..context(1_000)
@@ -763,6 +756,152 @@ async fn a_fold_and_collection_during_tip_discovery_cannot_reuse_a_wal_number() 
         .await
         .expect("file");
     }
+}
+
+/// Checks the lost commit that the second writer rule prevents: a session
+/// with tip `t` stays idle while another process's floor object at `t + 1`
+/// ages past the grace window. While the session's tip confirmation waits
+/// for its WAL HEAD, another process folds the floor object, and a
+/// collection deletes it, so the WAL HEAD finds nothing at `t + 1`. The
+/// manifest HEAD that follows finds the fold's manifest, so the session runs
+/// discovery and writes its commit at `t + 2`, not at the emptied number.
+#[tokio::test]
+async fn a_confirmation_after_a_collected_floor_object_never_writes_the_emptied_number() {
+    use loonfs_test_support::stores::MetadataMapStore;
+    let temp_dir = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("floor-gc").expect("namespace");
+    let grace = crate::limits::GC_MIN_GRACE_WINDOW_MS;
+    let options = crate::gc::GcOptions {
+        grace_window_ms: grace,
+    };
+    let store = MetadataMapStore::aged(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::any(),
+    );
+    let store = MetadataMapStore::new(
+        store,
+        KeyPredicate::new(|key| {
+            loonfs_objectstore::layout::manifest_no_of(key)
+                .is_some_and(|number| number >= ManifestNo(3))
+        }),
+        move |mut metadata| {
+            metadata.last_modified_at_ms = Some(grace + 1);
+            metadata
+        },
+    );
+    // The recording store logs each request when its response arrives. The
+    // gate above it logs each manifest HEAD when the request is sent, and
+    // parks the next WAL HEAD when it's armed.
+    let store = RecordingStore::new(store, KeyPredicate::manifest(&namespace_id));
+    let sent_manifest_heads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let store = BlockingStore::matching(store, {
+        let sent_manifest_heads = Arc::clone(&sent_manifest_heads);
+        let wal = wal_prefix(&namespace_id);
+        let manifests = KeyPredicate::manifest(&namespace_id);
+        move |context| {
+            if !OperationSelector::Head.matches(context.kind()) {
+                return false;
+            }
+            if manifests.matches(context.key()) {
+                sent_manifest_heads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            context.key().starts_with(&wal)
+        }
+    });
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context(1_000))
+        .create()
+        .await
+        .expect("create");
+    let timer = Arc::new(ManualClock::new(0));
+    let mut engine = NamespaceCommitEngine::new(
+        crate::NamespaceStore {
+            timer: timer.clone(),
+            ..crate::test_support::namespace_store(&store, &namespace_id)
+        },
+        context(1_000).writer_id,
+    );
+    let clock = OperationClock::start(1_000, timer.clone());
+    engine
+        .publish_batch(vec![directory("seed")], &clock)
+        .await
+        .results
+        .remove(0)
+        .expect("seed");
+    let tip = engine
+        .writer_position()
+        .expect("a position")
+        .read_basis
+        .head
+        .wal_no;
+    let floor_object = tip.successor().expect("next WAL number");
+    let namespace = crate::test_support::namespace_store(store.inner(), &namespace_id);
+    let planned = namespace.load_current_manifest().await.expect("planned");
+    namespace
+        .publish_floor_object(&planned, ChangeSeq(1))
+        .await
+        .expect("another process creates a floor object");
+
+    timer.advance_ms(crate::limits::WAL_PUBLISH_BUDGET_MS + 1);
+    store.inner().reset();
+    sent_manifest_heads.store(0, std::sync::atomic::Ordering::SeqCst);
+    store.block_next();
+    let (mut published, ()) = futures::join!(
+        engine.publish_batch(vec![directory("after")], &clock),
+        async {
+            store.wait_until_blocked().await;
+            // A manifest HEAD sent before the WAL response is answered here,
+            // before the fold, so it finds no successor.
+            for _ in 0..16 {
+                tokio::task::yield_now().await;
+            }
+            while sent_manifest_heads.load(std::sync::atomic::Ordering::SeqCst)
+                > store
+                    .inner()
+                    .snapshot()
+                    .iter()
+                    .filter(|operation| matches!(operation, RecordedOperation::Head { .. }))
+                    .count()
+            {
+                tokio::task::yield_now().await;
+            }
+            namespace.fold_wal().await.expect("fold the floor object");
+            let aged = WriterAt {
+                now_ms: grace + 1,
+                ..context(1_000)
+            };
+            namespace
+                .gc(None, &options, &aged.clock())
+                .await
+                .expect("collect the floor object");
+            assert!(store
+                .inner()
+                .head(&wal_object(&namespace_id, &floor_object))
+                .await
+                .expect("the floor object's number")
+                .is_none());
+            store.release();
+        }
+    );
+    published
+        .results
+        .remove(0)
+        .expect("the commit plans again after discovery");
+    assert!(store
+        .head(&wal_object(&namespace_id, &floor_object))
+        .await
+        .expect("the emptied number")
+        .is_none());
+    assert_eq!(
+        engine
+            .writer_position()
+            .expect("a position")
+            .read_basis
+            .head
+            .wal_no,
+        floor_object
+            .successor()
+            .expect("the number after the floor object")
+    );
 }
 
 #[tokio::test]

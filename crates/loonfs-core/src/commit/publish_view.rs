@@ -101,6 +101,15 @@ impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
         &self.position.tail
     }
 
+    /// Returns the retention floor of the manifest that the view replays its
+    /// WAL tail above.
+    pub(super) fn manifest_retention_floor_seq(&self) -> ChangeSeq {
+        self.manifest_segments
+            .manifest()
+            .payload()
+            .retention_floor_seq
+    }
+
     pub(crate) fn into_position(self) -> WriterPosition {
         self.position
     }
@@ -127,8 +136,6 @@ impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriterPosition {
     pub read_basis: ReadBasis,
-    /// The basis manifest's `retention_floor_seq`.
-    pub retention_floor_seq: ChangeSeq,
     /// The projected WAL tail above the basis at the head. Reads from the
     /// position start from this tail without replaying the WAL.
     pub tail: Arc<ProjectedWalTail>,
@@ -138,6 +145,13 @@ pub struct WriterPosition {
 }
 
 impl WriterPosition {
+    /// Returns the position's retention floor, which restore validation and
+    /// the merge floor rule read: the basis manifest's floor, raised by the
+    /// floor objects in the position's WAL tail.
+    pub fn retention_floor_seq(&self) -> ChangeSeq {
+        self.read_basis.head.retention_floor_seq
+    }
+
     /// Returns the number of unfolded WAL objects at the position's head,
     /// including fences.
     pub fn wal_tail_objects(&self) -> u64 {
@@ -161,18 +175,13 @@ impl WriterPosition {
     ///
     /// A manifest at or below the basis's number leaves the position where
     /// it is. A later manifest moves the position by the rule of
-    /// [`move_read_basis`]. A position that moves takes the manifest's
-    /// retention floor, so the session validates its next commits against a
-    /// floor that a retention advance raised.
+    /// [`move_read_basis`], which drops the position at a manifest that
+    /// folds past the position's tip.
     pub(crate) fn move_to(&mut self, manifest: &PublishedManifest) -> bool {
         if manifest.manifest.manifest_no <= self.read_basis.basis.manifest_no() {
             return true;
         }
-        if !move_read_basis(&mut self.read_basis, &mut self.tail, manifest) {
-            return false;
-        }
-        self.retention_floor_seq = manifest.retention_floor_seq;
-        true
+        move_read_basis(&mut self.read_basis, &mut self.tail, manifest)
     }
 }
 
@@ -248,11 +257,6 @@ fn load_writer_position<S: ObjectStore + ?Sized>(
             head: anchor.read_state.clone(),
             basis,
         },
-        retention_floor_seq: loaded_basis
-            .segments
-            .manifest()
-            .payload()
-            .retention_floor_seq,
         tail,
         basis_checked: anchor.checked.clone(),
     })

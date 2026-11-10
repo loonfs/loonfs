@@ -172,14 +172,15 @@ pub enum GarbageCollection {
 /// advance would make the window a day longer for exactly the namespaces
 /// that are busiest.
 ///
-/// An advance whose floor moves runs in the namespace's writer session in
-/// this server, which folds the tail and publishes the floor under its
-/// writer epoch. For a namespace that the server holds no session for, the
-/// advance opens one, which acquires the writer epoch, and the session ends
-/// when the advance returns. A writer session of the namespace in another
-/// process returns `writer_fenced` to its next request, like after any
-/// takeover. A failed advance keeps no retry state either, and the next
-/// sweep tries it again.
+/// An advance whose floor moves creates a floor object in the WAL, through
+/// the namespace's writer session in this server when the server has one,
+/// and then folds the namespace, so a manifest records the new floor. For a
+/// namespace that the server has no session for, the advance creates the
+/// floor object itself and opens no session. The advance claims no writer
+/// epoch, so a writer session of the namespace in another process isn't
+/// fenced, and the session plans its next commit against the new floor. A
+/// failed advance keeps no retry state either, and the next sweep tries it
+/// again.
 ///
 /// The scheduler starts a session's steps without waiting for the steps
 /// that other sessions started at the interval before, so a long step on one

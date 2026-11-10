@@ -178,6 +178,7 @@ pub async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
         namespace_id: state.namespace_id.clone(),
         manifest_no: context.read_basis.basis.manifest_no(),
         head_seq: state.seq,
+        wal_no: state.wal_no,
     };
     let mut tail = None;
     let mut extended = false;
@@ -198,6 +199,7 @@ pub async fn probe_namespace_wal<S: ObjectStore + ?Sized>(
         let before = state.clone();
         state = state.after_wal_object(object.envelope().payload());
         cache_key.head_seq = state.seq;
+        cache_key.wal_no = state.wal_no;
         if let Some(cached) = head_and_wal_tail_cache.get_tail(&cache_key) {
             tail = Some(cached);
             extended = false;

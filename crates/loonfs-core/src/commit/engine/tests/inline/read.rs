@@ -55,6 +55,7 @@ fn cache_key(context: &RuntimeReadContext) -> WalTailCacheKey {
         namespace_id: context.read_basis.head.namespace_id.clone(),
         manifest_no: context.read_basis.basis.manifest_no(),
         head_seq: context.read_basis.head.seq,
+        wal_no: context.read_basis.head.wal_no,
     }
 }
 
@@ -366,6 +367,7 @@ async fn a_copy_and_an_advanced_reader_keep_earlier_inline_content() {
     namespace.head_and_wal_tail_cache.insert_tail(
         WalTailCacheKey {
             head_seq: newest.read_basis.head.seq,
+            wal_no: newest.read_basis.head.wal_no,
             ..cache_key(&context)
         },
         Arc::clone(&newest.tail),

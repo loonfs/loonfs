@@ -18,13 +18,13 @@ use crate::{
     SetRetentionWindowResponse, WriterState,
 };
 use crate::{Error, Result};
-use loonfs_core::control::NamespaceStorageDiagnostics;
+use loonfs_core::control::{LoadedManifest, NamespaceStorageDiagnostics};
 use loonfs_core::{
-    CheckpointPageCursor, ExtensionBasis, ExtensionPublication, MetadataCompactionCancellation,
-    RetentionPlan,
+    CheckpointPageCursor, ExtensionBasis, ExtensionPublication, FloorObjectReport,
+    MetadataCompactionCancellation, RetentionPlan,
 };
 use loonfs_types::format::manifest::ExtensionEntry;
-use loonfs_types::{u64_from_usize, ExtensionName, PageRequest, RunNo, WriterId};
+use loonfs_types::{u64_from_usize, ChangeSeq, ExtensionName, PageRequest, RunNo, WriterId};
 use std::num::NonZeroU64;
 use std::sync::Arc;
 
@@ -500,8 +500,8 @@ impl Maintenance {
         .await
     }
 
-    /// Advances the namespace retention floor toward `options.target` through
-    /// the namespace's writer session.
+    /// Advances the namespace retention floor toward `options.target` with a
+    /// floor object in the WAL, and claims no writer epoch.
     ///
     /// Whatever the target, the floor doesn't pass a commit dated less than
     /// [`RETENTION_ADVANCE_MIN_COMMIT_AGE_MS`](crate::RETENTION_ADVANCE_MIN_COMMIT_AGE_MS)
@@ -515,20 +515,25 @@ impl Maintenance {
     /// [`RetentionTarget::Window`](crate::RetentionTarget::Window), so a
     /// namespace without a window keeps its whole history.
     ///
-    /// The call plans the floor from the manifest of this runtime's writer
-    /// position when it has a current one, and otherwise from the current
-    /// manifest, and returns that manifest's floor when the floor would not
-    /// move. A floor that moves is advanced by the namespace's writer
-    /// session, which the call opens as a write does when this runtime has
-    /// none. The session's queue orders the advance after the commits
-    /// admitted before it, and the session acquires the writer epoch if it
-    /// has none, folds the WAL tail, and publishes the floor under its epoch
-    /// ([Advancing the retention
+    /// The call plans the floor from this runtime's writer position when it
+    /// has a current one, and otherwise from the current manifest and the
+    /// WAL tail after that manifest. A floor that moves is recorded in a
+    /// floor object at the next WAL number ([Advancing the retention
     /// floor](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#101-advancing-the-retention-floor)).
-    /// A writer session of the namespace in another runtime then returns
-    /// `writer_fenced` to its next publication. If another writer fences
-    /// this runtime's session during the advance, the advance returns
-    /// `writer_fenced`.
+    /// When this runtime has a writer session for the namespace, the floor
+    /// object is one item of the session's queue, after the commits admitted
+    /// before it, and the session's later commits are validated against the
+    /// new floor. Otherwise, the call creates the floor object itself and
+    /// opens no session, and it drops the position of a session that opened
+    /// in this runtime meanwhile, so the fold after it reads the floor
+    /// object from the store. A writer session in another runtime isn't fenced.
+    /// Its next put collides with the floor object, and it plans again
+    /// against the new floor.
+    ///
+    /// When no manifest records the floor of the view after the advance,
+    /// including after an earlier advance whose fold failed, the call then
+    /// folds the namespace, so the fold's manifest records the floor. The
+    /// response's floor is the view's.
     pub async fn advance_retention_floor_with_options(
         &self,
         namespace_id: &NamespaceId,
@@ -537,28 +542,75 @@ impl Maintenance {
         trace::in_operation(
             operation_span!(self.core, "advance_retention_floor", namespace_id),
             async {
-                let basis = match self.load_position_basis(namespace_id).await? {
-                    Some(basis) => basis,
-                    None => self.load_live_basis(namespace_id).await?,
-                };
-                let plan = self
-                    .core
-                    .namespace_store(namespace_id)
-                    .plan_retention_floor(&basis.manifest, options.target)
+                let store = self.core.namespace_store(namespace_id);
+                let (planned, retention_floor_seq) = self.load_retention_view(namespace_id).await?;
+                let plan = store
+                    .plan_retention_floor(&planned, retention_floor_seq, options.target)
                     .await?;
-                match plan {
-                    RetentionPlan::Stays(retention_floor_seq) => Ok(AdvanceRetentionResponse {
-                        namespace_id: namespace_id.clone(),
+                let report = match plan {
+                    RetentionPlan::Stays(retention_floor_seq) => FloorObjectReport {
                         retention_floor_seq,
-                    }),
-                    RetentionPlan::Moves(target) => {
-                        let session = self.publisher.open_session(namespace_id)?;
-                        session.submit_retention_advance(target).await
-                    }
+                        manifest_retention_floor_seq: planned.retention_floor_seq(),
+                    },
+                    RetentionPlan::Moves(target) => match self
+                        .publisher
+                        .submit_retention_advance(namespace_id, planned.clone(), target)
+                        .await
+                    {
+                        Some(report) => report?,
+                        None => {
+                            let report = store.publish_floor_object(&planned, target).await?;
+                            // A session that opened in this runtime after the
+                            // check above keeps a position that may end below
+                            // the floor object, and a fold from that position
+                            // would miss the floor object.
+                            self.publisher.drop_session_position(namespace_id).await;
+                            report
+                        }
+                    },
+                };
+                if report.retention_floor_seq > report.manifest_retention_floor_seq {
+                    self.publisher
+                        .fold_namespace(namespace_id, FoldWhen::Always)
+                        .await?;
                 }
+                Ok(AdvanceRetentionResponse {
+                    namespace_id: namespace_id.clone(),
+                    retention_floor_seq: report.retention_floor_seq,
+                })
             },
         )
         .await
+    }
+
+    /// Returns the manifest and the retention floor of the view that a
+    /// retention advance plans from: this runtime's writer position when it
+    /// has a current one, and otherwise the current manifest and the WAL
+    /// tail after that manifest.
+    async fn load_retention_view(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<(LoadedManifest, ChangeSeq)> {
+        if let Some(position) = self.publisher.current_position(namespace_id) {
+            let basis = loonfs_core::control::load_position_basis(
+                self.core.store(),
+                &self.core.metadata_segment_cache(),
+                &position,
+            )
+            .await?;
+            if let Some(basis) = basis {
+                return Ok((basis.manifest, position.retention_floor_seq()));
+            }
+        }
+        let anchor = self
+            .core
+            .namespace_store(namespace_id)
+            .load_live_read_anchor(self.core.observation())
+            .await?;
+        Ok((
+            anchor.current_manifest().clone(),
+            anchor.retention_floor_seq(),
+        ))
     }
 
     /// Loads the namespace's current manifest as the basis of an extension's

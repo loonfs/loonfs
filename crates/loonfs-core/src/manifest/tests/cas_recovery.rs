@@ -523,12 +523,13 @@ async fn discovery_probes_windows_above_the_hint_and_a_missing_hint_reads_as_abs
     assert_eq!(store.counts().puts, 0);
 }
 
-/// Checks that an advance without a writer session claims the writer epoch,
-/// writes a fence, folds it, and publishes the floor, each with
-/// put-if-absent, that the floor's manifest changes nothing but the floor
-/// from the fold's, and that writers read the new floor.
+/// Checks that an advance without a writer session creates a floor object
+/// and then folds it, each with put-if-absent, and claims no epoch. The
+/// fold of a tail with the floor object and no commits publishes a manifest
+/// that changes nothing but the floor and the folded WAL number, and
+/// writers read the new floor.
 #[tokio::test]
-async fn an_advance_without_a_session_claims_folds_and_publishes_and_writers_read_it() {
+async fn an_advance_without_a_session_creates_a_floor_object_and_folds_it() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
     let store = RecordingStore::new(
@@ -566,27 +567,15 @@ async fn an_advance_without_a_session_claims_folds_and_publishes_and_writers_rea
     .await
     .expect("advance")
     .response;
-    // The claim, the fence, the fold, and the floor, and the advance leaves
-    // the hint for the runtime to raise.
-    assert_eq!(store.counts().create_if_absent_puts, 4);
+    // The floor object and the fold, and the advance leaves the hint for
+    // the runtime to raise.
+    assert_eq!(store.counts().create_if_absent_puts, 2);
     assert_eq!(store.counts().compare_and_swaps, 0);
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let after = namespace.load_current_manifest().await.expect("current");
-    let folded = namespace
-        .load_manifest_by_no(ManifestNo(after.payload().manifest_no.0 - 1))
-        .await
-        .expect("load the fold's manifest")
-        .expect("the fold's manifest exists");
-    assert_eq!(
-        folded.payload().writer_epoch,
-        before
-            .payload()
-            .writer_epoch
-            .successor()
-            .expect("next epoch")
-    );
-    let mut expected = folded.payload().clone();
+    let mut expected = before.payload().clone();
     expected.manifest_no = expected.manifest_no.successor().expect("next");
+    expected.folded_wal_no = expected.folded_wal_no.successor().expect("next");
     expected.retention_floor_seq = before.payload().head_seq;
     assert_eq!(after.payload(), &expected);
     assert_eq!(advanced.retention_floor_seq, before.payload().head_seq);

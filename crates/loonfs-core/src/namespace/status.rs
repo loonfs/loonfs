@@ -96,8 +96,8 @@ pub(crate) fn created_namespace(manifest: &NamespaceManifestPayload) -> Namespac
     namespace_metadata(NamespaceReadState::from(manifest), manifest)
 }
 
-/// Combines the head with the retention state of `manifest`, which is the
-/// current manifest below that head.
+/// Combines the head, whose retention floor is the view's, with the retention
+/// window of `manifest`, which is the current manifest below that head.
 fn namespace_metadata(
     head: NamespaceReadState,
     manifest: &NamespaceManifestPayload,
@@ -110,7 +110,7 @@ fn namespace_metadata(
         family_root_id: head.family_root_id,
         namespace_id: head.namespace_id,
         head_seq: head.seq,
-        retention_floor_seq: manifest.retention_floor_seq,
+        retention_floor_seq: head.retention_floor_seq,
         retention_window_ms: manifest.retention_window_ms.map(NonZeroU64::get),
     }
 }

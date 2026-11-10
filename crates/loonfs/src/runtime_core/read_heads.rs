@@ -187,6 +187,7 @@ impl RuntimeCore {
                     namespace_id: namespace_id.clone(),
                     manifest_no: loaded.basis().manifest_no(),
                     head_seq: loaded.read_state.seq,
+                    wal_no: loaded.read_state.wal_no,
                 },
                 tail,
             );
