@@ -37,7 +37,7 @@ async fn list_changes_within<S: ObjectStore + ?Sized>(
     let head_seq = view.visible_seq();
     let retention_floor_seq = view.retention_floor_seq();
     let namespace_id = &head.namespace_id;
-    crate::namespace::control::ensure_namespace_live(&head.namespace_id, head.status)?;
+    crate::namespace::control::ensure_namespace_live(&head.namespace_id, &head.status)?;
     let ChangeFeedPosition {
         after_seq,
         event_index,

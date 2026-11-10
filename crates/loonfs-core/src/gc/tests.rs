@@ -468,6 +468,7 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
         .fork_namespace(
             &clone,
             &loonfs_test_support::test_actor(),
+            &loonfs_types::CreationId::generate(),
             crate::test_support::folded_manifest(&fixture.namespace)
                 .await
                 .expect("fold the WAL tail"),
@@ -1378,6 +1379,7 @@ async fn a_source_keeps_content_its_fork_inherited_while_the_fork_pin_exists() {
         .fork_namespace(
             &clone,
             &loonfs_test_support::test_actor(),
+            &loonfs_types::CreationId::generate(),
             crate::test_support::folded_manifest(&fixture.namespace)
                 .await
                 .expect("fold the WAL tail"),
@@ -2123,6 +2125,7 @@ async fn retired_targets_release_their_source_pins_and_retry_failed_deletes() {
         .fork_namespace(
             &clone,
             &loonfs_test_support::test_actor(),
+            &loonfs_types::CreationId::generate(),
             crate::test_support::folded_manifest(&fixture.namespace)
                 .await
                 .expect("fold the WAL tail"),
@@ -2255,6 +2258,7 @@ async fn an_unreadable_or_corrupt_fork_target_keeps_its_pin_and_the_collection_c
         .fork_namespace(
             &clone,
             &loonfs_test_support::test_actor(),
+            &loonfs_types::CreationId::generate(),
             crate::test_support::folded_manifest(&fixture.namespace)
                 .await
                 .expect("fold the WAL tail"),
@@ -2302,6 +2306,7 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
         .fork_namespace(
             &clone,
             &loonfs_test_support::test_actor(),
+            &loonfs_types::CreationId::generate(),
             crate::test_support::folded_manifest(&fixture.namespace)
                 .await
                 .expect("fold the WAL tail"),
@@ -2390,6 +2395,7 @@ async fn a_fork_retry_keeps_young_pins_and_reclaims_the_abandoned_one_after_grac
         .fork_namespace(
             &clone,
             &loonfs_test_support::test_actor(),
+            &loonfs_types::CreationId::generate(),
             crate::test_support::folded_manifest(&fixture.namespace)
                 .await
                 .expect("fold the WAL tail"),
@@ -3289,6 +3295,7 @@ async fn fork_pin_grace_skips_targets_and_aged_pins_read_only_manifest_discovery
         .fork_namespace(
             &source,
             &loonfs_test_support::test_actor(),
+            &loonfs_types::CreationId::generate(),
             crate::test_support::folded_manifest(&fixture.namespace)
                 .await
                 .expect("fold the WAL tail"),
@@ -3304,6 +3311,7 @@ async fn fork_pin_grace_skips_targets_and_aged_pins_read_only_manifest_discovery
             .fork_namespace(
                 &target,
                 &loonfs_test_support::test_actor(),
+                &loonfs_types::CreationId::generate(),
                 crate::test_support::folded_manifest(&fixture.namespace)
                     .await
                     .expect("fold the WAL tail"),

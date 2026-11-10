@@ -558,6 +558,7 @@ fn sample_manifest_payload() -> NamespaceManifestPayload {
         },
         created_at_ms: 1_000,
         created_by: loonfs_types::ActorId::parse("test").expect("actor"),
+        creation_id: loonfs_types::CreationId::parse("job-4182-create").expect("creation ID"),
         access: NamespaceAccess::Unrestricted {},
         retention_window_ms: None,
         fork_basis: None,
@@ -673,6 +674,7 @@ fn sample_deleted_manifest() -> NamespaceManifestPayload {
     NamespaceManifestPayload {
         status: NamespaceStatus::Deleted {
             deleted_at_ms: 1_500_000,
+            deletion_id: loonfs_types::DeletionId::parse("job-4182-delete").expect("deletion ID"),
         },
         ..sample_manifest_payload()
     }
@@ -938,12 +940,17 @@ fn manifest_status_reading_is_fail_closed_on_unknown_statuses() {
         .expect_err("an unknown status must fail closed");
 
     let deleted = serde_json::to_string(&sample_deleted_manifest()).expect("encode deleted");
-    assert!(deleted.contains("\"status\":{\"kind\":\"deleted\",\"deleted_at_ms\":1500000}"));
+    assert!(deleted.contains(
+        "\"status\":{\"kind\":\"deleted\",\"deleted_at_ms\":1500000,\"deletion_id\":\"job-4182-delete\"}"
+    ));
+    let without_deletion_id = deleted.replacen(",\"deletion_id\":\"job-4182-delete\"", "", 1);
+    serde_json::from_str::<NamespaceManifestPayload>(&without_deletion_id)
+        .expect_err("a tombstone without a deletion ID must be rejected");
 }
 
 #[test]
 fn manifest_without_required_fields_is_rejected() {
-    for field in ["status", "created_by", "family_root_id"] {
+    for field in ["status", "created_by", "creation_id", "family_root_id"] {
         let mut document = serde_json::to_value(sample_manifest_payload())
             .expect("encode active manifest as a document");
         document

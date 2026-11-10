@@ -237,7 +237,7 @@ The full registry (`ErrorCode` in `loonfs-types`) lists every error code and its
 | `inode_not_found` | 404 | The requested visible or retained inode doesn't exist. In an ACL namespace, the server also returns this code for a checked inode on which the subject has no rights. |
 | `revision_not_found` | 404 | The file has no such revision. |
 | `upload_not_found` | 404 | No upload session exists with this ID. The server also returns this code for an aborted session, and for an open session asked to stage, sign parts, or complete at or after its `expires_at_ms`. Neither session will ever select content, so the server reports each one as missing, as it will once the session is deleted. |
-| `namespace_exists` | 409 | The create or fork target already exists (another namespace has the ID). |
+| `namespace_exists` | 409 | The create or fork target already exists (a request with another creation ID created a namespace with the ID). |
 | `content_not_prepared` | 409 | A path put or an explicit create or replace operation references external content without a matching admission, or it includes a relevant token that was rejected. Prepare the content and retry with its proof. |
 | `path_conflict` | 409 | The path names a directory where a file was expected, the path names a file where a directory was expected, or the destination already exists. A failed `path_binding`, `path_absence`, or `name_absence` precondition also returns this code. |
 | `directory_not_empty` | 409 | The directory has children, and the operation isn't recursive. |
@@ -713,7 +713,7 @@ The token is a bearer credential, and so is everything the upload routes return.
 
 Every operation includes an `x-loonfs-retry` value for generated SDKs. The value is one of three retry classes:
 
-- `idempotent`: a client can safely repeat the request.
+- `idempotent`: a client can safely repeat the request. A repeated namespace create or fork is recognized by its `creation_id`, and a repeated namespace delete by its `deletion_id`.
 - `replayable`: repeating the request returns the original result. A repeated commit is replayed by its `commit_id`, and a repeated upload completion returns the first completion's result.
 - `not_idempotent`: a generated client makes one automatic attempt and leaves recovery to the application.
 
@@ -724,7 +724,7 @@ The following table lists v0 operations, with their retry classes and representa
 | Check server health | `get_health` | `idempotent` | `GET /health` |
 | Check server readiness | `get_readiness` | `idempotent` | `GET /readiness` |
 | Read deployment capabilities | `get_capabilities` | `idempotent` | `GET /v0/capabilities` |
-| Create a namespace | `create_namespace` | `not_idempotent` | `POST /v0/namespaces`. Requires the `Loonfs-Actor` header, and accepts the optional `access` and `retention_window_ms` body fields. |
+| Create a namespace | `create_namespace` | `idempotent` | `POST /v0/namespaces`. Requires the `Loonfs-Actor` header and the `creation_id` body field, and accepts the optional `access` and `retention_window_ms` body fields. |
 | Read a namespace | `get_namespace` | `idempotent` | `GET /v0/namespaces/{ns}` |
 | Read a path entry | `get_path_entry` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/entry?path=/docs/report.txt&include_attributes=false&snapshot_id=...` (`include_attributes` is optional and defaults to `true`, and `snapshot_id` is optional) |
 | Read an inode | `get_inode` | `idempotent` | `GET /v0/namespaces/{ns}/inodes/{inode_id}?include_attributes=false&snapshot_id=...` (`include_attributes` is optional and defaults to `true`, and `snapshot_id` is optional) |
@@ -753,11 +753,11 @@ The following table lists v0 operations, with their retry classes and representa
 | Read a snapshot | `get_snapshot` | `idempotent` | `GET /v0/namespaces/{ns}/snapshots/{snapshot_id}` (returns an expired snapshot that garbage collection hasn't deleted, and a missing ID returns `snapshot_not_found`) |
 | Extend a snapshot | `extend_snapshot` | `idempotent` | `POST /v0/namespaces/{ns}/snapshots/{snapshot_id}/extend`. Requires `ttl_ms`, and never moves the expiry earlier. |
 | Delete a snapshot | `delete_snapshot` | `idempotent` | `DELETE /v0/namespaces/{ns}/snapshots/{snapshot_id}` (deletes the pin, and a missing ID succeeds) |
-| Fork a namespace | `fork_namespace` | `not_idempotent` | `POST /v0/namespaces/{source_ns}/forks`. Requires the `Loonfs-Actor` header. |
+| Fork a namespace | `fork_namespace` | `idempotent` | `POST /v0/namespaces/{source_ns}/forks`. Requires the `Loonfs-Actor` header and the `creation_id` body field. |
 | Merge a fork | `merge_fork` | `replayable` | `POST /v0/namespaces/{ns}/merges`. Requires the `Loonfs-Actor` header. |
 | Read where a fork's next merge starts | `get_next_merge_range` | `idempotent` | `GET /v0/namespaces/{ns}/merges?source=demo-branch` |
 | Rebase a fork | `rebase_fork` | `replayable` | `POST /v0/namespaces/{ns}/rebases`. Requires the `Loonfs-Actor` header. |
-| Delete a namespace | `delete_namespace` | `not_idempotent` | `DELETE /v0/namespaces/{ns}?expected_head_seq=418` (the precondition is optional) |
+| Delete a namespace | `delete_namespace` | `idempotent` | `DELETE /v0/namespaces/{ns}?deletion_id=job-4182-delete&expected_head_seq=418` (`deletion_id` is required, and the precondition is optional) |
 | Read namespace diagnostics | `get_namespace_diagnostics` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/diagnostics` |
 | List checkpoints | `list_checkpoints` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/checkpoints?limit=100&cursor=...` |
 | Read a checkpoint | `get_checkpoint` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/checkpoints/{checkpoint_id}` (returns any pin the listing returns, and a missing ID returns `snapshot_not_found`) |
@@ -929,6 +929,8 @@ For example, a job that deletes three WAL objects and two grep segments returns 
 A "snapshot" is a pin that a caller creates to keep one version of a namespace readable (see [Pins](format.md#8-pins)). It's the only kind of pin that a caller creates and deletes. For example, a sandbox can create a snapshot before an agent edits it, and then read the snapshot, or fork it into a new namespace, after the edits. A snapshot's `snapshot_id` is its pin ID, and its `captured_seq` is the namespace sequence it captured.
 
 A create request requires `name`, and it accepts `ttl_ms`. The name is a label, not a key. Every create call writes a new record, so several snapshots can have the same name. Creating a snapshot first folds any WAL tail after the current manifest, and then pins the resulting manifest. A snapshot with `ttl_ms` expires that many milliseconds after the server's current time, and a snapshot without it doesn't expire. A `ttl_ms` of zero returns `invalid_request`.
+
+A snapshot create has no ID that the caller generates, so `create_snapshot` is `not_idempotent`, and a retry after a lost response creates a second snapshot. After an unknown outcome, a caller that set a name it can recognize (for example `release-job-4182`) lists the snapshots and looks for that name before it retries. The check isn't exact, because a put whose outcome is unknown can still succeed after the listing, and a retry then creates a second snapshot with the same name. A caller that later finds two snapshots with that name deletes the extra snapshot.
 
 Create, list, retrieve, and extend return the same snapshot object, which contains `snapshot_id`, `namespace_id`, `name`, `captured_seq`, `created_at_ms`, and an optional `expires_at_ms`. For example:
 
@@ -1237,9 +1239,12 @@ Creating a namespace uses the namespace ID directly. In v0, there are no namespa
 ```json
 {
   "namespace_id": "demo",
+  "creation_id": "job-4182-create",
   "access": {"kind":"unrestricted"}
 }
 ```
+
+The "creation ID" (`creation_id`) is an identifier that the caller generates for one request that creates or forks a namespace (see [Creation ID](glossary.md#creation-id)). A request without a creation ID returns `invalid_request`.
 
 The response contains the new namespace's initial state. A new namespace starts at sequence 0, with a retention floor of 0:
 
@@ -1256,11 +1261,19 @@ The response contains the new namespace's initial state. A new namespace starts 
 
 A fork request identifies the target namespace with `new_namespace_id`. Route placeholders such as `{ns}`, `{source_ns}`, and an implementation-internal `:namespace` are path parameter names, and each one takes the same namespace ID value. v0 doesn't accept or return a namespace `name` alias.
 
-Create and fork install the hint and then manifest 1. The conditional put of the hint determines whether the namespace ID is new (see [Namespace lifecycle and forks](format.md#9-namespace-lifecycle-and-forks)). A create or fork that loses that write to another active namespace returns `namespace_exists` (409). A create or fork into a deleted ID returns `namespace_deleted` (410). A namespace is never left partially created.
+Create and fork install the hint and then manifest 1. The conditional put of the hint determines whether the namespace ID is new (see [Namespace lifecycle and forks](format.md#9-namespace-lifecycle-and-forks)). A create or fork that loses that write to an active namespace with another creation ID returns `namespace_exists` (409). A create or fork into a deleted ID returns `namespace_deleted` (410). A namespace is never left partially created.
 
 [Namespaces and identity](format.md#11-namespaces-and-identity) defines a namespace's lifetime. An application that reuses a human-readable name MUST keep its own map from names to namespace IDs, and generate a new namespace ID for each lifetime.
 
-If a creation acknowledgement is lost, a new request returns `namespace_exists`, unless the request explicitly allows an existing namespace. Within the original attempt, after an unknown transport outcome, an exact read-back of the manifest confirms a fork, because the fork's fork pin is unique. For a plain create, matching bytes don't prove which caller created the namespace, so the result is `namespace_exists`, or the existing summary if the caller allows an existing namespace.
+LoonFS stores the creation ID in the namespace's first manifest and copies the ID into every later manifest, so a create or fork that finds an existing namespace compares the creation IDs:
+
+- A create or fork that finds an active namespace with its own creation ID returns the namespace as it is now. For example, if a `retention_window` job has since changed the namespace's window, and the namespace has commits through sequence 12, a retry returns the new window and `head_seq` 12.
+- A create or fork that finds an active namespace with another creation ID returns `namespace_exists`.
+- A create or fork that finds a deleted namespace returns `namespace_deleted`, whatever the IDs are, because a deleted namespace ID can't be used again.
+
+So if a creation acknowledgement is lost, the caller sends the same request again with the same creation ID. Within the original attempt, after an unknown transport outcome, an exact read-back of manifest 1 confirms the create or fork, because manifest 1 includes the creation ID. The namespace summary doesn't include the creation ID.
+
+Warning: a retry is safe only if the caller keeps the creation ID between attempts. A caller that generates a new creation ID for a retry sends a new request, which returns `namespace_exists` if the first request succeeded.
 
 ### 6.1 `GET /v0/capabilities`
 
@@ -1372,7 +1385,7 @@ The embedded `NamespaceStore::load_statistics` and `NamespaceStore::load_snapsho
 
 Deletes a namespace. In an ACL namespace, this operation requires an administrator subject. A request with no subject headers acts as the token holder.
 
-Deletion runs in the namespace's writer session, and it's a fenced manifest publication (see [Deleting a namespace](format.md#94-deleting-a-namespace)). The deletion is linearized at the manifest put, so commits acknowledged before that put stay committed. These requests fail with `namespace_deleted` (410) once they observe the deletion: reads, commits, forks from the namespace ID, status requests, another deletion, and creating or forking a namespace into that ID. The namespace tombstone stays the current manifest after the namespace's content is reclaimed.
+Deletion runs in the namespace's writer session, and it's a fenced manifest publication (see [Deleting a namespace](format.md#94-deleting-a-namespace)). The deletion is linearized at the manifest put, so commits acknowledged before that put stay committed. These requests fail with `namespace_deleted` (410) once they observe the deletion: reads, commits, forks from the namespace ID, status requests, a deletion with another deletion ID, and creating or forking a namespace into that ID. The namespace tombstone stays the current manifest after the namespace's content is reclaimed.
 
 The checkpoint inventory and snapshot deletion are explicit exceptions, and they stay available after deletion. Deleting a fork pin's ID through the snapshot route still returns `snapshot_not_found`.
 
@@ -1380,7 +1393,11 @@ Deletion itself doesn't reclaim anything. [Retirement](format.md#95-retirement) 
 
 A deployment should run garbage collection repeatedly to catch late writes, and it should keep the provider's lifecycle rule for incomplete multipart uploads. Deleting an object key doesn't erase the physical versions kept by bucket versioning or retention locks.
 
+The required `deletion_id` query parameter is an identifier that the caller generates for one request that deletes a namespace (see [Deletion ID](glossary.md#deletion-id)). The tombstone records the deletion ID, and a request without a deletion ID returns `invalid_request`.
+
 With the optional `expected_head_seq` query parameter, the server deletes the namespace only if the head is still at that sequence, and otherwise fails with `stale_head`. This is the same precondition pattern that file mutations use. The rejection reports both sequences, in the message and as the `expected_head_seq` and `actual_head_seq` details, so a caller that still wants to delete the namespace can retry against the sequence it found.
+
+For example, `DELETE /v0/namespaces/demo?deletion_id=job-4182-delete&expected_head_seq=418` publishes a tombstone whose head is 418, and returns:
 
 ```json
 {
@@ -1388,6 +1405,8 @@ With the optional `expected_head_seq` query parameter, the server deletes the na
   "head_seq": 418
 }
 ```
+
+A delete that finds a tombstone with its own deletion ID returns the namespace ID and the final head, whatever `expected_head_seq` it sends, including a different value from the first request. So if the response above is lost, the same request sent again returns the same body, and a request with the deletion ID `job-5000-delete` returns `namespace_deleted`. A commit differs. A retried commit with a changed precondition returns `commit_id_reuse_conflict`, because the commit ID identifies the whole request. The server compares the deletion IDs wherever a delete finds the tombstone, whether that's the open of the namespace's writer session or the deletion's own check that the namespace is live.
 
 A commit can succeed without its acknowledgement reaching the caller, and deletion doesn't retroactively change that outcome. The reference server resolves its queue in admission order:
 
@@ -2599,7 +2618,8 @@ Representative request:
 
 ```json
 {
-  "new_namespace_id": "demo-branch"
+  "new_namespace_id": "demo-branch",
+  "creation_id": "job-4182-fork"
 }
 ```
 
@@ -2649,7 +2669,9 @@ The new namespace has the same family root as its source. It reads inherited con
 
 The response contains the new namespace's initial state. Its head sequence and retention floor equal the captured basis sequence, and the target's first data commit is one sequence above that head. Inherited file history follows the floor rule from the start. After the target's first base compaction, each inherited file keeps its newest revision at or below the fork point, plus the revisions the target adds.
 
-If the target ID is active, the server returns `namespace_exists` before it writes a source pin. If the target ID is deleted, the server returns `namespace_deleted` before it writes a source pin. If the fork pin can't be verified, the server returns `checkpoint_unavailable`, and no target namespace is installed.
+The required `creation_id` field identifies the request, as it does for a create (see [Creating and forking namespaces](#creating-and-forking-namespaces)). The server loads the target before it writes a source pin. If the target is active with the request's creation ID, the server returns the fork as it is now. If the target is active with another creation ID, the server returns `namespace_exists`, and if the target ID is deleted, the server returns `namespace_deleted`. If the fork pin can't be verified, the server returns `checkpoint_unavailable`, and no target namespace is installed.
+
+If two attempts with the same creation ID overlap (for example, because a client retried after a timeout while the first attempt was still running), each attempt writes a fork pin, and the attempt whose manifest 1 put loses finds the target with its own creation ID. That attempt deletes its own fork pin, because the fork's manifest refers to the other attempt's pin, and returns the fork as it is now. The source keeps one fork pin.
 
 ### 6.14 `POST /merges`
 

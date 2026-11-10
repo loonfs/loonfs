@@ -6,8 +6,8 @@ use crate::control::{ForkBasis, NamespaceStatus, WriterBlock};
 use crate::envelope::EnvelopeCodecError;
 use crate::metadata_rows::MetadataRowFamily;
 use crate::segment_blocks::BlockHandle;
-use crate::CompactorEpoch;
 use crate::{AccessGrants, ActorId, ChangeSeq, ManifestNo, MetadataSegmentId, NamespaceId, RunNo};
+use crate::{CompactorEpoch, CreationId};
 use crate::{ExtensionName, IndexSegmentId, PrincipalScope, WalNo, WriterEpoch};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -320,6 +320,9 @@ pub struct NamespaceManifestPayload {
     pub created_at_ms: u64,
     /// Actor that created the namespace, as supplied by the application.
     pub created_by: ActorId,
+    /// The creation ID of the request that created the namespace, which every later manifest
+    /// copies, so a retry of that request finds the ID in the current manifest.
+    pub creation_id: CreationId,
     /// The namespace's access mode, which can't be changed.
     pub access: NamespaceAccess,
     /// The namespace's retention window in milliseconds, which a scheduled
@@ -411,6 +414,7 @@ impl NamespaceManifestPayload {
         namespace_id: NamespaceId,
         created_at_ms: u64,
         created_by: ActorId,
+        creation_id: CreationId,
         access: NamespaceAccess,
     ) -> Self {
         Self {
@@ -418,6 +422,7 @@ impl NamespaceManifestPayload {
             namespace_id,
             created_at_ms,
             created_by,
+            creation_id,
             access,
             retention_window_ms: None,
             fork_basis: None,
@@ -443,6 +448,7 @@ impl NamespaceManifestPayload {
         namespace_id: NamespaceId,
         created_at_ms: u64,
         created_by: ActorId,
+        creation_id: CreationId,
         fork_basis: ForkBasis,
         source: &Self,
     ) -> Self {
@@ -460,6 +466,7 @@ impl NamespaceManifestPayload {
                 namespace_id,
                 created_at_ms,
                 created_by,
+                creation_id,
                 source.access.clone(),
             )
         }
@@ -476,11 +483,12 @@ impl NamespaceManifestPayload {
             namespace_id: self.namespace_id.clone(),
             created_at_ms: self.created_at_ms,
             created_by: self.created_by.clone(),
+            creation_id: self.creation_id.clone(),
             access: self.access.clone(),
             retention_window_ms: self.retention_window_ms,
             fork_basis: self.fork_basis.clone(),
             family_root_id: self.family_root_id.clone(),
-            status: self.status,
+            status: self.status.clone(),
             writer: self.writer.clone(),
             folded_wal_no: self.folded_wal_no,
             manifest_no: self.manifest_no.successor()?,
@@ -598,6 +606,9 @@ impl NamespaceManifestPayload {
         if successor.created_by != self.created_by {
             return invalid("created_by");
         }
+        if successor.creation_id != self.creation_id {
+            return invalid("creation_id");
+        }
         if successor.access != self.access {
             return invalid("access");
         }
@@ -678,8 +689,8 @@ mod tests {
         encode_namespace_manifest_json, BlockHandle, MetadataRowFamily, MetadataRunRef,
         MetadataSegmentRef, NamespaceManifestPayload, RunTier,
     };
-    use crate::CompactorEpoch;
     use crate::{ChangeSeq, ManifestNo, MetadataSegmentId, NamespaceId, RunNo, WriterEpoch};
+    use crate::{CompactorEpoch, CreationId};
     use std::assert_matches;
 
     #[test]
@@ -694,6 +705,7 @@ mod tests {
             NamespaceId::parse("activity").expect("namespace"),
             0,
             crate::ActorId::parse("test").expect("actor"),
+            CreationId::parse("test").expect("creation ID"),
             super::NamespaceAccess::unrestricted(),
         );
         assert_eq!(maximum.checked_add(Default::default()), Some(maximum));
@@ -763,6 +775,7 @@ mod tests {
             NamespaceId::parse("original").expect("namespace"),
             1_000,
             crate::ActorId::parse("test").expect("actor"),
+            CreationId::parse("test").expect("creation ID"),
             super::NamespaceAccess::Unrestricted {},
         );
         let mut next = initial.clone();
@@ -773,6 +786,7 @@ mod tests {
             ("fork_basis", 2),
             ("access", 3),
             ("family_root_id", 4),
+            ("creation_id", 5),
         ] {
             let mut successor = next.clone();
             match change {
@@ -794,6 +808,7 @@ mod tests {
                     })
                 }
                 4 => successor.family_root_id = NamespaceId::parse("another").expect("namespace"),
+                5 => successor.creation_id = CreationId::parse("another").expect("creation ID"),
                 _ => {
                     successor.access = super::NamespaceAccess::Acl {
                         principal_scope: crate::PrincipalScope::parse("org_test").expect("scope"),
@@ -824,6 +839,7 @@ mod tests {
         let mut deleted = next.clone();
         deleted.status = crate::control::NamespaceStatus::Deleted {
             deleted_at_ms: 1_500,
+            deletion_id: crate::DeletionId::parse("test").expect("deletion ID"),
         };
         initial.ensure_successor(&deleted).expect("delete");
         let mut after_tombstone = deleted.clone();
@@ -843,6 +859,7 @@ mod tests {
             NamespaceId::parse("later").expect("namespace"),
             1_000,
             crate::ActorId::parse("test").expect("actor"),
+            CreationId::parse("test").expect("creation ID"),
             super::NamespaceAccess::Unrestricted {},
         );
         let mut later = initial.clone();
@@ -880,6 +897,7 @@ mod tests {
         let deleted = NamespaceManifestPayload {
             status: crate::control::NamespaceStatus::Deleted {
                 deleted_at_ms: 1_500,
+                deletion_id: crate::DeletionId::parse("test").expect("deletion ID"),
             },
             ..later.clone()
         };
@@ -901,6 +919,7 @@ mod tests {
             activity: Default::default(),
             created_at_ms: 1_000,
             created_by: crate::ActorId::parse("test").expect("actor"),
+            creation_id: CreationId::parse("test").expect("creation ID"),
             access: super::NamespaceAccess::Unrestricted {},
             retention_window_ms: None,
             fork_basis: None,
@@ -947,6 +966,7 @@ mod tests {
             activity: Default::default(),
             created_at_ms: 1_000,
             created_by: crate::ActorId::parse("test").expect("actor"),
+            creation_id: CreationId::parse("test").expect("creation ID"),
             access: super::NamespaceAccess::Unrestricted {},
             retention_window_ms: None,
             fork_basis: None,
@@ -1000,6 +1020,7 @@ mod tests {
             NamespaceId::parse("bounded").expect("namespace"),
             0,
             crate::ActorId::parse("test").expect("actor"),
+            CreationId::parse("test").expect("creation ID"),
             super::NamespaceAccess::unrestricted(),
         ))
         .expect("encode");

@@ -306,6 +306,7 @@ async fn an_append_in_a_fork_to_an_inherited_file_reports_its_offset() {
         .fork_namespace(
             &fork,
             &loonfs_test_support::test_actor(),
+            &loonfs_types::CreationId::generate(),
             loonfs_core::test_support::folded_manifest(
                 &loonfs_core::test_support::namespace_store(&store, &source),
             )

@@ -1735,8 +1735,9 @@ async fn identical_pending_deletes_coalesce_into_one_outcome() {
 
     let options = DeleteNamespaceOptions {
         expected_head_seq: Some(ChangeSeq(2)),
+        ..Default::default()
     };
-    let first = spawn_delete(&publisher, options);
+    let first = spawn_delete(&publisher, options.clone());
     wait_for_queued_delete_waiters(&publisher, 1).await;
     let second = spawn_delete(&publisher, options);
     wait_for_queued_delete_waiters(&publisher, 2).await;
@@ -1790,6 +1791,7 @@ async fn pending_deletes_with_different_preconditions_settle_separately() {
         &publisher,
         DeleteNamespaceOptions {
             expected_head_seq: Some(ChangeSeq(1)),
+            ..Default::default()
         },
     );
     wait_for_queued_delete_waiters(&publisher, 1).await;
@@ -1845,6 +1847,7 @@ async fn a_stale_pending_delete_does_not_share_the_first_deletes_success() {
         &publisher,
         DeleteNamespaceOptions {
             expected_head_seq: Some(ChangeSeq(2)),
+            ..Default::default()
         },
     );
     wait_for_queued_delete_waiters(&publisher, 1).await;
@@ -1852,6 +1855,7 @@ async fn a_stale_pending_delete_does_not_share_the_first_deletes_success() {
         &publisher,
         DeleteNamespaceOptions {
             expected_head_seq: Some(ChangeSeq(1)),
+            ..Default::default()
         },
     );
     wait_for_queued_delete_waiters(&publisher, 2).await;

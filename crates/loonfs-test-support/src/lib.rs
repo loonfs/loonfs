@@ -17,4 +17,4 @@ pub mod provider_detail;
 pub mod stores;
 
 pub use env_guard::EnvGuard;
-pub use ids::test_actor;
+pub use ids::{test_actor, test_creation_id};

@@ -47,6 +47,7 @@ async fn fork<S: ObjectStore + Clone>(store: S, source: &NamespaceId, target: &N
         .fork_namespace(
             target,
             &loonfs_test_support::test_actor(),
+            &loonfs_types::CreationId::generate(),
             crate::test_support::folded_manifest(&fixture.namespace)
                 .await
                 .expect("fold the WAL tail"),

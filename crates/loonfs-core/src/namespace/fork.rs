@@ -4,6 +4,7 @@
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
 use crate::manifest::load_namespace_manifest_envelope;
+use crate::manifest::publish::CreationOutcome;
 use crate::merge::merge_start;
 use crate::metadata::MetadataView;
 use crate::namespace::state::NamespaceReadState;
@@ -14,7 +15,7 @@ use crate::time::OperationClock;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::{ForkBasis, ManifestRef, PinOwner, PinPayload, RebasedFrom};
 use loonfs_types::format::manifest::NamespaceManifestPayload;
-use loonfs_types::{ChangeSeq, NamespaceId, NamespaceMetadata, PinId};
+use loonfs_types::{ChangeSeq, CreationId, NamespaceId, NamespaceMetadata, PinId};
 
 /// The fork whose commits a rebase replays into the new fork that it
 /// creates, and the sequence of the forked namespace that the fork was made
@@ -40,15 +41,27 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// The fork shares immutable file bytes but gets its own metadata history.
     /// Returns the target's status at the fork point. A manifest that stopped
     /// being current before the fork pin's verification returns
-    /// `checkpoint_unavailable`, so the caller folds and forks again.
+    /// `checkpoint_unavailable`, so the caller folds and forks again. A
+    /// target that already exists with `creation_id` was created by an
+    /// earlier attempt of the same request, and the call deletes its own
+    /// fork pin unless the target's fork basis refers to the pin, and
+    /// returns the target as it is now
+    /// ([design note](https://github.com/loonfs/loonfs/blob/main/docs/design/retrying-creates-and-deletes.md#forking-a-namespace)).
     pub async fn fork_namespace(
         &self,
         new_namespace_id: &NamespaceId,
         actor_id: &loonfs_types::ActorId,
+        creation_id: &CreationId,
         manifest: ManifestRef,
     ) -> Result<NamespaceMetadata> {
-        self.install_fork(new_namespace_id, actor_id, ForkAt::Head(manifest), None)
-            .await
+        self.install_fork(
+            new_namespace_id,
+            actor_id,
+            creation_id,
+            ForkAt::Head(manifest),
+            None,
+        )
+        .await
     }
 
     /// Creates a new namespace at the unexpired snapshot `snapshot_id`, as
@@ -57,11 +70,13 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         &self,
         new_namespace_id: &NamespaceId,
         actor_id: &loonfs_types::ActorId,
+        creation_id: &CreationId,
         snapshot_id: &PinId,
     ) -> Result<NamespaceMetadata> {
         self.install_fork(
             new_namespace_id,
             actor_id,
+            creation_id,
             ForkAt::Snapshot(snapshot_id),
             None,
         )
@@ -82,6 +97,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         &self,
         new_namespace_id: &NamespaceId,
         actor_id: &loonfs_types::ActorId,
+        creation_id: &CreationId,
         source_namespace_id: &NamespaceId,
         fork_point_seq: ChangeSeq,
         manifest: ManifestRef,
@@ -93,6 +109,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         self.install_fork(
             new_namespace_id,
             actor_id,
+            creation_id,
             ForkAt::Head(manifest),
             Some(rebase),
         )
@@ -103,6 +120,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         &self,
         new_namespace_id: &NamespaceId,
         actor_id: &loonfs_types::ActorId,
+        creation_id: &CreationId,
         at: ForkAt<'_>,
         rebase: Option<Rebase<'_>>,
     ) -> Result<NamespaceMetadata> {
@@ -151,33 +169,59 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             new_namespace_id.clone(),
             clock.request_at_ms(),
             actor_id.clone(),
+            creation_id.clone(),
             fork_basis,
             source_manifest.payload(),
         );
-        if let Err(error) = target.create_manifest(manifest.clone(), &clock).await {
-            if matches!(
-                error,
-                CoreError::NamespaceExists { .. } | CoreError::NamespaceDeleted { .. }
-            ) {
-                match target.target_retains_pin(&source_record).await {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        self.namespace
-                            .delete_failed_pin(&source_record.pin_id, &error)
-                            .await;
-                    }
-                    Err(check_error) => tracing::warn!(
+        match target.create_manifest(manifest.clone(), &clock).await {
+            Ok(CreationOutcome::Created) => {
+                Ok(crate::namespace::status::created_namespace(&manifest))
+            }
+            // An earlier attempt of the same request created the target, so
+            // this attempt's pin protects nothing unless the target's fork
+            // basis refers to the pin.
+            Ok(CreationOutcome::Replayed) => {
+                self.release_unused_fork_pin(&target, &source_record).await;
+                target.load_metadata().await
+            }
+            Err(
+                error @ (CoreError::NamespaceExists { .. } | CoreError::NamespaceDeleted { .. }),
+            ) => {
+                self.release_unused_fork_pin(&target, &source_record).await;
+                Err(error)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Deletes the fork pin `source_record`, which this attempt created,
+    /// unless the fork basis of `target`'s current manifest refers to the
+    /// pin. A pin whose target can't be read stays, and garbage collection
+    /// collects an unused fork pin after its creation grace.
+    async fn release_unused_fork_pin(
+        &self,
+        target: &NamespaceStore<&S>,
+        source_record: &PinPayload,
+    ) {
+        match target.target_retains_pin(source_record).await {
+            Ok(true) => {}
+            Ok(false) => {
+                if let Err(cleanup_error) = self.namespace.delete_pin(&source_record.pin_id).await {
+                    tracing::warn!(
                         namespace_id = %self.namespace.namespace_id,
                         pin_id = %source_record.pin_id,
-                        original_error = %error,
-                        check_error = %check_error,
-                        "kept a fork pin whose target could not be read after installation failed"
-                    ),
+                        cleanup_error = %cleanup_error,
+                        "failed to delete a fork pin that the fork's target doesn't refer to"
+                    );
                 }
             }
-            return Err(error);
+            Err(check_error) => tracing::warn!(
+                namespace_id = %self.namespace.namespace_id,
+                pin_id = %source_record.pin_id,
+                check_error = %check_error,
+                "kept a fork pin whose target could not be read after the fork's installation"
+            ),
         }
-        Ok(crate::namespace::status::created_namespace(&manifest))
     }
 }
 
@@ -243,7 +287,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let source_head = self.load_read_anchor(clock.observe()).await?.read_state;
         crate::namespace::control::ensure_namespace_live(
             &source_head.namespace_id,
-            source_head.status,
+            &source_head.status,
         )?;
         let snapshot = self.load_user_pin(snapshot_id).await?;
         Ok(ensure_unexpired(snapshot, clock.now_ms())?.state)

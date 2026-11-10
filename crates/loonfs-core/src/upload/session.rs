@@ -139,7 +139,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     ) -> Result<VerifiedNamespaceCatalogEntry> {
         let manifest = self.load_current_manifest().await?;
         let head = crate::namespace::state::NamespaceReadState::from(manifest.payload());
-        crate::namespace::control::ensure_namespace_live(&head.namespace_id, head.status)?;
+        crate::namespace::control::ensure_namespace_live(&head.namespace_id, &head.status)?;
         Ok(VerifiedNamespaceCatalogEntry::from_head(&head))
     }
 

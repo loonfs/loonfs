@@ -97,6 +97,64 @@ async fn two_creations_race_at_manifest_one() {
     assert_eq!(loser.expect_err("loser").code(), ErrorCode::NamespaceExists);
 }
 
+/// Checks that a create sent again with its creation ID returns the
+/// namespace without publishing a manifest, that a create with another
+/// creation ID returns `namespace_exists`, and that a create of a deleted
+/// namespace returns `namespace_deleted` with either creation ID.
+#[tokio::test]
+async fn a_retried_create_returns_the_namespace_and_another_create_fails() {
+    let directory = tempdir().expect("directory");
+    let store = RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    );
+    let namespace_id = NamespaceId::parse("created-once").expect("namespace");
+    let fixture = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context());
+    let create = |creation_id: &str| crate::options::CreateNamespaceOptions {
+        creation_id: Some(loonfs_types::CreationId::parse(creation_id).expect("creation ID")),
+        ..Default::default()
+    };
+    let first = fixture
+        .create_with_options(&create("job-1-create"))
+        .await
+        .expect("create");
+    store.reset();
+    let retried = fixture
+        .create_with_options(&create("job-1-create"))
+        .await
+        .expect("a retry returns the namespace");
+    assert_eq!(retried, first);
+    let manifests = metadata_manifest_prefix(&namespace_id);
+    assert!(!control_requests(&namespace_id, &store.take())
+        .iter()
+        .any(|(kind, key)| *kind == "put" && key.starts_with(&manifests)));
+    let error = fixture
+        .create_with_options(&create("job-2-create"))
+        .await
+        .expect_err("another create");
+    assert_eq!(error.code(), ErrorCode::NamespaceExists);
+    let adopted = fixture
+        .create_with_options(&crate::options::CreateNamespaceOptions {
+            allow_existing: true,
+            ..create("job-2-create")
+        })
+        .await
+        .expect("allow existing returns the namespace whatever its creation ID");
+    assert_eq!(adopted, first);
+    fixture
+        .engine()
+        .delete_namespace(Default::default())
+        .await
+        .expect("delete");
+    for creation_id in ["job-1-create", "job-2-create"] {
+        let error = fixture
+            .create_with_options(&create(creation_id))
+            .await
+            .expect_err("a create of a deleted namespace");
+        assert_eq!(error.code(), ErrorCode::NamespaceDeleted);
+    }
+}
+
 /// Checks that a create and a fork each return the state that their manifest
 /// 1 records, and that neither reads the new namespace: the put of manifest 1
 /// decides whether it exists.
@@ -143,6 +201,7 @@ async fn a_new_namespace_returns_the_state_its_first_manifest_records() {
         .fork_namespace(
             &target,
             &loonfs_test_support::test_actor(),
+            &loonfs_types::CreationId::generate(),
             crate::test_support::folded_manifest(&fixture.namespace)
                 .await
                 .expect("fold the WAL tail"),
@@ -166,8 +225,10 @@ async fn a_new_namespace_returns_the_state_its_first_manifest_records() {
     );
 }
 
+/// Checks that identical bytes at manifest 1 confirm an ambiguous create or
+/// fork, because manifest 1 includes the request's creation ID.
 #[tokio::test]
-async fn an_ambiguous_first_manifest_confirms_only_a_forks_creation() {
+async fn an_ambiguous_first_manifest_with_identical_bytes_confirms_the_creation() {
     let directory = tempdir().expect("directory");
     let source = NamespaceId::parse("source").expect("source");
     let target = NamespaceId::parse("target").expect("target");
@@ -182,28 +243,18 @@ async fn an_ambiguous_first_manifest_confirms_only_a_forks_creation() {
     .apply_then_fail();
     store.fail_next(1);
     let actor_id = loonfs_test_support::test_actor();
-    let error = crate::test_support::NamespaceFixture::new(&store, &source, &context())
+    let created = crate::test_support::NamespaceFixture::new(&store, &source, &context())
         .create()
         .await
-        .expect_err("plain create cannot prove authorship from matching bytes");
-    assert_eq!(error.code(), ErrorCode::NamespaceExists);
+        .expect("a plain create proves its own put from matching bytes");
     assert_eq!(store.attempts(), 1);
-    let existing = crate::test_support::namespace_store(&store, &source)
-        .load_metadata()
-        .await
-        .expect("created namespace");
-    let adopted = crate::test_support::NamespaceFixture::new(&store, &source, &context())
-        .engine()
-        .bootstrap_namespace(
-            &actor_id,
-            &crate::options::CreateNamespaceOptions {
-                allow_existing: true,
-                ..Default::default()
-            },
-        )
-        .await
-        .expect("allow existing returns the created namespace");
-    assert_eq!(adopted, existing);
+    assert_eq!(
+        created,
+        crate::test_support::namespace_store(&store, &source)
+            .load_metadata()
+            .await
+            .expect("created namespace")
+    );
     store.fail_next(1);
     let fixture = crate::test_support::NamespaceFixture::new(&store, &source, &context());
     let created = fixture
@@ -211,12 +262,13 @@ async fn an_ambiguous_first_manifest_confirms_only_a_forks_creation() {
         .fork_namespace(
             &target,
             &actor_id,
+            &loonfs_types::CreationId::generate(),
             crate::test_support::folded_manifest(&fixture.namespace)
                 .await
                 .expect("fold the WAL tail"),
         )
         .await
-        .expect("fork source pin proves authorship from matching bytes");
+        .expect("a fork proves its own put from matching bytes");
     assert!(created.fork_basis.is_some());
     assert_eq!(store.attempts(), 1);
     assert_eq!(store.remaining(), 0);
@@ -248,6 +300,7 @@ async fn nested_forks_read_copied_runs_without_source_control_reads() {
         .fork_namespace(
             &target,
             &loonfs_test_support::test_actor(),
+            &loonfs_types::CreationId::generate(),
             crate::test_support::folded_manifest(&fixture.namespace)
                 .await
                 .expect("fold the WAL tail"),
@@ -279,6 +332,7 @@ async fn nested_forks_read_copied_runs_without_source_control_reads() {
         .fork_namespace(
             &nested,
             &loonfs_test_support::test_actor(),
+            &loonfs_types::CreationId::generate(),
             crate::test_support::folded_manifest(&fixture.namespace)
                 .await
                 .expect("fold the WAL tail"),
@@ -478,6 +532,7 @@ async fn fork_into_a_deleted_id_leaves_no_source_pin() {
         .fork_namespace(
             &target,
             &loonfs_test_support::test_actor(),
+            &loonfs_types::CreationId::generate(),
             crate::test_support::folded_manifest(&fixture.namespace)
                 .await
                 .expect("fold the WAL tail"),
@@ -497,9 +552,13 @@ async fn fork_into_a_deleted_id_leaves_no_source_pin() {
         .is_empty());
 }
 
+/// Checks that a fork whose target appears while the fork writes its pin
+/// deletes its own pin. A target that another request created or deleted
+/// fails the fork, and a target that an overlapping attempt with the same
+/// creation ID created returns the fork, so the source keeps one fork pin.
 #[tokio::test]
 async fn a_fork_that_loses_target_publication_deletes_its_source_pin() {
-    for deleted in [false, true] {
+    for competitor in ["create", "create_and_delete", "same_fork"] {
         let directory = tempdir().expect("directory");
         let source = NamespaceId::parse("source").expect("source");
         let target = NamespaceId::parse("target").expect("target");
@@ -511,6 +570,7 @@ async fn a_fork_that_loses_target_publication_deletes_its_source_pin() {
         );
         let setup = context();
         let actor = loonfs_test_support::test_actor();
+        let creation_id = loonfs_types::CreationId::parse("job-1-fork").expect("creation ID");
         crate::test_support::NamespaceFixture::new(&store, &source, &setup)
             .create()
             .await
@@ -520,18 +580,34 @@ async fn a_fork_that_loses_target_publication_deletes_its_source_pin() {
         let fork = engine.fork_namespace(
             &target,
             &actor,
+            &creation_id,
             crate::test_support::folded_manifest(&engine.namespace)
                 .await
                 .expect("fold the WAL tail"),
         );
-        let competing_create = async {
+        let competing = async {
             store.wait_until_blocked().await;
-            crate::test_support::NamespaceFixture::new(store.inner(), &target, &setup)
-                .create()
-                .await
-                .expect("competing create");
-            if deleted {
-                crate::test_support::NamespaceFixture::new(store.inner(), &target, &setup)
+            let inner = crate::test_support::NamespaceFixture::new(store.inner(), &target, &setup);
+            if competitor == "same_fork" {
+                let engine =
+                    crate::test_support::NamespaceFixture::new(store.inner(), &source, &setup)
+                        .engine();
+                engine
+                    .fork_namespace(
+                        &target,
+                        &actor,
+                        &creation_id,
+                        crate::test_support::folded_manifest(&engine.namespace)
+                            .await
+                            .expect("fold the WAL tail"),
+                    )
+                    .await
+                    .expect("overlapping fork");
+            } else {
+                inner.create().await.expect("competing create");
+            }
+            if competitor == "create_and_delete" {
+                inner
                     .engine()
                     .delete_namespace(Default::default())
                     .await
@@ -539,20 +615,30 @@ async fn a_fork_that_loses_target_publication_deletes_its_source_pin() {
             }
             store.release();
         };
-        let (result, ()) = tokio::join!(fork, competing_create);
-        assert_eq!(
-            result.expect_err("lost fork").code(),
-            if deleted {
-                ErrorCode::NamespaceDeleted
-            } else {
-                ErrorCode::NamespaceExists
-            }
-        );
-        assert!(store
+        let (result, ()) = tokio::join!(fork, competing);
+        let pins = store
             .list_prefix(&pin_prefix)
             .await
             .expect("source pins")
-            .is_empty());
+            .len();
+        match competitor {
+            "same_fork" => {
+                let forked = result.expect("the overlapping attempt returns the fork");
+                assert_eq!(forked.namespace_id, target);
+                assert_eq!(pins, 1);
+            }
+            _ => {
+                assert_eq!(
+                    result.expect_err("lost fork").code(),
+                    if competitor == "create" {
+                        ErrorCode::NamespaceExists
+                    } else {
+                        ErrorCode::NamespaceDeleted
+                    }
+                );
+                assert_eq!(pins, 0);
+            }
+        }
     }
 }
 

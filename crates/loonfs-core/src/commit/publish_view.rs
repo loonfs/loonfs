@@ -215,7 +215,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             ),
         };
         ensure_writer_not_fenced(head, &acquired_writer)?;
-        ensure_namespace_live(&head.namespace_id, head.status)?;
+        ensure_namespace_live(&head.namespace_id, &head.status)?;
         let tail_discovered = matches!(source, ViewSource::Cold(_));
         let position = match source {
             ViewSource::Cached(cached) => *cached,

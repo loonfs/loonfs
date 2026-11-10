@@ -867,11 +867,12 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
         activity: Default::default(),
         created_at_ms: head.created_at_ms,
         created_by: head.created_by.clone(),
+        creation_id: creation_id_below(store, namespace_id, manifest_no).await,
         access: loonfs_types::NamespaceAccess::Unrestricted {},
         retention_window_ms: None,
         fork_basis: head.fork_basis.clone(),
         family_root_id: head.family_root_id.clone(),
-        status: head.status,
+        status: head.status.clone(),
         writer: head.writer.clone(),
         folded_wal_no: head.wal_no,
         compactor_epoch: loonfs_types::CompactorEpoch(0),
@@ -975,6 +976,28 @@ async fn publish_once_within<S: ObjectStore + ?Sized>(
         .await
 }
 
+/// Returns the creation ID of the namespace's newest manifest below
+/// `manifest_no`, which a hand-built manifest at `manifest_no` copies, or the
+/// shared test creation ID when no manifest is below it.
+pub(super) async fn creation_id_below<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    manifest_no: ManifestNo,
+) -> loonfs_types::CreationId {
+    for number in (1..manifest_no.0).rev() {
+        if let Ok(Some(previous)) = inspection_state::load_manifest_state_for_inspection_if_present(
+            store,
+            namespace_id,
+            &ManifestNo(number),
+        )
+        .await
+        {
+            return previous.manifest.payload().creation_id.clone();
+        }
+    }
+    loonfs_test_support::test_creation_id()
+}
+
 pub(super) async fn publish_manifest_with_segments<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -983,10 +1006,12 @@ pub(super) async fn publish_manifest_with_segments<S: ObjectStore + ?Sized>(
     segments: Vec<MetadataSegmentRef>,
 ) -> ManifestNo {
     let manifest_number = manifest_no;
+    let creation_id = creation_id_below(store, namespace_id, manifest_no).await;
     let manifest = encode_namespace_manifest_json(NamespaceManifestPayload {
         activity: Default::default(),
         created_at_ms: 1_000,
         created_by: loonfs_test_support::test_actor(),
+        creation_id,
         access: loonfs_types::NamespaceAccess::Unrestricted {},
         retention_window_ms: None,
         fork_basis: None,

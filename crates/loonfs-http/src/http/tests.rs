@@ -106,6 +106,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "create_file_by_inode",
     "created_at_ms",
     "created_by",
+    "creation_id",
     "current_manifest_no",
     "cursor_inode_id",
     "delete_by_inode",
@@ -114,6 +115,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "deleted_binding",
     "deleted_by",
     "deleted_checkpoints_by_owner",
+    "deletion_id",
     "deletion_seq",
     "destination_display_name",
     "destination_exists",
@@ -567,7 +569,9 @@ async fn provider_failure_is_projected_in_the_remote_api_envelope() {
                 .header(axum::http::header::AUTHORIZATION, "Bearer test-token")
                 .header("Loonfs-Actor", "test-actor")
                 .header(axum::http::header::CONTENT_TYPE, "application/json")
-                .body(axum::body::Body::from(r#"{"namespace_id":"customer-a"}"#))
+                .body(axum::body::Body::from(
+                    r#"{"creation_id":"test-create","namespace_id":"customer-a"}"#,
+                ))
                 .expect("create namespace request"),
         )
         .await

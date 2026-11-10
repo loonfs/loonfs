@@ -48,7 +48,7 @@ impl From<&NamespaceManifestPayload> for NamespaceReadState {
             access: manifest.access.clone(),
             fork_basis: manifest.fork_basis.clone(),
             family_root_id: manifest.family_root_id.clone(),
-            status: manifest.status,
+            status: manifest.status.clone(),
             writer_epoch: manifest.writer_epoch,
             writer: manifest.writer.clone(),
             seq: manifest.head_seq,
@@ -65,6 +65,7 @@ impl NamespaceReadState {
             namespace_id,
             created_at_ms,
             created_by,
+            loonfs_types::CreationId::generate(),
             loonfs_types::NamespaceAccess::Unrestricted {},
         ))
     }

@@ -3,11 +3,11 @@
 //! ([Appendix A.4](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a4-control-and-manifest-payloads)).
 
 use crate::envelope::EnvelopeCodecError;
-use crate::WriterId;
 use crate::{
     ChangeSeq, ChecksumAlgorithm, CommitId, ContentId, ContentRef, ManifestNo, NamespaceId,
     PayloadChecksum, PinId, SubjectId, UploadId,
 };
+use crate::{DeletionId, WriterId};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
@@ -175,7 +175,7 @@ pub struct WriterBlock {
 ///
 /// A namespace is either active or deleted. Missing and unknown
 /// status values fail decoding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NamespaceStatus {
     /// The namespace serves reads and accepts commits.
@@ -187,6 +187,9 @@ pub enum NamespaceStatus {
     Deleted {
         /// Unix-millisecond call clock of the deletion.
         deleted_at_ms: u64,
+        /// The deletion ID of the request that deleted the namespace. A retry of that request
+        /// finds the ID here and returns the namespace ID and the final head.
+        deletion_id: DeletionId,
     },
 }
 
@@ -199,6 +202,13 @@ impl NamespaceStatus {
     pub const fn deleted_at_ms(&self) -> Option<u64> {
         match self {
             Self::Deleted { deleted_at_ms, .. } => Some(*deleted_at_ms),
+            Self::Active {} => None,
+        }
+    }
+    /// Returns the deletion ID of a deleted namespace.
+    pub const fn deletion_id(&self) -> Option<&DeletionId> {
+        match self {
+            Self::Deleted { deletion_id, .. } => Some(deletion_id),
             Self::Active {} => None,
         }
     }

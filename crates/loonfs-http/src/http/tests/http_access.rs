@@ -115,7 +115,7 @@ async fn every_upload_route_acts_as_the_request_subject() {
             "POST",
             "/v0/namespaces",
             Some(
-                r#"{"namespace_id":"demo","access":{"kind":"acl","principal_scope":"org","root_grants":{"team":["admin"]}}}"#,
+                r#"{"creation_id":"test-create","namespace_id":"demo","access":{"kind":"acl","principal_scope":"org","root_grants":{"team":["admin"]}}}"#,
             ),
             &[],
         ))
@@ -195,7 +195,7 @@ async fn subject_headers_distinguish_service_and_subject_authority() {
             "POST",
             "/v0/namespaces",
             Some(
-                r#"{"namespace_id":"demo-acl","access":{"kind":"acl","principal_scope":"org","root_grants":{"team":["admin"]}}}"#,
+                r#"{"creation_id":"test-create","namespace_id":"demo-acl","access":{"kind":"acl","principal_scope":"org","root_grants":{"team":["admin"]}}}"#,
             ),
             &[],
         ))
@@ -260,7 +260,7 @@ async fn retrieving_a_snapshot_in_an_acl_namespace_requires_an_administrator_sub
             "POST",
             "/v0/namespaces",
             Some(
-                r#"{"namespace_id":"demo-acl","access":{"kind":"acl","principal_scope":"org","root_grants":{"team":["admin"]}}}"#,
+                r#"{"creation_id":"test-create","namespace_id":"demo-acl","access":{"kind":"acl","principal_scope":"org","root_grants":{"team":["admin"]}}}"#,
             ),
             &[],
         ))
@@ -320,7 +320,7 @@ async fn an_acl_namespace_refuses_a_subject_from_another_scope() {
             "POST",
             "/v0/namespaces",
             Some(
-                r#"{"namespace_id":"demo","access":{"kind":"acl","principal_scope":"org_expected","root_grants":{"team":["admin"]}}}"#,
+                r#"{"creation_id":"test-create","namespace_id":"demo","access":{"kind":"acl","principal_scope":"org_expected","root_grants":{"team":["admin"]}}}"#,
             ),
             &[],
         ))
@@ -464,7 +464,7 @@ async fn an_acl_namespace_is_created_over_the_wire() {
     .expect("app");
     let acl = |grants: &str| {
         format!(
-            r#"{{"namespace_id":"demo-acl","access":{{"kind":"acl","principal_scope":"org","root_grants":{grants}}}}}"#
+            r#"{{"creation_id":"test-create","namespace_id":"demo-acl","access":{{"kind":"acl","principal_scope":"org","root_grants":{grants}}}}}"#
         )
     };
     let response = router
@@ -561,7 +561,7 @@ async fn a_repeated_grant_principal_is_invalid_and_does_not_commit() {
         .oneshot(request(
             "POST",
             "/v0/namespaces",
-            Some(r#"{"namespace_id":"demo","access":{"kind":"acl","principal_scope":"org_demo","root_grants":{"administrator":["admin"]}}}"#),
+            Some(r#"{"creation_id":"test-create","namespace_id":"demo","access":{"kind":"acl","principal_scope":"org_demo","root_grants":{"administrator":["admin"]}}}"#),
             &[],
         ))
         .await
@@ -611,7 +611,7 @@ async fn a_former_server_observes_revocation_on_its_first_strong_read() {
         .oneshot(request(
             "POST",
             "/v0/namespaces",
-            Some(r#"{"namespace_id":"demo","access":{"kind":"acl","principal_scope":"org_demo","root_grants":{"prn_root":["admin"]}}}"#),
+            Some(r#"{"creation_id":"test-create","namespace_id":"demo","access":{"kind":"acl","principal_scope":"org_demo","root_grants":{"prn_root":["admin"]}}}"#),
             &[],
         ))
         .await

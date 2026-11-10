@@ -293,7 +293,7 @@ pub(crate) fn head_from_manifest(
     manifest: &NamespaceManifestEnvelope,
 ) -> NamespaceReadState {
     NamespaceReadState {
-        status: current_head.status,
+        status: current_head.status.clone(),
         writer_epoch: current_head.writer_epoch,
         writer: current_head.writer.clone(),
         ..NamespaceReadState::from(manifest.payload())

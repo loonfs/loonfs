@@ -45,7 +45,7 @@ impl Operation {
 
 pub(crate) const GET_HEALTH: Operation = Operation::retry(Method::GET);
 pub(crate) const GET_CAPABILITIES: Operation = Operation::retry(Method::GET);
-pub(crate) const CREATE_NAMESPACE: Operation = Operation::once(Method::POST);
+pub(crate) const CREATE_NAMESPACE: Operation = Operation::retry(Method::POST);
 pub(crate) const GET_NAMESPACE: Operation = Operation::retry(Method::GET);
 pub(crate) const GET_PATH_ENTRY: Operation = Operation::retry(Method::GET);
 pub(crate) const GET_INODE: Operation = Operation::retry(Method::GET);
@@ -76,11 +76,11 @@ pub(crate) const LIST_SNAPSHOTS: Operation = Operation::retry(Method::GET);
 pub(crate) const GET_SNAPSHOT: Operation = Operation::retry(Method::GET);
 pub(crate) const EXTEND_SNAPSHOT: Operation = Operation::retry(Method::POST);
 pub(crate) const DELETE_SNAPSHOT: Operation = Operation::retry(Method::DELETE);
-pub(crate) const FORK_NAMESPACE: Operation = Operation::once(Method::POST);
+pub(crate) const FORK_NAMESPACE: Operation = Operation::retry(Method::POST);
 pub(crate) const MERGE_FORK: Operation = Operation::retry(Method::POST);
 pub(crate) const GET_NEXT_MERGE_RANGE: Operation = Operation::retry(Method::GET);
 pub(crate) const REBASE_FORK: Operation = Operation::retry(Method::POST);
-pub(crate) const DELETE_NAMESPACE: Operation = Operation::once(Method::DELETE);
+pub(crate) const DELETE_NAMESPACE: Operation = Operation::retry(Method::DELETE);
 pub(crate) const GET_NAMESPACE_DIAGNOSTICS: Operation = Operation::retry(Method::GET);
 pub(crate) const LIST_CHECKPOINTS: Operation = Operation::retry(Method::GET);
 pub(crate) const GET_CHECKPOINT: Operation = Operation::retry(Method::GET);

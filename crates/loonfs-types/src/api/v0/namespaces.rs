@@ -1,6 +1,8 @@
 //! Namespace requests and responses for the v0 HTTP API.
 
-use crate::{ActorId, ChangeSeq, ManifestNo, NamespaceAccess, NamespaceId, PinId, PrincipalScope};
+use crate::{
+    ActorId, ChangeSeq, CreationId, ManifestNo, NamespaceAccess, NamespaceId, PinId, PrincipalScope,
+};
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
 
@@ -13,6 +15,9 @@ pub struct CreateNamespaceRequest {
     /// default is unrestricted.
     #[serde(default = "NamespaceAccess::unrestricted")]
     pub access: NamespaceAccess,
+    /// The caller's creation ID for this request. A retry with the same creation ID returns the
+    /// namespace as it is now.
+    pub creation_id: CreationId,
     /// The durable ID of the new namespace.
     pub namespace_id: NamespaceId,
     /// The namespace's retention window, in milliseconds, which must be positive. The reference
@@ -32,6 +37,9 @@ pub struct CreateNamespaceRequest {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ForkNamespaceRequest {
+    /// The caller's creation ID for this request. A retry with the same creation ID returns the
+    /// fork as it is now.
+    pub creation_id: CreationId,
     /// The durable ID of the new namespace that the fork creates.
     pub new_namespace_id: NamespaceId,
     /// An unexpired snapshot to fork from. Without it, the fork starts from the current head.
@@ -260,11 +268,13 @@ mod tests {
     #[test]
     fn create_and_fork_namespace_requests_are_strict() {
         serde_json::from_value::<CreateNamespaceRequest>(serde_json::json!({
+            "creation_id": "job-1-create",
             "namespace_id": "demo",
         }))
         .expect("the same create body without a typo decodes");
         assert_eq!(
             serde_json::from_value::<CreateNamespaceRequest>(serde_json::json!({
+                "creation_id": "job-1-create",
                 "namespace_id": "demo",
                 "retention_window_ms": 86_400_000
             }))
@@ -273,14 +283,24 @@ mod tests {
             NonZeroU64::new(86_400_000)
         );
         serde_json::from_value::<CreateNamespaceRequest>(serde_json::json!({
+            "creation_id": "job-1-create",
             "namespace_id": "demo",
             "fork_of": "other"
         }))
         .expect_err("a fork field on a create request should be rejected");
         serde_json::from_value::<ForkNamespaceRequest>(serde_json::json!({
+            "creation_id": "job-1-fork",
             "new_namespace_id": "demo",
             "source_namespace_id": "other"
         }))
         .expect_err("a source namespace field on a fork request should be rejected");
+        serde_json::from_value::<CreateNamespaceRequest>(serde_json::json!({
+            "namespace_id": "demo",
+        }))
+        .expect_err("a create request without a creation ID should be rejected");
+        serde_json::from_value::<ForkNamespaceRequest>(serde_json::json!({
+            "new_namespace_id": "demo",
+        }))
+        .expect_err("a fork request without a creation ID should be rejected");
     }
 }

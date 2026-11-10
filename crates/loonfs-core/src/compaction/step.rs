@@ -118,7 +118,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         if payload.compactor_epoch != compactor_epoch {
             return Ok(CompactionUnitOutcome::Fenced);
         }
-        ensure_namespace_live(&payload.namespace_id, payload.status)?;
+        ensure_namespace_live(&payload.namespace_id, &payload.status)?;
         // The unit reads its input runs without the cache, and the compaction inserts
         // its output into the cache.
         let segments = metadata_basis_from_manifest(&self.namespace.store, None, current).segments;

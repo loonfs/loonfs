@@ -57,6 +57,7 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
         .fork_namespace(
             &target,
             &loonfs_test_support::test_actor(),
+            &loonfs_types::CreationId::generate(),
             crate::test_support::folded_manifest(&fixture.namespace)
                 .await
                 .expect("fold the WAL tail"),
@@ -278,6 +279,7 @@ async fn a_fork_basis_naming_its_pin_with_a_different_checksum_is_corrupt() {
         .fork_namespace(
             &target,
             &loonfs_test_support::test_actor(),
+            &loonfs_types::CreationId::generate(),
             crate::test_support::folded_manifest(&fixture.namespace)
                 .await
                 .expect("fold the WAL tail"),

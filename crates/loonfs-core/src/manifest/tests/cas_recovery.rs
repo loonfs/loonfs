@@ -165,7 +165,7 @@ async fn an_ambiguous_manifest_read_back_must_finish_within_its_budget() {
                 crate::test_support::namespace_store(&store, &payload.namespace_id)
                     .create_manifest(payload, &deadline)
                     .await
-                    .map(|()| None)
+                    .map(|_| None)
             } else {
                 publish_once_within(&store, encode_manifest(payload), &deadline)
                     .await
@@ -492,8 +492,10 @@ async fn discovery_probes_windows_above_the_hint_and_a_missing_hint_reads_as_abs
             &OperationClock::start(0, crate::test_support::std_timer()),
             |current: crate::namespace::control::LoadedManifest| async move {
                 let mut payload = current.payload().clone();
-                payload.status =
-                    loonfs_types::format::control::NamespaceStatus::Deleted { deleted_at_ms: 1 };
+                payload.status = loonfs_types::format::control::NamespaceStatus::Deleted {
+                    deleted_at_ms: 1,
+                    deletion_id: loonfs_types::DeletionId::parse("test").expect("deletion ID"),
+                };
                 Ok(super::super::publish::ManifestChange::Next(
                     Box::new(payload),
                     (),

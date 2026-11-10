@@ -105,7 +105,7 @@ fn manifest_statistics(
         manifest_bytes,
         segments_by_family,
         created_at_ms: payload.created_at_ms,
-        status: payload.status,
+        status: payload.status.clone(),
         folded_wal_no: payload.folded_wal_no,
         activity: payload.activity,
         inode_record_count,

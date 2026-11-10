@@ -27,6 +27,14 @@ validation_error!(
     "invalid commit_id {value:?}: {reason}"
 );
 validation_error!(
+    CreationIdValidationError,
+    "invalid creation_id {value:?}: {reason}"
+);
+validation_error!(
+    DeletionIdValidationError,
+    "invalid deletion_id {value:?}: {reason}"
+);
+validation_error!(
     GeneratedIdValidationError,
     "invalid generated id {value:?}: {reason}"
 );
@@ -191,6 +199,14 @@ fn validate_commit_id(value: &str) -> Result<(), CommitIdValidationError> {
     validate_id_grammar(value).map_err(|reason| CommitIdValidationError::new(value, reason))
 }
 
+fn validate_creation_id(value: &str) -> Result<(), CreationIdValidationError> {
+    validate_id_grammar(value).map_err(|reason| CreationIdValidationError::new(value, reason))
+}
+
+fn validate_deletion_id(value: &str) -> Result<(), DeletionIdValidationError> {
+    validate_id_grammar(value).map_err(|reason| DeletionIdValidationError::new(value, reason))
+}
+
 /// Maximum name-key length in UTF-8 bytes
 /// ([Names and paths](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#14-names-and-paths)), three times the display-name
 /// cap, so every key derived from a valid name fits.
@@ -343,6 +359,55 @@ impl CommitId {
     /// Generates a valid random commit id.
     pub fn generate() -> Self {
         Self(generated_id("c"))
+    }
+}
+
+string_id! {
+    /// The ID that a caller generates for one request that creates or forks a namespace.
+    ///
+    /// LoonFS stores the creation ID in the namespace's manifests, so a retry of the request with
+    /// the same creation ID returns the namespace as it is now instead of `namespace_exists`.
+    /// Reuse the same creation ID when you retry the same request. A creation ID is 1 to 128
+    /// lowercase ASCII letters, digits, dots, underscores, or hyphens, and it starts with a letter
+    /// or digit. Generated creation IDs have the form `cre_` followed by 26 lowercase Crockford
+    /// base 32 characters, but callers can supply any value that follows these rules.
+    CreationId,
+    error = CreationIdValidationError,
+    validate = validate_creation_id,
+    schema(
+        pattern = r"^[a-z0-9][a-z0-9._-]{0,127}$",
+        example = "cre_7kn71d9dq885x91hejz3gvf9p0"
+    )
+}
+
+impl CreationId {
+    /// Generates a valid random creation ID.
+    pub fn generate() -> Self {
+        Self(generated_id("cre"))
+    }
+}
+
+string_id! {
+    /// The ID that a caller generates for one request that deletes a namespace.
+    ///
+    /// LoonFS stores the deletion ID in the namespace's tombstone, so a retry of the request with
+    /// the same deletion ID returns the namespace ID and the final head instead of
+    /// `namespace_deleted`. Reuse the same deletion ID when you retry the same request. A
+    /// deletion ID follows the creation ID's rules. Generated deletion IDs have the form `del_`
+    /// followed by 26 lowercase Crockford base 32 characters.
+    DeletionId,
+    error = DeletionIdValidationError,
+    validate = validate_deletion_id,
+    schema(
+        pattern = r"^[a-z0-9][a-z0-9._-]{0,127}$",
+        example = "del_7kn71d9dq885x91hejz3gvf9p0"
+    )
+}
+
+impl DeletionId {
+    /// Generates a valid random deletion ID.
+    pub fn generate() -> Self {
+        Self(generated_id("del"))
     }
 }
 
@@ -613,9 +678,9 @@ numeric_id! {
 #[cfg(test)]
 mod tests {
     use super::{
-        next_public_ordinal, BindingVersion, ChangeSeq, CommitId, ContentId, ManifestNo,
-        MetadataSegmentId, NameKey, NamespaceId, PinId, RevisionNo, RunNo, UploadId, WalNo,
-        WriterEpoch, WriterId, MAX_PUBLIC_INTEGER,
+        next_public_ordinal, BindingVersion, ChangeSeq, CommitId, ContentId, CreationId,
+        DeletionId, ManifestNo, MetadataSegmentId, NameKey, NamespaceId, PinId, RevisionNo, RunNo,
+        UploadId, WalNo, WriterEpoch, WriterId, MAX_PUBLIC_INTEGER,
     };
     use crate::AttributesRevisionNo;
     use std::collections::BTreeSet;
@@ -707,8 +772,12 @@ mod tests {
                 .as_str(),
             "my-loonfs-notes"
         );
-        // Commit ids share the base grammar but not the reservation.
+        // Commit, creation, and deletion IDs share the base grammar but not the reservation.
         assert!(CommitId::parse("loonfs-retry-1").is_ok());
+        assert!(CreationId::parse("loonfs-retry-1").is_ok());
+        assert!(DeletionId::parse("loonfs-retry-1").is_ok());
+        CreationId::parse("Job-1").expect_err("a creation ID with an uppercase letter");
+        DeletionId::parse("job/1").expect_err("a deletion ID with a slash");
     }
 
     #[test]
@@ -831,6 +900,8 @@ mod tests {
 
         assert_generated_id_shape(upload_id.as_str(), "upl");
         assert_generated_id_shape(metadata_segment_id.as_str(), "seg");
+        assert_generated_id_shape(CreationId::generate().as_str(), "cre");
+        assert_generated_id_shape(DeletionId::generate().as_str(), "del");
         assert_eq!(
             super::generated_id_body_prefixes(0).collect::<Vec<_>>(),
             [""]

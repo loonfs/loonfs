@@ -70,7 +70,7 @@ pub(crate) fn ensure_head_identity(
 
 pub(crate) fn ensure_namespace_live(
     namespace_id: &NamespaceId,
-    status: NamespaceStatus,
+    status: &NamespaceStatus,
 ) -> crate::error::Result<()> {
     if status.is_deleted() {
         return Err(CoreError::NamespaceDeleted {

@@ -44,6 +44,7 @@ async fn live_grandchild_keeps_deleted_ancestors_pinned_until_retirement_runs_le
                 .fork_namespace(
                     namespace_id,
                     &loonfs_test_support::test_actor(),
+                    &loonfs_types::CreationId::generate(),
                     crate::test_support::folded_manifest(&fixture.namespace)
                         .await
                         .expect("fold the WAL tail"),

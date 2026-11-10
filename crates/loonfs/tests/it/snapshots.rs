@@ -378,6 +378,7 @@ async fn an_expired_snapshot_is_not_found_for_reads_and_forks_but_stays_listed()
                 &loonfs_test_support::test_actor(),
                 &ForkNamespaceOptions {
                     snapshot_id: Some(snapshot.snapshot_id.clone()),
+                    ..Default::default()
                 },
             )
             .await,
@@ -695,6 +696,7 @@ async fn a_fork_pin_reads_a_revision_after_the_sources_floor_passes_it() {
                 &actor,
                 &ForkNamespaceOptions {
                     snapshot_id: Some(pin_id),
+                    ..Default::default()
                 },
             )
             .await,

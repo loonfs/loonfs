@@ -12,7 +12,7 @@ use crate::options::DeleteNamespaceOptions;
 use crate::time::OperationClock;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::NamespaceStatus;
-use loonfs_types::DeleteNamespaceResponse;
+use loonfs_types::{DeleteNamespaceResponse, DeletionId};
 use std::sync::Mutex;
 
 impl<S: ObjectStore> NamespaceStore<S> {
@@ -24,7 +24,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// instead of reading the WAL tail, and the attempt's fold folds the
     /// position's tail. After that fold, the position moves onto the fold's
     /// manifest by [`WriterPosition::move_to`], and the deletion drops the
-    /// position when the position can't move.
+    /// position when the position can't move. The tombstone records
+    /// `options`' deletion ID, or a generated one when `options` has none.
     pub(crate) async fn delete_namespace(
         &self,
         options: DeleteNamespaceOptions,
@@ -42,9 +43,11 @@ impl<S: ObjectStore> NamespaceStore<S> {
         // lock, because a future that a closure returns can't borrow the
         // closure's own state.
         let position = Mutex::new(position);
+        let deletion_id = options.deletion_id_or_generate();
         self.update_manifest(basis, clock, |current: LoadedManifest| {
             let acquired_writer = &acquired_writer;
             let position = &position;
+            let deletion_id = &deletion_id;
             async move {
                 let mut payload = current.payload().clone();
                 let held = position
@@ -56,7 +59,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     Some(held) => held.read_basis.head.clone(),
                     None => self.load_read_anchor(clock.observe()).await?.read_state,
                 };
-                super::control::ensure_namespace_live(&head.namespace_id, head.status)?;
+                super::control::ensure_namespace_live(&head.namespace_id, &head.status)?;
                 ensure_writer_not_fenced(&head, acquired_writer)?;
                 if let Some(expected) = options.expected_head_seq {
                     if head.seq != expected {
@@ -77,6 +80,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 }
                 payload.status = NamespaceStatus::Deleted {
                     deleted_at_ms: clock.request_at_ms(),
+                    deletion_id: deletion_id.clone(),
                 };
                 // A tombstone lists no extension segments, so they're
                 // collected once no pin keeps a manifest that lists them
@@ -93,5 +97,29 @@ impl<S: ObjectStore> NamespaceStore<S> {
         })
         .await
         .map(ManifestUpdate::into_report)
+    }
+
+    /// Returns the namespace ID and the final head when the namespace's
+    /// current manifest is a tombstone with `deletion_id`, and `None` when
+    /// the namespace is live, missing, or deleted under another deletion ID.
+    ///
+    /// A delete that finds a tombstone calls this, so a retry of the delete
+    /// that published the tombstone returns what the first delete returned
+    /// ([design note](https://github.com/loonfs/loonfs/blob/main/docs/design/retrying-creates-and-deletes.md#deleting-a-namespace)).
+    /// The retry doesn't check `expected_head_seq` again.
+    pub async fn find_deletion(
+        &self,
+        deletion_id: &DeletionId,
+    ) -> Result<Option<DeleteNamespaceResponse>> {
+        let current = self
+            .load_current_manifest_if_present()
+            .await
+            .map_err(CoreError::ControlObjectLoad)?;
+        Ok(current
+            .filter(|current| current.payload().status.deletion_id() == Some(deletion_id))
+            .map(|tombstone| DeleteNamespaceResponse {
+                namespace_id: self.namespace_id.clone(),
+                head_seq: tombstone.payload().head_seq,
+            }))
     }
 }

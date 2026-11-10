@@ -155,6 +155,7 @@ async fn an_inherited_extension_segment_stays_until_no_family_member_lists_it() 
         .fork_namespace(
             &fork,
             &loonfs_test_support::test_actor(),
+            &loonfs_types::CreationId::generate(),
             crate::test_support::folded_manifest(&fixture.namespace)
                 .await
                 .expect("fold the WAL tail"),

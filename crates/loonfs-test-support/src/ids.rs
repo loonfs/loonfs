@@ -26,6 +26,11 @@ pub fn test_actor() -> ActorId {
     ActorId::parse("test-actor").expect("valid test actor id")
 }
 
+/// Returns the creation ID shared by tests that build a manifest by hand.
+pub fn test_creation_id() -> loonfs_types::CreationId {
+    loonfs_types::CreationId::parse("test-creation").expect("valid test creation ID")
+}
+
 /// Parses an attribute key that is expected to be valid test data.
 pub fn attribute_key(value: &str) -> AttributeKey {
     AttributeKey::parse(value).expect("valid attribute key")

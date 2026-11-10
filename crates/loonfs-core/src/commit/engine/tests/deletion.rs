@@ -202,6 +202,7 @@ async fn rejected_deletion_writes_nothing_before_folding_inline_content() {
             .delete_namespace(
                 DeleteNamespaceOptions {
                     expected_head_seq: Some(expected_head_seq),
+                    ..Default::default()
                 },
                 acquired_writer.clone(),
                 None,
@@ -224,4 +225,73 @@ async fn rejected_deletion_writes_nothing_before_folding_inline_content() {
         assert_eq!(store.counts().puts, 0);
         assert_eq!(store.counts().compare_and_swaps, 0);
     }
+}
+
+/// Checks that a delete sent again with its deletion ID returns the namespace
+/// ID and the final head without a write, whatever its `expected_head_seq`,
+/// and that a delete with another deletion ID returns `namespace_deleted`.
+#[tokio::test]
+async fn a_retried_deletion_returns_the_final_head_and_another_deletion_fails() {
+    let directory = tempdir().expect("directory");
+    let store = RecordingStore::new(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::any(),
+    );
+    let namespace_id = NamespaceId::parse("deleted-once").expect("namespace");
+    let context = context();
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .create()
+        .await
+        .expect("bootstrap");
+    let mut writer = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(&store, &namespace_id),
+        context.writer_id.clone(),
+    );
+    writer
+        .publish_batch(
+            [CommitCandidate::new(CommitIntent::single(
+                CommitId::parse("before-delete").expect("commit"),
+                loonfs_test_support::test_actor(),
+                None,
+                FilesystemOperation::CreateDirectory {
+                    path: AbsolutePath::parse("/early").expect("path"),
+                    parents: false,
+                },
+            ))],
+            &context.clock(),
+        )
+        .await
+        .results
+        .remove(0)
+        .expect("publish before deletion");
+    let deletion = |deletion_id: &str, expected_head_seq| DeleteNamespaceOptions {
+        expected_head_seq,
+        deletion_id: Some(loonfs_types::DeletionId::parse(deletion_id).expect("deletion ID")),
+    };
+    let first = writer
+        .delete_namespace(deletion("job-1-delete", Some(ChangeSeq(1))))
+        .await
+        .expect("delete");
+    assert_eq!(first.head_seq, ChangeSeq(1));
+    for expected_head_seq in [Some(ChangeSeq(1)), Some(ChangeSeq(0)), None] {
+        store.reset();
+        let retried = NamespaceCommitEngine::new(
+            crate::test_support::namespace_store(&store, &namespace_id),
+            context.writer_id.clone(),
+        )
+        .delete_namespace(deletion("job-1-delete", expected_head_seq))
+        .await
+        .expect("a retry returns the first deletion's response");
+        assert_eq!(retried, first);
+        assert_eq!(store.counts().puts, 0);
+        assert_eq!(store.counts().compare_and_swaps, 0);
+    }
+    let error = NamespaceCommitEngine::new(
+        crate::test_support::namespace_store(&store, &namespace_id),
+        context.writer_id.clone(),
+    )
+    .delete_namespace(deletion("job-2-delete", None))
+    .await
+    .expect_err("another deletion");
+    assert_matches!(error, CoreError::NamespaceDeleted { .. });
 }

@@ -252,7 +252,7 @@ async fn a_retention_window_is_set_at_creation_changed_by_runs_and_copied_by_a_f
             &router,
             "POST",
             "/v0/namespaces",
-            r#"{"namespace_id":"zero","retention_window_ms":0}"#,
+            r#"{"creation_id":"test-create","namespace_id":"zero","retention_window_ms":0}"#,
         )
         .await,
     );
@@ -260,7 +260,7 @@ async fn a_retention_window_is_set_at_creation_changed_by_runs_and_copied_by_a_f
         &router,
         "POST",
         "/v0/namespaces",
-        r#"{"namespace_id":"windowed","retention_window_ms":86400000}"#,
+        r#"{"creation_id":"test-create","namespace_id":"windowed","retention_window_ms":86400000}"#,
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{created}");
@@ -291,7 +291,7 @@ async fn a_retention_window_is_set_at_creation_changed_by_runs_and_copied_by_a_f
         &router,
         "POST",
         "/v0/namespaces/windowed/forks",
-        r#"{"new_namespace_id":"forked"}"#,
+        r#"{"creation_id":"test-fork","new_namespace_id":"forked"}"#,
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{forked}");

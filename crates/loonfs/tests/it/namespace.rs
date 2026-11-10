@@ -1,10 +1,11 @@
 //! The per-namespace handle: opening, sharing, closing, dropping, epochs,
 //! and the read-only mode.
 
-use crate::common::{data_wal_put_for, expect_code, writer_epoch};
+use crate::common::{collect_checkpoints, data_wal_put_for, expect_code, writer_epoch};
 use loonfs::test_support::writer;
 use loonfs::{
-    CreateNamespaceOptions, ErrorCode, LoonFs, NamespaceId, NamespaceSessionStatus, RuntimeConfig,
+    CreateNamespaceOptions, CreationId, DeleteNamespaceOptions, DeletionId, ErrorCode,
+    ForkNamespaceOptions, LoonFs, NamespaceId, NamespaceSessionStatus, RuntimeConfig,
     SharedObjectStore, Writable,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -64,6 +65,77 @@ async fn a_namespace_created_without_a_window_has_the_runtimes_default_window() 
             "{name}"
         );
     }
+}
+
+/// Checks that a fork and a delete sent again with their IDs return their
+/// first results through the runtime. The retried fork finds its target
+/// before it creates a fork pin, and the retried delete finds the tombstone
+/// through the deleting handle's session and through a new handle.
+#[tokio::test]
+async fn a_retried_fork_and_a_retried_delete_return_their_first_results() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store: SharedObjectStore =
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("create store"));
+    let writer = writer(store, "retries").await;
+    let actor = loonfs_test_support::test_actor();
+    let source = NamespaceId::parse("retried-source").expect("namespace id");
+    let target = NamespaceId::parse("retried-fork").expect("namespace id");
+    create_namespace(&writer, &source).await;
+    let fork = |creation_id: &str| ForkNamespaceOptions {
+        creation_id: Some(CreationId::parse(creation_id).expect("creation ID")),
+        ..ForkNamespaceOptions::default()
+    };
+    let first = writer
+        .fork_namespace_with_options(&source, &target, &actor, &fork("job-1-fork"))
+        .await
+        .expect("fork");
+    let retried = writer
+        .fork_namespace_with_options(&source, &target, &actor, &fork("job-1-fork"))
+        .await
+        .expect("a retried fork returns the fork");
+    assert_eq!(retried, first);
+    expect_code(
+        writer
+            .fork_namespace_with_options(&source, &target, &actor, &fork("job-2-fork"))
+            .await,
+        ErrorCode::NamespaceExists,
+    );
+    let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("retries-gc"));
+    let checkpoints = collect_checkpoints(&maintenance, &source)
+        .await
+        .expect("list the source's pins");
+    assert_eq!(checkpoints.checkpoints.len(), 1, "one fork pin");
+
+    let delete = |deletion_id: &str| DeleteNamespaceOptions {
+        deletion_id: Some(DeletionId::parse(deletion_id).expect("deletion ID")),
+        ..DeleteNamespaceOptions::default()
+    };
+    let handle = writer.open_namespace(&target).expect("open the fork");
+    let deleted = handle
+        .delete_with_options(&delete("job-1-delete"))
+        .await
+        .expect("delete");
+    assert_eq!(
+        handle
+            .delete_with_options(&delete("job-1-delete"))
+            .await
+            .expect("a retry through the deleting handle"),
+        deleted
+    );
+    let reopened = writer
+        .open_namespace(&target)
+        .expect("open the deleted fork");
+    assert_eq!(
+        reopened
+            .delete_with_options(&delete("job-1-delete"))
+            .await
+            .expect("a retry through a new handle"),
+        deleted
+    );
+    expect_code(
+        reopened.delete_with_options(&delete("job-2-delete")).await,
+        ErrorCode::NamespaceDeleted,
+    );
 }
 
 #[tokio::test]

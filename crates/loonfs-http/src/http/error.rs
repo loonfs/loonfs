@@ -40,6 +40,11 @@ impl ApiResponseError {
         response
     }
 
+    /// Returns the error's code.
+    pub(super) fn code(&self) -> ErrorCode {
+        self.code
+    }
+
     /// Identifies the request input that caused the error.
     pub(super) fn with_param(mut self, param: impl Into<String>) -> Self {
         self.body.param = Some(param.into());

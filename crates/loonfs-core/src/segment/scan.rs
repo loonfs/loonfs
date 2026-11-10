@@ -119,6 +119,7 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
             loonfs_types::NamespaceId::parse("runs").expect("a static namespace id should parse"),
             0,
             loonfs_types::ActorId::parse("runs").expect("a static actor id should parse"),
+            loonfs_types::CreationId::parse("runs").expect("a static creation ID should parse"),
             loonfs_types::NamespaceAccess::Unrestricted {},
         );
         let manifest = loonfs_types::format::manifest::encode_namespace_manifest_json(payload)

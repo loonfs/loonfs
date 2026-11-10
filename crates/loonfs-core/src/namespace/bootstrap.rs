@@ -2,6 +2,7 @@
 
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
+use crate::manifest::publish::CreationOutcome;
 use crate::metadata::{AccessRevisionRecord, InodeRecord, MetadataState};
 use crate::options::CreateNamespaceOptions;
 use loonfs_objectstore::ObjectStore;
@@ -14,7 +15,11 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Creates the namespace if it does not already exist.
     ///
     /// Use this before normal reads and writes for a new namespace. Returns
-    /// the namespace's status after manifest 1 is installed.
+    /// the namespace's status after manifest 1 is installed. When the
+    /// namespace already exists with the request's creation ID, an earlier
+    /// attempt of the same request created the namespace, and the call
+    /// returns the namespace as it is now
+    /// ([design note](https://github.com/loonfs/loonfs/blob/main/docs/design/retrying-creates-and-deletes.md#creating-a-namespace)).
     pub async fn bootstrap_namespace(
         &self,
         actor_id: &loonfs_types::ActorId,
@@ -35,11 +40,13 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 self.namespace.namespace_id.clone(),
                 clock.request_at_ms(),
                 actor_id.clone(),
+                options.creation_id_or_generate(),
                 options.access.clone(),
             )
         };
         match self.namespace.create_manifest(start.clone(), &clock).await {
-            Ok(()) => Ok(super::status::created_namespace(&start)),
+            Ok(CreationOutcome::Created) => Ok(super::status::created_namespace(&start)),
+            Ok(CreationOutcome::Replayed) => self.namespace.load_metadata().await,
             Err(CoreError::NamespaceExists { .. }) if options.allow_existing => {
                 self.namespace.load_metadata().await
             }

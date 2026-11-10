@@ -96,7 +96,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         loop {
             let head = &anchor.read_state;
             ensure_writer_not_fenced(head, &acquired)?;
-            super::control::ensure_namespace_live(&head.namespace_id, head.status)?;
+            super::control::ensure_namespace_live(&head.namespace_id, &head.status)?;
             let fence =
                 prepare_wal_object(self.namespace_id.clone(), acquired.writer_epoch, head, &[])?;
             match publish_wal_object(&self.store, &fence, &tip).await {

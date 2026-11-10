@@ -42,6 +42,7 @@ async fn fork_namespace<S: ObjectStore + ?Sized>(
         .fork_namespace(
             new_namespace_id,
             &loonfs_test_support::test_actor(),
+            &loonfs_types::CreationId::generate(),
             manifest,
         )
         .await
@@ -132,6 +133,7 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
         .fork_namespace_at_snapshot(
             &target,
             &loonfs_test_support::test_actor(),
+            &loonfs_types::CreationId::generate(),
             &snapshot.snapshot_id,
         )
         .await
@@ -210,7 +212,12 @@ async fn invalid_snapshot_forks_write_nothing() {
     ] {
         store.take();
         let error = engine
-            .fork_namespace_at_snapshot(&target, &loonfs_test_support::test_actor(), &snapshot_id)
+            .fork_namespace_at_snapshot(
+                &target,
+                &loonfs_test_support::test_actor(),
+                &loonfs_types::CreationId::generate(),
+                &snapshot_id,
+            )
             .await
             .expect_err("invalid snapshot");
         assert_eq!(error.code(), expected_code);
@@ -254,7 +261,9 @@ async fn snapshot_deletion_during_fork_deletes_the_attempt_without_installing_a_
     let engine = namespace_engine(&store, &source, &context);
     store.block_next();
     let actor_id = loonfs_test_support::test_actor();
-    let forking = engine.fork_namespace_at_snapshot(&target, &actor_id, &snapshot.snapshot_id);
+    let creation_id = loonfs_types::CreationId::generate();
+    let forking =
+        engine.fork_namespace_at_snapshot(&target, &actor_id, &creation_id, &snapshot.snapshot_id);
     let deleting = async {
         store.wait_until_blocked().await;
         store.inner().block_next();
@@ -1192,6 +1201,7 @@ async fn a_create_losing_to_a_foreign_head_reports_the_id_as_taken() {
         namespace_id.clone(),
         1_000,
         loonfs_test_support::test_actor(),
+        loonfs_test_support::test_creation_id(),
         loonfs_types::NamespaceAccess::Unrestricted {},
     );
     let foreign_bytes =
@@ -1262,6 +1272,7 @@ async fn namespace_delete_blocks_reads_writes_and_forks() {
     let stale = engine
         .delete_namespace(loonfs_core::DeleteNamespaceOptions {
             expected_head_seq: Some(ChangeSeq(0)),
+            ..Default::default()
         })
         .await
         .expect_err("stale precondition");

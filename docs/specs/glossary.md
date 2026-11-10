@@ -56,6 +56,14 @@ The sequence of the newest commit that a manifest's runs include, recorded as th
 
 An identifier for a commit, chosen by the client, that makes retries safe. It's usually a random ID (the Rust client generates one when the caller doesn't provide it). When a retry uses the same commit ID and the same request, LoonFS returns the original commit's result instead of committing again, for as long as the commit receipt is kept. See [Commit identity and retries](format.md#65-commit-identity-and-retries).
 
+### Creation ID
+
+An identifier that the caller generates for one request that creates or forks a namespace, such as `job-4182-create`. LoonFS stores the creation ID in the namespace's first manifest and copies the ID into every later manifest, so a retry of the request can find the ID for as long as the namespace exists. A create or fork that finds an active namespace with its own creation ID returns the namespace as it is now, and a create or fork that finds another creation ID returns `namespace_exists`. The Rust client generates a creation ID when the caller doesn't provide one, and sends the same ID on every attempt of one call. See [Creating a namespace](format.md#91-creating-a-namespace).
+
+### Deletion ID
+
+An identifier that the caller generates for one request that deletes a namespace, such as `job-4182-delete`. LoonFS stores the deletion ID in the [namespace tombstone](#namespace-tombstone). A delete that finds a tombstone with its own deletion ID returns the namespace ID and the final head, and a delete that finds another deletion ID returns `namespace_deleted`. See [Deleting a namespace](format.md#94-deleting-a-namespace).
+
 ### Commit receipt
 
 A stored row that maps a commit ID to the sequence it committed at. LoonFS uses receipts to recognize retries. Compaction can remove receipts below the retention floor, and after that, a reused commit ID is treated as a new commit.
@@ -116,7 +124,7 @@ Bringing a deleted file or directory back, or making a prior revision's content 
 
 ### Namespace tombstone
 
-A deleted namespace's final manifest, which records that the namespace was deleted and when. See [Deleting a namespace](format.md#94-deleting-a-namespace).
+A deleted namespace's final manifest, which records that the namespace was deleted, when, and the [deletion ID](#deletion-id) of the request that deleted the namespace. See [Deleting a namespace](format.md#94-deleting-a-namespace).
 
 ## Content
 

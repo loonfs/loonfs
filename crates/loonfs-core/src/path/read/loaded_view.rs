@@ -43,7 +43,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         context: &RuntimeReadContext,
     ) -> Result<LoadedMetadataView<'_, S>> {
         let head = &context.read_basis.head;
-        crate::namespace::control::ensure_namespace_live(&head.namespace_id, head.status)?;
+        crate::namespace::control::ensure_namespace_live(&head.namespace_id, &head.status)?;
         self.load_metadata_view_for_authorization(context).await
     }
 

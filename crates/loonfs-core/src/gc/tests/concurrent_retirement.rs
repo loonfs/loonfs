@@ -27,6 +27,7 @@ async fn overlapping_retirement_retries_a_lost_pin_delete_and_preserves_a_live_s
             .fork_namespace(
                 fork,
                 &loonfs_test_support::test_actor(),
+                &loonfs_types::CreationId::generate(),
                 crate::test_support::folded_manifest(&fixture.namespace)
                     .await
                     .expect("fold the WAL tail"),

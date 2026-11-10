@@ -75,7 +75,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let anchor = self.load_read_anchor(observed).await?;
         crate::namespace::control::ensure_namespace_live(
             &anchor.read_state.namespace_id,
-            anchor.read_state.status,
+            &anchor.read_state.status,
         )?;
         Ok(anchor)
     }

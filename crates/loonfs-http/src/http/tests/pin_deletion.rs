@@ -169,7 +169,7 @@ async fn a_snapshot_on_a_deleted_namespace_stays_deletable() {
     let (status, body) = request(
         &router,
         Method::DELETE,
-        &format!("/v0/namespaces/{namespace_id}"),
+        &format!("/v0/namespaces/{namespace_id}?deletion_id=test-delete"),
         json!({}),
     )
     .await;

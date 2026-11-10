@@ -29,7 +29,10 @@ impl Client {
     /// its genesis state.
     ///
     /// With `options.allow_existing`, a namespace that already exists isn't
-    /// an error, and the call returns that namespace's current state.
+    /// an error, and the call returns that namespace's current state. Every
+    /// attempt of one call sends the same creation ID, `options.creation_id`
+    /// or one that the call generates, so a retry after a lost response
+    /// returns the namespace as it is now.
     pub async fn create_namespace_with_options(
         &self,
         namespace_id: &NamespaceId,
@@ -37,13 +40,13 @@ impl Client {
         options: &CreateNamespaceOptions,
     ) -> Result<NamespaceMetadata> {
         let url = format!("{}/v0/namespaces", self.base_url);
-        // Namespace creation has no durable request identity to reconcile an ambiguous success.
         let created = self
             .send_json(
                 self.request(operations::CREATE_NAMESPACE, &url)
                     .header(headers::ACTOR, actor.as_str())
                     .json(&CreateNamespaceRequest {
                         access: options.access.clone(),
+                        creation_id: options.creation_id_or_generate(),
                         namespace_id: namespace_id.clone(),
                         retention_window_ms: options.retention_window_ms,
                     })?,
@@ -82,18 +85,21 @@ impl Client {
     /// Deletes the namespace.
     ///
     /// Set `options.expected_head_seq` to delete only if the namespace is
-    /// still where you last observed it (`stale_head` on mismatch). Deleting
-    /// an already-deleted namespace fails with `namespace_deleted`.
+    /// still where you last observed it (`stale_head` on mismatch). Every
+    /// attempt of one call sends the same deletion ID, `options.deletion_id`
+    /// or one that the call generates, so a retry after a lost response
+    /// returns the namespace ID and the final head. Deleting a namespace that
+    /// another request deleted fails with `namespace_deleted`.
     pub async fn delete_namespace_with_options(
         &self,
         namespace_id: &NamespaceId,
         options: &DeleteNamespaceOptions,
     ) -> Result<DeleteNamespaceResponse> {
         let mut query = QueryBuilder::new(self.namespace_url(namespace_id, ""));
+        query.push("deletion_id", options.deletion_id_or_generate());
         if let Some(expected) = options.expected_head_seq {
             query.push("expected_head_seq", expected.0);
         }
-        // The expected head is a precondition, not an idempotency key for an ambiguous delete.
         self.send_json(self.request(operations::DELETE_NAMESPACE, &query.build()))
             .await
     }
@@ -117,6 +123,10 @@ impl Client {
 
     /// Creates a new namespace from the selected current head or unexpired snapshot and
     /// returns the target's state at the fork point.
+    ///
+    /// Every attempt of one call sends the same creation ID,
+    /// `options.creation_id` or one that the call generates, so a retry after
+    /// a lost response returns the fork as it is now.
     pub async fn fork_namespace_with_options(
         &self,
         source_namespace_id: &NamespaceId,
@@ -125,11 +135,11 @@ impl Client {
         options: &ForkNamespaceOptions,
     ) -> Result<NamespaceMetadata> {
         let url = self.namespace_url(source_namespace_id, "/forks");
-        // Namespace forks have no durable request identity to replay after an ambiguous success.
         self.send_json(
             self.request(operations::FORK_NAMESPACE, &url)
                 .header(headers::ACTOR, actor.as_str())
                 .json(&ForkNamespaceRequest {
+                    creation_id: options.creation_id_or_generate(),
                     new_namespace_id: new_namespace_id.clone(),
                     snapshot_id: options.snapshot_id.clone(),
                 })?,

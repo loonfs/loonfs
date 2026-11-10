@@ -28,9 +28,9 @@ use crate::publisher::{NamespaceChange, NamespaceSession, PublisherRegistry};
 use crate::runtime_core::RuntimeCore;
 use crate::trace::{self, operation_span};
 use crate::{
-    ActorId, CapabilityDocument, CoreError, CreateNamespaceOptions, Error, ExecutionBudget,
-    ForkNamespaceOptions, InlineContentPolicy, Maintenance, MetadataCache, Namespace, NamespaceId,
-    Result, SharedObjectStore, StoreConfig,
+    ActorId, CapabilityDocument, CoreError, CreateNamespaceOptions, CreationId, Error,
+    ExecutionBudget, ForkNamespaceOptions, InlineContentPolicy, Maintenance, MetadataCache,
+    Namespace, NamespaceId, Result, SharedObjectStore, StoreConfig,
 };
 use loonfs_core::NamespaceWriterEngine;
 use loonfs_types::format::control::ManifestRef;
@@ -430,6 +430,12 @@ impl LoonFs<Writable> {
     /// so it waits for a fold in progress, such as the fold of the source's
     /// writer session, and it starts from that session's position. A fork of
     /// a snapshot never folds and takes no fold permit.
+    ///
+    /// A target that already exists with the fork's creation ID was created
+    /// by an earlier attempt of the same request, and the call returns the
+    /// target as it is now without creating a fork pin. Any other existing
+    /// target returns `namespace_exists`, or `namespace_deleted` when the
+    /// target was deleted.
     pub async fn fork_namespace_with_options(
         &self,
         source_namespace_id: &NamespaceId,
@@ -437,23 +443,28 @@ impl LoonFs<Writable> {
         actor: &ActorId,
         options: &ForkNamespaceOptions,
     ) -> Result<crate::NamespaceMetadata> {
+        let creation_id = options.creation_id_or_generate();
+        let creation_id = &creation_id;
         trace::in_operation(
             operation_span!(self.core, "fork_namespace", source_namespace_id),
             async {
                 self.namespace(source_namespace_id)
                     .ensure_administrator()
                     .await?;
-                if self.find_fork_target(new_namespace_id).await?.is_some() {
-                    return Err(CoreError::NamespaceExists {
-                        namespace_id: new_namespace_id.clone(),
-                    }
-                    .into());
+                if let Some(existing) = self.find_fork_target(new_namespace_id, creation_id).await?
+                {
+                    return Ok(existing);
                 }
                 match options.snapshot_id.as_ref() {
                     Some(snapshot_id) => {
                         let result = self
                             .engine(source_namespace_id)
-                            .fork_namespace_at_snapshot(new_namespace_id, actor, snapshot_id)
+                            .fork_namespace_at_snapshot(
+                                new_namespace_id,
+                                actor,
+                                creation_id,
+                                snapshot_id,
+                            )
                             .await
                             .map_err(Error::from);
                         self.finish_fork(source_namespace_id, new_namespace_id, result)
@@ -465,7 +476,7 @@ impl LoonFs<Writable> {
                             new_namespace_id,
                             |engine, manifest| async move {
                                 engine
-                                    .fork_namespace(new_namespace_id, actor, manifest)
+                                    .fork_namespace(new_namespace_id, actor, creation_id, manifest)
                                     .await
                             },
                         )
@@ -477,12 +488,33 @@ impl LoonFs<Writable> {
         .await
     }
 
+    /// Returns the metadata of `new_namespace_id` when a fork with
+    /// `creation_id` created the namespace, and `None` when the namespace
+    /// doesn't exist. A namespace that another request created returns
+    /// `namespace_exists`, and a deleted one returns `namespace_deleted`.
+    ///
+    /// A fork reads its target with this before it folds the source, so a
+    /// fork into an existing namespace folds nothing and creates no pin.
+    /// Core compares the creation IDs again when the fork's first manifest
+    /// finds a target that a concurrent caller created in between.
+    async fn find_fork_target(
+        &self,
+        new_namespace_id: &NamespaceId,
+        creation_id: &CreationId,
+    ) -> Result<Option<crate::NamespaceMetadata>> {
+        let _permit = self.core.read_permit().await;
+        Ok(self
+            .core
+            .namespace_store(new_namespace_id)
+            .find_creation(creation_id)
+            .await?)
+    }
+
     /// Returns the metadata of `new_namespace_id` when the namespace exists,
-    /// and `None` when it doesn't. A fork reads its target with this before
-    /// it folds the source, so a fork into an existing namespace folds
-    /// nothing; core's own check before it creates the fork still refuses a
-    /// target that a concurrent caller creates in between.
-    pub(crate) async fn find_fork_target(
+    /// and `None` when it doesn't. A rebase reads its new fork with this
+    /// before it folds the source, so a rebase into an existing namespace
+    /// folds nothing.
+    pub(crate) async fn find_rebase_target(
         &self,
         new_namespace_id: &NamespaceId,
     ) -> Result<Option<crate::NamespaceMetadata>> {

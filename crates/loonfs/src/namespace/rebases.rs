@@ -6,8 +6,9 @@ use super::merges::{missing_fork, MergeOutcome, PlannedMerge};
 use crate::publisher::MergeSlot;
 use crate::trace::{self, operation_span};
 use crate::{
-    ActorId, CommitId, Consistency, CoreError, Error, LoonFs, MergeConflict, MergeForkOptions,
-    Namespace, NamespaceId, NamespaceMetadata, RebaseForkResponse, Result, Writable,
+    ActorId, CommitId, Consistency, CoreError, CreationId, Error, LoonFs, MergeConflict,
+    MergeForkOptions, Namespace, NamespaceId, NamespaceMetadata, RebaseForkResponse, Result,
+    Writable,
 };
 use loonfs_core::MergeRequest;
 
@@ -38,7 +39,7 @@ impl LoonFs<Writable> {
             operation_span!(self.core, "fork_namespace_for_rebase", namespace_id),
             async {
                 self.core.ensure_merges_enabled()?;
-                if let Some(existing) = self.find_fork_target(new_namespace_id).await? {
+                if let Some(existing) = self.find_rebase_target(new_namespace_id).await? {
                     return ensure_rebase(
                         existing,
                         namespace_id,
@@ -63,6 +64,10 @@ impl LoonFs<Writable> {
                 }
                 .await
                 .map_err(|error| missing_fork(source_namespace_id, error))?;
+                // A rebase recognizes its own new fork by the fork basis, so
+                // the new fork's creation ID only has to be unique.
+                let creation_id = CreationId::generate();
+                let creation_id = &creation_id;
                 self.install_fork(
                     namespace_id,
                     new_namespace_id,
@@ -71,6 +76,7 @@ impl LoonFs<Writable> {
                             .fork_namespace_for_rebase(
                                 new_namespace_id,
                                 actor,
+                                creation_id,
                                 source_namespace_id,
                                 fork_point_seq,
                                 manifest,

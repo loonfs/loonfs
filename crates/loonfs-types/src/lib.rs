@@ -148,12 +148,13 @@ pub use error::{ErrorCode, ErrorKind};
 pub use ids::{
     generated_id, generated_id_body_prefixes, next_public_ordinal, BindingVersion,
     BindingVersionValidationError, ChangeSeq, CommitId, CommitIdValidationError, CompactorEpoch,
-    ContentId, ExtensionName, ExtensionNameValidationError, GeneratedIdValidationError,
-    IndexSegmentId, ManifestNo, MetadataCompactionId, MetadataSegmentId, NameKey,
-    NameKeyValidationError, NamespaceId, NamespaceIdValidationError, PinId, ProbeRunId,
-    PublicOrdinalRangeError, RevisionNo, RunNo, UploadId, WalNo, WriterEpoch, WriterId,
-    WriterIdValidationError, GENERATED_ID_BODY_BYTES, MAX_EXTENSION_NAME_BYTES, MAX_ID_BYTES,
-    MAX_NAME_KEY_BYTES, MAX_PUBLIC_INTEGER, MAX_WRITER_ID_BYTES,
+    ContentId, CreationId, CreationIdValidationError, DeletionId, DeletionIdValidationError,
+    ExtensionName, ExtensionNameValidationError, GeneratedIdValidationError, IndexSegmentId,
+    ManifestNo, MetadataCompactionId, MetadataSegmentId, NameKey, NameKeyValidationError,
+    NamespaceId, NamespaceIdValidationError, PinId, ProbeRunId, PublicOrdinalRangeError,
+    RevisionNo, RunNo, UploadId, WalNo, WriterEpoch, WriterId, WriterIdValidationError,
+    GENERATED_ID_BODY_BYTES, MAX_EXTENSION_NAME_BYTES, MAX_ID_BYTES, MAX_NAME_KEY_BYTES,
+    MAX_PUBLIC_INTEGER, MAX_WRITER_ID_BYTES,
 };
 pub use inode_id::{InodeId, InodeIdValidationError, ROOT_INODE_ID};
 pub use layout::{ContentExtent, ContentLayout, ContentLayoutError, ExtentObject};

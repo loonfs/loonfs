@@ -23,6 +23,7 @@ async fn every_member_of_a_fork_family_records_the_family_root() {
             .fork_namespace(
                 target,
                 &loonfs_test_support::test_actor(),
+                &loonfs_types::CreationId::generate(),
                 crate::test_support::folded_manifest(&fixture.namespace)
                     .await
                     .expect("fold the WAL tail"),
@@ -71,6 +72,7 @@ async fn a_successor_that_changes_the_family_root_is_refused() {
         .fork_namespace(
             &fork,
             &loonfs_test_support::test_actor(),
+            &loonfs_types::CreationId::generate(),
             crate::test_support::folded_manifest(&fixture.namespace)
                 .await
                 .expect("fold the WAL tail"),
@@ -109,6 +111,7 @@ fn a_manifest_records_itself_as_its_family_root_exactly_when_it_has_no_fork_basi
         namespace_id.clone(),
         1_000,
         loonfs_test_support::test_actor(),
+        loonfs_test_support::test_creation_id(),
         loonfs_types::NamespaceAccess::Unrestricted {},
     );
     let fork_basis = ForkBasis {

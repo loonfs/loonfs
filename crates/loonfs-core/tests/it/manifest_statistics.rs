@@ -300,6 +300,7 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
         .fork_namespace_at_snapshot(
             &child,
             &loonfs_test_support::test_actor(),
+            &loonfs_types::CreationId::generate(),
             &snapshot.snapshot_id,
         )
         .await
@@ -341,6 +342,7 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
         .fork_namespace(
             &grandchild,
             &loonfs_test_support::test_actor(),
+            &loonfs_types::CreationId::generate(),
             loonfs_core::test_support::folded_manifest(&namespace_store(&store, &child))
                 .await
                 .expect("fold the WAL tail"),

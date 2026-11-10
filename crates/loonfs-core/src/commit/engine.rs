@@ -247,8 +247,30 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
     /// and a takeover detected during manifest publication permanently fences the
     /// session. A deletion first folds the WAL tail under the namespace's run
     /// policy. Both publications build on the position's manifest while the
-    /// position's last check is within the revalidation bound.
+    /// position's last check is within the revalidation bound. A deletion
+    /// that finds a tombstone with its own deletion ID returns the namespace
+    /// ID and the tombstone's head (see [`NamespaceStore::find_deletion`]).
     pub async fn delete_namespace(
+        &mut self,
+        options: DeleteNamespaceOptions,
+    ) -> Result<DeleteNamespaceResponse> {
+        let deletion_id = options.deletion_id_or_generate();
+        let options = DeleteNamespaceOptions {
+            deletion_id: Some(deletion_id.clone()),
+            ..options
+        };
+        match self.publish_tombstone(options).await {
+            Err(CoreError::NamespaceDeleted { namespace_id }) => {
+                match self.namespace.find_deletion(&deletion_id).await? {
+                    Some(response) => Ok(response),
+                    None => Err(CoreError::NamespaceDeleted { namespace_id }),
+                }
+            }
+            deleted => deleted,
+        }
+    }
+
+    async fn publish_tombstone(
         &mut self,
         options: DeleteNamespaceOptions,
     ) -> Result<DeleteNamespaceResponse> {

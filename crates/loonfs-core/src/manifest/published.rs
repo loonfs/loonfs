@@ -42,7 +42,7 @@ impl PublishedManifest {
         Self {
             manifest: super::publish::manifest_ref_for(manifest),
             writer_epoch: payload.writer_epoch,
-            status: payload.status,
+            status: payload.status.clone(),
             folded_wal_no: payload.folded_wal_no,
             retention_floor_seq: payload.retention_floor_seq,
             started,

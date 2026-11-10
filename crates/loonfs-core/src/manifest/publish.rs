@@ -21,7 +21,7 @@ use loonfs_types::format::manifest::{
     encode_namespace_manifest_json, ExtensionEntry, NamespaceManifestEnvelope,
     NamespaceManifestPayload, MAX_NAMESPACE_MANIFEST_BYTES,
 };
-use loonfs_types::{ManifestNo, NamespaceId};
+use loonfs_types::{CreationId, ManifestNo, NamespaceId};
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -32,6 +32,17 @@ pub(crate) enum ManifestPublicationOutcome {
     Published(LoadedManifest),
     CoveredByCurrent(LoadedManifest),
     PredecessorChanged(LoadedManifest),
+}
+
+/// How a create or a fork of a namespace ended, after its first manifest's
+/// publication.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CreationOutcome {
+    /// The call published the namespace's first manifest.
+    Created,
+    /// The namespace already existed with the call's creation ID, so an
+    /// earlier attempt of the same request created the namespace.
+    Replayed,
 }
 
 enum ManifestKind {
@@ -235,7 +246,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     {
         self.update_manifest(basis, clock, |current: LoadedManifest| {
             let payload = current.payload();
-            let changed = ensure_namespace_live(&payload.namespace_id, payload.status)
+            let changed = ensure_namespace_live(&payload.namespace_id, &payload.status)
                 .map(|()| change(payload.clone()));
             async move { changed?.await }
         })
@@ -273,17 +284,21 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// The put of the hint decides whether the ID is new (format spec,
     /// "Creating a namespace"). Manifest 1 can't, because garbage collection
     /// deletes it once a successor is old enough. When the hint exists, the
-    /// call reads the current manifest through it, and returns
-    /// `namespace_exists`, or `namespace_deleted` when that manifest is a
-    /// tombstone. A hint without a manifest belongs to a creation that failed
-    /// before it wrote manifest 1, and the call then writes manifest 1 with
-    /// put-if-absent, which decides between two such creations.
+    /// call reads the current manifest through it. A tombstone returns
+    /// `namespace_deleted`, a live manifest with `payload`'s creation ID
+    /// returns [`CreationOutcome::Replayed`], and any other live manifest
+    /// returns `namespace_exists`. A hint without a manifest belongs to a
+    /// creation that failed before it wrote manifest 1, and the call then
+    /// writes manifest 1 with put-if-absent, which decides between two such
+    /// creations. A manifest 1 put that loses compares the winner in the
+    /// same way.
     pub(crate) async fn create_manifest(
         &self,
         payload: NamespaceManifestPayload,
         clock: &OperationClock,
-    ) -> Result<()> {
+    ) -> Result<CreationOutcome> {
         let namespace_id = payload.namespace_id.clone();
+        let creation_id = payload.creation_id.clone();
         let first = HintPayload {
             namespace_id: namespace_id.clone(),
             manifest_no: ManifestNo(1),
@@ -303,7 +318,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     .await
                     .map_err(CoreError::ControlObjectLoad)?
                 {
-                    return Err(existing_namespace(namespace_id, &current));
+                    return existing_namespace(namespace_id, &creation_id, &current);
                 }
             }
             Err(error) => return Err(CoreError::store(&object_key, &error)),
@@ -312,10 +327,10 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .publish_manifest_from(encode_manifest(payload), clock, None)
             .await?
         {
-            ManifestPublicationOutcome::Published(_) => Ok(()),
+            ManifestPublicationOutcome::Published(_) => Ok(CreationOutcome::Created),
             ManifestPublicationOutcome::CoveredByCurrent(current)
             | ManifestPublicationOutcome::PredecessorChanged(current) => {
-                Err(existing_namespace(namespace_id, &current))
+                existing_namespace(namespace_id, &creation_id, &current)
             }
         }
     }
@@ -527,21 +542,34 @@ impl<S: ObjectStore> NamespaceStore<S> {
     }
 }
 
-/// The error for a create or fork of a namespace ID that `current` holds.
-fn existing_namespace(namespace_id: NamespaceId, current: &LoadedManifest) -> CoreError {
-    if current.payload().status.is_deleted() {
-        CoreError::NamespaceDeleted { namespace_id }
+/// Returns the outcome of a create or fork with `creation_id` that finds
+/// `current` already published for its namespace ID: `namespace_deleted` for
+/// a tombstone, [`CreationOutcome::Replayed`] for a live manifest with the
+/// same creation ID, and `namespace_exists` otherwise.
+fn existing_namespace(
+    namespace_id: NamespaceId,
+    creation_id: &CreationId,
+    current: &LoadedManifest,
+) -> Result<CreationOutcome> {
+    let payload = current.payload();
+    if payload.status.is_deleted() {
+        Err(CoreError::NamespaceDeleted { namespace_id })
+    } else if payload.creation_id == *creation_id {
+        Ok(CreationOutcome::Replayed)
     } else {
-        CoreError::NamespaceExists { namespace_id }
+        Err(CoreError::NamespaceExists { namespace_id })
     }
 }
 
-/// Returns whether `payload` references an object that this attempt created:
-/// a fork's source pin, or a metadata or extension segment that its
-/// predecessor doesn't list.
+/// Returns whether identical bytes at `payload`'s number confirm that a
+/// request with this attempt's identity published `payload`.
 ///
-/// Identical bytes prove authorship only for such a manifest. A rival can
-/// rebuild any other manifest byte for byte.
+/// That's true for every manifest 1 and every tombstone, because a first
+/// manifest includes its request's creation ID and a tombstone includes its
+/// request's deletion ID, so only an attempt of the same request can build
+/// the same bytes. It's also true for a manifest that lists a metadata or
+/// extension segment that its predecessor doesn't list, because this attempt
+/// wrote that segment. A rival can rebuild any other manifest byte for byte.
 fn references_own_object(
     payload: &NamespaceManifestPayload,
     current: Option<&PublicationBasis>,
@@ -560,7 +588,8 @@ fn references_own_object(
                 .map(|segment| segment.segment_id.as_str()),
         )
         .collect::<HashSet<_>>();
-    (payload.manifest_no == ManifestNo(1) && payload.fork_basis.is_some())
+    payload.manifest_no == ManifestNo(1)
+        || payload.status.is_deleted()
         || payload
             .runs
             .iter()

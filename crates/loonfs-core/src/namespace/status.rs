@@ -1,6 +1,6 @@
 //! Reads namespace state and storage diagnostics.
 
-use crate::error::Result;
+use crate::error::{CoreError, Result};
 use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
@@ -9,7 +9,7 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::ForkBasis;
 use loonfs_types::format::manifest::NamespaceManifestPayload;
 use loonfs_types::{
-    ActorId, ChangeSeq, ManifestNo, NamespaceForkBasis, NamespaceId, NamespaceMetadata,
+    ActorId, ChangeSeq, CreationId, ManifestNo, NamespaceForkBasis, NamespaceId, NamespaceMetadata,
     NamespaceRebasedFrom,
 };
 use std::num::NonZeroU64;
@@ -55,6 +55,41 @@ impl<S: ObjectStore> NamespaceStore<S> {
             anchor.read_state,
             anchor.manifest.payload(),
         ))
+    }
+
+    /// Returns the current state of the namespace when a request with
+    /// `creation_id` created the namespace, and `None` when the namespace
+    /// doesn't exist.
+    ///
+    /// A live namespace with another creation ID returns `namespace_exists`,
+    /// and a deleted namespace returns `namespace_deleted`, so a fork checks
+    /// its target with this before the fork creates a pin
+    /// ([design note](https://github.com/loonfs/loonfs/blob/main/docs/design/retrying-creates-and-deletes.md#forking-a-namespace)).
+    pub async fn find_creation(
+        &self,
+        creation_id: &CreationId,
+    ) -> Result<Option<NamespaceMetadata>> {
+        let anchor = match self
+            .load_live_read_anchor(Observation::now(Arc::clone(&self.timer)))
+            .await
+        {
+            Ok(anchor) => anchor,
+            Err(CoreError::NamespaceNotFound { namespace_id })
+                if namespace_id == self.namespace_id =>
+            {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        if anchor.manifest.payload().creation_id != *creation_id {
+            return Err(CoreError::NamespaceExists {
+                namespace_id: self.namespace_id.clone(),
+            });
+        }
+        Ok(Some(namespace_metadata(
+            anchor.read_state,
+            anchor.manifest.payload(),
+        )))
     }
 
     pub async fn load_diagnostics(&self) -> Result<NamespaceStorageDiagnostics> {

@@ -960,6 +960,10 @@
             "$ref": "#/components/schemas/NamespaceAccess",
             "description": "The namespace's access mode, which can't be changed after the namespace is created. The\ndefault is unrestricted."
           },
+          "creation_id": {
+            "$ref": "#/components/schemas/CreationId",
+            "description": "The caller's creation ID for this request. A retry with the same creation ID returns the\nnamespace as it is now."
+          },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
             "description": "The durable ID of the new namespace."
@@ -972,6 +976,7 @@
           }
         },
         "required": [
+          "creation_id",
           "namespace_id"
         ],
         "type": "object"
@@ -1098,6 +1103,12 @@
           "mode"
         ],
         "type": "object"
+      },
+      "CreationId": {
+        "description": "The ID that a caller generates for one request that creates or forks a namespace.\n\nLoonFS stores the creation ID in the namespace's manifests, so a retry of the request with\nthe same creation ID returns the namespace as it is now instead of `namespace_exists`.\nReuse the same creation ID when you retry the same request. A creation ID is 1 to 128\nlowercase ASCII letters, digits, dots, underscores, or hyphens, and it starts with a letter\nor digit. Generated creation IDs have the form `cre_` followed by 26 lowercase Crockford\nbase 32 characters, but callers can supply any value that follows these rules.",
+        "example": "cre_7kn71d9dq885x91hejz3gvf9p0",
+        "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$",
+        "type": "string"
       },
       "DeleteDirectoryBehavior": {
         "description": "Whether a delete can remove a non-empty directory.",
@@ -1228,6 +1239,12 @@
           "temporary_objects"
         ],
         "type": "object"
+      },
+      "DeletionId": {
+        "description": "The ID that a caller generates for one request that deletes a namespace.\n\nLoonFS stores the deletion ID in the namespace's tombstone, so a retry of the request with\nthe same deletion ID returns the namespace ID and the final head instead of\n`namespace_deleted`. Reuse the same deletion ID when you retry the same request. A\ndeletion ID follows the creation ID's rules. Generated deletion IDs have the form `del_`\nfollowed by 26 lowercase Crockford base 32 characters.",
+        "example": "del_7kn71d9dq885x91hejz3gvf9p0",
+        "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$",
+        "type": "string"
       },
       "DestinationBehavior": {
         "description": "What a path put, move, or copy does when the destination already exists.",
@@ -2777,6 +2794,10 @@
         "additionalProperties": false,
         "description": "A request to fork a namespace.",
         "properties": {
+          "creation_id": {
+            "$ref": "#/components/schemas/CreationId",
+            "description": "The caller's creation ID for this request. A retry with the same creation ID returns the\nfork as it is now."
+          },
           "new_namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
             "description": "The durable ID of the new namespace that the fork creates."
@@ -2787,6 +2808,7 @@
           }
         },
         "required": [
+          "creation_id",
           "new_namespace_id"
         ],
         "type": "object"
@@ -6011,15 +6033,12 @@
         "tags": [
           "namespaces"
         ],
-        "x-fern-retries": {
-          "disabled": true
-        },
         "x-fern-sdk-group-name": [
           "namespaces"
         ],
         "x-fern-sdk-method-name": "create",
         "x-loonfs-actor": "required",
-        "x-loonfs-retry": "not_idempotent"
+        "x-loonfs-retry": "idempotent"
       }
     },
     "/v0/namespaces/{namespace_id}": {
@@ -6034,6 +6053,15 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "description": "The caller's deletion ID for this request. A retry with the same deletion ID returns the\nnamespace ID and the final head, whatever its `expected_head_seq`.",
+            "in": "query",
+            "name": "deletion_id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/DeletionId"
             }
           },
           {
@@ -6116,14 +6144,11 @@
           "namespaces"
         ],
         "x-fern-request-name": "DeleteNamespaceRequest",
-        "x-fern-retries": {
-          "disabled": true
-        },
         "x-fern-sdk-group-name": [
           "namespaces"
         ],
         "x-fern-sdk-method-name": "delete",
-        "x-loonfs-retry": "not_idempotent"
+        "x-loonfs-retry": "idempotent"
       },
       "get": {
         "description": "Returns the current head and retention state for a namespace.",
@@ -7662,15 +7687,12 @@
         "tags": [
           "namespaces"
         ],
-        "x-fern-retries": {
-          "disabled": true
-        },
         "x-fern-sdk-group-name": [
           "namespaces"
         ],
         "x-fern-sdk-method-name": "fork",
         "x-loonfs-actor": "required",
-        "x-loonfs-retry": "not_idempotent"
+        "x-loonfs-retry": "idempotent"
       }
     },
     "/v0/namespaces/{namespace_id}/grep": {

@@ -283,7 +283,7 @@ async fn requests_outside_namespace_routes_report_nothing() {
         (
             "POST",
             "/v0/namespaces",
-            r#"{"namespace_id":"other"}"#,
+            r#"{"creation_id":"test-create","namespace_id":"other"}"#,
             StatusCode::OK,
         ),
         ("GET", "/v0/unknown", "", StatusCode::NOT_FOUND),

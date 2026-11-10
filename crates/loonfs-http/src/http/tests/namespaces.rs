@@ -110,6 +110,9 @@ async fn two_commits_to_one_namespace_use_one_writer_epoch() {
     assert_eq!(writer_epoch(&state, &namespace_id).await, created + 1);
 }
 
+/// Checks that a delete leaves no writer handle, that the same delete sent
+/// again returns the first response from the tombstone that the host's open
+/// finds, and that a delete without its deletion ID or with another one fails.
 #[tokio::test]
 async fn a_deleted_namespace_leaves_no_writer_handle_in_the_host() {
     let (_directory, router, state, namespaces) = host("delete-host").await;
@@ -120,11 +123,36 @@ async fn a_deleted_namespace_leaves_no_writer_handle_in_the_host() {
         create_directory(&router, namespace_id, "/written").await;
     }
 
-    let uri = format!("/v0/namespaces/{deleted}");
+    let uri = format!("/v0/namespaces/{deleted}?deletion_id=job-1-delete&expected_head_seq=1");
+    let (status, first) = send(&router, Method::DELETE, &uri, String::new()).await;
+    assert_eq!(status, StatusCode::OK);
+    let retried_uri = format!("/v0/namespaces/{deleted}?deletion_id=job-1-delete");
     assert_eq!(
-        send(&router, Method::DELETE, &uri, String::new()).await.0,
-        StatusCode::OK
+        send(&router, Method::DELETE, &retried_uri, String::new()).await,
+        (StatusCode::OK, first)
     );
+    for (uri, status, code) in [
+        (
+            format!("/v0/namespaces/{deleted}?deletion_id=job-2-delete"),
+            StatusCode::GONE,
+            ErrorCode::NamespaceDeleted,
+        ),
+        (
+            format!("/v0/namespaces/{kept}"),
+            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidRequest,
+        ),
+        (
+            format!("/v0/namespaces/{kept}?deletion_id=Not%20an%20ID"),
+            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidRequest,
+        ),
+    ] {
+        let (actual, body) = send(&router, Method::DELETE, &uri, String::new()).await;
+        assert_eq!(actual, status, "{uri}");
+        let error: loonfs_types::ErrorResponse = serde_json::from_slice(&body).expect("error body");
+        assert_eq!(error.code, code.as_str(), "{uri}");
+    }
 
     let closed = namespaces.close(&deleted).await.expect("close");
     assert!(closed.is_none(), "the host kept a handle: {closed:?}");
@@ -138,7 +166,11 @@ async fn a_create_request_with_a_naming_field_is_rejected_and_leaves_no_writer_h
     let named = namespace_id("named");
     // Every namespace compares sibling names by the same rule, so the create
     // request has no `naming` field.
-    let body = serde_json::json!({"namespace_id": "named", "naming": "case_insensitive"});
+    let body = serde_json::json!({
+        "namespace_id": "named",
+        "creation_id": "job-1-create",
+        "naming": "case_insensitive",
+    });
     let (status, body) = send(&router, Method::POST, "/v0/namespaces", body.to_string()).await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -156,6 +188,41 @@ async fn a_create_request_with_a_naming_field_is_rejected_and_leaves_no_writer_h
     );
     let closed = namespaces.close(&named).await.expect("close");
     assert!(closed.is_none(), "the host kept a handle: {closed:?}");
+}
+
+/// Checks that a create or a fork sent again with its creation ID returns the
+/// namespace, and that a create or a fork without a creation ID is
+/// `invalid_request`.
+#[tokio::test]
+async fn a_create_or_fork_needs_a_creation_id_and_a_retry_returns_the_namespace() {
+    let (_directory, router, _, _) = host("creation-id-host").await;
+    let create = serde_json::json!({"namespace_id": "created", "creation_id": "job-1-create"});
+    let fork = serde_json::json!({"new_namespace_id": "forked", "creation_id": "job-1-fork"});
+    for (uri, body) in [
+        ("/v0/namespaces", &create),
+        ("/v0/namespaces/created/forks", &fork),
+    ] {
+        let (status, first) = send(&router, Method::POST, uri, body.to_string()).await;
+        assert_eq!(status, StatusCode::OK, "{uri}");
+        let (status, retried) = send(&router, Method::POST, uri, body.to_string()).await;
+        assert_eq!(status, StatusCode::OK, "{uri}");
+        assert_eq!(retried, first, "{uri}");
+    }
+    for (uri, body) in [
+        (
+            "/v0/namespaces",
+            serde_json::json!({"namespace_id": "other"}),
+        ),
+        (
+            "/v0/namespaces/created/forks",
+            serde_json::json!({"new_namespace_id": "other"}),
+        ),
+    ] {
+        let (status, body) = send(&router, Method::POST, uri, body.to_string()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+        let error: loonfs_types::ErrorResponse = serde_json::from_slice(&body).expect("error body");
+        assert_eq!(error.code, ErrorCode::InvalidRequest.as_str(), "{uri}");
+    }
 }
 
 #[tokio::test]

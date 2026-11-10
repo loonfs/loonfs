@@ -708,39 +708,65 @@ fn assert_single_attempt<T>(
     assert_eq!(transport.attempts(), 1);
 }
 
+/// Checks that the client retries a namespace create, fork, and delete, and
+/// sends the same creation ID or deletion ID on every attempt of one call.
 #[tokio::test]
-async fn retry_policy_lifecycle_mutations_are_single_attempt() {
+async fn retry_policy_lifecycle_mutations_retry_with_one_id() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let fork_id = NamespaceId::parse("fork").expect("valid id");
+    let metadata = serde_json::to_vec(&loonfs_types::NamespaceMetadata {
+        access: loonfs_types::NamespaceAccessMode::Unrestricted {},
+        namespace_id: namespace_id.clone(),
+        created_at_ms: 1_000,
+        created_by: loonfs_test_support::test_actor(),
+        fork_basis: None,
+        family_root_id: namespace_id.clone(),
+        head_seq: ChangeSeq(0),
+        retention_floor_seq: ChangeSeq(0),
+        retention_window_ms: None,
+    })
+    .expect("serialize metadata");
+    let deleted = serde_json::to_vec(&loonfs_types::DeleteNamespaceResponse {
+        namespace_id: namespace_id.clone(),
+        head_seq: ChangeSeq(7),
+    })
+    .expect("serialize response");
+    let assert_retried_with_one_id = |transport: &crate::scripted_transport::ScriptedTransport,
+                                      id_field: &str| {
+        let sent = transport.sent();
+        assert_eq!(sent.len(), 2, "one failure and one retry");
+        assert_eq!(sent[0].url, sent[1].url);
+        assert_eq!(sent[0].body, sent[1].body);
+        let request = format!("{}{}", sent[0].url, String::from_utf8_lossy(&sent[0].body));
+        assert!(request.contains(id_field), "{request}");
+    };
 
-    let (transport, client) = single_attempt_probe();
-    assert_single_attempt(
-        client
-            .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-            .await,
-        &transport,
-    );
+    let transport = crate::scripted_transport::failure_then_success(metadata.clone());
+    retry_policy_client(&transport)
+        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("a create retries");
+    assert_retried_with_one_id(&transport, "\"creation_id\":\"cre_");
 
-    let (transport, client) = single_attempt_probe();
-    assert_single_attempt(
-        client
-            .fork_namespace(&namespace_id, &fork_id, &loonfs_test_support::test_actor())
-            .await,
-        &transport,
-    );
+    let transport = crate::scripted_transport::failure_then_success(metadata);
+    retry_policy_client(&transport)
+        .fork_namespace(&namespace_id, &fork_id, &loonfs_test_support::test_actor())
+        .await
+        .expect("a fork retries");
+    assert_retried_with_one_id(&transport, "\"creation_id\":\"cre_");
 
-    let (transport, client) = single_attempt_probe();
-    assert_single_attempt(
-        client
-            .delete_namespace_with_options(
-                &namespace_id,
-                &DeleteNamespaceOptions {
-                    expected_head_seq: Some(ChangeSeq(7)),
-                },
-            )
-            .await,
-        &transport,
-    );
+    let transport = crate::scripted_transport::failure_then_success(deleted);
+    retry_policy_client(&transport)
+        .delete_namespace_with_options(
+            &namespace_id,
+            &DeleteNamespaceOptions {
+                expected_head_seq: Some(ChangeSeq(7)),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("a delete retries");
+    assert_retried_with_one_id(&transport, "deletion_id=del_");
 }
 
 #[tokio::test]

@@ -65,7 +65,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         let clock = self.namespace.start_clock();
         let checked = clock.observe();
         let manifest = self.namespace.load_current_manifest().await?;
-        ensure_namespace_live(&manifest.payload().namespace_id, manifest.payload().status)?;
+        ensure_namespace_live(&manifest.payload().namespace_id, &manifest.payload().status)?;
         Ok(ExtensionBasis {
             basis: PublicationBasis { manifest, checked },
             clock,
@@ -148,7 +148,7 @@ fn extension_change(
     entry_at: &mut impl FnMut(RunNo) -> (ExtensionEntry, RunNo),
 ) -> Result<ManifestChange<()>> {
     let payload = current.payload();
-    ensure_namespace_live(&payload.namespace_id, payload.status)?;
+    ensure_namespace_live(&payload.namespace_id, &payload.status)?;
     if payload.extensions.get(name) != built_on {
         return Ok(ManifestChange::Finished(()));
     }

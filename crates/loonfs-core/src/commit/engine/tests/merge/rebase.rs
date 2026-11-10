@@ -36,6 +36,7 @@ async fn fork_for_rebase(
         .fork_namespace_for_rebase(
             target,
             &loonfs_test_support::test_actor(),
+            &loonfs_types::CreationId::generate(),
             &fork(),
             FORK_POINT,
             crate::test_support::folded_manifest(&fixture.namespace)

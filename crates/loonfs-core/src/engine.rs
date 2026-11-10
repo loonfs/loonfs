@@ -610,7 +610,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     pub(crate) fn ensure_live_context(&self, context: &RuntimeReadContext) -> Result<()> {
         let head = &context.read_basis.head;
         crate::namespace::control::ensure_head_identity(head, &self.namespace.namespace_id)?;
-        crate::namespace::control::ensure_namespace_live(&head.namespace_id, head.status)
+        crate::namespace::control::ensure_namespace_live(&head.namespace_id, &head.status)
     }
 
     /// Lists one revision page for an inode against the pinned runtime read context.

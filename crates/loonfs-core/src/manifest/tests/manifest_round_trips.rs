@@ -667,6 +667,12 @@ async fn manifest_run_rejects_rows_after_run_seq() {
         activity: Default::default(),
         created_at_ms: 1_000,
         created_by: loonfs_test_support::test_actor(),
+        creation_id: super::creation_id_below(
+            &store,
+            &namespace_id,
+            manifest_no(materialization.head.seq),
+        )
+        .await,
         access: loonfs_types::NamespaceAccess::Unrestricted {},
         retention_window_ms: None,
         fork_basis: None,

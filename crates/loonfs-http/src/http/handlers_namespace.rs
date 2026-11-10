@@ -11,9 +11,9 @@ use loonfs::{CreateNamespaceOptions, DeleteNamespaceOptions, MergeForkOptions};
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
 use loonfs_types::{
-    CapabilityDocument, ChangeSeq, Commit, CreateNamespaceRequest, ForkNamespaceRequest,
-    MergeForkRequest, NamespaceId, NextMergeRangeResponse, RebaseForkRequest, RebaseForkResponse,
-    API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0, API_GROUP_QUERY_V0,
+    CapabilityDocument, ChangeSeq, Commit, CreateNamespaceRequest, DeletionId, ErrorCode,
+    ForkNamespaceRequest, MergeForkRequest, NamespaceId, NextMergeRangeResponse, RebaseForkRequest,
+    RebaseForkResponse, API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0, API_GROUP_QUERY_V0,
     FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_MAINTENANCE_GREP_INDEX, FEATURE_QUERY_GREP,
     FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
     LIMIT_COMMIT_MAX_REQUEST_BODY_BYTES, LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONCURRENT_REQUESTS,
@@ -47,6 +47,10 @@ fn set_feature(capabilities: &mut CapabilityDocument, feature: &str, supported: 
 #[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
 #[serde(deny_unknown_fields)]
 pub(super) struct DeleteNamespaceQuery {
+    /// The caller's deletion ID for this request. A retry with the same deletion ID returns the
+    /// namespace ID and the final head, whatever its `expected_head_seq`.
+    #[cfg_attr(feature = "openapi", param(required = true))]
+    deletion_id: Option<DeletionId>,
     /// The head sequence that the namespace must still have for the delete to succeed.
     expected_head_seq: Option<ChangeSeq>,
 }
@@ -187,7 +191,7 @@ pub(super) async fn get_capabilities(
         operation_id = "create_namespace",
         extensions(
             ("x-loonfs-actor" = json!("required")),
-            ("x-loonfs-retry" = json!("not_idempotent")),
+            ("x-loonfs-retry" = json!("idempotent")),
         ),
         path = "/v0/namespaces",
         tag = "namespaces",
@@ -219,6 +223,7 @@ pub(super) async fn create_namespace(
             &CreateNamespaceOptions {
                 access: request.access,
                 retention_window_ms: request.retention_window_ms,
+                creation_id: Some(request.creation_id),
                 ..Default::default()
             },
         )
@@ -302,7 +307,7 @@ pub(super) async fn get_namespace_diagnostics(
     utoipa::path(
         delete,
         operation_id = "delete_namespace",
-        extensions(("x-loonfs-retry" = json!("not_idempotent"))),
+        extensions(("x-loonfs-retry" = json!("idempotent"))),
         path = "/v0/namespaces/{namespace_id}",
         tag = "namespaces",
         summary = "Delete namespace",
@@ -328,10 +333,29 @@ pub(super) async fn delete_namespace(
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<DeleteNamespaceQuery>,
 ) -> Result<Json<loonfs_types::DeleteNamespaceResponse>, ApiResponseError> {
+    let deletion_id = required_query_param(query.deletion_id, "deletion_id")?;
     let options = DeleteNamespaceOptions {
         expected_head_seq: query.expected_head_seq,
+        deletion_id: Some(deletion_id.clone()),
     };
-    let namespace = state.open_writer(&namespace_id, subject).await?;
+    // The host opens a writer only for a live namespace, so a retry whose
+    // first attempt deleted the namespace finds the tombstone here.
+    let namespace = match state.open_writer(&namespace_id, subject.clone()).await {
+        Ok(namespace) => namespace,
+        Err(error) if error.code() == ErrorCode::NamespaceDeleted => {
+            return match state
+                .runtime_for(subject)
+                .namespace(&namespace_id)
+                .find_deletion(&deletion_id)
+                .await
+                .map_err(ApiResponseError::runtime)?
+            {
+                Some(response) => Ok(Json(response)),
+                None => Err(error),
+            };
+        }
+        Err(error) => return Err(error),
+    };
     let response = namespace.delete_with_options(&options).await.map_err(
         ApiResponseError::for_namespace_writer(state.namespaces.as_ref(), &namespace_id),
     )?;
@@ -346,7 +370,7 @@ pub(super) async fn delete_namespace(
         operation_id = "fork_namespace",
         extensions(
             ("x-loonfs-actor" = json!("required")),
-            ("x-loonfs-retry" = json!("not_idempotent")),
+            ("x-loonfs-retry" = json!("idempotent")),
         ),
         path = "/v0/namespaces/{namespace_id}/forks",
         tag = "namespaces",
@@ -382,6 +406,7 @@ pub(super) async fn fork_namespace(
             &actor_id,
             &loonfs::ForkNamespaceOptions {
                 snapshot_id: request.snapshot_id,
+                creation_id: Some(request.creation_id),
             },
         )
         .await

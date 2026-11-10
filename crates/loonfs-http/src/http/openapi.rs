@@ -77,6 +77,8 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
         crate::http::handlers_store::probe_store
     ),
     components(
+        // A query parameter refers to this schema, and no body does.
+        schemas(loonfs_types::DeletionId),
         responses(UnavailableResponse)
     ),
     // Applies to every operation that does not override it. `/health` and

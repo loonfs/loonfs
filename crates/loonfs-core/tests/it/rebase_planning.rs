@@ -59,6 +59,7 @@ impl Family {
             .fork_namespace(
                 &family.fork,
                 &loonfs_test_support::test_actor(),
+                &loonfs_types::CreationId::generate(),
                 loonfs_core::test_support::folded_manifest(&namespace_store(
                     &family.store,
                     &family.main,
@@ -97,6 +98,7 @@ impl Family {
         main.fork_namespace_for_rebase(
             &self.rebase,
             &loonfs_test_support::test_actor(),
+            &loonfs_types::CreationId::generate(),
             &self.fork,
             fork_point_seq,
             loonfs_core::test_support::folded_manifest(

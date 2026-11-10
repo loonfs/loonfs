@@ -113,7 +113,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     ) -> Result<RetentionPlan> {
         let now_ms = self.start_clock().request_at_ms();
         let manifest = current.payload();
-        ensure_namespace_live(&manifest.namespace_id, manifest.status)?;
+        ensure_namespace_live(&manifest.namespace_id, &manifest.status)?;
         let age_cutoff_at_ms = now_ms.saturating_sub(RETENTION_ADVANCE_MIN_COMMIT_AGE_MS);
         let (through, cutoff_at_ms) = match target {
             RetentionTarget::Head => (manifest.head_seq, age_cutoff_at_ms),

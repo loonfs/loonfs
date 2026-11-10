@@ -529,6 +529,7 @@ async fn merge_a_forks_file() -> (tempfile::TempDir, MergedFile) {
         .fork_namespace(
             &fork,
             &loonfs_test_support::test_actor(),
+            &loonfs_types::CreationId::generate(),
             crate::test_support::folded_manifest(&main_fixture.namespace)
                 .await
                 .expect("fold the WAL tail"),

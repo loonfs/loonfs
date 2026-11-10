@@ -110,7 +110,9 @@ async fn compositions_preserve_operational_routes_capabilities_and_filesystem_be
                     .header("authorization", "Bearer test-token")
                     .header("loonfs-actor", "composition-test")
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"namespace_id":"example"}"#))
+                    .body(Body::from(
+                        r#"{"namespace_id":"example","creation_id":"example-create"}"#,
+                    ))
                     .expect("request"),
             )
             .await

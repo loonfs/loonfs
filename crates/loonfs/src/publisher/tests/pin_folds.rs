@@ -119,6 +119,7 @@ async fn creations_wait_for_a_fold_permit_whether_or_not_the_tail_is_folded() {
             &loonfs_test_support::test_actor(),
             &crate::ForkNamespaceOptions {
                 snapshot_id: Some(snapshot.snapshot_id),
+                ..Default::default()
             },
         ),
     )

@@ -75,7 +75,7 @@ async fn diff_page_within<S: ObjectStore + ?Sized>(
     let (to_seq, after_seq, event_index, limit, splitting) =
         (*to_seq, *after_seq, *event_index, *limit, *commit_splitting);
     let head = view.head();
-    crate::namespace::control::ensure_namespace_live(&head.namespace_id, head.status)?;
+    crate::namespace::control::ensure_namespace_live(&head.namespace_id, &head.status)?;
     let retention_floor_seq = view.retention_floor_seq();
     if from_seq < retention_floor_seq {
         return Err(CoreError::RebootstrapRequired {

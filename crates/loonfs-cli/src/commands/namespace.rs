@@ -12,7 +12,9 @@ use crate::profiles::{resolve_profile, set_default_namespace, NamedProfile};
 use crate::prompt::prompt_line;
 use crate::resolve::resolve_namespace;
 use loonfs_client::{CreateNamespaceOptions, DeleteNamespaceOptions, ForkNamespaceOptions};
-use loonfs_types::{AccessGrants, AccessRights, NamespaceAccess, PrincipalScope};
+use loonfs_types::{
+    AccessGrants, AccessRights, CreationId, DeletionId, NamespaceAccess, PrincipalScope,
+};
 use std::collections::BTreeMap;
 
 pub(crate) async fn run_namespace_command(
@@ -64,6 +66,7 @@ async fn run_namespace_create(
                 access,
                 retention_window_ms: args.retention_window_ms,
                 allow_existing: false,
+                creation_id: Some(CreationId::generate()),
             },
         )
         .await
@@ -145,6 +148,7 @@ async fn run_namespace_delete(
             &args.namespace_id,
             &DeleteNamespaceOptions {
                 expected_head_seq: args.expected_head_seq,
+                deletion_id: Some(DeletionId::generate()),
             },
         )
         .await
@@ -168,6 +172,7 @@ async fn run_namespace_fork(
             &actor_id,
             &ForkNamespaceOptions {
                 snapshot_id: args.snapshot_id,
+                creation_id: Some(CreationId::generate()),
             },
         )
         .await

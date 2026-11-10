@@ -37,7 +37,7 @@ async fn http_rejects_invalid_namespace_ids_in_body_and_path() {
             .post(&format!("{}/v0/namespaces", harness.server_url))
             .set("authorization", "Bearer test-token")
             .set("Loonfs-Actor", "test-actor")
-            .send_json(json!({ "namespace_id": "bad/name" })),
+            .send_json(json!({ "namespace_id": "bad/name", "creation_id": "bad-create" })),
     );
 
     assert_invalid_namespace_response(

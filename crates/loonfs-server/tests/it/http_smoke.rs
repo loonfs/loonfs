@@ -57,6 +57,7 @@ async fn delete_namespace_blocks_operations() {
             &namespace,
             &loonfs_client::DeleteNamespaceOptions {
                 expected_head_seq: Some(ChangeSeq(0)),
+                ..Default::default()
             },
         )
         .await
@@ -526,6 +527,7 @@ async fn http_namespace_fork_uses_the_snapshot_sequence() {
             &loonfs_test_support::test_actor(),
             &loonfs_client::ForkNamespaceOptions {
                 snapshot_id: Some(snapshot.snapshot_id.clone()),
+                ..Default::default()
             },
         )
         .await

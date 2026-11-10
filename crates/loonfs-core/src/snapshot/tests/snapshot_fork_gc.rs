@@ -174,6 +174,7 @@ async fn snapshot_fork_survives_snapshot_deletion_during_an_older_collection() {
             .fork_namespace_at_snapshot(
                 &fixture.target,
                 &loonfs_test_support::test_actor(),
+                &loonfs_types::CreationId::generate(),
                 &fixture.snapshot.pin_id,
             )
             .await
@@ -225,8 +226,14 @@ async fn snapshot_fork_refuses_a_snapshot_deleted_before_post_write_verification
     let engine =
         crate::test_support::NamespaceFixture::new(&gate, &fixture.source, &fixture.context)
             .engine();
+    let creation_id = loonfs_types::CreationId::generate();
     let (fork, ()) = tokio::join!(
-        engine.fork_namespace_at_snapshot(&fixture.target, &actor, &fixture.snapshot.pin_id),
+        engine.fork_namespace_at_snapshot(
+            &fixture.target,
+            &actor,
+            &creation_id,
+            &fixture.snapshot.pin_id
+        ),
         async {
             gate.wait_until_blocked().await;
             assert_eq!(
@@ -284,8 +291,14 @@ async fn snapshot_fork_refuses_a_source_deleted_before_post_write_verification()
     let engine =
         crate::test_support::NamespaceFixture::new(&gate, &fixture.source, &fixture.context)
             .engine();
+    let creation_id = loonfs_types::CreationId::generate();
     let (fork, ()) = tokio::join!(
-        engine.fork_namespace_at_snapshot(&fixture.target, &actor, &fixture.snapshot.pin_id),
+        engine.fork_namespace_at_snapshot(
+            &fixture.target,
+            &actor,
+            &creation_id,
+            &fixture.snapshot.pin_id
+        ),
         async {
             gate.wait_until_blocked().await;
             crate::test_support::namespace_store(fixture.store.as_ref(), &fixture.source)
@@ -355,8 +368,9 @@ async fn snapshot_fork_refuses_a_snapshot_that_expired_after_the_fork_call_began
         fixture
     }
     .engine();
+    let creation_id = loonfs_types::CreationId::generate();
     let (fork, ()) = tokio::join!(
-        namespace.fork_namespace_at_snapshot(&target, &actor, &snapshot.pin_id),
+        namespace.fork_namespace_at_snapshot(&target, &actor, &creation_id, &snapshot.pin_id),
         async {
             store.wait_until_blocked().await;
             clock.advance_ms(10);

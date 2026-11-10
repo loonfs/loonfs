@@ -3,8 +3,8 @@
 
 use crate::trace::{self, operation_span};
 use crate::{
-    CloseNamespaceReport, DeleteNamespaceOptions, DeleteNamespaceResponse, Error, Namespace,
-    Result, Writable,
+    CloseNamespaceReport, DeleteNamespaceOptions, DeleteNamespaceResponse, DeletionId, Error,
+    ErrorCode, Namespace, Result, Writable,
 };
 
 impl<M: crate::Mode> Namespace<M> {
@@ -19,6 +19,32 @@ impl<M: crate::Mode> Namespace<M> {
             .pinned_read(&self.namespace_id, crate::Consistency::Strong)
             .await?;
         Ok(engine.ensure_administrator(&context).await?)
+    }
+
+    /// Returns the namespace ID and the final head when the namespace's
+    /// current manifest is a tombstone with `deletion_id`, and `None`
+    /// otherwise.
+    ///
+    /// A delete that finds the namespace deleted calls this, so a retry of
+    /// the delete that published the tombstone returns the namespace ID and
+    /// the final head, whichever check found the tombstone first
+    /// ([design note](https://github.com/loonfs/loonfs/blob/main/docs/design/retrying-creates-and-deletes.md#deleting-a-namespace)).
+    pub async fn find_deletion(
+        &self,
+        deletion_id: &DeletionId,
+    ) -> Result<Option<DeleteNamespaceResponse>> {
+        trace::in_operation(
+            operation_span!(self.core, "find_deletion", self.namespace_id),
+            async {
+                let _permit = self.core.read_permit().await;
+                Ok(self
+                    .core
+                    .namespace_store(&self.namespace_id)
+                    .find_deletion(deletion_id)
+                    .await?)
+            },
+        )
+        .await
     }
 }
 
@@ -35,16 +61,36 @@ impl Namespace<Writable> {
     ///
     /// Sequenced as a barrier through the publication service: mutations
     /// admitted before the delete publish first, and mutations admitted
-    /// after it fail once it succeeds.
+    /// after it fail once it succeeds. A delete that finds the namespace
+    /// deleted with its own deletion ID returns the namespace ID and the
+    /// final head, whatever its `expected_head_seq`, and one that finds
+    /// another deletion ID returns `namespace_deleted`.
     pub async fn delete_with_options(
         &self,
         options: &DeleteNamespaceOptions,
     ) -> Result<DeleteNamespaceResponse> {
+        let deletion_id = options.deletion_id_or_generate();
+        let options = DeleteNamespaceOptions {
+            deletion_id: Some(deletion_id.clone()),
+            ..options.clone()
+        };
         trace::in_operation(
             operation_span!(self.core, "delete", self.namespace_id),
             async {
-                self.ensure_administrator().await?;
-                self.session().submit_delete(*options).await
+                let deleted = async {
+                    self.ensure_administrator().await?;
+                    self.session().submit_delete(options).await
+                }
+                .await;
+                match deleted {
+                    Err(error) if error.code() == ErrorCode::NamespaceDeleted => {
+                        match self.find_deletion(&deletion_id).await? {
+                            Some(response) => Ok(response),
+                            None => Err(error),
+                        }
+                    }
+                    deleted => deleted,
+                }
             },
         )
         .await
