@@ -1348,9 +1348,9 @@ async fn a_group_compacted_after_the_trash_still_removes_an_expired_deletions_ro
     }
 }
 
-/// Checks that a base compaction over the retention advance's own manifest
-/// removes every row that an expired deletion hides, with no commit and no
-/// fence after the advance. At or below the floor, a deletion whose latest
+/// Checks that a base compaction over the manifest of the retention
+/// advance's fold removes every row that an expired deletion hides, with no
+/// commit after the advance. At or below the floor, a deletion whose latest
 /// event is `set` has expired, and nothing else has to happen before a
 /// compaction removes its rows.
 #[tokio::test]

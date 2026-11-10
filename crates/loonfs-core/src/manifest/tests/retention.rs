@@ -256,7 +256,7 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
     assert_eq!(
         after.len(),
         wal_objects.len() + 1,
-        "the advance writes one WAL object, its fence"
+        "the advance writes one WAL object, its floor object"
     );
     assert!(store
         .head(&current_manifest_key(&store, &namespace_id).await)

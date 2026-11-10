@@ -442,7 +442,7 @@ pub(super) async fn get_file_content(
         path = "/v0/namespaces/{namespace_id}/filesystem/trash",
         tag = "filesystem",
         summary = "List recoverable deletions",
-        description = "Returns the namespace's recoverable deletions, oldest first. A deletion leaves the list when it's undeleted, or when the namespace's writer expires it after the retention floor reaches its `deletion_seq`. Each entry includes the inode ID and deletion sequence that an undelete needs, and the directory binding that the delete removed.",
+        description = "Returns the namespace's recoverable deletions, oldest first. A deletion leaves the list when it's undeleted, or when the namespace's retention floor reaches its `deletion_seq`. Each entry includes the inode ID and deletion sequence that an undelete needs, and the directory binding that the delete removed.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             LivePageQuery

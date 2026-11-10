@@ -324,12 +324,12 @@ pub(crate) fn page_request(cursor: Option<String>, matches: u32) -> PageRequest<
 /// through a runtime whose wall clock is one default grace window ahead, so
 /// the advance can pass every commit made before the call.
 ///
-/// That runtime is separate from the test's others, so the advance opens a
-/// writer session of its own and takes the namespace's writer epoch. A
-/// writer session for the namespace in another runtime then fails its next
-/// request with `writer_fenced`. A test that writes through such a session
-/// after the advance needs to advance the floor in that session's runtime
-/// instead, as `ContentFixture::advance_retention_floor` does.
+/// That runtime is separate from the test's others and has no writer session
+/// for the namespace, so the advance creates a floor object at the WAL tip,
+/// folds it, and claims no writer epoch. A writer session for the namespace
+/// in another runtime isn't fenced. Its next commit collides with the floor
+/// object and plans again against the new floor, so a test can keep writing
+/// through that session after the advance.
 pub(crate) async fn fold_wal_and_advance_retention(
     store: &SharedObjectStore,
     maintenance: &Maintenance,

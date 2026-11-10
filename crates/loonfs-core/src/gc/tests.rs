@@ -241,7 +241,7 @@ async fn gc_reaps_below_floor_wal_objects_after_the_grace_window() {
         .await
         .expect("collection");
 
-    // The advance's fence is folded too.
+    // The advance's floor object is folded too.
     assert_eq!(report.deleted.wal_objects, 5);
     stat_root(&store, &namespace_id).await;
 }
@@ -1043,8 +1043,9 @@ async fn publish_inline(
     key
 }
 
-/// Folds the tail, moves the floor to the head, acknowledges it, and
-/// compacts every family group, so each file keeps only its newest revision.
+/// Folds the tail, moves the floor to the head, which the advance's fold
+/// records in a manifest, and compacts every family group, so each file
+/// keeps only its newest revision.
 async fn compact_below_the_floor<S: ObjectStore>(store: &S, namespace_id: &NamespaceId) {
     crate::test_support::namespace_store(store, namespace_id)
         .fold_wal()
@@ -1059,16 +1060,6 @@ async fn compact_below_the_floor<S: ObjectStore>(store: &S, namespace_id: &Names
         .advance_retention_floor(RetentionTarget::Head)
         .await
         .expect("advance floor");
-    // The fence of a writer epoch records the advanced floor, and its fold
-    // acknowledges the floor, so a base compaction drops the older revisions.
-    crate::test_support::namespace_store(store, namespace_id)
-        .acquire_writer_epoch(&floor_writer.writer_id)
-        .await
-        .expect("write a fence");
-    crate::test_support::namespace_store(store, namespace_id)
-        .fold_wal()
-        .await
-        .expect("fold the fence");
     crate::test_support::compact_every_group(store, namespace_id).await;
 }
 
@@ -1746,7 +1737,7 @@ async fn gc_never_deletes_the_live_replay_tail() {
         .await
         .expect("collection");
 
-    // The advance's fence is folded too.
+    // The advance's floor object is folded too.
     assert_eq!(report.deleted.wal_objects, 5);
     // Latest reads replay the retained tail over the manifest basis.
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
