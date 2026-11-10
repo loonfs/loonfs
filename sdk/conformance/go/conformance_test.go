@@ -285,6 +285,11 @@ func runCommitReplay(t *testing.T, h *harness, testCase conformanceCase) {
 	t.Helper()
 	request, expected := decodeCaseValues[commitReplayRequest, commitReplayExpected](t, testCase)
 	createNamespace(t, h.client, request.NamespaceID, request.ActorID)
+	// A create sent again with its creation ID returns the namespace.
+	recreated, err := createNamespaceOnce(h.client, request.NamespaceID, request.ActorID)
+	if err != nil || recreated == nil || string(recreated.NamespaceID) != request.NamespaceID {
+		t.Fatalf("repeated create: %v", err)
+	}
 	commit := createDirectoryCommit(request.NamespaceID, request.CommitID, request.Path, &request.Message)
 	commit.Preconditions = request.Preconditions
 	first, err := h.client.Commits.Create(
@@ -2992,6 +2997,7 @@ func runProxyACL(t *testing.T, h *harness, request proxyCaseRequest, expected pr
 	acl := request.ACL
 	proxyJSONRequest[json.RawMessage](t, http.DefaultClient, http.MethodPost, h.serverBaseURL+"/v0/namespaces", map[string]any{
 		"namespace_id": acl.NamespaceID,
+		"creation_id":  creationID(acl.NamespaceID),
 		"access": map[string]any{
 			"kind":            "acl",
 			"principal_scope": acl.PrincipalScope,
@@ -3776,16 +3782,28 @@ func listChanges(t *testing.T, sdk *server.Client, namespaceID string) *loonfs.L
 	return changes
 }
 
+// creationID returns the creation ID that the suite sends for a create of
+// namespaceID, so a repeated create is a retry of the same request.
+func creationID(namespaceID string) loonfs.CreationID {
+	return loonfs.CreationID(namespaceID + "-create")
+}
+
 func createNamespace(t *testing.T, sdk *server.Client, namespaceID string, actorID loonfs.ActorID) {
 	t.Helper()
-	_, err := sdk.Namespaces.Create(
-		context.Background(),
-		&loonfs.CreateNamespaceRequest{NamespaceID: loonfs.NamespaceID(namespaceID)},
-		option.WithHTTPHeader(http.Header{"Loonfs-Actor": []string{string(actorID)}}),
-	)
-	if err != nil {
+	if _, err := createNamespaceOnce(sdk, namespaceID, actorID); err != nil {
 		t.Fatalf("create namespace: %v", err)
 	}
+}
+
+func createNamespaceOnce(sdk *server.Client, namespaceID string, actorID loonfs.ActorID) (*loonfs.NamespaceMetadata, error) {
+	return sdk.Namespaces.Create(
+		context.Background(),
+		&loonfs.CreateNamespaceRequest{
+			NamespaceID: loonfs.NamespaceID(namespaceID),
+			CreationID:  creationID(namespaceID),
+		},
+		option.WithHTTPHeader(http.Header{"Loonfs-Actor": []string{string(actorID)}}),
+	)
 }
 
 func applyCreateDirectory(
