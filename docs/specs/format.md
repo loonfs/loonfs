@@ -1525,7 +1525,7 @@ Segments that no root references are protected until their provider age is at le
 compaction deadline + minimum grace window <= 24 hours
 ```
 
-With the current constants, a compaction can start its publication for at most 23 hours, 18 minutes, and 30 seconds after its timer starts (before it writes any output). After that, it abandons the publication, because its earliest unreferenced output might already be eligible for deletion. A cancelled or crashed compaction leaves output that's subject to the same age rule.
+With the current constants, a compaction can start its publication for at most 23 hours, 37 minutes, and 45 seconds after its timer starts (before it writes any output). After that, it abandons the publication, because its earliest unreferenced output might already be eligible for deletion. A cancelled or crashed compaction leaves output that's subject to the same age rule.
 
 A compaction applies the row-retention rules for its selected window, and it MUST preserve every retained view. A restart begins a new plan from the current manifest, and there's no durable compaction cursor or output-protection record.
 
