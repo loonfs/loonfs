@@ -1529,7 +1529,7 @@ With the current constants, a compaction can start its publication for at most 2
 
 A compaction applies the row-retention rules for its selected window, and it MUST preserve every retained view. A restart begins a new plan from the current manifest, and there's no durable compaction cursor or output-protection record.
 
-Why does core keep a compactor epoch? A compaction of a large window publishes once at the end, which can be hours later. The epoch lets a newer runtime stop a stale compactor at its next check. (Grep publishes each bounded step separately, so a lost race costs one step, and grep doesn't need an epoch.)
+Why does core keep a compactor epoch? A compaction of a large window publishes once at the end, which can be hours later. The epoch lets a newer runtime stop a stale compactor at its next check. (Grep publishes the steps of one maintenance interval together, so a lost race costs at most that interval's steps, and grep doesn't need an epoch.)
 
 ## 11. Garbage collection
 
