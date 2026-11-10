@@ -29,7 +29,7 @@ impl<M: crate::Mode> Namespace<M> {
     /// A delete that finds the namespace deleted calls this, so a retry of
     /// the delete that published the tombstone returns the namespace ID and
     /// the final head, whichever check found the tombstone first
-    /// ([design note](https://github.com/loonfs/loonfs/blob/main/docs/design/retrying-creates-and-deletes.md#deleting-a-namespace)).
+    /// ([format spec](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#94-deleting-a-namespace)).
     /// The administrator check reads the root's access rows from the
     /// tombstone, as a snapshot deletion after the namespace's deletion does.
     /// A subject that isn't an administrator gets `None`, as a delete with

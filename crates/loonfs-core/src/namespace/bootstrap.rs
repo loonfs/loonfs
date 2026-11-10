@@ -19,7 +19,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// namespace already exists with the request's creation ID, an earlier
     /// attempt of the same request created the namespace, and the call
     /// returns the namespace as it is now
-    /// ([design note](https://github.com/loonfs/loonfs/blob/main/docs/design/retrying-creates-and-deletes.md#creating-a-namespace)).
+    /// ([format spec](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#91-creating-a-namespace)).
     pub async fn bootstrap_namespace(
         &self,
         actor_id: &loonfs_types::ActorId,

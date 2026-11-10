@@ -64,7 +64,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// A live namespace with another creation ID returns `namespace_exists`,
     /// and a deleted namespace returns `namespace_deleted`, so a fork checks
     /// its target with this before the fork creates a pin
-    /// ([design note](https://github.com/loonfs/loonfs/blob/main/docs/design/retrying-creates-and-deletes.md#forking-a-namespace)).
+    /// ([format spec](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#92-forking-a-namespace)).
     pub async fn find_creation(
         &self,
         creation_id: &CreationId,

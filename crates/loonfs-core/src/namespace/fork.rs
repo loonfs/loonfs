@@ -46,7 +46,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// earlier attempt of the same request, and the call deletes its own
     /// fork pin unless the target's fork basis refers to the pin, and
     /// returns the target as it is now
-    /// ([design note](https://github.com/loonfs/loonfs/blob/main/docs/design/retrying-creates-and-deletes.md#forking-a-namespace)).
+    /// ([format spec](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#92-forking-a-namespace)).
     pub async fn fork_namespace(
         &self,
         new_namespace_id: &NamespaceId,

@@ -105,7 +105,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     ///
     /// A delete that finds a tombstone calls this, so a retry of the delete
     /// that published the tombstone returns what the first delete returned
-    /// ([design note](https://github.com/loonfs/loonfs/blob/main/docs/design/retrying-creates-and-deletes.md#deleting-a-namespace)).
+    /// ([format spec](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#94-deleting-a-namespace)).
     /// The retry doesn't check `expected_head_seq` again.
     pub async fn find_deletion(
         &self,
