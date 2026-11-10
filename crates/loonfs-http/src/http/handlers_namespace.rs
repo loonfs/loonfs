@@ -404,7 +404,7 @@ pub(super) async fn fork_namespace(
         path = "/v0/namespaces/{namespace_id}/merges",
         tag = "namespaces",
         summary = "Merge a fork",
-        description = "Merges a fork's commits into the namespace as one commit. The merge applies the fork's net change since its previous merge, or since the fork point, through `through_seq` or the fork's head. A change that conflicts with the namespace returns `merge_conflict`, and nothing is committed. The commit ID makes retries idempotent. After the commit, the server folds the namespace's WAL tail through it, unless the merge has already run for half of the request deadline, in which case the tail waits for the fold trigger like any other tail.",
+        description = "Merges a fork's commits into the namespace as one commit. The merge applies the fork's net change since its previous merge, or since the fork point, through `through_seq` or the fork's head. A change that conflicts with the namespace returns `merge_conflict`, and nothing is committed. The commit ID makes retries idempotent. The merge's WAL object counts toward the namespace's fold triggers like any commit.",
         params(("namespace_id" = String, Path, description = "The namespace that the merge commits into.")),
         request_body = MergeForkRequest,
         responses(

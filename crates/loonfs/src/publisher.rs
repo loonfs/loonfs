@@ -31,8 +31,6 @@ mod registry;
 mod retention_advance;
 mod session_tasks;
 mod worker;
-
-pub(crate) use worker::sleep_ms;
 mod write_stop;
 
 use crate::runtime_core::{ReadPositionSlot, RuntimeCore};
