@@ -1,6 +1,6 @@
 # Retrying a create or a delete
 
-This note describes how a caller retries a request that creates a namespace, forks a namespace, or deletes a namespace. Each of these requests includes an ID that the caller generates, LoonFS stores the ID in the manifest that the request publishes, and a retry that finds the ID returns the first request's result, in the same way as a retried commit.
+This note describes how a caller retries a request that creates a namespace, forks a namespace, or deletes a namespace. Each of these requests includes an ID that the caller generates, LoonFS stores the ID in the manifest that the request publishes, and a retry that finds its own ID succeeds, so a caller can safely repeat the request.
 
 ## The problem
 
@@ -21,14 +21,14 @@ This section describes the rule, what a retry finds, the protocols for a create,
 
 ### The rule
 
-Every request that creates, forks, or deletes a namespace includes an ID that the caller generates. LoonFS stores the ID in the manifest that the request publishes. A later request with the same ID that finds that manifest returns the first request's result. Commits already follow this rule.
+Every request that creates, forks, or deletes a namespace includes an ID that the caller generates. LoonFS stores the ID in the manifest that the request publishes. A later request with the same ID that finds that manifest succeeds. A create or a fork returns the namespace as it is now, and a delete returns the namespace ID and the final head. A retried commit uses its commit ID in the same way.
 
 A "creation ID" (`creation_id`) is an identifier that the caller generates for one request that creates or forks a namespace, such as `job-4182-create`. LoonFS stores the creation ID in the namespace's first manifest and copies the ID into every later manifest, in the same way as `created_by`, so a retry can find the ID for as long as the namespace exists. A "deletion ID" (`deletion_id`) is the same kind of identifier for one request that deletes a namespace, and LoonFS stores the deletion ID in the [namespace tombstone](../specs/glossary.md#namespace-tombstone).
 
 | Operation | ID in the request | Where LoonFS stores the ID | A request that finds its own ID returns |
 | --- | --- | --- | --- |
-| Create a namespace | Creation ID (`creation_id`) | The namespace's first manifest, copied into every later manifest | The namespace's summary |
-| Fork a namespace | Creation ID (`creation_id`) | The fork's first manifest, copied in the same way | The fork's summary |
+| Create a namespace | Creation ID (`creation_id`) | The namespace's first manifest, copied into every later manifest | The namespace's current summary |
+| Fork a namespace | Creation ID (`creation_id`) | The fork's first manifest, copied in the same way | The fork's current summary |
 | Delete a namespace | Deletion ID (`deletion_id`) | The tombstone's `status`, beside `deleted_at_ms` | The namespace ID and final head, as the first delete returned |
 
 The IDs follow the commit ID's rules. The HTTP API requires the field, and the SDKs and the embedded API generate an ID when the caller doesn't supply an ID, as `CommitOptions::commit_id_or_generate` does for a commit. Both IDs use the commit ID's grammar (1 to 128 lowercase ASCII letters, digits, dots, underscores, or hyphens, starting with a letter or a digit). The namespace summary doesn't include the creation ID.
@@ -67,7 +67,7 @@ The embedded API's `allow_existing` option doesn't change, so with that option a
 
 The creation ID also simplifies the rule for a manifest put whose outcome is unknown. The format spec says that identical bytes prove a publisher's own success only when the manifest refers to an object that the attempt created, such as a fork's pin or a new segment. Without a creation ID, a plain create's first manifest has no such object, so a publisher that read back identical bytes couldn't claim the create and would return `namespace_exists`. With the creation ID in the first manifest, identical bytes show that a process with the same creation ID wrote the manifest. Two processes with the same creation ID are attempts of one request, so the request succeeded, whichever process wrote the bytes. The same argument applies to a tombstone and its deletion ID.
 
-In `publish.rs`, `references_own_object` is the function that says whether identical bytes confirm a publisher's own put. It returns true for every manifest 1 and for every tombstone.
+In `publish.rs`, `references_own_object` is the function that says whether identical bytes confirm a publisher's own put. In this design, the function also returns true for every manifest 1 and for every tombstone. For every other manifest, the function still returns true when the manifest lists a segment that the attempt wrote.
 
 Why is the hint put still the check for a new namespace ID? The creation ID doesn't change how LoonFS detects an existing namespace. The hint stays for as long as the namespace exists, and manifest 1 doesn't, so two concurrent creates still race on the hint put. The creation ID changes what LoonFS returns after the hint put finds an existing namespace.
 
@@ -92,7 +92,7 @@ Why does the losing attempt delete its pin before it returns success? The fork's
 
 A delete request includes the deletion ID as the `deletion_id` query parameter, because a `DELETE` request has no body. LoonFS stores the deletion ID in the tombstone's status, beside `deleted_at_ms`, for example `{"kind":"deleted","deleted_at_ms":1752629000000,"deletion_id":"job-4182-delete"}`. The tombstone's `head_seq` is the final head, which the first delete returned.
 
-A delete that finds a tombstone compares the tombstone's deletion ID with the request's. If the IDs are equal, the delete returns the namespace ID and the tombstone's `head_seq`. LoonFS runs this comparison wherever a delete can find the tombstone, so a retry gets the same result whether the writer session's open or the deletion's own check that the namespace is live finds the tombstone first. A replay doesn't check `expected_head_seq` again, in the same way that a commit replay doesn't evaluate its preconditions again.
+A delete that finds a tombstone compares the tombstone's deletion ID with the request's. If the IDs are equal, the delete returns the namespace ID and the tombstone's `head_seq`. LoonFS runs this comparison wherever a delete can find the tombstone, so a retry gets the same result whether the writer session's open or the deletion's own check that the namespace is live finds the tombstone first. A retry doesn't check `expected_head_seq`. The tombstone doesn't record the value that the first request sent, so a retry with the same deletion ID and a different `expected_head_seq` also returns the tombstone's result. (A commit differs. A retried commit with a changed precondition is a different request, and it returns `commit_id_reuse_conflict`.)
 
 For example, `DELETE /v0/namespaces/demo?deletion_id=job-4182-delete&expected_head_seq=418` publishes a tombstone with `head_seq` 418, and the response is lost. The same request sent again returns `{"namespace_id":"demo","head_seq":418}`. A request with the deletion ID `job-5000-delete` returns `namespace_deleted`.
 
@@ -111,7 +111,7 @@ A caller supplies each snapshot's `name`, and the snapshot listing returns the n
 
 ### Retry classes
 
-After this change, `create_namespace`, `fork_namespace`, and `delete_namespace` are `replayable`, and the client library retries these requests under its usual retry policy (three retries, with a backoff from 250 ms to 2 s).
+After this change, `create_namespace`, `fork_namespace`, and `delete_namespace` are `idempotent`, which is the class of a request that a client can safely repeat, and the client library retries these requests under its usual retry policy (three retries, with a backoff from 250 ms to 2 s). The three operations aren't `replayable`, because that class promises the original result, and a retried create returns the namespace as it is now.
 
 `create_snapshot`, `create_upload`, `run_maintenance`, and `probe_store` stay `not_idempotent`:
 
@@ -124,7 +124,7 @@ After this change, `create_namespace`, `fork_namespace`, and `delete_namespace` 
 This section lists what the design costs.
 
 - Every create, fork, and delete request includes one more field, and the HTTP API rejects a request without the field. A manifest includes the creation ID (at most 128 bytes), and a tombstone also includes the deletion ID.
-- A retry works while the manifest that stores the ID exists. A creation ID lasts as long as the namespace's manifests, and a deletion ID as long as the tombstone, which stays the current manifest after the namespace is deleted.
+- A retry works while the manifest that stores the ID exists. A creation ID lasts as long as the namespace's manifests, and a deletion ID as long as the tombstone, which stays the current manifest after the namespace is deleted. A create that is retried after the namespace was deleted returns `namespace_deleted`.
 - A retried fork that overlaps the first attempt writes a second fork pin and then deletes the pin. If the delete fails, the pin stays until garbage collection collects an unused fork pin after its creation grace.
 - Snapshot and upload creates still have no safe retry.
 
@@ -134,7 +134,7 @@ This section lists the sections of the API spec, the storage format, and the glo
 
 The API changes in these sections:
 
-- In [Operations and retry classes](../specs/api.md#operations-and-retry-classes), the rows for `create_namespace`, `fork_namespace`, and `delete_namespace` change from `not_idempotent` to `replayable`, and the `replayable` definition mentions the creation ID and the deletion ID. The `create_namespace` and `fork_namespace` rows add the required `creation_id` body field, and the `delete_namespace` row shows the required `deletion_id` query parameter.
+- In [Operations and retry classes](../specs/api.md#operations-and-retry-classes), the rows for `create_namespace`, `fork_namespace`, and `delete_namespace` change from `not_idempotent` to `idempotent`. The `create_namespace` and `fork_namespace` rows add the required `creation_id` body field, and the `delete_namespace` row shows the required `deletion_id` query parameter.
 - In [Creating and forking namespaces](../specs/api.md#creating-and-forking-namespaces), the example request includes `creation_id`, and the last paragraph is replaced by the rules in [What a request finds](#what-a-request-finds).
 - In [`DELETE /v0/namespaces/{ns}`](../specs/api.md#63-delete-v0namespacesns), the request includes `deletion_id`, and "another deletion" fails with `namespace_deleted` unless the deletion has the tombstone's deletion ID.
 - In [`POST /forks`](../specs/api.md#613-post-forks), the request includes `creation_id`, and the paragraph about an active or deleted target describes step 1 of [Forking a namespace](#forking-a-namespace).
