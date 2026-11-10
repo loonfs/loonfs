@@ -33,7 +33,7 @@ prune_generated() {
     case "$1" in
     go)
         # Fern cannot omit these generator-level model tests.
-        for name in capabilities changes commits files inodes namespaces snapshots trash types uploads \
+        for name in capabilities changes commits diff files inodes namespaces snapshots trash types uploads \
             maintenance/checkpoints maintenance/diagnostics maintenance/grep_index maintenance/runs \
             maintenance/pools/runs; do
             rm "generated/go/${name}_test.go"
