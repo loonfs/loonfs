@@ -44,10 +44,9 @@ pub fn content_id(value: &str) -> ContentId {
 /// Returns the content ID whose body is the decimal digits of `number`.
 ///
 /// A garbage collection keeps an unreferenced content object whose name an
-/// extent filter matches by chance, and the filter of a segment with a few
-/// names matches about one generated ID in 200. A test that expects a
-/// collection to delete content writes every content object under a numbered
-/// ID, so that the filters match the same names in every run.
+/// extent filter matches by chance. A test that expects a collection to delete
+/// content writes every content object under a numbered ID, so that the
+/// filters match the same names in every run.
 pub fn numbered_content_id(number: usize) -> ContentId {
     ContentId::parse(format!("con_{number:026}")).expect("valid content id")
 }

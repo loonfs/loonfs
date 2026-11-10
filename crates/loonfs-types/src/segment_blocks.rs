@@ -46,8 +46,16 @@ pub const RESTART_INTERVAL: usize = 16;
 pub const FILTER_BITS_PER_KEY: usize = 10;
 /// Bloom filter probe count, chosen for [`FILTER_BITS_PER_KEY`].
 pub const FILTER_HASH_COUNT: u32 = 7;
+/// Bloom filter sizing: the fewest bits of a filter.
+pub const FILTER_MIN_BITS: usize = 64;
 /// Extent filter sizing: bits reserved per inserted content object name.
 pub const EXTENT_FILTER_BITS_PER_KEY: usize = 20;
+/// Extent filter sizing: the fewest bits of an extent filter.
+///
+/// A garbage collection keeps a content object whose name an extent filter
+/// matches, and a 64-bit filter of three names matches about one other name
+/// in 100.
+pub const EXTENT_FILTER_MIN_BITS: usize = 4096;
 
 const FILTER_HASH_SEED_ONE: u64 = 0;
 const FILTER_HASH_SEED_TWO: u64 = 0x9e37_79b9_7f4a_7c15;
@@ -394,12 +402,13 @@ impl SegmentBlocksBuilder {
         let extent_filter = match &self.extent_hashes {
             Some(hashes) => Some(append_section(
                 &mut bytes,
-                &build_filter_payload(hashes, EXTENT_FILTER_BITS_PER_KEY),
+                &build_filter_payload(hashes, EXTENT_FILTER_BITS_PER_KEY, EXTENT_FILTER_MIN_BITS),
                 false,
             )?),
             None => None,
         };
-        let filter_payload = build_filter_payload(&self.filter_hashes, FILTER_BITS_PER_KEY);
+        let filter_payload =
+            build_filter_payload(&self.filter_hashes, FILTER_BITS_PER_KEY, FILTER_MIN_BITS);
         let filter = append_section(&mut bytes, &filter_payload, false)?;
 
         let mut index_payload = Vec::new();
@@ -593,7 +602,7 @@ impl SegmentFilter {
                 "filter hash count must be seven".to_owned(),
             ));
         }
-        if bit_len < 64 {
+        if bit_len < FILTER_MIN_BITS as u64 {
             return Err(SegmentBlockCodecError::Malformed(
                 "filter bit length must be at least 64".to_owned(),
             ));
@@ -747,8 +756,8 @@ fn decode_section(
     Ok(payload)
 }
 
-fn build_filter_payload(hashes: &[(u64, u64)], bits_per_key: usize) -> Vec<u8> {
-    let mut builder = SegmentFilterBuilder::with_bits_per_key(hashes.len(), bits_per_key);
+fn build_filter_payload(hashes: &[(u64, u64)], bits_per_key: usize, min_bits: usize) -> Vec<u8> {
+    let mut builder = SegmentFilterBuilder::with_sizing(hashes.len(), bits_per_key, min_bits);
     for hash in hashes {
         builder.insert_hashes(*hash);
     }
@@ -765,16 +774,14 @@ pub struct SegmentFilterBuilder {
 
 impl SegmentFilterBuilder {
     /// Returns a builder with [`FILTER_BITS_PER_KEY`] bits for each of
-    /// `expected_keys` keys, and at least 64 bits. Inserting more keys than
-    /// expected raises the filter's false positive rate.
+    /// `expected_keys` keys, and at least [`FILTER_MIN_BITS`] bits. Inserting
+    /// more keys than expected raises the filter's false positive rate.
     pub fn new(expected_keys: usize) -> Self {
-        Self::with_bits_per_key(expected_keys, FILTER_BITS_PER_KEY)
+        Self::with_sizing(expected_keys, FILTER_BITS_PER_KEY, FILTER_MIN_BITS)
     }
 
-    /// Returns a builder with `bits_per_key` bits for each of `expected_keys`
-    /// keys, and at least 64 bits.
-    pub fn with_bits_per_key(expected_keys: usize, bits_per_key: usize) -> Self {
-        let bit_len = expected_keys.saturating_mul(bits_per_key).max(64);
+    fn with_sizing(expected_keys: usize, bits_per_key: usize, min_bits: usize) -> Self {
+        let bit_len = expected_keys.saturating_mul(bits_per_key).max(min_bits);
         Self {
             bit_len: bit_len as u64,
             bits: vec![0; bit_len.div_ceil(8)],
@@ -1421,8 +1428,10 @@ mod tests {
             builder.push(&key, &filter_key, &row).expect("push row");
             let built = builder.build().expect("segment");
             assert_eq!(
-                built.extent_filter.map(|handle| handle.decoded_bytes),
-                enabled.then_some(12 + 8)
+                built
+                    .extent_filter
+                    .map(|handle| handle.decoded_bytes as usize),
+                enabled.then_some(12 + EXTENT_FILTER_MIN_BITS / 8)
             );
         }
     }
