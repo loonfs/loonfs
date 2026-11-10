@@ -17,7 +17,7 @@ Why can't the caller read the namespace before retrying, as the `outcome_unknown
 
 ## The design
 
-This section describes the rule, what a retry finds, the protocols for a create, a fork, and a delete, why snapshots and upload sessions keep their current behavior, and the retry classes that follow.
+This section describes the rule, what a retry finds, the protocols for a create, a fork, and a delete, why the design doesn't cover snapshots and upload sessions, and the retry classes that follow.
 
 ### The rule
 
@@ -100,7 +100,7 @@ Why does the deletion ID go in the status? The tombstone is the one record that 
 
 ### Snapshots and upload sessions
 
-Snapshots and upload sessions keep IDs that LoonFS generates, and `create_snapshot` and `create_upload` stay `not_idempotent`. A caller's ID can't be the key of a pin or an upload session, because garbage collection is safe only if a pin ID or an upload ID is never used twice:
+This design doesn't cover snapshots or upload sessions, so `create_snapshot` and `create_upload` stay `not_idempotent`. A namespace's manifest is a record that stores the caller's ID beside the result, and a pin or an upload session has no such record. Using the caller's ID as the key of the pin or the session record isn't safe, because garbage collection is safe only if a pin ID or an upload ID is never used twice:
 
 - **Pins.** A fork of a snapshot checks that the snapshot exists, writes its fork pin, and checks again. [Creating and verifying a pin](../specs/format.md#82-creating-and-verifying-a-pin) argues that pins are never recreated, so a snapshot that exists at the second check existed the whole time, and every collection that listed pins before the fork pin was written also listed the snapshot. With a caller's ID as the key, one create would write the key again when its verification fails and `pin_after_fold` tries again, and a late retry after the snapshot is deleted would create the snapshot again under the same key.
 - **Upload sessions.** Garbage collection deletes a session record before its outcome record (see [Upload-session cleanup](../specs/format.md#116-upload-session-cleanup)). A late retry with the same upload ID between those two deletes would write a new session record beside the old outcome record, so the new session would read as completed or aborted, with the old content reference (see [Upload sessions](../specs/format.md#51-upload-sessions)).
@@ -115,7 +115,7 @@ After this change, `create_namespace`, `fork_namespace`, and `delete_namespace` 
 
 `create_snapshot`, `create_upload`, `run_maintenance`, and `probe_store` stay `not_idempotent`:
 
-- A snapshot create and an upload create use IDs that LoonFS generates, as [Snapshots and upload sessions](#snapshots-and-upload-sessions) describes.
+- This design doesn't cover a snapshot create or an upload create, as [Snapshots and upload sessions](#snapshots-and-upload-sessions) describes.
 - A maintenance job's result describes that run, such as the number of compaction units that a `metadata` job published, so a second run can't return the first run's result. A `recover_administrator` job also commits under a commit ID that the server generates, so a second run makes a second commit.
 - A store probe writes and deletes its own scratch objects under a new run ID, and its report describes how the store behaved during that run. A retry is a second probe, so an operator chooses whether to probe the store again.
 
@@ -126,7 +126,7 @@ This section lists what the design costs.
 - Every create, fork, and delete request includes one more field, and the HTTP API rejects a request without the field. A manifest includes the creation ID (at most 128 bytes), and a tombstone also includes the deletion ID.
 - A retry works while the manifest that stores the ID exists. A creation ID lasts as long as the namespace's manifests, and a deletion ID as long as the tombstone, which stays the current manifest after the namespace is deleted. A create that is retried after the namespace was deleted returns `namespace_deleted`.
 - A retried fork that overlaps the first attempt writes a second fork pin and then deletes the pin. If the delete fails, the pin stays until garbage collection collects an unused fork pin after its creation grace.
-- Snapshot and upload creates still have no safe retry.
+- The design leaves snapshot and upload creates without a safe retry.
 
 ## Changes to the specs and glossary
 
