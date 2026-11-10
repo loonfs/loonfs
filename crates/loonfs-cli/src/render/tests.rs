@@ -687,6 +687,15 @@ fn gc_summaries_report_counts_retention_and_namespace_retirement() {
     );
     assert!(!empty.contains("namespace is retired"), "{empty}");
     assert!(empty.contains("0 fork checkpoints, 0 snapshots"), "{empty}");
+    assert!(!empty.contains("skipped"), "{empty}");
+
+    pass.skipped = vec![loonfs_types::GcSkippedWork::ContentSweepFamilyBudget];
+    assert_eq!(
+        gc_summary(&pass).lines().last(),
+        Some(
+            "skipped the content sweep: the fork family's roots weren't all read within the budget"
+        )
+    );
 }
 
 #[test]

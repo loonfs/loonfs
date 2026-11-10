@@ -1,6 +1,7 @@
 //! Short, reusable phrases for human-readable command summaries.
 
 use super::*;
+use loonfs_types::GcSkippedWork;
 
 /// Overall result of an object-store probe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -183,6 +184,18 @@ pub(super) fn gc_summary(report: &GcResponse) -> String {
             "\nnamespace can be retired at or after {} after pin cleanup; only fork pins can hold it beyond this deadline",
             format_utc_ms(deadline)
         ));
+    }
+    for reason in &report.skipped {
+        summary.push('\n');
+        summary.push_str(match reason {
+            GcSkippedWork::ContentSweepFamilyBudget => {
+                "skipped the content sweep: the fork family's roots weren't all read within the budget"
+            }
+            GcSkippedWork::ContentSweepUnreadableMember => {
+                "skipped the content sweep: a fork family member's roots couldn't be read"
+            }
+            GcSkippedWork::Unknown => "skipped work for a reason unknown to this CLI",
+        });
     }
     summary
 }

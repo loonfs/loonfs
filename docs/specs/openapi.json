@@ -2791,6 +2791,14 @@
         ],
         "type": "object"
       },
+      "GcSkippedWork": {
+        "description": "A part of a garbage collection pass that the pass skipped.",
+        "enum": [
+          "content_sweep_family_budget",
+          "content_sweep_unreadable_member"
+        ],
+        "type": "string"
+      },
       "GrepIndex": {
         "description": "The maintenance status of a namespace's grep index.",
         "discriminator": {
@@ -3377,6 +3385,13 @@
         "enum": [
           "caught_up",
           "due"
+        ],
+        "type": "string"
+      },
+      "MetadataSkippedWork": {
+        "description": "A part of a metadata maintenance run that the run skipped.",
+        "enum": [
+          "expired_row_removal_walk_limit"
         ],
         "type": "string"
       },
@@ -4404,6 +4419,13 @@
           "retained": {
             "$ref": "#/components/schemas/RetainedCandidates",
             "description": "The candidates that the pass kept at deletion time, counted by reason."
+          },
+          "skipped": {
+            "description": "The work that this pass skipped at a limit, by reason. Empty when the pass skipped nothing.",
+            "items": {
+              "$ref": "#/components/schemas/GcSkippedWork"
+            },
+            "type": "array"
           }
         },
         "required": [
@@ -4438,6 +4460,13 @@
           "outcome": {
             "$ref": "#/components/schemas/MetadataMaintenanceOutcome",
             "description": "Whether work is still due when the run returns."
+          },
+          "skipped": {
+            "description": "The work that this run skipped at a limit, by reason. Empty when the run skipped nothing.",
+            "items": {
+              "$ref": "#/components/schemas/MetadataSkippedWork"
+            },
+            "type": "array"
           }
         },
         "required": [

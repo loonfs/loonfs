@@ -134,6 +134,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 input_bytes: result.input_bytes,
                 output_bytes: result.output_bytes,
                 output_segments: result.output_segments.len(),
+                skipped: result.skipped,
             }),
             // Every attempt lost its manifest number to another publication.
             Err(CoreError::StoreContention { .. }) => {

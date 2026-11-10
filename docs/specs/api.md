@@ -836,6 +836,12 @@ The result's `outcome` has two values:
 {"kind":"metadata","namespace_id":"demo","outcome":"caught_up","compaction_units":2}
 ```
 
+The result also includes `skipped` when a unit that the job published stopped part of its work at a limit. It lists each reason once, in the order that the job first met it, and it's absent when the job skipped nothing. Clients MUST tolerate other values.
+
+| Reason | What the job skipped | What the operator can do |
+| --- | --- | --- |
+| `expired_row_removal_walk_limit` | A base compaction kept every row that an expired deletion hides, because the walk that finds the kept inodes would have needed more than 4,096 directory cursors at once (see [Row retention during a base compaction](format.md#103-row-retention-during-a-base-compaction)). | Move part of the deeply nested tree closer to the root. The next base compaction of each family group removes the hidden rows once the walk fits within the limit. |
+
 A compaction unit can take minutes, so a `metadata` job can too. The reference server exempts maintenance jobs from its request deadline. A client sends the request once, because `run_maintenance` isn't idempotent. After a `due` outcome, the client runs the job again later, as the reference server's scheduler does for a namespace that's still due.
 
 In a `metadata` job, `max_wal_tail_objects` overrides the fold threshold in WAL objects, and the fold threshold in WAL bytes and the idle fold still apply. A value of zero, or a value above the write-rejection threshold, returns `invalid_request`. A WAL tail below the threshold is still folded once it goes idle, which means that its newest commit is as old as the server's configured idle period (15 minutes by default), measured on the server's clock (see [Recovery material and maintenance policy](format.md#73-recovery-material-and-maintenance-policy)). A server can turn this rule off. Replay history is kept unless the request uses `kind: "retention"`.
@@ -915,6 +921,13 @@ Every core GC response also includes `retained`, which counts the candidates the
 | `upload_session_undecided` | An upload session that's kept for a reason that doesn't end at a known time: a lost compare-and-swap, a record that disappeared during the collection, or a content cleanup failure. |
 
 Each collection counts the candidates that it examined and kept, not the objects in the namespace, so an object that two collections both examine is counted by each collection.
+
+A GC response also includes `skipped` when the collection stopped part of its work at a limit. It lists each reason once, and it's absent when the collection skipped nothing. Clients MUST tolerate other values.
+
+| Reason | What the collection skipped | What the operator can do |
+| --- | --- | --- |
+| `content_sweep_family_budget` | The collection deleted no content objects, because it couldn't read the roots of every member of the fork family within the time that [Content roots](format.md#119-content-roots) allows. | Run the collection again later. If the reason repeats, delete the forks that are no longer needed, so the collection has fewer members to read. |
+| `content_sweep_unreadable_member` | The collection deleted no content objects, because it couldn't read the roots of one member of the fork family. | Find the error in the server's warning log for the collection, and repair or delete the member namespace that it reports. |
 
 [Candidate and age rules](format.md#113-candidate-and-age-rules) defines which objects are candidates for deletion, and when each one is old enough to delete.
 

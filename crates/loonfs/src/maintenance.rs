@@ -290,6 +290,7 @@ impl Maintenance {
                             namespace_id: namespace_id.clone(),
                             outcome: MetadataMaintenanceOutcome::Due,
                             compaction_units: 0,
+                            skipped: Vec::new(),
                         },
                         next_due_at_ms: None,
                     });

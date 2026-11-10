@@ -14,7 +14,7 @@ use loonfs_objectstore::keys::content_prefix;
 use loonfs_objectstore::layout::content_id_of;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::segment_blocks::{filter_key_hashes, SegmentFilter};
-use loonfs_types::GcResponse;
+use loonfs_types::{GcResponse, GcSkippedWork};
 use std::sync::Arc;
 
 /// The extent filters of the distinct layout segments that the collection's rooted
@@ -34,7 +34,13 @@ pub(super) struct ContentSweep {
 }
 
 impl ContentSweep {
-    pub(super) async fn load<S: ObjectStore>(sweep: &Sweep<'_, S>) -> Result<Option<Self>> {
+    /// Loads the extent filters of the collection's rooted layout segments, or
+    /// returns `None` when the collection sweeps no content. A family root
+    /// that couldn't read every member's roots records why in `report`.
+    pub(super) async fn load<S: ObjectStore>(
+        sweep: &Sweep<'_, S>,
+        report: &mut GcResponse,
+    ) -> Result<Option<Self>> {
         let live = sweep.live;
         let namespace_id = &sweep.namespace.namespace_id;
         let (family_members, family_members_read) = (live.family.members, live.family.members_read);
@@ -53,11 +59,15 @@ impl ContentSweep {
             FamilyWalkOutcome::BudgetExceeded => {
                 tracing::info!(namespace_id = %namespace_id, family_members, family_members_read,
                     "the fork family's roots weren't all read within the budget; skipped content sweep");
+                report.skipped.push(GcSkippedWork::ContentSweepFamilyBudget);
                 return Ok(None);
             }
             FamilyWalkOutcome::UnreadableMember => {
                 tracing::info!(namespace_id = %namespace_id, family_members, family_members_read,
                     "a fork family member's roots couldn't be read; skipped content sweep");
+                report
+                    .skipped
+                    .push(GcSkippedWork::ContentSweepUnreadableMember);
                 return Ok(None);
             }
         }

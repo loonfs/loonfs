@@ -831,6 +831,119 @@ async fn expire_old<S: ObjectStore>(
     (old, a)
 }
 
+/// Creates `count` nested directories `/c{count-1}/d/d/...` in a few large
+/// commits. Each directory contains an empty directory `f`, and every
+/// directory except the deepest also contains the next directory down as `d`,
+/// which sorts before `f`. The commits build the chain from the bottom with
+/// moves, because a request path has at most 128 components.
+async fn create_directory_chain<S: ObjectStore>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    context: &WriterAt,
+    count: usize,
+) {
+    let path = |path: String| AbsolutePath::parse(path).expect("path");
+    let fixture = crate::test_support::NamespaceFixture::new(store, namespace_id, context);
+    let mut operations = Vec::new();
+    for level in 0..count {
+        operations.push(FilesystemOperation::CreateDirectory {
+            path: path(format!("/c{level}/f")),
+            parents: true,
+        });
+        if level > 0 {
+            operations.push(FilesystemOperation::MovePath {
+                source_path: path(format!("/c{}", level - 1)),
+                destination_path: path(format!("/c{level}/d")),
+                precondition: loonfs_types::DestinationPrecondition {
+                    behavior: DestinationBehavior::NoReplace,
+                    ..Default::default()
+                },
+            });
+        }
+        if operations.len() >= 1_024 || level + 1 == count {
+            let intent = CommitIntent {
+                commit_id: CommitId::generate(),
+                actor_id: loonfs_test_support::test_actor(),
+                subject: None,
+                message: None,
+                operations: std::mem::take(&mut operations),
+                preconditions: Vec::new(),
+            };
+            fixture
+                .publish_candidates(vec![CommitCandidate::new(intent)])
+                .await
+                .pop()
+                .expect("one result")
+                .expect("commit a part of the chain");
+        }
+    }
+}
+
+/// Checks that a base compaction whose kept inode walk reaches its limit
+/// publishes, keeps every row that an expired deletion hides, and reports
+/// that it skipped removing them.
+///
+/// The walk drops a directory's cursor before it descends into the
+/// directory's last child, so a chain of directories of any depth uses one
+/// cursor. In the chain that this test builds, every directory has a second
+/// entry after the child it descends into (`f` after `d`, and the root's
+/// `keep.txt` after the chain's top), so every directory keeps its cursor. The
+/// walk reaches the limit when it reads the directory at depth 4,095, with
+/// the root's cursor and 4,095 others on the stack, and finds a child
+/// directory.
+#[tokio::test]
+async fn a_compaction_whose_kept_inode_walk_reaches_its_limit_keeps_every_row() {
+    let temp = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp.path()).expect("store");
+    let namespace_id = NamespaceId::parse("walk-limit").expect("namespace id");
+    let context = writer_at("writer-1", 5_000);
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    write_test_file(&store, &namespace_id, "/old/a.txt", "c_old_a", &context).await;
+    write_test_file(&store, &namespace_id, "/keep.txt", "c_keep", &context).await;
+    create_directory_chain(
+        &store,
+        &namespace_id,
+        &context,
+        crate::limits::MAX_KEPT_INODE_WALK_DEPTH,
+    )
+    .await;
+    let a = inode_id_of(&store, &namespace_id, "/old/a.txt").await;
+    let deletion_seq = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .delete_path("/old", None)
+        .await
+        .expect("delete /old")
+        .committed_seq;
+    advance_floor_through(&store, &namespace_id, deletion_seq, &context).await;
+    let before =
+        rows_of(&store, &namespace_id, &[a]).await[&ApiMetadataRowFamily::Revisions].clone();
+    assert_eq!(before.len(), 1, "the basis has the hidden revision");
+
+    let current = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_current_manifest()
+        .await
+        .expect("load the current manifest");
+    let outcome = run_planned_compaction(
+        &store,
+        &namespace_id,
+        &context,
+        MetadataRunPolicy::default(),
+        &whole_group_spec(&current, MetadataFamilyGroup::Revisions),
+    )
+    .await;
+    assert_matches!(
+        outcome,
+        CompactionUnitOutcome::Published { skipped, .. }
+            if skipped == [loonfs_types::MetadataSkippedWork::ExpiredRowRemovalWalkLimit]
+    );
+    assert_eq!(
+        rows_of(&store, &namespace_id, &[a]).await[&ApiMetadataRowFamily::Revisions],
+        before,
+        "the compaction keeps the hidden revision"
+    );
+}
+
 /// Checks that a compaction whose window skips a group's oldest run keeps
 /// every row of an expired deletion's inodes, and a base compaction of the
 /// same groups then removes them.

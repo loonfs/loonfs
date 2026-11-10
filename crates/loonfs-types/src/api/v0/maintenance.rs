@@ -168,6 +168,22 @@ pub struct MetadataMaintenanceResponse {
     pub outcome: MetadataMaintenanceOutcome,
     /// The compaction units that this run published. A unit compacts one family group's window.
     pub compaction_units: u64,
+    /// The work that this run skipped at a limit, by reason. Empty when the run skipped nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<MetadataSkippedWork>,
+}
+
+/// A part of a metadata maintenance run that the run skipped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum MetadataSkippedWork {
+    /// A compaction unit kept every row that an expired deletion hides, because the walk that
+    /// finds the kept inodes reached its limit of 4,096 open directories.
+    ExpiredRowRemovalWalkLimit,
+    /// A reason from a newer server.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Whether metadata maintenance left work due for a namespace.
@@ -188,25 +204,40 @@ pub enum MetadataMaintenanceOutcome {
 mod tests {
     use super::*;
 
-    /// Checks that a `metadata` run reports its outcome and compaction units as flat fields next
-    /// to the job kind.
+    /// Checks that a `metadata` run reports its outcome, compaction units, and skipped work as
+    /// flat fields next to the job kind, and leaves out `skipped` when the run skipped nothing.
     #[test]
     fn a_metadata_run_reports_its_outcome_and_compaction_units() {
+        let response = MetadataMaintenanceResponse {
+            namespace_id: NamespaceId::parse("demo").expect("namespace id"),
+            outcome: MetadataMaintenanceOutcome::Due,
+            compaction_units: 16,
+            skipped: Vec::new(),
+        };
         assert_eq!(
-            serde_json::to_value(RunMaintenanceResponse::Metadata(
-                MetadataMaintenanceResponse {
-                    namespace_id: NamespaceId::parse("demo").expect("namespace id"),
-                    outcome: MetadataMaintenanceOutcome::Due,
-                    compaction_units: 16,
-                },
-            ))
-            .expect("serialize metadata maintenance response"),
+            serde_json::to_value(RunMaintenanceResponse::Metadata(response.clone()))
+                .expect("serialize metadata maintenance response"),
             serde_json::json!({
                 "kind": "metadata",
                 "namespace_id": "demo",
                 "outcome": "due",
                 "compaction_units": 16
             })
+        );
+        let skipped = MetadataMaintenanceResponse {
+            skipped: vec![MetadataSkippedWork::ExpiredRowRemovalWalkLimit],
+            ..response
+        };
+        let json = serde_json::to_value(RunMaintenanceResponse::Metadata(skipped.clone()))
+            .expect("serialize a run that skipped work");
+        assert_eq!(
+            json["skipped"],
+            serde_json::json!(["expired_row_removal_walk_limit"])
+        );
+        assert_eq!(
+            serde_json::from_value::<RunMaintenanceResponse>(json)
+                .expect("decode a run that skipped work"),
+            RunMaintenanceResponse::Metadata(skipped)
         );
         assert_eq!(
             serde_json::to_value(MetadataMaintenanceOutcome::CaughtUp)
@@ -215,15 +246,16 @@ mod tests {
         );
     }
 
-    /// Checks that a client decodes a metadata maintenance outcome from a newer server as
-    /// `Unknown`.
+    /// Checks that a client decodes a metadata maintenance outcome and a skipped reason from a
+    /// newer server as `Unknown`.
     #[test]
     fn a_metadata_outcome_from_a_newer_server_decodes_as_unknown() {
         let response: RunMaintenanceResponse = serde_json::from_value(serde_json::json!({
             "kind": "metadata",
             "namespace_id": "demo",
             "outcome": "throttled",
-            "compaction_units": 2
+            "compaction_units": 2,
+            "skipped": ["expired_row_removal_walk_limit", "a_newer_limit"]
         }))
         .expect("a newer outcome decodes");
         let RunMaintenanceResponse::Metadata(metadata) = response else {
@@ -231,6 +263,13 @@ mod tests {
         };
         assert_eq!(metadata.outcome, MetadataMaintenanceOutcome::Unknown);
         assert_eq!(metadata.compaction_units, 2);
+        assert_eq!(
+            metadata.skipped,
+            [
+                MetadataSkippedWork::ExpiredRowRemovalWalkLimit,
+                MetadataSkippedWork::Unknown
+            ]
+        );
     }
 
     #[test]
