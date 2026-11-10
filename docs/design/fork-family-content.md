@@ -10,7 +10,7 @@ So the question for the format is which prefix stores an object, because the pre
 
 ## The design
 
-A "fork family" is a set of namespaces: one namespace that was created without a source, and every namespace forked from it, directly or through other forks. Each namespace in the set is a "member" of the family. The namespace that was created without a source is the "family root". Every manifest records the namespace's family root (`family_root_id`). A plain create records the namespace itself, and a fork copies the value from the pinned source manifest. The value can't change.
+A "fork family" is a set of namespaces: one namespace that was created without a source, and every namespace forked from it, directly or through other forks. Each namespace in the set is a "member" of the family. The namespace that was created without a source is the "family root". Every manifest records the namespace's pool (`pool_id`), whose prefix stores the family's content. A plain create records a pool ID that the create call generates, and a fork copies the value from the pinned source manifest. The value can't change.
 
 Every member of a family writes new content under the family root's prefix: the object of each upload, the objects a fold writes for inline pieces, and the extents of new chains. Upload session records are stored under the same prefix, and each one records the namespace that created the session. A content reference contains a content ID, a size, and a checksum. The reader's own manifest supplies the family root, so a reference identifies the same object in every member. A fork reads inherited content and its own content by one rule, and content is never copied between the members of a family.
 

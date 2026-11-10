@@ -79,7 +79,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         }
 
         Ok(MultipartPartTargets {
-            object_key: content_blob(catalog.family_root_id(), &session.content_id),
+            object_key: content_blob(catalog.pool_id(), &session.content_id),
             provider_upload_id: provider_upload_id.to_owned(),
             parts,
         })

@@ -189,9 +189,10 @@ async fn an_append_continues_its_chain_and_preserves_earlier_revisions() {
             .await
             .expect("fold");
     }
+    let pool_id = pool_id(&store).await;
     assert_eq!(
         store
-            .get(&content_blob(&namespace_id, &original.content_id), None)
+            .get(&content_blob(&pool_id, &original.content_id), None)
             .await
             .expect("get")
             .expect("object"),
@@ -491,9 +492,10 @@ async fn appends_reject_a_base_in_another_store_algorithm() {
         (4, Checksum::crc32c(b"direct")),
     ] {
         let content_id = ContentId::generate();
+        let pool_id = pool_id(&store).await;
         store
             .put(
-                &content_blob(&namespace_id, &content_id),
+                &content_blob(&pool_id, &content_id),
                 Bytes::from_static(b"direct"),
                 PutMode::CreateIfAbsent,
             )
@@ -522,7 +524,7 @@ async fn appends_reject_a_base_in_another_store_algorithm() {
                         checksum: checksum.clone(),
                     },
                     layout: Some(loonfs_types::ContentLayout {
-                        creator_namespace_id: family_root_id(),
+                        creator_namespace_id: namespace_id.clone(),
                         extents: vec![loonfs_types::ContentExtent {
                             content_id,
                             object: loonfs_types::ExtentObject::Whole,
@@ -752,7 +754,7 @@ async fn a_fresh_chain_shares_folded_and_materialized_extents_without_copying_by
             let extent = row.layout.extents.last().expect("new extent");
             assert_eq!(extent.content_id, fresh.content_id);
             let key =
-                crate::storage::content_location::extent_object_key(&family_root_id(), extent);
+                crate::storage::content_location::extent_object_key(&pool_id(&store).await, extent);
             assert_eq!(
                 store.get(&key, None).await.expect("get").expect("object"),
                 suffix
@@ -849,7 +851,7 @@ async fn a_fresh_chain_with_missing_resident_base_bytes_writes_nothing() {
             whole,
             offset,
             Some(loonfs_types::ContentLayout {
-                creator_namespace_id: family_root_id(),
+                creator_namespace_id: namespace_id.clone(),
                 extents: vec![loonfs_types::ContentExtent {
                     content_id: value.content_ref().content_id.clone(),
                     object: loonfs_types::ExtentObject::Whole,

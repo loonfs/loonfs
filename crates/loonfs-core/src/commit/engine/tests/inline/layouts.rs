@@ -16,7 +16,7 @@ async fn layout(
     store: &RecordingStore<LocalFsStore>,
     reference: &ContentRef,
 ) -> ContentLayoutRecord {
-    crate::test_support::namespace_store(store, &family_root_id())
+    crate::test_support::namespace_store(store, &namespace_id())
         .load_current_metadata_view()
         .await
         .expect("view")
@@ -153,9 +153,10 @@ async fn folds_write_whole_then_spans_and_combine_small_tail_extents() {
             bytes
         );
     }
+    let pool_id = pool_id(&store).await;
     assert_eq!(
         store
-            .get(&content_blob(&namespace_id, &original.content_id), None)
+            .get(&content_blob(&pool_id, &original.content_id), None)
             .await
             .expect("get")
             .expect("whole"),
@@ -222,7 +223,8 @@ async fn three_extents_read_three_ranges_and_older_references_take_a_prefix() {
         bytes[..105]
     );
     assert_eq!(store.counts().gets, 2);
-    let missing = content_span(&namespace_id, &original.content_id, 100, 110);
+    let pool_id = pool_id(&store).await;
+    let missing = content_span(&pool_id, &original.content_id, 100, 110);
     store.delete(&missing).await.expect("delete span");
     assert_matches!(
         location.read_bytes(&store, None, &reference).await,
@@ -252,7 +254,8 @@ async fn a_combined_span_must_match_its_objects_stored_checksum() {
         .fold_wal()
         .await
         .expect("span fold");
-    let key = content_span(&namespace_id, &original.content_id, 100, 103);
+    let pool_id = pool_id(&store).await;
+    let key = content_span(&pool_id, &original.content_id, 100, 103);
     let incorrect = MetadataMapStore::new(
         store.clone(),
         KeyPredicate::exact(key.clone()),
@@ -315,11 +318,12 @@ async fn a_retry_accepts_a_span_with_a_matching_stored_checksum_without_changing
         ContentWrites::new(&store, &crate::test_support::content_writes(), view.head()),
         &view.projected_metadata_view(),
         &content,
-        assemble_tail_content(&family_root_id(), &content).expect("pieces"),
+        assemble_tail_content(&pool_id(&store).await, &content).expect("pieces"),
     )
     .await
     .expect("first write");
-    let key = content_span(&namespace_id, &original.content_id, 100, 110);
+    let pool_id = pool_id(&store).await;
+    let key = content_span(&pool_id, &original.content_id, 100, 110);
     let before = store.head(&key).await.expect("head").expect("span");
     crate::test_support::namespace_store(&store, &namespace_id)
         .fold_wal()
@@ -358,11 +362,12 @@ async fn a_retry_after_an_append_keeps_the_first_whole_object_immutable() {
         ContentWrites::new(&store, &crate::test_support::content_writes(), view.head()),
         &view.projected_metadata_view(),
         &content,
-        assemble_tail_content(&family_root_id(), &content).expect("pieces"),
+        assemble_tail_content(&pool_id(&store).await, &content).expect("pieces"),
     )
     .await
     .expect("whole before manifest");
     let access = ReadAccess::live(Authorizer::Unrestricted);
+    let pool_id = pool_id(&store).await;
     assert_eq!(
         view.direct_download_target(
             "/file-0",
@@ -375,7 +380,7 @@ async fn a_retry_after_an_append_keeps_the_first_whole_object_immutable() {
         .expect("equal whole download")
         .ranges[0]
             .object_key,
-        content_blob(&namespace_id, &original.content_ref().content_id)
+        content_blob(&pool_id, &original.content_ref().content_id)
     );
     let inode_id = tail.revisions().next().expect("revision").inode_id;
     let reference = commit_piece(
@@ -432,7 +437,7 @@ async fn a_retry_after_an_append_keeps_the_first_whole_object_immutable() {
     );
     assert_eq!(
         store
-            .get(&content_blob(&namespace_id, &reference.content_id), None)
+            .get(&content_blob(&pool_id, &reference.content_id), None)
             .await
             .expect("get whole")
             .expect("whole"),
@@ -527,7 +532,8 @@ async fn a_fresh_chain_shares_its_bases_extents_without_copying() {
         .fold_wal()
         .await
         .expect("fold shared base");
-    let span = content_span(&namespace_id, &fresh.content_id, 105, 106);
+    let pool_id = pool_id(&store).await;
+    let span = content_span(&pool_id, &fresh.content_id, 105, 106);
     assert_matches!(
         content_operations(&store).as_slice(),
         [RecordedOperation::Assemble { key, bytes: 1, .. }] if key == &span
@@ -575,16 +581,17 @@ async fn downloads_cover_three_extents_from_inside_the_second_and_create_empty_o
         .direct_download_target("/file-0", None, 105, &access, &content_writes)
         .await
         .expect("resumed ranges");
+    let pool_id = pool_id(&store).await;
     assert_eq!(
         target.ranges,
         vec![
             ObjectRange {
-                object_key: content_span(&namespace_id, &original.content_id, 100, 110),
+                object_key: content_span(&pool_id, &original.content_id, 100, 110),
                 object_start: 5,
                 length: 5,
             },
             ObjectRange {
-                object_key: content_span(&namespace_id, &original.content_id, 110, 113),
+                object_key: content_span(&pool_id, &original.content_id, 110, 113),
                 object_start: 0,
                 length: 3,
             },
@@ -628,7 +635,7 @@ async fn downloads_cover_three_extents_from_inside_the_second_and_create_empty_o
     assert_eq!(target.ranges[0].object_start, 0);
     assert_eq!(
         target.ranges[0].object_key,
-        content_blob(&namespace_id, &empty.content_ref().content_id)
+        content_blob(&pool_id, &empty.content_ref().content_id)
     );
     assert_eq!(
         store
@@ -690,9 +697,10 @@ async fn collection_lists_content_once_and_keeps_a_shared_base_of_another_chain(
         .fold_wal()
         .await
         .expect("fold");
+    let pool_id = pool_id(&store).await;
     let other = crate::storage::content_staging::stage_bytes_under_content_id(
         &store,
-        &namespace_id,
+        &pool_id,
         ContentId::parse("con_40000000000000000000000000").expect("other id"),
         b"other",
         crate::storage::content_staging::ContentKeyOwner::FreshIdentity,
@@ -722,16 +730,16 @@ async fn collection_lists_content_once_and_keeps_a_shared_base_of_another_chain(
         .await
         .expect("fold other file");
     prune_revisions(&store, &namespace_id).await;
-    let rooted_span = content_span(&namespace_id, &fresh.content_id, 5, 6);
-    let superseded_span = content_span(&namespace_id, &fresh.content_id, 1, 2);
+    let rooted_span = content_span(&pool_id, &fresh.content_id, 5, 6);
+    let superseded_span = content_span(&pool_id, &fresh.content_id, 1, 2);
     store
         .put_immutable_verified(&superseded_span, Bytes::from_static(b"x"))
         .await
         .expect("old span");
     let unrooted = ContentId::parse("con_70000000000000000000000000").expect("unrooted id");
     let unrooted_keys = [
-        content_blob(&namespace_id, &unrooted),
-        content_span(&namespace_id, &unrooted, 1, 2),
+        content_blob(&pool_id, &unrooted),
+        content_span(&pool_id, &unrooted, 1, 2),
     ];
     for key in &unrooted_keys {
         store
@@ -755,7 +763,7 @@ async fn collection_lists_content_once_and_keeps_a_shared_base_of_another_chain(
         .await
         .expect("collect");
     assert_eq!(report.deleted.content_objects, 3);
-    let prefix = loonfs_objectstore::keys::content_prefix(&namespace_id);
+    let prefix = loonfs_objectstore::keys::content_prefix(&pool_id);
     let listed: Vec<_> = store
         .snapshot()
         .into_iter()
@@ -772,10 +780,7 @@ async fn collection_lists_content_once_and_keeps_a_shared_base_of_another_chain(
         .await
         .expect("superseded span")
         .is_none());
-    let shared_keys = [
-        content_blob(&namespace_id, &original.content_id),
-        rooted_span,
-    ];
+    let shared_keys = [content_blob(&pool_id, &original.content_id), rooted_span];
     for key in &shared_keys {
         assert!(store.head(key).await.expect("head").is_some(), "{key}");
     }
@@ -1028,7 +1033,8 @@ async fn collection_keeps_shared_objects_that_a_restore_names_across_a_floor_adv
         "at most the deleted copy's replacement is collected: {first:?}, {second:?}"
     );
     for extent in &shared_layout.layout.extents {
-        let key = crate::storage::content_location::extent_object_key(&family_root_id(), extent);
+        let key =
+            crate::storage::content_location::extent_object_key(&pool_id(&store).await, extent);
         assert!(store.head(&key).await.expect("head").is_some(), "{key}");
     }
     assert_eq!(
@@ -1078,8 +1084,9 @@ async fn tail_revision_downloads_use_materialized_objects_in_either_order() {
         let namespace = crate::test_support::namespace_store(&blocked, &namespace_id);
         let view = namespace.load_current_metadata_view().await.expect("view");
         let access = ReadAccess::live(Authorizer::Unrestricted);
+        let pool_id = pool_id(&store).await;
         for revision in revisions {
-            let key = content_span(&namespace_id, &original.content_ref().content_id, 0, 10);
+            let key = content_span(&pool_id, &original.content_ref().content_id, 0, 10);
             let pool = crate::PermitPool::new(std::num::NonZeroUsize::MIN, None);
             let absent = store.head(&key).await.expect("head").is_none();
             if absent {
@@ -1125,7 +1132,7 @@ async fn tail_revision_downloads_use_materialized_objects_in_either_order() {
                 .expect("object");
             assert_eq!(bytes, expected);
         }
-        let key = content_span(&namespace_id, &original.content_ref().content_id, 0, 10);
+        let key = content_span(&pool_id, &original.content_ref().content_id, 0, 10);
         let before = store.head(&key).await.expect("head").expect("span");
         crate::test_support::namespace_store(&store, &namespace_id)
             .fold_wal()
@@ -1527,7 +1534,7 @@ async fn a_pending_reference_keeps_its_chain_through_a_floor_advance() {
         collect_aged(&store, &namespace_id, &context).await;
         for extent in &carried.extents {
             let key =
-                crate::storage::content_location::extent_object_key(&family_root_id(), extent);
+                crate::storage::content_location::extent_object_key(&pool_id(&store).await, extent);
             assert!(store.head(&key).await.expect("head").is_some(), "{key}");
         }
         let (path, revision_no) = if restore {

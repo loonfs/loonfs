@@ -1266,7 +1266,7 @@ fn embedded_profile_namespace_fork_reads_shared_content_and_diverges() {
                 "source_head_seq": 1,
                 "source_pin_id": json_data(&fork)["fork_basis"]["source_pin_id"]
             },
-            "family_root_id": "demo",
+            "pool_id": json_data(&fork)["pool_id"],
             "head_seq": 1,
             "retention_floor_seq": 1
         })
@@ -2339,9 +2339,14 @@ fn a_remote_put_replays_its_exact_request_after_the_upload_session_is_gone() {
     ];
     let first = harness.run(&args);
     assert_success(&first);
-    let uploads = harness
-        .store_root("remote")
-        .join("put-recovery/namespaces/demo/uploads");
+    let pools = fs::read_dir(harness.store_root("remote").join("put-recovery/pools"))
+        .expect("pools")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("pool directories");
+    let [pool] = pools.as_slice() else {
+        panic!("one namespace has one pool, found {pools:?}");
+    };
+    let uploads = pool.path().join("uploads");
     let records = fs::read_dir(&uploads)
         .expect("upload sessions")
         .collect::<Result<Vec<_>, _>>()

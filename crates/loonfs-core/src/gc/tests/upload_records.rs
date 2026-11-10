@@ -86,8 +86,9 @@ async fn upload_keys<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Vec<String> {
+    let pool_id = crate::test_support::load_pool_id(store, namespace_id).await;
     store
-        .list_prefix(&upload_session_prefix(namespace_id))
+        .list_prefix(&upload_session_prefix(&pool_id))
         .await
         .expect("list upload records")
 }
@@ -112,7 +113,6 @@ async fn a_collection_that_stops_between_the_two_deletes_leaves_an_outcome_the_n
 ) {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let prefix = upload_session_prefix(&namespace_id);
     let upload_deletes = Arc::new(AtomicUsize::new(0));
     // Fails the second delete of an upload record, whichever record it is.
     let store = FailStore::matching(
@@ -120,7 +120,7 @@ async fn a_collection_that_stops_between_the_two_deletes_leaves_an_outcome_the_n
         {
             let upload_deletes = Arc::clone(&upload_deletes);
             move |operation: &OperationContext<'_>| {
-                operation.key().starts_with(&prefix)
+                KeyPredicate::upload_records().matches(operation.key())
                     && matches!(operation.kind(), OperationKind::Delete)
                     && upload_deletes.fetch_add(1, Ordering::SeqCst) == 1
             }
@@ -137,7 +137,8 @@ async fn a_collection_that_stops_between_the_two_deletes_leaves_an_outcome_the_n
         .await
         .expect("complete");
     commit_upload(&store, &namespace_id, "/committed.txt", completed.prepared).await;
-    let content_key = content_blob(&namespace_id, &content_ref.content_id);
+    let pool_id = crate::test_support::load_pool_id(&store, &namespace_id).await;
+    let content_key = content_blob(&pool_id, &content_ref.content_id);
     let past_grace = now_after_newest_object(
         &store,
         &namespace_id,
@@ -152,7 +153,7 @@ async fn a_collection_that_stops_between_the_two_deletes_leaves_an_outcome_the_n
         .expect_err("the collection stops at its second delete");
     assert_eq!(
         upload_keys(&store, &namespace_id).await,
-        [upload_outcome(&namespace_id, &upload_id)],
+        [upload_outcome(&pool_id, &upload_id)],
         "the session record goes first"
     );
     assert!(read_upload_session(&store, &namespace_id, &upload_id)
@@ -195,7 +196,8 @@ async fn a_completion_stalled_across_a_collection_that_deleted_an_aborted_sessio
         .await
         .expect("bootstrap");
     let (upload_id, content_ref) = stage_upload(&store, &namespace_id, &setup).await;
-    let content_key = content_blob(&namespace_id, &content_ref.content_id);
+    let pool_id = crate::test_support::load_pool_id(&store, &namespace_id).await;
+    let content_key = content_blob(&pool_id, &content_ref.content_id);
     let aborted_at_ms = 3_000;
     let past_abort_grace = aborted_at_ms + GRACE_MS + 1;
 
@@ -218,7 +220,7 @@ async fn a_completion_stalled_across_a_collection_that_deleted_an_aborted_sessio
     assert_matches!(completion, Err(CoreError::UploadNotFound { .. }));
     assert_eq!(
         upload_keys(&store, &namespace_id).await,
-        [upload_outcome(&namespace_id, &upload_id)],
+        [upload_outcome(&pool_id, &upload_id)],
         "the stalled completion's outcome is left without its session"
     );
     for result in [
@@ -261,9 +263,10 @@ async fn an_outcome_without_its_session_record_is_deleted_only_once_older_than_t
         .await
         .expect("bootstrap");
     let session = crate::test_support::proxied_upload_session(&namespace_id, 2_000);
+    let pool_id = crate::test_support::load_pool_id(&store, &namespace_id).await;
     let session_key = crate::test_support::write_upload_records(
         &store,
-        &namespace_id,
+        &pool_id,
         &session,
         Some(UploadOutcome::Aborted {
             aborted_at_ms: 1_000,
@@ -274,7 +277,8 @@ async fn an_outcome_without_its_session_record_is_deleted_only_once_older_than_t
         .delete(&session_key)
         .await
         .expect("delete session record");
-    let outcome_key = upload_outcome(&namespace_id, &session.upload_id);
+    let pool_id = crate::test_support::load_pool_id(&store, &namespace_id).await;
+    let outcome_key = upload_outcome(&pool_id, &session.upload_id);
     let written_at_ms = store
         .head(&outcome_key)
         .await
@@ -315,7 +319,8 @@ async fn an_abort_stalled_across_a_collection_that_deleted_a_completed_session_k
         .await
         .expect("bootstrap");
     let (upload_id, content_ref) = stage_upload(&store, &namespace_id, &setup).await;
-    let content_key = content_blob(&namespace_id, &content_ref.content_id);
+    let pool_id = crate::test_support::load_pool_id(&store, &namespace_id).await;
+    let content_key = content_blob(&pool_id, &content_ref.content_id);
 
     let (aborted, ()) = tokio::join!(abort(&store, &namespace_id, &upload_id, 2_000), async {
         store.wait_until_blocked().await;
@@ -348,7 +353,7 @@ async fn an_abort_stalled_across_a_collection_that_deleted_a_completed_session_k
         "the stalled abort deletes no committed content"
     );
     assert!(store
-        .head(&upload_session(&namespace_id, &upload_id))
+        .head(&upload_session(&pool_id, &upload_id))
         .await
         .expect("head")
         .is_none());

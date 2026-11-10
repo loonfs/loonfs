@@ -41,20 +41,13 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         };
         let (uploaded, direct_put_object_key) = match (&loaded.outcome, &loaded.session.mode) {
             (None, UploadSessionMode::ServiceProxied {}) => (
-                find_proxied_content_ref(
-                    &self.namespace.store,
-                    catalog.family_root_id(),
-                    &loaded.session,
-                )
-                .await?,
+                find_proxied_content_ref(&self.namespace.store, catalog.pool_id(), &loaded.session)
+                    .await?,
                 None,
             ),
             (None, UploadSessionMode::DirectPut { .. }) => (
                 None,
-                Some(content_blob(
-                    catalog.family_root_id(),
-                    &loaded.session.content_id,
-                )),
+                Some(content_blob(catalog.pool_id(), &loaded.session.content_id)),
             ),
             _ => (None, None),
         };

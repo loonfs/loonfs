@@ -44,9 +44,9 @@ impl ContentSweep {
         let live = sweep.live;
         let namespace_id = &sweep.namespace.namespace_id;
         let (family_members, family_members_read) = (live.family.members, live.family.members_read);
-        // A fork's content prefix stores nothing. A family root sweeps its
-        // family's content whether it's active or deleted, until its
-        // retirement lists and deletes the whole content prefix.
+        // Only a family root sweeps its pool's content, whether it's active or
+        // deleted, until its retirement lists and deletes the whole content
+        // prefix.
         if !live.collects_family_content() || live.retirement_status() == RetirementStatus::Eligible
         {
             tracing::info!(namespace_id = %namespace_id, layout_segments = 0,
@@ -94,7 +94,7 @@ impl ContentSweep {
         }))
     }
 
-    /// Lists the family root's content prefix once and decides each listed
+    /// Lists the pool's content prefix once and decides each listed
     /// object from the extent filters and from the content IDs of the WAL
     /// tails and upload sessions.
     pub(super) async fn sweep<S: ObjectStore>(
@@ -102,9 +102,7 @@ impl ContentSweep {
         sweep: &Sweep<'_, S>,
         report: &mut GcResponse,
     ) -> Result<()> {
-        // Only a family root's collection sweeps content, so the collected
-        // namespace's prefix is the family's.
-        let prefix = content_prefix(&sweep.namespace.namespace_id);
+        let prefix = content_prefix(&sweep.live.pool_id);
         let decisions = sweep
             .namespace
             .store

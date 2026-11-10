@@ -2,7 +2,7 @@
 
 use loonfs_types::{
     sha256_hex, ActorId, AttributeKey, AttributeValue, CommitFingerprint, CommitId, ContentId,
-    ContentRef, EffectiveLimit, NamespaceId, PageRequest, WriterId, DEFAULT_PAGE_LIMIT,
+    ContentRef, EffectiveLimit, NamespaceId, PageRequest, PoolId, WriterId, DEFAULT_PAGE_LIMIT,
 };
 use std::num::{NonZeroU32, NonZeroUsize};
 
@@ -49,6 +49,12 @@ pub fn content_id(value: &str) -> ContentId {
 /// filters match the same names in every run.
 pub fn numbered_content_id(number: usize) -> ContentId {
     ContentId::parse(format!("con_{number:026}")).expect("valid content id")
+}
+
+/// Returns the pool ID whose body is the decimal digits of `number`, for a
+/// test or fixture that needs the same pool ID in every run.
+pub fn numbered_pool_id(number: usize) -> PoolId {
+    PoolId::parse(format!("pool_{number:026}")).expect("valid pool id")
 }
 
 /// Builds a valid commit fingerprint from the SHA-256 of `label`, for tests

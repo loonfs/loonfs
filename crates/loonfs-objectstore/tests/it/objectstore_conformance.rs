@@ -7,7 +7,7 @@ use crate::provider_env::{
 use bytes::Bytes;
 use futures::{StreamExt, TryStreamExt};
 use loonfs_objectstore::gcs::GcpGcsStoreConfig;
-use loonfs_objectstore::keys::{content_blob, content_span};
+use loonfs_objectstore::keys::{content_blob, content_span, temporary_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::presign::{DirectMultipartIssuer, PresignedPartRequest};
 use loonfs_objectstore::probe::{run_store_contract_probe, StoreProbeReport};
@@ -21,7 +21,7 @@ use loonfs_objectstore::{
 use loonfs_objectstore::{ConfiguredObjectStore, MultipartPart};
 use loonfs_test_support::ids::page_limit;
 use loonfs_types::StoreProbeResponse;
-use loonfs_types::{Checksum, ChecksumAlgorithm, ContentId, NamespaceId, Page};
+use loonfs_types::{Checksum, ChecksumAlgorithm, ContentId, Page};
 use object_store::client::{HttpClient, HttpConnector, HttpRequestBody, ReqwestConnector};
 use std::assert_matches;
 use tempfile::TempDir;
@@ -511,7 +511,7 @@ async fn assert_direct_completion_is_create_only(configured: ConfiguredObjectSto
         .expect("direct multipart needs a proven endpoint");
     let store = configured.into_shared();
     let key = content_blob(
-        &NamespaceId::parse("demo").expect("namespace id"),
+        &loonfs_test_support::ids::numbered_pool_id(1),
         &ContentId::generate(),
     );
     let http = ReqwestConnector::default()
@@ -637,7 +637,7 @@ fn probe_report_lines(report: &StoreProbeReport) -> String {
 /// Returns the object key used by the stored-checksum test.
 fn stored_checksum_test_key() -> String {
     content_blob(
-        &loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
+        &loonfs_test_support::ids::numbered_pool_id(1),
         &ContentId::parse("con_4t8707tnf2847v7hprw7sa7d65").expect("valid content id"),
     )
 }
@@ -680,7 +680,7 @@ async fn assert_put_stores_a_trustworthy_checksum<S: ObjectStore>(store: &S, pro
 /// The content key a streamed-write exercise writes to and cleans up.
 fn streamed_write_key() -> String {
     content_blob(
-        &loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
+        &loonfs_test_support::ids::numbered_pool_id(1),
         &ContentId::parse("con_2q4fn9t72b93ra3mq3yjjvdhyr").expect("valid content id"),
     )
 }
@@ -754,7 +754,7 @@ async fn assert_assembly<S: ObjectStore>(
     cases: &[(usize, usize)],
     crc: ChecksumAlgorithm,
 ) {
-    let namespace_id = NamespaceId::parse("demo").expect("namespace");
+    let pool_id = loonfs_test_support::ids::numbered_pool_id(1);
     for &(first_length, second_length) in cases {
         let first = Bytes::from(vec![b'a'; first_length]);
         let second = Bytes::from(vec![b'b'; second_length]);
@@ -762,7 +762,7 @@ async fn assert_assembly<S: ObjectStore>(
         let payload = [first.as_ref(), second.as_ref(), tail.as_ref()].concat();
         let mut sources = Vec::new();
         for bytes in [first, second] {
-            let key = content_blob(&namespace_id, &ContentId::generate());
+            let key = content_blob(&pool_id, &ContentId::generate());
             store
                 .put_immutable_verified(&key, bytes.clone())
                 .await
@@ -775,7 +775,7 @@ async fn assert_assembly<S: ObjectStore>(
             });
         }
         let key = content_span(
-            &namespace_id,
+            &pool_id,
             &ContentId::generate(),
             7,
             7 + payload.len() as u64,
@@ -831,7 +831,7 @@ async fn assert_assembly<S: ObjectStore>(
                 .size_bytes,
             payload.len() as u64
         );
-        let wrong_key = content_blob(&namespace_id, &ContentId::generate());
+        let wrong_key = content_blob(&pool_id, &ContentId::generate());
         assert_matches!(
             store
                 .assemble(
@@ -845,7 +845,7 @@ async fn assert_assembly<S: ObjectStore>(
         );
         // A provider that verifies after completion leaves the rejected object
         // for collection; nothing names it, and no writer deletes it.
-        let ranged = content_blob(&namespace_id, &ContentId::generate());
+        let ranged = content_blob(&pool_id, &ContentId::generate());
         sources[0].range = Some(ByteRange {
             start_inclusive: 1,
             end_exclusive: first_length as u64 - 1,
@@ -903,7 +903,7 @@ async fn assert_assembly<S: ObjectStore>(
         store.delete(&key).await.expect("delete assembly");
     }
     assert!(store
-        .list_prefix("namespaces/demo/temporary/")
+        .list_prefix(&temporary_prefix(&pool_id))
         .await
         .expect("temporaries")
         .is_empty());
@@ -917,7 +917,7 @@ async fn assert_put_and_assembly_share_identity<S: ObjectStore>(
     expected: &Checksum,
 ) {
     let put_key = content_blob(
-        &NamespaceId::parse("demo").expect("namespace"),
+        &loonfs_test_support::ids::numbered_pool_id(1),
         &ContentId::generate(),
     );
     store
@@ -950,12 +950,12 @@ async fn assert_put_and_assembly_share_identity<S: ObjectStore>(
 }
 
 async fn assert_chained_compose<S: ObjectStore>(store: &S) {
-    let owner = NamespaceId::parse("demo").expect("owner");
+    let pool_id = loonfs_test_support::ids::numbered_pool_id(1);
     let mut sources = Vec::new();
     let mut bytes = Vec::new();
     for index in 0..40 {
         let source = Bytes::from(vec![index; MIB / 4]);
-        let key = content_blob(&owner, &ContentId::generate());
+        let key = content_blob(&pool_id, &ContentId::generate());
         store
             .put_immutable_verified(&key, source.clone())
             .await
@@ -968,7 +968,7 @@ async fn assert_chained_compose<S: ObjectStore>(store: &S) {
         });
         bytes.extend_from_slice(&source);
     }
-    let key = content_blob(&owner, &ContentId::generate());
+    let key = content_blob(&pool_id, &ContentId::generate());
     let expected = Checksum::crc32c(&bytes);
     let result = store
         .assemble(&key, &sources, Vec::new(), &expected)
@@ -980,7 +980,7 @@ async fn assert_chained_compose<S: ObjectStore>(store: &S) {
         bytes
     );
     assert!(store
-        .list_prefix("namespaces/demo/temporary/")
+        .list_prefix(&temporary_prefix(&pool_id))
         .await
         .expect("temporaries")
         .is_empty());

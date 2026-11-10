@@ -969,7 +969,7 @@ async fn a_repeated_retirement_collection_lists_once_and_deletes_nothing() {
     let directory = tempdir().expect("directory");
     let store = Arc::new(RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::prefix("namespaces/retired/content/"),
+        KeyPredicate::new(|key| key.starts_with("pools/") && key.contains("/content/")),
     ));
     let namespace_id = namespace_id("retired");
     let writer = LoonFs::builder_with_store(store.clone())
@@ -982,10 +982,9 @@ async fn a_repeated_retirement_collection_lists_once_and_deletes_nothing() {
         .await
         .expect("namespace");
     for _ in 0..3 {
-        let key = loonfs_objectstore::keys::content_blob(
-            &namespace_id,
-            &loonfs_types::ContentId::generate(),
-        );
+        let pool_id = loonfs_core::test_support::load_pool_id(&store, &namespace_id).await;
+        let key =
+            loonfs_objectstore::keys::content_blob(&pool_id, &loonfs_types::ContentId::generate());
         store
             .put_if_absent(&key, bytes::Bytes::from_static(b"content"))
             .await

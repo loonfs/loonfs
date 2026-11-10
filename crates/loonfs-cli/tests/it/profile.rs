@@ -1289,7 +1289,7 @@ fn external_remote_profile_executes_through_http() {
             "namespace_id": "demo",
             "created_at_ms": json_data(&create)["created_at_ms"],
             "created_by": "loonfs-cli",
-            "family_root_id": "demo",
+            "pool_id": json_data(&create)["pool_id"],
             "head_seq": 0,
             "retention_floor_seq": 0
         })
@@ -1309,7 +1309,7 @@ fn external_remote_profile_executes_through_http() {
                 "source_head_seq": 0,
                 "source_pin_id": json_data(&fork)["fork_basis"]["source_pin_id"]
             },
-            "family_root_id": "demo",
+            "pool_id": json_data(&create)["pool_id"],
             "head_seq": 0,
             "retention_floor_seq": 0
         })

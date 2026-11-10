@@ -49,6 +49,18 @@ impl KeyPredicate {
         Self::family(DurableObjectFamily::ContentBlob)
     }
 
+    /// Selects the keys of upload session records and upload outcome records.
+    pub fn upload_records() -> Self {
+        Self::new(|key| {
+            parse_object_key(key).is_some_and(|parsed| {
+                matches!(
+                    parsed.family(),
+                    DurableObjectFamily::UploadSession | DurableObjectFamily::UploadOutcome
+                )
+            })
+        })
+    }
+
     /// Selects metadata-segment keys.
     pub fn metadata_segment() -> Self {
         Self::family(DurableObjectFamily::MetadataSegment)

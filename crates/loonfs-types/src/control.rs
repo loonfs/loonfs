@@ -309,7 +309,7 @@ impl UploadSessionMode {
 pub struct UploadSessionPayload {
     /// The namespace that created the session, and the only namespace whose
     /// commits the session's content admits. The record is stored under the
-    /// prefix of that namespace's family root.
+    /// prefix of that namespace's pool.
     pub namespace_id: NamespaceId,
     /// Durable session identity used by upload and completion requests.
     pub upload_id: UploadId,

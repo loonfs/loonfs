@@ -3,9 +3,9 @@
 
 use crate::keys::{
     namespace_prefix, CONTENT_DIRECTORY, EXTENSIONS_DIRECTORY, HINT_NAME, MANIFEST_DIRECTORY,
-    MANIFEST_SUFFIX, NAMESPACES_DIRECTORY, PIN_DIRECTORY, PIN_SUFFIX, SEGMENT_DIRECTORY,
-    SEGMENT_SUFFIX, TEMPORARY_DIRECTORY, UPLOAD_DIRECTORY, UPLOAD_OUTCOME_SUFFIX,
-    UPLOAD_SESSION_SUFFIX, WAL_DIRECTORY, WAL_SUFFIX,
+    MANIFEST_SUFFIX, NAMESPACES_DIRECTORY, PIN_DIRECTORY, PIN_SUFFIX, POOLS_DIRECTORY,
+    SEGMENT_DIRECTORY, SEGMENT_SUFFIX, TEMPORARY_DIRECTORY, UPLOAD_DIRECTORY,
+    UPLOAD_OUTCOME_SUFFIX, UPLOAD_SESSION_SUFFIX, WAL_DIRECTORY, WAL_SUFFIX,
 };
 use crate::{ObjectStore, Result};
 use loonfs_types::{ContentId, EffectiveLimit, ManifestNo, NamespaceId, UploadId};
@@ -51,11 +51,24 @@ pub enum DurableObjectFamily {
     TemporaryObject,
 }
 
+/// The prefix that contains a recognized key, with the unvalidated ID text
+/// from the key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyPrefix<'a> {
+    /// The prefix of a namespace (`namespaces/{namespace_id}/`), which
+    /// contains the namespace's WAL objects, manifests, hint, pins, and the
+    /// metadata and extension segments that the namespace owns.
+    Namespace(&'a str),
+    /// The prefix of a pool (`pools/{pool_id}/`), which contains the pool's
+    /// content objects, upload records, and temporary objects.
+    Pool(&'a str),
+}
+
 /// Reports the durable family and identifiers recoverable from a recognized key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedObjectKey<'a> {
     family: DurableObjectFamily,
-    prefix_namespace_id: &'a str,
+    prefix: KeyPrefix<'a>,
     identifier: Option<&'a str>,
 }
 
@@ -65,11 +78,12 @@ impl<'a> ParsedObjectKey<'a> {
         self.family
     }
 
-    /// Returns the namespace whose prefix contains the key: the family root
-    /// for a content object or an upload record, the owner for a metadata or
-    /// extension segment, and the namespace itself for every other family.
-    pub fn prefix_namespace_id(&self) -> &'a str {
-        self.prefix_namespace_id
+    /// Returns the prefix that contains the key: the pool for a content
+    /// object, an upload record, or a temporary object, the owner namespace
+    /// for a metadata or extension segment, and the namespace itself for
+    /// every other family.
+    pub fn prefix(&self) -> KeyPrefix<'a> {
+        self.prefix
     }
 
     /// Returns the family-specific identifier when the key has one.
@@ -85,16 +99,16 @@ impl<'a> ParsedObjectKey<'a> {
 pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
     let segments: Vec<_> = key.split('/').collect();
     match segments.as_slice() {
-        [NAMESPACES_DIRECTORY, family_root_id, CONTENT_DIRECTORY, content_id]
+        [POOLS_DIRECTORY, pool_id, CONTENT_DIRECTORY, content_id]
             if content_id.len() == CONTENT_ID_BYTES =>
         {
             Some(parsed(
                 DurableObjectFamily::ContentBlob,
-                family_root_id,
+                KeyPrefix::Pool(pool_id),
                 Some(content_id),
             ))
         }
-        [NAMESPACES_DIRECTORY, family_root_id, CONTENT_DIRECTORY, object]
+        [POOLS_DIRECTORY, pool_id, CONTENT_DIRECTORY, object]
             if object.len() == CONTENT_SPAN_NAME_BYTES
                 && object.is_ascii()
                 && object.as_bytes()[CONTENT_ID_BYTES] == b'-'
@@ -108,22 +122,30 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
         {
             Some(parsed(
                 DurableObjectFamily::ContentBlob,
-                family_root_id,
+                KeyPrefix::Pool(pool_id),
                 Some(&object[..CONTENT_ID_BYTES]),
             ))
         }
         [NAMESPACES_DIRECTORY, namespace, WAL_DIRECTORY, object] => object
             .strip_suffix(WAL_SUFFIX)
             .filter(|identifier| parse_wal_no(identifier).is_some())
-            .map(|identifier| parsed(DurableObjectFamily::WalObject, namespace, Some(identifier))),
-        [NAMESPACES_DIRECTORY, namespace, HINT_NAME] => {
-            Some(parsed(DurableObjectFamily::Hint, namespace, None))
-        }
+            .map(|identifier| {
+                parsed(
+                    DurableObjectFamily::WalObject,
+                    KeyPrefix::Namespace(namespace),
+                    Some(identifier),
+                )
+            }),
+        [NAMESPACES_DIRECTORY, namespace, HINT_NAME] => Some(parsed(
+            DurableObjectFamily::Hint,
+            KeyPrefix::Namespace(namespace),
+            None,
+        )),
         [NAMESPACES_DIRECTORY, namespace, MANIFEST_DIRECTORY, manifest] => {
             manifest.strip_suffix(MANIFEST_SUFFIX).map(|identifier| {
                 parsed(
                     DurableObjectFamily::MetadataManifest,
-                    namespace,
+                    KeyPrefix::Namespace(namespace),
                     Some(identifier),
                 )
             })
@@ -132,7 +154,7 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
             segment.strip_suffix(SEGMENT_SUFFIX).map(|identifier| {
                 parsed(
                     DurableObjectFamily::MetadataSegment,
-                    namespace,
+                    KeyPrefix::Namespace(namespace),
                     Some(identifier),
                 )
             })
@@ -141,19 +163,25 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
             segment.strip_suffix(SEGMENT_SUFFIX).map(|identifier| {
                 parsed(
                     DurableObjectFamily::ExtensionSegment,
-                    namespace,
+                    KeyPrefix::Namespace(namespace),
                     Some(identifier),
                 )
             })
         }
-        [NAMESPACES_DIRECTORY, namespace, PIN_DIRECTORY, pin] => pin
-            .strip_suffix(PIN_SUFFIX)
-            .map(|identifier| parsed(DurableObjectFamily::Pin, namespace, Some(identifier))),
-        [NAMESPACES_DIRECTORY, family_root_id, UPLOAD_DIRECTORY, upload] => {
+        [NAMESPACES_DIRECTORY, namespace, PIN_DIRECTORY, pin] => {
+            pin.strip_suffix(PIN_SUFFIX).map(|identifier| {
+                parsed(
+                    DurableObjectFamily::Pin,
+                    KeyPrefix::Namespace(namespace),
+                    Some(identifier),
+                )
+            })
+        }
+        [POOLS_DIRECTORY, pool_id, UPLOAD_DIRECTORY, upload] => {
             match upload.strip_suffix(UPLOAD_OUTCOME_SUFFIX) {
                 Some(identifier) => Some(parsed(
                     DurableObjectFamily::UploadOutcome,
-                    family_root_id,
+                    KeyPrefix::Pool(pool_id),
                     Some(identifier),
                 )),
                 None => upload
@@ -161,15 +189,15 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
                     .map(|identifier| {
                         parsed(
                             DurableObjectFamily::UploadSession,
-                            family_root_id,
+                            KeyPrefix::Pool(pool_id),
                             Some(identifier),
                         )
                     }),
             }
         }
-        [NAMESPACES_DIRECTORY, namespace, TEMPORARY_DIRECTORY, temporary] => Some(parsed(
+        [POOLS_DIRECTORY, pool_id, TEMPORARY_DIRECTORY, temporary] => Some(parsed(
             DurableObjectFamily::TemporaryObject,
-            namespace,
+            KeyPrefix::Pool(pool_id),
             Some(temporary),
         )),
         _ => None,
@@ -296,12 +324,12 @@ pub async fn list_namespace_ids<S: ObjectStore + ?Sized>(
 
 fn parsed<'a>(
     family: DurableObjectFamily,
-    prefix_namespace_id: &'a str,
+    prefix: KeyPrefix<'a>,
     identifier: Option<&'a str>,
 ) -> ParsedObjectKey<'a> {
     ParsedObjectKey {
         family,
-        prefix_namespace_id,
+        prefix,
         identifier,
     }
 }
@@ -311,12 +339,13 @@ mod tests {
     // The key builder is tested where it is defined.
     #![allow(clippy::disallowed_methods)]
 
-    use super::{parse_object_key, DurableObjectFamily};
+    use super::{parse_object_key, DurableObjectFamily, KeyPrefix};
     use crate::keys::{
         content_blob, extension_segment, hint, metadata_manifest_object, metadata_segment,
         metadata_segment_prefix, pin, temporary_object, upload_outcome, upload_session, wal_object,
         wal_prefix,
     };
+    use loonfs_test_support::ids::numbered_pool_id;
     use loonfs_types::{
         ContentId, ExtensionName, IndexSegmentId, ManifestNo, MetadataSegmentId, NamespaceId,
         PinId, UploadId, WalNo,
@@ -324,10 +353,10 @@ mod tests {
 
     #[test]
     fn spans_use_the_chain_id_and_require_exact_decimal_bounds() {
-        let family_root_id = NamespaceId::parse("root").expect("namespace");
+        let pool_id = numbered_pool_id(1);
         let content_id = ContentId::generate();
-        let own_key = content_blob(&family_root_id, &content_id);
-        let key = crate::keys::content_span(&family_root_id, &content_id, 2, 19);
+        let own_key = content_blob(&pool_id, &content_id);
+        let key = crate::keys::content_span(&pool_id, &content_id, 2, 19);
         assert_eq!(
             key,
             format!("{own_key}-00000000000000000002-00000000000000000019")
@@ -350,8 +379,11 @@ mod tests {
     }
 
     #[test]
-    fn built_keys_parse_to_their_family_prefix_namespace_and_identifier() {
+    fn built_keys_parse_to_their_family_prefix_and_identifier() {
         let namespace_id = NamespaceId::parse("ns-1").expect("namespace id");
+        let pool_id = numbered_pool_id(1);
+        let namespace = KeyPrefix::Namespace("ns-1");
+        let pool = KeyPrefix::Pool(pool_id.as_str());
         let wal_no = WalNo(1);
         let manifest_object_id = ManifestNo(400);
         let metadata_segment_id = MetadataSegmentId::parse("seg_00000000000000000000000001")
@@ -361,23 +393,31 @@ mod tests {
         let content_id = ContentId::parse("con_5bsqqg28t5cy4tqkff04hmasw9").expect("content id");
         let index_segment_id =
             IndexSegmentId::parse("idx_00000000000000000000000001").expect("index segment id");
-        let temporary = temporary_object(&namespace_id);
+        let temporary = temporary_object(&pool_id);
         let temporary_id = temporary.rsplit('/').next();
         let cases = [
             (
                 wal_object(&namespace_id, &wal_no),
                 DurableObjectFamily::WalObject,
+                namespace,
                 Some("00000000000000000001"),
             ),
-            (hint(&namespace_id), DurableObjectFamily::Hint, None),
+            (
+                hint(&namespace_id),
+                DurableObjectFamily::Hint,
+                namespace,
+                None,
+            ),
             (
                 metadata_manifest_object(&namespace_id, &manifest_object_id),
                 DurableObjectFamily::MetadataManifest,
+                namespace,
                 Some("00000000000000000400"),
             ),
             (
                 metadata_segment(&namespace_id, &metadata_segment_id),
                 DurableObjectFamily::MetadataSegment,
+                namespace,
                 Some(metadata_segment_id.as_str()),
             ),
             (
@@ -387,77 +427,79 @@ mod tests {
                     &index_segment_id,
                 ),
                 DurableObjectFamily::ExtensionSegment,
+                namespace,
                 Some(index_segment_id.as_str()),
             ),
             (
                 pin(&namespace_id, &pin_id),
                 DurableObjectFamily::Pin,
+                namespace,
                 Some(pin_id.as_str()),
             ),
             (
-                upload_session(&namespace_id, &upload_id),
+                upload_session(&pool_id, &upload_id),
                 DurableObjectFamily::UploadSession,
+                pool,
                 Some(upload_id.as_str()),
             ),
             (
-                upload_outcome(&namespace_id, &upload_id),
+                upload_outcome(&pool_id, &upload_id),
                 DurableObjectFamily::UploadOutcome,
+                pool,
                 Some(upload_id.as_str()),
             ),
             (
-                content_blob(&namespace_id, &content_id),
+                content_blob(&pool_id, &content_id),
                 DurableObjectFamily::ContentBlob,
+                pool,
+                Some(content_id.as_str()),
+            ),
+            (
+                crate::keys::content_span(&pool_id, &content_id, 2, 19),
+                DurableObjectFamily::ContentBlob,
+                pool,
                 Some(content_id.as_str()),
             ),
             (
                 temporary.clone(),
                 DurableObjectFamily::TemporaryObject,
+                pool,
                 temporary_id,
             ),
         ];
 
-        for (key, family, identifier) in cases {
+        for (key, family, prefix, identifier) in cases {
             let parsed = parse_object_key(&key).expect("built key should parse");
             assert_eq!(parsed.family(), family);
-            assert_eq!(parsed.prefix_namespace_id(), "ns-1");
+            assert_eq!(parsed.prefix(), prefix);
             assert_eq!(parsed.identifier(), identifier);
         }
-        for family_root_id in ["a", "ab"] {
-            let family_root_id = NamespaceId::parse(family_root_id).expect("family root");
-            let key = content_blob(&family_root_id, &content_id);
-            assert_eq!(
-                key,
-                format!("namespaces/{family_root_id}/content/{content_id}")
-            );
-            assert_eq!(
-                parse_object_key(&key)
-                    .expect("content key")
-                    .prefix_namespace_id(),
-                family_root_id.as_str()
-            );
-        }
+        assert_eq!(
+            content_blob(&pool_id, &content_id),
+            format!("pools/{pool_id}/content/{content_id}")
+        );
     }
 
     #[test]
     fn an_upload_outcome_key_sorts_directly_after_its_session_key() {
         // Garbage collection pairs a session's two records by listing order.
-        let namespace_id = NamespaceId::parse("ns-1").expect("namespace id");
+        let pool_id = numbered_pool_id(1);
         let first = UploadId::parse("upl_00000000000000000000000001").expect("upload id");
         let second = UploadId::parse("upl_0000000000000000000000000g").expect("upload id");
         let mut keys = [
-            upload_outcome(&namespace_id, &second),
-            upload_session(&namespace_id, &second),
-            upload_outcome(&namespace_id, &first),
-            upload_session(&namespace_id, &first),
+            upload_outcome(&pool_id, &second),
+            upload_session(&pool_id, &second),
+            upload_outcome(&pool_id, &first),
+            upload_session(&pool_id, &first),
         ];
         keys.sort();
         assert_eq!(
             keys,
             [
-                upload_session(&namespace_id, &first),
-                upload_outcome(&namespace_id, &first),
-                upload_session(&namespace_id, &second),
-                upload_outcome(&namespace_id, &second),
+                upload_session(&pool_id, &first),
+                upload_outcome(&pool_id, &first),
+                upload_session(&pool_id, &second),
+                upload_outcome(&pool_id, &second),
             ]
         );
         assert_eq!(super::upload_id_of(&keys[0]), Some(first.clone()));
@@ -490,6 +532,14 @@ mod tests {
             "namespaces/ns-1/manifests/00000000000000000001.json",
             "namespaces/ns-1/pins/pin_1.tmp",
             "namespaces/ns-1/uploads/upl_1.tmp",
+            "namespaces/ns-1/content/con_5bsqqg28t5cy4tqkff04hmasw9",
+            "namespaces/ns-1/content/con_5bsqqg28t5cy4tqkff04hmasw9-00000000000000000002-00000000000000000019",
+            "namespaces/ns-1/uploads/upl_00000000000000000000000001.json",
+            "namespaces/ns-1/uploads/upl_00000000000000000000000001.outcome.json",
+            "namespaces/ns-1/temporary/tmp_00000000000000000000000001",
+            "pools/pool_00000000000000000000000001/content/nested/object",
+            "pools/pool_00000000000000000000000001/hint.json",
+            "pools/pool_00000000000000000000000001/wal/00000000000000000001.wal.zst",
             "private/random.json",
             "namespaces/ns-1/unknown/file.json",
             "../namespaces/ns-1/hint.json",

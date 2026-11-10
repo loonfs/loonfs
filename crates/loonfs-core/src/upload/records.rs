@@ -23,7 +23,7 @@ use loonfs_types::format::control::{
     encode_control_state, ControlObjectKind, UploadOutcome, UploadOutcomePayload,
     UploadSessionPayload,
 };
-use loonfs_types::{NamespaceId, UploadId};
+use loonfs_types::{PoolId, UploadId};
 
 /// An upload session's record, together with its outcome if the session ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,7 +35,7 @@ pub(crate) struct UploadSessionState {
 
 impl<S: ObjectStore> NamespaceStore<S> {
     /// Loads the records of an upload session that the namespace `catalog`
-    /// describes created, from its family root's prefix.
+    /// describes created, from its pool's prefix.
     ///
     /// The outcome record is read before the session record. Garbage collection
     /// deletes the session record first, so if the session record is still
@@ -49,10 +49,10 @@ impl<S: ObjectStore> NamespaceStore<S> {
         catalog: &VerifiedNamespaceCatalogEntry,
         upload_id: &UploadId,
     ) -> Result<UploadSessionState> {
-        let family_root_id = catalog.family_root_id();
-        let outcome = self.load_upload_outcome(family_root_id, upload_id).await?;
+        let pool_id = catalog.pool_id();
+        let outcome = self.load_upload_outcome(pool_id, upload_id).await?;
         let session = self
-            .load_upload_session_record(family_root_id, upload_id)
+            .load_upload_session_record(pool_id, upload_id)
             .await?
             .filter(|session| session.namespace_id == *catalog.namespace_id())
             .ok_or_else(|| CoreError::UploadNotFound {
@@ -68,16 +68,16 @@ impl<S: ObjectStore> NamespaceStore<S> {
     }
 
     /// Loads the record that started an upload session, from the prefix of
-    /// `family_root_id`, or `None` if it's gone. The record identifies the
+    /// `pool_id`, or `None` if it's gone. The record identifies the
     /// member of the fork family that created the session.
     pub(crate) async fn load_upload_session_record(
         &self,
-        family_root_id: &NamespaceId,
+        pool_id: &PoolId,
         upload_id: &UploadId,
     ) -> Result<Option<UploadSessionPayload>> {
         let loaded = load_control_object(
             &self.store,
-            upload_session(family_root_id, upload_id),
+            upload_session(pool_id, upload_id),
             ControlObjectKind::UploadSession,
             |object_key, session: &UploadSessionPayload| {
                 expect_identity_field(
@@ -93,15 +93,15 @@ impl<S: ObjectStore> NamespaceStore<S> {
     }
 
     /// Loads the record of how an upload session ended, from the prefix of
-    /// `family_root_id`, or `None` if it has no outcome record.
+    /// `pool_id`, or `None` if it has no outcome record.
     pub(crate) async fn load_upload_outcome(
         &self,
-        family_root_id: &NamespaceId,
+        pool_id: &PoolId,
         upload_id: &UploadId,
     ) -> Result<Option<UploadOutcomePayload>> {
         let loaded = load_control_object(
             &self.store,
-            upload_outcome(family_root_id, upload_id),
+            upload_outcome(pool_id, upload_id),
             ControlObjectKind::UploadOutcome,
             |object_key, record: &UploadOutcomePayload| {
                 expect_identity_field(
@@ -117,7 +117,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     }
 
     /// Records how an upload session ended, under the prefix of
-    /// `family_root_id`, then confirms that the session record still exists.
+    /// `pool_id`, then confirms that the session record still exists.
     ///
     /// The outcome record is created with put-if-absent, so a completion, a
     /// client's abort, and garbage collection's abort of an expired session race
@@ -140,12 +140,12 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// session record.
     pub(crate) async fn create_upload_outcome(
         &self,
-        family_root_id: &NamespaceId,
+        pool_id: &PoolId,
         session: &UploadSessionPayload,
         outcome: &UploadOutcome,
     ) -> Result<OutcomeCreation> {
         let upload_id = &session.upload_id;
-        let object_key = upload_outcome(family_root_id, upload_id);
+        let object_key = upload_outcome(pool_id, upload_id);
         let record = UploadOutcomePayload {
             namespace_id: session.namespace_id.clone(),
             upload_id: upload_id.clone(),
@@ -164,7 +164,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 ) => error,
                 Err(error) => return Err(CoreError::store(&object_key, &error)),
             };
-            match self.load_upload_outcome(family_root_id, upload_id).await? {
+            match self.load_upload_outcome(pool_id, upload_id).await? {
                 Some(stored) if stored == record => {
                     Ok(CasOutcome::Settled(OutcomeCreation::Created))
                 }
@@ -187,7 +187,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             }
         })
         .await??;
-        let session_key = upload_session(family_root_id, upload_id);
+        let session_key = upload_session(pool_id, upload_id);
         match self.store.head(&session_key).await {
             Ok(Some(_)) => Ok(creation),
             Ok(None) => Err(CoreError::UploadNotFound {
@@ -198,7 +198,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     }
 
     /// Deletes an ended upload session's records from the prefix of
-    /// `family_root_id`, the session record first.
+    /// `pool_id`, the session record first.
     ///
     /// An outcome record counts only while its session record exists, so the
     /// session record goes first. If this call stops between the two deletes,
@@ -211,12 +211,12 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// deleted while the caller stalled.
     pub(crate) async fn delete_upload_session_records(
         &self,
-        family_root_id: &NamespaceId,
+        pool_id: &PoolId,
         upload_id: &UploadId,
     ) -> Result<()> {
         for object_key in [
-            upload_session(family_root_id, upload_id),
-            upload_outcome(family_root_id, upload_id),
+            upload_session(pool_id, upload_id),
+            upload_outcome(pool_id, upload_id),
         ] {
             self.store
                 .delete(&object_key)
@@ -338,7 +338,6 @@ mod tests {
                 completed_at_ms: 1_500,
                 content_ref,
             };
-            write_upload_records(&store, &namespace_id, &session, Some(outcome.clone())).await;
             let catalog = VerifiedNamespaceCatalogEntry::from_head(
                 &crate::namespace::state::NamespaceReadState::initial(
                     namespace_id.clone(),
@@ -346,6 +345,7 @@ mod tests {
                     loonfs_test_support::test_actor(),
                 ),
             );
+            write_upload_records(&store, catalog.pool_id(), &session, Some(outcome.clone())).await;
             let loaded = crate::test_support::namespace_store(&store, &namespace_id)
                 .load_upload_session_state(&catalog, &session.upload_id)
                 .await;

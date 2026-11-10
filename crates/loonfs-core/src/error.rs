@@ -1128,19 +1128,19 @@ mod tests {
         let error = CoreError::store("namespaces/demo/metadata/segment", &invalid_range);
         assert_eq!(error.code(), ErrorCode::ServerError);
 
-        let key = "namespaces/demo/content/blob".to_owned();
+        let key = "pools/pool_00000000000000000000000001/content/blob".to_owned();
         for (occupied, message) in [
             (
                 ObjectStoreError::DifferentObject {
                     object_key: key.clone(),
                 },
-                "immutable object `namespaces/demo/content/blob` already exists with different bytes",
+                "immutable object `pools/pool_00000000000000000000000001/content/blob` already exists with different bytes",
             ),
             (
                 ObjectStoreError::StoredChecksumMissing {
                     object_key: key.clone(),
                 },
-                "immutable object `namespaces/demo/content/blob` already exists without a stored checksum",
+                "immutable object `pools/pool_00000000000000000000000001/content/blob` already exists without a stored checksum",
             ),
         ] {
             let error = CoreError::store(&key, &occupied);

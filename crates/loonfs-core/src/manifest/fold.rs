@@ -89,7 +89,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         projection: &ManifestProjection<'_, S>,
     ) -> Result<HashMap<ContentId, ContentLayoutRecord>> {
         let tail = projection.tail_state.as_ref();
-        // The fold writes every extent under the family root's prefix and
+        // The fold writes every extent under the pool's prefix and
         // records this namespace as the creator of every layout it writes,
         // because this namespace's WAL includes pieces only for chains that
         // it created.
@@ -98,7 +98,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .contents()
             .into_iter()
             .map(|content| {
-                let pieces = assemble_tail_content(&head.family_root_id, &content)?;
+                let pieces = assemble_tail_content(&head.pool_id, &content)?;
                 Ok((content, pieces))
             })
             .collect::<Result<Vec<_>>>()?;

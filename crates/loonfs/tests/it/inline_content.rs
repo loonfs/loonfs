@@ -107,10 +107,8 @@ async fn reader_downloads_write_tail_content_by_path_and_inode() {
         };
         assert_eq!(recording.count(OperationSelector::Put), 1);
 
-        assert_eq!(
-            object_key,
-            content_blob(&namespace_id, &content_ref.content_id)
-        );
+        let pool_id = loonfs_core::test_support::load_pool_id(&store, &namespace_id).await;
+        assert_eq!(object_key, content_blob(&pool_id, &content_ref.content_id));
         assert_eq!(
             store
                 .get(&object_key, None)
@@ -190,15 +188,15 @@ async fn an_append_in_a_fork_starts_a_chain_the_fork_creates() {
         fork_chain = Some(appended.clone());
     }
     let fork_chain = fork_chain.expect("the fork's chain");
-    // The fork's fold wrote the new chain's extent under the family root's
-    // prefix, and the fork's own content prefix stays empty.
+    // The fork's fold wrote the new chain's extent under the prefix of the
+    // source's pool.
+    let pool_id = loonfs_core::test_support::load_pool_id(&store, &source).await;
+    assert_eq!(
+        loonfs_core::test_support::load_pool_id(&store, &fork).await,
+        pool_id
+    );
     assert!(store
-        .list_prefix(&content_prefix(&fork))
-        .await
-        .expect("list the fork's content")
-        .is_empty());
-    assert!(store
-        .list_prefix(&content_prefix(&source))
+        .list_prefix(&content_prefix(&pool_id))
         .await
         .expect("list the family's content")
         .iter()

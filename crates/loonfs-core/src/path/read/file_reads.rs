@@ -13,8 +13,8 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_objectstore::ObjectStoreErrorKind;
 use loonfs_types::options::AttributeInclusion;
 use loonfs_types::{
-    AbsolutePath, AccessRight, ContentExtent, ContentRef, InodeId, InodeKind, NamespaceId,
-    PathEntry, PathEntryKind, RevisionNo,
+    AbsolutePath, AccessRight, ContentExtent, ContentRef, InodeId, InodeKind, PathEntry,
+    PathEntryKind, PoolId, RevisionNo,
 };
 
 /// File bytes plus the metadata entry they came from.
@@ -162,7 +162,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         let content = self.wal_tail.content(content_ref);
         ContentLocation::resolve(
             &self.metadata_view(),
-            &self.head.family_root_id,
+            &self.head.pool_id,
             content.as_ref(),
             content_ref,
         )
@@ -187,7 +187,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         {
             if content_ref.size_bytes > chain.size_bytes {
                 return Err(DurableContentValidationError::ContentLengthMismatch {
-                    object_key: content_object_key_for_ref(&self.head.family_root_id, content_ref),
+                    object_key: content_object_key_for_ref(&self.head.pool_id, content_ref),
                     expected: content_ref.size_bytes,
                     actual: chain.size_bytes,
                 }
@@ -264,7 +264,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 ContentWrites::new(store, content_writes, &self.head),
                 &self.metadata_view(),
                 &content,
-                assemble_tail_content(&self.head.family_root_id, &content)?,
+                assemble_tail_content(&self.head.pool_id, &content)?,
             )
             .await
             .map_err(cannot_write)?
@@ -278,7 +278,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 .collect()
         };
         Ok(object_ranges(
-            &self.head.family_root_id,
+            &self.head.pool_id,
             extents,
             start_offset,
             content_ref.size_bytes,
@@ -378,10 +378,10 @@ pub(crate) fn file_content_ref(entry: &PathEntry) -> Result<ContentRef> {
     }
 }
 
-/// Returns the ranges of `extents`, under the prefix of `family_root_id`, that
+/// Returns the ranges of `extents`, under the prefix of `pool_id`, that
 /// store the bytes of a `size_bytes`-byte file from `start_offset` to its end.
 fn object_ranges(
-    family_root_id: &NamespaceId,
+    pool_id: &PoolId,
     extents: Vec<ContentExtent>,
     start_offset: u64,
     size_bytes: u64,
@@ -394,7 +394,7 @@ fn object_ranges(
         let last = end.min(size_bytes);
         if first < last {
             ranges.push(ObjectRange {
-                object_key: extent_object_key(family_root_id, &extent),
+                object_key: extent_object_key(pool_id, &extent),
                 object_start: extent.offset + (first - offset),
                 length: last - first,
             });

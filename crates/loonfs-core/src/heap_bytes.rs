@@ -31,8 +31,8 @@ use loonfs_types::{
     AbsolutePath, AccessGrants, ActorId, AttributeKey, AttributeValue, Attributes, BindingVersion,
     ChangeSeq, Checksum, ChecksumHex, CommitFingerprint, CommitId, CommitPrecondition, ContentId,
     ContentRef, DisplayName, ExtensionName, FileContent, IndexSegmentId, InodeId,
-    MetadataSegmentId, NameKey, NamespaceId, PathComponent, PayloadChecksum, PinId, PrincipalId,
-    PrincipalScope, Subject, SubjectId, UploadId, WriterId,
+    MetadataSegmentId, NameKey, NamespaceId, PathComponent, PayloadChecksum, PinId, PoolId,
+    PrincipalId, PrincipalScope, Subject, SubjectId, UploadId, WriterId,
 };
 use loonfs_types::{DiffEntry, FilesystemChange};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -175,6 +175,7 @@ text_heap_bytes!(
     NamespaceId,
     PayloadChecksum,
     PinId,
+    PoolId,
     PrincipalId,
     PrincipalScope,
     SubjectId,
@@ -622,7 +623,7 @@ impl HeapBytes for NamespaceManifestPayload {
             + self.created_by.heap_bytes()
             + self.access.heap_bytes()
             + self.fork_basis.heap_bytes()
-            + self.family_root_id.heap_bytes()
+            + self.pool_id.heap_bytes()
             + self.writer.heap_bytes()
             + self.runs.heap_bytes()
             + self
@@ -705,7 +706,7 @@ impl HeapBytes for NamespaceReadState {
             + self.created_by.heap_bytes()
             + self.access.heap_bytes()
             + self.fork_basis.heap_bytes()
-            + self.family_root_id.heap_bytes()
+            + self.pool_id.heap_bytes()
             + self.writer.heap_bytes()
     }
 }

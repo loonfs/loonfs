@@ -1178,7 +1178,7 @@ mod tests {
         let temp_dir = test_dir("delete");
         let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
         let key = upload_session(
-            &loonfs_types::NamespaceId::parse("ns-1").expect("valid namespace id"),
+            &loonfs_test_support::ids::numbered_pool_id(1),
             &loonfs_types::UploadId::parse("upl_00000000000000000000000001")
                 .expect("valid upload id"),
         );

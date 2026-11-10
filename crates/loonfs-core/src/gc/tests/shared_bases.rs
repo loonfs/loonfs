@@ -58,11 +58,14 @@ async fn layout_manifest(
     namespace_id: &NamespaceId,
     rows: impl IntoIterator<Item = ContentLayoutRecord>,
 ) -> (NamespaceManifestPayload, BTreeSet<String>) {
+    let mut head =
+        NamespaceReadState::initial(namespace_id.clone(), 0, loonfs_test_support::test_actor());
+    head.seq = ChangeSeq(1);
     let mut state = MetadataStateBuilder::default();
     let mut keys = BTreeSet::new();
     for row in rows {
         for extent in &row.layout.extents {
-            let key = extent_object_key(namespace_id, extent);
+            let key = extent_object_key(&head.pool_id, extent);
             store
                 .put_if_absent(&key, Bytes::from_static(b"x"))
                 .await
@@ -71,9 +74,6 @@ async fn layout_manifest(
         }
         state.push_content_layout(row);
     }
-    let mut head =
-        NamespaceReadState::initial(namespace_id.clone(), 0, loonfs_test_support::test_actor());
-    head.seq = ChangeSeq(1);
     let manifest = build_namespace_manifest_from_metadata_state(
         store,
         namespace_id,
@@ -174,11 +174,12 @@ async fn a_collection_reads_each_extent_filter_once_and_lists_content_once() {
     let (manifest, protected) = shared_layout_manifest(&store, &namespace_id, 2_048).await;
     let reads = extent_filter_reads(&manifest);
     assert_eq!(reads.len(), 256, "eight rows in each layout segment");
+    let pool_id = manifest.pool_id.clone();
     publish_layout_manifest(&store, manifest).await;
     let mut orphans = BTreeSet::new();
     for index in 0..8 {
         let content_id = ContentId::parse(format!("con_7{index:025}")).expect("orphan id");
-        let key = content_blob(&namespace_id, &content_id);
+        let key = content_blob(&pool_id, &content_id);
         store
             .put_if_absent(&key, Bytes::from_static(b"orphan"))
             .await
@@ -193,7 +194,7 @@ async fn a_collection_reads_each_extent_filter_once_and_lists_content_once() {
         crate::cache::ObjectStoreScope::new(0),
         Arc::new(crate::cache::ReadWorkingMemory::new(64 * 1024 * 1024, None)),
     ));
-    let prefix = content_prefix(&namespace_id);
+    let prefix = content_prefix(&pool_id);
     for (round, deleted, filter_gets) in [(1, &orphans, reads.len()), (2, &BTreeSet::new(), 0)] {
         store.reset();
         let report = crate::NamespaceStore {
@@ -275,7 +276,7 @@ async fn a_false_match_of_an_extent_filter_stays_until_no_root_lists_its_segment
     // names `con_7{index:025}`.
     let orphan = ContentId::parse("con_70000000000000000004909343").expect("orphan id");
     assert!(filter.may_contain(orphan.as_str()));
-    let orphan = content_blob(&namespace_id, &orphan);
+    let orphan = content_blob(&manifest.pool_id, &orphan);
     store
         .put_if_absent(&orphan, Bytes::from_static(b"orphan"))
         .await
@@ -363,9 +364,10 @@ async fn an_extent_of_a_superseded_layout_row_stays_until_no_root_lists_its_segm
             .await
             .expect("collection");
         assert_eq!(report.deleted.content_objects, deleted);
+        let pool_id = crate::test_support::load_pool_id(&store, &namespace_id).await;
         assert_eq!(
             store
-                .list_prefix(&content_prefix(&namespace_id))
+                .list_prefix(&content_prefix(&pool_id))
                 .await
                 .expect("survivors")
                 .into_iter()

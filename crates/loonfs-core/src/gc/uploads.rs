@@ -15,7 +15,7 @@ use loonfs_objectstore::keys::upload_session_prefix;
 use loonfs_objectstore::layout::{upload_id_of, upload_outcome_id_of};
 use loonfs_objectstore::{ListedObject, ObjectStore};
 use loonfs_types::format::control::{UploadOutcome, UploadOutcomePayload, UploadSessionPayload};
-use loonfs_types::{ContentId, UploadId};
+use loonfs_types::{ContentId, PoolId, UploadId};
 use std::pin::pin;
 
 /// One upload session's records, or one other key, as a listing of the
@@ -66,12 +66,16 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// Lists the uploads prefix and pairs each session record with its outcome
     /// record.
     ///
-    /// Only the collection on a family root lists its uploads prefix, which stores
-    /// the upload records of every member of its fork family. An outcome key
-    /// sorts directly after its session key, so the pairing looks one key
-    /// ahead and keeps no other state across the listing.
-    pub(super) fn list_uploads(&self) -> impl Stream<Item = Result<ListedUpload>> + Send + 'static {
-        let prefix = upload_session_prefix(&self.namespace_id);
+    /// Only the collection on a family root lists the uploads prefix of its
+    /// pool, which stores the upload records of every member of its fork
+    /// family. An outcome key sorts directly after its session key, so the
+    /// pairing looks one key ahead and keeps no other state across the
+    /// listing.
+    pub(super) fn list_uploads(
+        &self,
+        pool_id: &PoolId,
+    ) -> impl Stream<Item = Result<ListedUpload>> + Send + 'static {
+        let prefix = upload_session_prefix(pool_id);
         let entries = self
             .store
             .list_entries_from_stream(&prefix, None)
@@ -123,11 +127,12 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// isn't a root, because nothing can issue admission evidence from it.
     pub(super) async fn load_upload_sessions(
         &self,
+        pool_id: &PoolId,
         session_cache: Option<&CompletedUploadSessionCache>,
         mut each: impl FnMut(ListedUpload, Option<ListedUploadSession>) -> Result<()>,
     ) -> Result<()> {
         let mut uploads = pin!(self
-            .list_uploads()
+            .list_uploads(pool_id)
             .map_ok(|listed| async move {
                 let ListedUploadKind::Session {
                     upload_id,
@@ -142,7 +147,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                         session,
                     }),
                     None => SessionLookup::Read(
-                        self.load_listed_session(upload_id.clone(), *outcome_listing)
+                        self.load_listed_session(pool_id, upload_id.clone(), *outcome_listing)
                             .await?,
                     ),
                 };
@@ -182,6 +187,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// outcome already identifies the content.
     async fn load_listed_session(
         &self,
+        pool_id: &PoolId,
         upload_id: UploadId,
         outcome_listing: OutcomeListing,
     ) -> Result<Option<ListedUploadSession>> {
@@ -194,9 +200,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                         content_ref,
                     },
                 ..
-            }) = self
-                .load_upload_outcome(&self.namespace_id, &upload_id)
-                .await?
+            }) = self.load_upload_outcome(pool_id, &upload_id).await?
             {
                 return Ok(Some(ListedUploadSession::Completed {
                     upload_id,
@@ -209,7 +213,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             }
         }
         Ok(self
-            .load_upload_session_record(&self.namespace_id, &upload_id)
+            .load_upload_session_record(pool_id, &upload_id)
             .await?
             .map(|session| ListedUploadSession::Incomplete {
                 content_id: session.content_id,
@@ -225,18 +229,19 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// outcome record fails.
     pub(super) async fn load_swept_session(
         &self,
+        pool_id: &PoolId,
         upload_id: &UploadId,
         outcome_listing: OutcomeListing,
     ) -> Result<Option<UploadSessionState>> {
         let outcome = match outcome_listing {
             OutcomeListing::Listed => self
-                .load_upload_outcome(&self.namespace_id, upload_id)
+                .load_upload_outcome(pool_id, upload_id)
                 .await?
                 .map(|record| record.outcome),
             OutcomeListing::Absent => None,
         };
         Ok(self
-            .load_upload_session_record(&self.namespace_id, upload_id)
+            .load_upload_session_record(pool_id, upload_id)
             .await?
             .map(|session| UploadSessionState { session, outcome }))
     }
@@ -247,7 +252,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// An open or aborted session follows the same rules in an active
     /// namespace and in one that's eligible for retirement, and its provider
     /// cleanup runs even after the namespace is retired, because the records
-    /// and the content are under the family root's prefix.
+    /// and the content are under the pool's prefix.
     pub(super) async fn sweep_upload_session(
         &self,
         grace_window_ms: u64,
@@ -263,7 +268,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         }
         match &state.outcome {
             None => {
-                self.abort_expired_session(grace_window_ms, clock, &state.session)
+                self.abort_expired_session(&live.pool_id, grace_window_ms, clock, &state.session)
                     .await
             }
             Some(UploadOutcome::Aborted { aborted_at_ms }) => {
@@ -272,7 +277,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 }
                 // Repeat provider cleanup so a later collection completes work left by a crash
                 // after the abort.
-                if !AbandonedUpload::of(&self.namespace_id, &state.session)
+                if !AbandonedUpload::of(&live.pool_id, &state.session)
                     .release(&self.store)
                     .await
                 {
@@ -306,6 +311,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// whose clock runs behind the collector's.
     async fn abort_expired_session(
         &self,
+        pool_id: &PoolId,
         grace_window_ms: u64,
         clock: &OperationClock,
         session: &UploadSessionPayload,
@@ -317,13 +323,10 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let aborted = UploadOutcome::Aborted {
             aborted_at_ms: clock.request_at_ms(),
         };
-        match self
-            .create_upload_outcome(&self.namespace_id, session, &aborted)
-            .await
-        {
+        match self.create_upload_outcome(pool_id, session, &aborted).await {
             // Keep the newly aborted session until its post-abort grace period expires.
             Ok(OutcomeCreation::Created) => {
-                let _ = AbandonedUpload::of(&self.namespace_id, session)
+                let _ = AbandonedUpload::of(pool_id, session)
                     .release(&self.store)
                     .await;
                 Ok(retain_until(

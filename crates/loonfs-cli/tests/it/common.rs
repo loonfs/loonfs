@@ -110,7 +110,7 @@ pub(super) fn leave_a_partial_download(
 /// Callers use a unique size so the match identifies one fixture object.
 pub(super) fn content_object_path(store_root: &Path, size_bytes: u64) -> PathBuf {
     let content_blob = KeyPredicate::content_blob();
-    let objects = walkdir::WalkDir::new(store_root.join("namespaces"))
+    let objects = walkdir::WalkDir::new(store_root.join("pools"))
         .into_iter()
         .filter_map(|entry| entry.ok())
         .filter(|entry| {

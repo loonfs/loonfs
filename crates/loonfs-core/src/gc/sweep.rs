@@ -12,7 +12,7 @@ use crate::error::Result;
 use crate::namespace::store::NamespaceStore;
 use crate::time::OperationClock;
 use loonfs_objectstore::{ListedObject, ObjectStore};
-use loonfs_types::{RetainedReason, UploadId};
+use loonfs_types::{PoolId, RetainedReason, UploadId};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub(super) enum Decision {
@@ -24,9 +24,11 @@ pub(super) enum Decision {
         key: String,
         counter: DeletedCounter,
     },
-    /// Deletes an ended upload session's records, in the order that
+    /// Deletes an ended upload session's records from the prefix of
+    /// `pool_id`, in the order that
     /// [`crate::upload::records::delete_upload_session_records`] requires.
     DeleteUploadSession {
+        pool_id: PoolId,
         upload_id: UploadId,
     },
     Gone,
@@ -165,7 +167,7 @@ impl<S: ObjectStore> Sweep<'_, S> {
             None => {
                 let Some(state) = self
                     .namespace
-                    .load_swept_session(&upload_id, outcome_listing)
+                    .load_swept_session(&self.live.pool_id, &upload_id, outcome_listing)
                     .await?
                 else {
                     return Ok(self.retain(RetainedReason::UploadSessionUndecided, None));
@@ -179,7 +181,10 @@ impl<S: ObjectStore> Sweep<'_, S> {
             cache.invalidate(&upload_id);
         }
         Ok(match sweep {
-            UploadSessionSweep::Delete => Decision::DeleteUploadSession { upload_id },
+            UploadSessionSweep::Delete => Decision::DeleteUploadSession {
+                pool_id: self.live.pool_id.clone(),
+                upload_id,
+            },
             UploadSessionSweep::Retain { reclaimable_at_ms } => self.retain(
                 match reclaimable_at_ms {
                     Some(_) => RetainedReason::UploadSessionWindow,

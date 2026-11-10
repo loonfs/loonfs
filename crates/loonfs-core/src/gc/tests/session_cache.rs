@@ -6,15 +6,11 @@ use loonfs_objectstore::keys::{upload_outcome, upload_session, upload_session_pr
 use loonfs_types::format::control::UploadOutcome;
 use std::collections::BTreeMap;
 
-/// Creates a local store that records requests for the namespace's upload
-/// session records.
-fn session_recording_store(
-    root: &std::path::Path,
-    namespace_id: &NamespaceId,
-) -> RecordingStore<LocalFsStore> {
+/// Creates a local store that records requests for upload session records.
+fn session_recording_store(root: &std::path::Path) -> RecordingStore<LocalFsStore> {
     RecordingStore::new(
         LocalFsStore::new(root).expect("store"),
-        KeyPredicate::prefix(upload_session_prefix(namespace_id)),
+        KeyPredicate::upload_records(),
     )
 }
 
@@ -61,7 +57,7 @@ async fn collect(
 async fn a_second_collection_reads_no_completed_session_record() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let store = session_recording_store(temp_dir.path(), &namespace_id);
+    let store = session_recording_store(temp_dir.path());
     let completed = context(1_000);
     crate::test_support::NamespaceFixture::new(store.inner(), &namespace_id, &completed)
         .create()
@@ -73,9 +69,10 @@ async fn a_second_collection_reads_no_completed_session_record() {
     let (first, first_reads) = collect(&store, &cache, &namespace_id, completed.now_ms + 1).await;
     let (second, second_reads) = collect(&store, &cache, &namespace_id, completed.now_ms + 1).await;
 
+    let pool_id = crate::test_support::load_pool_id(&store, &namespace_id).await;
     let expected: BTreeMap<String, usize> = upload_ids
         .iter()
-        .map(|upload_id| (upload_outcome(&namespace_id, upload_id), 1))
+        .map(|upload_id| (upload_outcome(&pool_id, upload_id), 1))
         .collect();
     assert_eq!(
         first_reads, expected,
@@ -98,7 +95,7 @@ async fn a_second_collection_reads_no_completed_session_record() {
 async fn a_collection_reads_only_the_sessions_that_the_cache_dropped() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let store = session_recording_store(temp_dir.path(), &namespace_id);
+    let store = session_recording_store(temp_dir.path());
     let early = context(1_000);
     let late = context(early.now_ms + GRACE_MS);
     crate::test_support::NamespaceFixture::new(store.inner(), &namespace_id, &early)
@@ -113,10 +110,11 @@ async fn a_collection_reads_only_the_sessions_that_the_cache_dropped() {
     let (first, first_reads) = collect(&store, &cache, &namespace_id, late.now_ms).await;
     assert_eq!(first_reads.len(), 40);
     assert_eq!(first.retained.upload_session_window, 40);
+    let pool_id = crate::test_support::load_pool_id(&store, &namespace_id).await;
     let dropped: BTreeMap<String, usize> = upload_ids
         .iter()
         .filter(|upload_id| cache.get(upload_id).is_none())
-        .map(|upload_id| (upload_outcome(&namespace_id, upload_id), 1))
+        .map(|upload_id| (upload_outcome(&pool_id, upload_id), 1))
         .collect();
     assert!(
         !dropped.is_empty() && dropped.len() < 40,
@@ -134,7 +132,7 @@ async fn a_collection_reads_only_the_sessions_that_the_cache_dropped() {
     assert_eq!(second.retained.upload_session_window, 20);
     let remaining: BTreeSet<UploadId> = store
         .inner()
-        .list_prefix(&upload_session_prefix(&namespace_id))
+        .list_prefix(&upload_session_prefix(&pool_id))
         .await
         .expect("list sessions")
         .iter()
@@ -152,7 +150,8 @@ async fn put_session(
     outcome: Option<UploadOutcome>,
 ) -> UploadId {
     let session = crate::test_support::proxied_upload_session(namespace_id, expires_at_ms);
-    crate::test_support::write_upload_records(store, namespace_id, &session, outcome).await;
+    let pool_id = crate::test_support::load_pool_id(store, namespace_id).await;
+    crate::test_support::write_upload_records(store, &pool_id, &session, outcome).await;
     session.upload_id
 }
 
@@ -162,7 +161,7 @@ async fn put_session(
 async fn open_and_aborted_session_records_are_read_on_every_collection() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let store = session_recording_store(temp_dir.path(), &namespace_id);
+    let store = session_recording_store(temp_dir.path());
     let setup = context(1_000);
     crate::test_support::NamespaceFixture::new(store.inner(), &namespace_id, &setup)
         .create()
@@ -180,7 +179,8 @@ async fn open_and_aborted_session_records_are_read_on_every_collection() {
     )
     .await;
     let completed = completed_sessions(&store, &namespace_id, 1, &setup).await;
-    let completed = upload_outcome(&namespace_id, completed.first().expect("one session"));
+    let pool_id = crate::test_support::load_pool_id(&store, &namespace_id).await;
+    let completed = upload_outcome(&pool_id, completed.first().expect("one session"));
     let cache = CompletedUploadSessionCache::unshared(1024 * 1024);
 
     let (first, first_reads) = collect(&store, &cache, &namespace_id, setup.now_ms + 1).await;
@@ -190,9 +190,9 @@ async fn open_and_aborted_session_records_are_read_on_every_collection() {
     // its session record is read, once to root its content and once to
     // sweep it. An aborted session's two records are each read twice.
     let every_collection = BTreeMap::from([
-        (upload_session(&namespace_id, &open), 2),
-        (upload_session(&namespace_id, &aborted), 2),
-        (upload_outcome(&namespace_id, &aborted), 2),
+        (upload_session(&pool_id, &open), 2),
+        (upload_session(&pool_id, &aborted), 2),
+        (upload_outcome(&pool_id, &aborted), 2),
     ]);
     let mut first_expected = every_collection.clone();
     first_expected.insert(completed, 1);
@@ -210,7 +210,7 @@ async fn open_and_aborted_session_records_are_read_on_every_collection() {
 async fn a_session_the_sweep_deletes_leaves_the_cache() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let store = session_recording_store(temp_dir.path(), &namespace_id);
+    let store = session_recording_store(temp_dir.path());
     let completed = context(1_000);
     crate::test_support::NamespaceFixture::new(store.inner(), &namespace_id, &completed)
         .create()

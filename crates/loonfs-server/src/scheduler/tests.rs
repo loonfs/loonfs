@@ -415,7 +415,8 @@ async fn a_sweep_retires_a_deleted_namespace_after_its_grace() {
         .await
         .expect("delete the namespace");
     writer.shutdown().await.expect("stop the writer");
-    let content_prefix = loonfs_objectstore::keys::content_prefix(&namespace_id);
+    let pool_id = loonfs_core::test_support::load_pool_id(&store, &namespace_id).await;
+    let content_prefix = loonfs_objectstore::keys::content_prefix(&pool_id);
     assert!(!keys_under(store.as_ref(), &content_prefix).await.is_empty());
 
     let server = SchedulerServer::start(store.clone(), &scheduler_config(None), now_ms).await;
@@ -1174,6 +1175,12 @@ async fn an_idle_sweep_costs_one_listing_per_page_and_a_fixed_number_of_requests
             .await
             .expect("list namespaces");
 
+        let mut pool_prefixes = Vec::new();
+        for namespace_id in &names {
+            let pool_id =
+                loonfs_core::test_support::load_pool_id(base.as_ref(), namespace_id).await;
+            pool_prefixes.push(loonfs_objectstore::keys::pool_prefix(&pool_id));
+        }
         for (garbage, per_namespace, lists_per_namespace) in [
             (GarbageCollection::Skip, requests, 0),
             (
@@ -1193,11 +1200,13 @@ async fn an_idle_sweep_costs_one_listing_per_page_and_a_fixed_number_of_requests
                 })
                 .count();
             assert_eq!(listings, 2, "three namespaces at two per page");
-            for namespace_id in &names {
+            for (namespace_id, pool) in names.iter().zip(&pool_prefixes) {
                 let prefix = loonfs_objectstore::keys::namespace_prefix(namespace_id);
                 let namespace_requests: Vec<_> = operations
                     .iter()
-                    .filter(|operation| operation.key().starts_with(&prefix))
+                    .filter(|operation| {
+                        operation.key().starts_with(&prefix) || operation.key().starts_with(pool)
+                    })
                     .collect();
                 let lists = namespace_requests
                     .iter()

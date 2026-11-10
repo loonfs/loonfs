@@ -6,7 +6,7 @@ use loonfs::{InlineContentPolicy, LoonFs, NamespaceId, SharedObjectStore, Writab
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepBuildOutcome, GrepReorganizeOutcome, GrepStepBudget, GrepWorker,
 };
-use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
+use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily, KeyPrefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::clock::bounded;
 use loonfs_test_support::stores::{
@@ -31,16 +31,15 @@ fn content_watch(inner: LocalFsStore) -> NamespaceOverlapStore<LocalFsStore> {
     })
 }
 
-/// The namespace of a content object or a grep segment.
+/// The pool of a content object or the namespace of a grep segment. Each
+/// namespace in these tests is created without a source, so each has a pool
+/// of its own.
 fn content_namespace(key: &str) -> Option<String> {
-    parse_object_key(key)
-        .filter(|parsed| {
-            matches!(
-                parsed.family(),
-                DurableObjectFamily::ContentBlob | DurableObjectFamily::ExtensionSegment
-            )
-        })
-        .map(|parsed| parsed.prefix_namespace_id().to_owned())
+    parse_object_key(key).and_then(|parsed| match (parsed.family(), parsed.prefix()) {
+        (DurableObjectFamily::ContentBlob, KeyPrefix::Pool(id))
+        | (DurableObjectFamily::ExtensionSegment, KeyPrefix::Namespace(id)) => Some(id.to_owned()),
+        _ => None,
+    })
 }
 
 /// A writer that stores every file as a content object, so a step's content

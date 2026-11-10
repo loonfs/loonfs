@@ -11,14 +11,13 @@ use loonfs_types::format::manifest::NamespaceManifestPayload;
 use loonfs_types::GcResponse;
 
 impl<S: ObjectStore> NamespaceStore<S> {
-    /// Deletes a family root's content prefix, which stores the content of its
-    /// whole fork family, and the source pin of a fork's basis, once the
-    /// namespace is eligible for retirement. Returns whether the collection listed
-    /// the content prefix.
+    /// Deletes the content prefix of a family root's pool, which stores the
+    /// content of its whole fork family, and the source pin of a fork's basis,
+    /// once the namespace is eligible for retirement. Returns whether the
+    /// collection listed the content prefix.
     ///
-    /// A family root is retired after every other member of its family, and
-    /// a fork's content prefix stores nothing, so a fork's retirement deletes
-    /// no content.
+    /// A family root is retired after every other member of its family, so a
+    /// fork's retirement deletes no content.
     pub(super) async fn retire_namespace(
         &self,
         live: &LiveSet,
@@ -31,7 +30,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .current_tombstone
             .as_ref()
             .expect("eligible namespace should have a tombstone");
-        let content_listed = tombstone.is_family_root();
+        let content_listed = tombstone.fork_basis.is_none();
         if content_listed {
             self.sweep_content(tombstone, report).await?;
         }
@@ -48,7 +47,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         tombstone: &NamespaceManifestPayload,
         report: &mut GcResponse,
     ) -> Result<()> {
-        let prefix = content_prefix(&tombstone.namespace_id);
+        let prefix = content_prefix(&tombstone.pool_id);
         let mut listed_bytes = 0;
         let decisions = self
             .store

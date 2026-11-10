@@ -399,6 +399,17 @@ fn validate_pin_id(value: &str) -> Result<(), GeneratedIdValidationError> {
 }
 
 string_id! {
+    /// The ID of one pool, the set of namespaces that share one set of content objects. See
+    /// [Pools](https://github.com/loonfs/loonfs/blob/main/docs/design/pools.md).
+    PoolId,
+    prefix = "pool",
+    schema(
+        pattern = r"^pool_[0-7][0-9a-hjkmnp-tv-z]{25}$",
+        example = "pool_3s0drmj8em84yb4mnetqkz2j0x"
+    )
+}
+
+string_id! {
     /// The durable ID of one upload session.
     UploadId,
     prefix = "upl",
@@ -614,7 +625,7 @@ numeric_id! {
 mod tests {
     use super::{
         next_public_ordinal, BindingVersion, ChangeSeq, CommitId, ContentId, ManifestNo,
-        MetadataSegmentId, NameKey, NamespaceId, PinId, RevisionNo, RunNo, UploadId, WalNo,
+        MetadataSegmentId, NameKey, NamespaceId, PinId, PoolId, RevisionNo, RunNo, UploadId, WalNo,
         WriterEpoch, WriterId, MAX_PUBLIC_INTEGER,
     };
     use crate::AttributesRevisionNo;
@@ -877,15 +888,33 @@ mod tests {
     }
 
     #[test]
-    fn generated_content_ids_are_unique() {
+    fn generated_content_and_pool_ids_are_unique() {
         let mut ids = BTreeSet::new();
         for _ in 0..512 {
-            let id = ContentId::generate();
-            assert_generated_id_shape(id.as_str(), "con");
-            assert!(
-                ids.insert(id.clone()),
-                "generated duplicate content id {id}"
-            );
+            let content_id = ContentId::generate();
+            assert_generated_id_shape(content_id.as_str(), "con");
+            let pool_id = PoolId::generate();
+            assert_generated_id_shape(pool_id.as_str(), "pool");
+            assert_eq!(PoolId::parse(pool_id.as_str()).as_ref(), Ok(&pool_id));
+            for id in [content_id.to_string(), pool_id.to_string()] {
+                assert!(ids.insert(id.clone()), "generated duplicate id {id}");
+            }
+        }
+    }
+
+    #[test]
+    fn pool_id_parse_requires_the_generated_id_shape() {
+        let pool_id = PoolId::parse("pool_3s0drmj8em84yb4mnetqkz2j0x").expect("valid pool ID");
+        assert_eq!(pool_id.body(), "3s0drmj8em84yb4mnetqkz2j0x");
+        for invalid in [
+            "con_3s0drmj8em84yb4mnetqkz2j0x",
+            "pol_3s0drmj8em84yb4mnetqkz2j0x",
+            "pool_3S0DRMJ8EM84YB4MNETQKZ2J0X",
+            "pool_8s0drmj8em84yb4mnetqkz2j0x",
+            "pool_3s0drmj8em84yb4mnetqkz2j0",
+            "pool_3s0drmj8em84yb4mnetqkz2j0u",
+        ] {
+            PoolId::parse(invalid).expect_err(invalid);
         }
     }
 
