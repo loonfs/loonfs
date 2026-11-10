@@ -53,11 +53,11 @@ pub const DEFAULT_MAX_MERGE_BYTES: usize = 512 * 1024 * 1024;
 /// work of every runtime that shares it. Publication admission never waits: a request
 /// past an admitted total fails at once with `commit_queue_full`. A merge
 /// isn't charged to the byte total. Merges share the merge allowance by
-/// their reservations, which grow to their estimated peaks, three times
-/// their planned WAL bytes, while they plan. A merge whose reservation
-/// doesn't fit beside the others fails at once with `server_busy`, and a
-/// merge whose estimated peak exceeds the whole allowance fails with
-/// `merge_too_large`. Permit
+/// their reservations, which grow while they plan to their estimates, three
+/// times their planned WAL bytes or the memory that planning uses, whichever
+/// is larger. A merge whose reservation doesn't fit beside the others fails
+/// at once with `server_busy`, and a merge whose estimate exceeds the whole
+/// allowance fails with `merge_too_large`. Permit
 /// waits are first come, first served, whichever runtime they belong to. No
 /// runtime has a reserved share, so an idle runtime reserves nothing. A
 /// host that wants to isolate runtimes from each other gives them separate
@@ -289,7 +289,8 @@ impl ExecutionBudgetBuilder {
 
     /// Sets the merge allowance, which limits the estimated peak memory of
     /// the merges that plan and publish at once. A merge's estimate is three
-    /// times its planned WAL bytes. The runtimes that share the budget admit
+    /// times its planned WAL bytes, or the memory that planning the merge
+    /// uses, whichever is larger. The runtimes that share the budget admit
     /// merges while their reservations fit the allowance, and a merge whose
     /// reservation doesn't fit beside the others fails at once with
     /// `server_busy`. A merge whose estimate exceeds the whole allowance

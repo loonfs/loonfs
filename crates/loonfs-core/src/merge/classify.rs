@@ -3,15 +3,14 @@
 //! ([format section 6.2](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#62-validation)),
 //! and plans what the merge's commit does to each inode.
 
+use super::memory::PlanningMemory;
 use super::net_change::{fork_layout, inode_change, touched_inodes, Changed, InodeChange};
 use super::operations::{
     access_update, attributes_update, binding_change, create_plan, revision_update, BindingChange,
     InodePlan,
 };
 use super::replay::Replay;
-use super::size::check_planned_bytes;
 use super::state::{Edge, InodeState, StateReader};
-use super::MergeAllowance;
 use crate::authorize::{require, Absence, Authorizer};
 use crate::commit::wal_size::merge_operation_bytes;
 use crate::error::{CoreError, Result};
@@ -25,6 +24,7 @@ use loonfs_types::{
     ROOT_INODE_ID,
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 
 /// A directory that the fork deleted or moved, whose subtree in the
 /// merged-into namespace a merge checks for changes that aren't the fork's
@@ -64,9 +64,9 @@ pub(super) struct Classifier<'v, S: ObjectStore + ?Sized> {
     pub(super) fork_authorizer: Authorizer<'v>,
     pub(super) record: &'v MergeRecord,
     pub(super) fork_point_seq: ChangeSeq,
-    /// The publisher's merge allowance, which the running size bound checks
-    /// too.
-    pub(super) allowance: MergeAllowance,
+    /// The memory that the plan uses, which the running size bound checks
+    /// against the merge allowance with the planned bytes.
+    pub(super) memory: Arc<PlanningMemory>,
     /// The sequences above the fork point whose commits the check of a row's
     /// provenance read, and whether each commit is a merge from this fork.
     /// It grows with the rows that the merge replaces.
@@ -92,11 +92,14 @@ pub(super) struct Classifier<'v, S: ObjectStore + ?Sized> {
 
 impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
     /// Classifies each inode that the fork's commits in the range touched,
-    /// in inode ID order.
+    /// in inode ID order, and checks the merge allowance against the plan's
+    /// memory after each inode.
     pub(super) async fn classify(&mut self) -> Result<()> {
-        let touched = touched_inodes(self.ours.view(), self.record.source_after_seq).await?;
+        let touched =
+            touched_inodes(self.ours.view(), self.record.source_after_seq, &self.memory).await?;
         for inode_id in touched {
             self.classify_inode(inode_id).await?;
+            self.memory.check()?;
         }
         self.check_subtrees().await
     }
@@ -334,12 +337,12 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
     ///
     /// The running bound stops the merge with `merge_too_large` as soon as
     /// the plans so far exceed one WAL object or the merge allowance (see
-    /// [`check_planned_bytes`]), so the plans keep at most about that much
-    /// memory, and a merge that admission would refuse isn't planned in
-    /// full. It adds operations up as the merge commit's own bound does. The
-    /// commit's bound also includes the temporary moves that ordering the
-    /// operations can add, and the planner checks the ordered commit against
-    /// the same bounds.
+    /// [`MergeAllowance::check`](super::MergeAllowance::check)), so the
+    /// plans keep at most about that much memory, and a merge that admission
+    /// would refuse isn't planned in full. It adds operations up as the merge
+    /// commit's own bound does. The commit's bound also includes the
+    /// temporary moves that ordering the operations can add, and the planner
+    /// checks the ordered commit against the same bounds.
     async fn add_plan(&mut self, plan: InodePlan) -> Result<()> {
         let operations = plan.operations();
         if operations.is_empty() {
@@ -354,7 +357,7 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
                 .planned_bytes
                 .saturating_add(merge_operation_bytes(operation, layout_extents));
         }
-        check_planned_bytes(self.planned_bytes, &self.allowance)?;
+        self.memory.check_planned(self.planned_bytes)?;
         self.plans.push(plan);
         Ok(())
     }

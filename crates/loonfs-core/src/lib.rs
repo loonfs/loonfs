@@ -219,7 +219,7 @@ pub use manifest::{
     RetentionTarget,
 };
 pub use merge::{
-    check_planned_bytes, MergeAllowance, MergePlan, MergeRequest, MergeReservation, ReplayPlan,
+    MergeAllowance, MergePlan, MergeRequest, MergeReservation, ReplayPlan, MERGE_COMMITS_PAGE_BYTES,
 };
 pub use namespace::store::NamespaceStore;
 pub use options::{CreateNamespaceOptions, DeleteNamespaceOptions};

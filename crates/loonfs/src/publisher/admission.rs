@@ -6,7 +6,7 @@ use crate::execution_budget::{AdmissionChange, AdmissionCharge, BudgetPermit};
 use crate::publish::CommitCandidate;
 use crate::CoreError;
 use crate::{ExecutionBudget, PublicationPolicy};
-use loonfs_core::{check_planned_bytes, MergeAllowance, MergeReservation};
+use loonfs_core::{MergeAllowance, MergeReservation, MERGE_COMMITS_PAGE_BYTES};
 use loonfs_types::format::wal::{MAX_WAL_OBJECT_BYTES, WAL_OBJECT_OVERHEAD_BYTES};
 use loonfs_types::NamespaceId;
 use std::collections::HashMap;
@@ -25,6 +25,10 @@ const MERGE_PEAK_PER_PLANNED_BYTE: usize = 3;
 /// or the whole allowance when the allowance is smaller. At the default
 /// allowance of 512 MiB, at most 64 merges plan at once.
 pub(super) const MIN_MERGE_RESERVED_BYTES: usize = 8 * 1024 * 1024;
+
+/// The floor covers a first page of the fork's commits, and the set of
+/// touched inodes that the page adds, before the reservation first grows.
+const _: () = assert!(MIN_MERGE_RESERVED_BYTES >= 2 * MERGE_COMMITS_PAGE_BYTES);
 
 /// Admits one runtime's publication requests against its per-namespace
 /// limits and the totals of its execution budget.
@@ -130,7 +134,7 @@ impl PublicationAdmission {
         permit: &Arc<AdmissionPermit>,
     ) -> Result<(), CoreError> {
         candidate.validate_appended_content()?;
-        check_planned_bytes(planned_bytes, &permit.merge_allowance())
+        permit.merge_allowance().check(planned_bytes, 0)
     }
 
     pub(super) fn validate_candidate(candidate: &PreparedCandidate) -> Result<(), CoreError> {

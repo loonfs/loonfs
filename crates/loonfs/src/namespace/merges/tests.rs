@@ -3,16 +3,19 @@
 //! and merges on a runtime that has merges turned off.
 
 use super::{missing_fork, MergeOutcome, PlannedCommit, PlannedMerge};
+use crate::publish::{CommitIntent, FilesystemOperation};
 use crate::publisher::MergeReservation;
 use crate::{
     ActorId, Commit, CommitId, CoreError, DeleteOptions, ErrorCode, ExecutionBudget, LoonFs,
-    MergeForkOptions, Namespace, NamespaceSessionStatus, Result, Writable,
+    MergeForkOptions, MoveOptions, Namespace, NamespaceSessionStatus, Result, Writable,
 };
 use futures::future::BoxFuture;
 use loonfs_core::MergeRequest;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::{namespace_id, writer_id};
-use loonfs_types::{DeleteDirectoryBehavior, ManifestNo, MergeConflictKind, FEATURE_MERGES};
+use loonfs_types::{
+    AbsolutePath, DeleteDirectoryBehavior, ManifestNo, MergeConflictKind, FEATURE_MERGES,
+};
 use std::assert_matches;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -119,6 +122,63 @@ impl Family {
             .put_file(path, b"main", &actor())
             .await
             .expect("an unrelated write in main");
+    }
+
+    /// Creates 1,024 directories in the fork below a directory whose path
+    /// has 15 components of 240 bytes, merges them into `main`, and then
+    /// renames each directory in the fork and back again, so the fork's next
+    /// merge has an empty net change. The renames commit 256 moves at a
+    /// time, which stays below the namespace's admitted bytes.
+    ///
+    /// Each directory's path is about 3,600 bytes, and a path cache entry
+    /// with the path's components and its hash table slot estimates at about
+    /// 7.7 KB. The next plan reads each directory at the range's start and
+    /// at its end, so its path caches estimate at about 15 MiB, which is
+    /// more than the reservation floor of 8 MiB.
+    async fn undo_renames_in_the_fork(&self) {
+        let parent = format!("/{}", vec!["p".repeat(240); 15].join("/"));
+        let path = |name: &str, index: usize| {
+            AbsolutePath::parse(format!("{parent}/{name}-{index:04}")).expect("path")
+        };
+        let commit = |operations| {
+            self.fork.commit(CommitIntent {
+                commit_id: CommitId::generate(),
+                actor_id: actor(),
+                subject: None,
+                message: None,
+                operations,
+                preconditions: Vec::new(),
+            })
+        };
+        let parents = FilesystemOperation::CreateDirectory {
+            path: AbsolutePath::parse(&parent).expect("path"),
+            parents: true,
+        };
+        let creates = (0..1024).map(|index| FilesystemOperation::CreateDirectory {
+            path: path("d", index),
+            parents: false,
+        });
+        commit(std::iter::once(parents).chain(creates).collect())
+            .await
+            .expect("create the directories in the fork");
+        self.main
+            .merge_fork(self.fork.id(), &actor())
+            .await
+            .expect("merge the directories");
+        for (from, to) in [("d", "m"), ("m", "d")] {
+            for first in (0..1024).step_by(256) {
+                let moves = (first..first + 256).map(|index| {
+                    FilesystemOperation::move_path(
+                        path(from, index),
+                        path(to, index),
+                        &MoveOptions::default(),
+                    )
+                });
+                commit(moves.collect())
+                    .await
+                    .expect("rename the directories in the fork");
+            }
+        }
     }
 
     /// Commits `planned` as the merge route does, and plans again with
@@ -267,6 +327,64 @@ async fn a_merge_keeps_its_reservation_from_its_plan() {
         .merge_fork(family.fork.id(), &actor())
         .await
         .expect("the merge once the allowance has room");
+}
+
+/// Checks that a merge whose net change is empty reserves the memory that
+/// its plan uses. The plan's path caches grow the reservation above the
+/// floor (see [`Family::undo_renames_in_the_fork`]), the merge commits a
+/// merge record with no changes, and the reservation returns to the
+/// allowance once the merge settles.
+#[tokio::test]
+async fn a_merge_of_an_undone_change_reserves_the_memory_that_its_plan_uses() {
+    let family = family().await;
+    family.undo_renames_in_the_fork().await;
+    let budget = family.runtime.execution_budget().clone();
+    let planned = family.plan(&family.request("undone")).await;
+    let reserved = budget.stats().admitted_merge_bytes;
+    assert!(reserved > 8 * 1024 * 1024, "{reserved} bytes reserved");
+    let commit = family
+        .main
+        .submit_merge(planned.candidate, &planned.reservation)
+        .await
+        .expect("the merge");
+    assert!(commit.merge.is_some());
+    assert_eq!(commit.events, Vec::new());
+    drop(planned.reservation);
+    assert_eq!(budget.stats().admitted_merge_bytes, 0);
+}
+
+/// Checks that a merge whose plan uses more memory than the other merges'
+/// reservations leave room for gets `server_busy`, commits nothing, and
+/// leaves the allowance as it was. The other reservations leave one floor
+/// of 8 MiB, which the plan's path caches outgrow (see
+/// [`Family::undo_renames_in_the_fork`]).
+#[tokio::test]
+async fn a_merge_whose_plan_memory_doesnt_fit_beside_other_reservations_is_busy() {
+    let family = family().await;
+    family.undo_renames_in_the_fork().await;
+    let budget = family.runtime.execution_budget().clone();
+    let floor = 8 * 1024 * 1024;
+    let others = (1..budget.max_merge_bytes() / floor)
+        .map(|_| {
+            family
+                .main
+                .session()
+                .reserve_merge()
+                .expect("a reservation")
+        })
+        .collect::<Vec<_>>();
+    let full = budget.stats();
+    let head = family.main.metadata().await.expect("metadata").head_seq;
+    let error = family
+        .main
+        .merge_fork(family.fork.id(), &actor())
+        .await
+        .expect_err("the plan's memory doesn't fit");
+    assert_eq!(error.code(), ErrorCode::ServerBusy);
+    assert_eq!(budget.stats(), full);
+    let metadata = family.main.metadata().await.expect("metadata");
+    assert_eq!(metadata.head_seq, head, "the refused merge commits nothing");
+    drop(others);
 }
 
 /// Checks that a merge after the caller dropped the fork's handle, right

@@ -272,7 +272,7 @@ impl<'v, S: ObjectStore + ?Sized> Classifier<'v, S> {
         let mut parts = Vec::with_capacity(2);
         // A directory that an earlier replay commit created has no path at
         // the new fork's fork point, and nothing below it changed before.
-        let mut pinned_head = StateReader::new(pinned.metadata_view());
+        let mut pinned_head = StateReader::new(pinned.metadata_view(), &self.memory);
         let mut pinned_paths = Vec::with_capacity(checks.len());
         for (index, check) in checks.iter().enumerate() {
             let path = pinned_head

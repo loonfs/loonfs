@@ -3,10 +3,11 @@
 //! commit commits into.
 
 use super::classify::Classifier;
+use super::memory::PlanningMemory;
 use super::operations::BindingChange;
 use super::order::MergeOperations;
 use super::replay::Replay;
-use super::size::{check_planned_bytes, with_split_hint};
+use super::size::with_split_hint;
 use super::state::StateReader;
 use super::{through_seq, MergeAllowance, MergeRequest};
 use crate::authorize::{Authorizer, CommitAuthority};
@@ -21,6 +22,7 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::MergeRecord;
 use loonfs_types::{u64_from_usize, ChangeSeq, CommitPrecondition, InodeKind, MergeConflict};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 /// The commit of a merge or of a replay commit, as one plan made it, with
 /// the conflicts that its classification found.
@@ -51,8 +53,9 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// moves that the ordering adds, doesn't fit them. Either refusal has
     /// the split hint that the fork's net change over shorter ranges gives
     /// (see [`with_split_hint`]). Each check grows the merge's reservation of
-    /// the allowance, and returns `server_busy` when other merges'
-    /// reservations leave no room for the growth.
+    /// the allowance to cover the planned bytes and the memory that the plan
+    /// uses (see [`PlanningMemory`]), and returns `server_busy` when other
+    /// merges' reservations leave no room for the growth.
     #[allow(
         clippy::too_many_arguments,
         reason = "a merge and a replay commit share every input, and a replay commit adds the pin"
@@ -87,12 +90,19 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             intent.message.as_deref(),
             Some(&record),
         );
+        let memory = PlanningMemory::new(allowance.clone());
         let mut classifier = Classifier {
             main,
-            theirs: StateReader::new(main.metadata_view()),
-            base: StateReader::new(pinned.unwrap_or(main).metadata_view_at(fork_point_seq)),
-            ours: StateReader::new(fork_view.metadata_view_at(record.source_through_seq)),
-            before: StateReader::new(fork_view.metadata_view_at(source_after_seq)),
+            theirs: StateReader::new(main.metadata_view(), &memory),
+            base: StateReader::new(
+                pinned.unwrap_or(main).metadata_view_at(fork_point_seq),
+                &memory,
+            ),
+            ours: StateReader::new(
+                fork_view.metadata_view_at(record.source_through_seq),
+                &memory,
+            ),
+            before: StateReader::new(fork_view.metadata_view_at(source_after_seq), &memory),
             fork_authorizer: Authorizer::for_request(
                 source_namespace_id,
                 &fork_head.access,
@@ -100,7 +110,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             )?,
             record: &record,
             fork_point_seq,
-            allowance: allowance.clone(),
+            memory: Arc::clone(&memory),
             own_seqs: HashMap::new(),
             plans: Vec::new(),
             layouts: HashMap::new(),
@@ -179,7 +189,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         .with_merge(record.clone(), fork_point_seq, created_inode_ids)
         .with_temporary_moves(temporary_moves);
         with_split_hint(
-            check_planned_bytes(candidate.wal_record_bytes_upper_bound(), allowance),
+            memory.check_planned(candidate.wal_record_bytes_upper_bound()),
             fork_view,
             range,
             fields_bytes,

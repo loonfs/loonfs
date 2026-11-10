@@ -4,6 +4,7 @@
 //! ([format section 6.2](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#62-validation)).
 
 mod classify;
+mod memory;
 mod net_change;
 mod next_range;
 mod operations;
@@ -27,7 +28,7 @@ use crate::storage::tail_content::ContentWrites;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::{ForkBasis, RebasedFrom};
 use loonfs_types::format::manifest::MergeIndexRecord;
-use loonfs_types::format::wal::MergeRecord;
+use loonfs_types::format::wal::{MergeRecord, MAX_WAL_OBJECT_BYTES, WAL_OBJECT_OVERHEAD_BYTES};
 use loonfs_types::{
     ActorId, ChangeSeq, Commit, CommitId, CommitPrecondition, FilesystemOperation, MergeConflict,
     NamespaceId,
@@ -35,8 +36,8 @@ use loonfs_types::{
 use std::fmt;
 use std::sync::Arc;
 
+pub use net_change::MERGE_COMMITS_PAGE_BYTES;
 pub use replay::ReplayPlan;
-pub use size::check_planned_bytes;
 
 /// A request to merge a fork's commits into a namespace.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,10 +65,11 @@ pub struct MergeRequest {
 /// the merges that plan and publish at once, with one merge's reservation of
 /// the allowance.
 ///
-/// The estimate is `peak_per_planned_byte` times the merge's planned WAL
-/// bytes. The planner checks the allowance as it plans, so it stops planning
-/// a merge that admission would refuse, and the check grows the merge's
-/// reservation to the estimate. Admission checks the merge's commit.
+/// A merge's estimate is `peak_per_planned_byte` times the merge's planned
+/// WAL bytes, or the memory that planning the merge uses, whichever is
+/// larger. The planner checks the allowance as it plans, so it stops
+/// planning a merge that admission would refuse, and the check grows the
+/// merge's reservation to the estimate. Admission checks the merge's commit.
 #[derive(Clone)]
 pub struct MergeAllowance {
     /// The allowance, in bytes.
@@ -118,14 +120,31 @@ impl MergeAllowance {
         }
     }
 
-    /// Returns `merge_too_large` when the estimated peak of a merge whose
-    /// planned WAL bytes are `planned_bytes` exceeds the allowance, and
-    /// otherwise grows the merge's reservation to the estimate. When other
-    /// merges' reservations leave no room for the growth, the check returns
-    /// `server_busy`. An allowance of zero turns merges off, so it refuses
-    /// every merge.
-    pub fn check(&self, planned_bytes: usize) -> Result<()> {
-        let estimated_bytes = planned_bytes.saturating_mul(self.peak_per_planned_byte);
+    /// Checks a merge whose planned WAL bytes are `planned_bytes` and whose
+    /// planner uses an estimated `working_bytes` of memory, and grows the
+    /// merge's reservation to the merge's estimate.
+    ///
+    /// The check applies three rules in order. A merge whose planned bytes
+    /// don't fit one WAL object returns `merge_too_large`. The merge's
+    /// estimate is the larger of `peak_per_planned_byte` times the planned
+    /// bytes and the working bytes, and an estimate above the allowance
+    /// returns `merge_too_large`. Otherwise the check grows the reservation to
+    /// the estimate, and returns `server_busy` when other merges'
+    /// reservations leave no room for the growth. An allowance of zero turns
+    /// merges off, so it refuses every merge.
+    pub fn check(&self, planned_bytes: usize, working_bytes: usize) -> Result<()> {
+        let document_bytes = planned_bytes.saturating_add(WAL_OBJECT_OVERHEAD_BYTES);
+        if document_bytes > MAX_WAL_OBJECT_BYTES {
+            return Err(CoreError::MergeTooLarge {
+                bound: MergeBound::WalObject,
+                estimated_bytes: document_bytes,
+                max_bytes: MAX_WAL_OBJECT_BYTES,
+                split_at_seq: None,
+            });
+        }
+        let estimated_bytes = planned_bytes
+            .saturating_mul(self.peak_per_planned_byte)
+            .max(working_bytes);
         if self.max_bytes == 0 || estimated_bytes > self.max_bytes {
             return Err(CoreError::MergeTooLarge {
                 bound: MergeBound::MergeAllowance,

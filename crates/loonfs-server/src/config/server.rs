@@ -75,7 +75,8 @@ pub struct ServerConfig {
     pub max_admitted_bytes: Option<NonZeroUsize>,
     /// The merge allowance, which limits the estimated peak memory of the
     /// merges that the server plans and publishes at once. A merge's
-    /// estimate is three times its planned WAL bytes. A merge whose estimate
+    /// estimate is three times its planned WAL bytes, or the memory that
+    /// planning the merge uses, whichever is larger. A merge whose estimate
     /// exceeds the allowance returns `merge_too_large`, and a merge whose
     /// reservation doesn't fit beside other merges' reservations returns
     /// `server_busy`. Zero turns merges off, and the sizing
