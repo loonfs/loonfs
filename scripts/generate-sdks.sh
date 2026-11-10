@@ -34,10 +34,11 @@ prune_generated() {
     go)
         # Fern cannot omit these generator-level model tests.
         for name in capabilities changes commits files inodes namespaces snapshots trash types uploads \
-            maintenance/checkpoints maintenance/diagnostics maintenance/grep_index maintenance/runs; do
+            maintenance/checkpoints maintenance/diagnostics maintenance/grep_index maintenance/runs \
+            maintenance/pools/runs; do
             rm "generated/go/${name}_test.go"
         done
-        rm -r generated/go/*/*_test generated/go/*/*/*_test
+        rm -r generated/go/*/*_test generated/go/*/*/*_test generated/go/*/*/*/*_test
         # The generator's retrier test pins the generator's retry policy; the
         # overlay replaces it with one that pins the Retry-After contract.
         rm generated/go/internal/retrier_test.go
