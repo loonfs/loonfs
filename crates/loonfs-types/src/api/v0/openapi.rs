@@ -40,7 +40,9 @@ pub fn register(schemas: &mut BTreeMap<String, RefOr<Schema>>) {
     named.plain::<DiffEntryKind>("unknown");
     named.plain::<MergeBound>("unknown");
     named.plain::<MergeConflictKind>("unknown");
+    named.plain::<GcSkippedWork>("unknown");
     named.plain::<MetadataMaintenanceOutcome>("unknown");
+    named.plain::<MetadataSkippedWork>("unknown");
     named.plain::<UploadMode>("unknown");
     named.object::<ErrorDetails>();
     named.object::<MergeConflictVersion>();

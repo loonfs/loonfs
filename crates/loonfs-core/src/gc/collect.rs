@@ -56,7 +56,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             session_cache,
             listed_bytes: AtomicU64::new(0),
         };
-        let content = ContentSweep::load(&sweep).await?;
+        let content = ContentSweep::load(&sweep, &mut report).await?;
         for family in CandidateFamily::ALL {
             if family == CandidateFamily::Content {
                 if let Some(content) = &content {

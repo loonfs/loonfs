@@ -307,6 +307,7 @@ fn compaction_instruments_register_the_closed_vocabularies() {
             input_bytes: 2_000,
             output_bytes: 1_000,
             output_segments: 1,
+            skipped: Vec::new(),
         }),
         25,
     );
@@ -404,6 +405,7 @@ fn a_collection_counts_what_it_reclaimed_and_retained() {
         listed_bytes: 0,
         next_reclamation_at_ms: None,
         reclaimable_at_ms: None,
+        skipped: Vec::new(),
     };
 
     instruments.gc.record_collection(&gc);

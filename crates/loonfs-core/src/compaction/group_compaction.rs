@@ -28,7 +28,7 @@ use crate::segment::runs::{MetadataFamilyGroup, MetadataRunManifest, MetadataRun
 use crate::segment::scan::VerifiedMetadataSegments;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{MetadataRow, MetadataRowFamily, MetadataSegmentRef};
-use loonfs_types::{ChangeSeq, NamespaceId, RunNo};
+use loonfs_types::{ChangeSeq, MetadataSkippedWork, NamespaceId, RunNo};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
@@ -53,6 +53,8 @@ pub(crate) struct GroupCompactionReport {
     /// size of the group. A retention operator decides each row as it
     /// arrives and keeps none.
     pub(crate) peak_resident_blocks: usize,
+    /// The work that the compaction skipped at a limit.
+    pub(crate) skipped: Vec<MetadataSkippedWork>,
 }
 
 /// Rebuilds the family group and runs selected by `spec`. `segments` must come
@@ -161,6 +163,12 @@ impl<'a, S: ObjectStore + ?Sized> GroupCompaction<'a, S> {
             .flat_map(|run| group_run_descriptors(run, group))
             .map(segment_object_bytes)
             .sum();
+        let skipped = match kept_inodes {
+            KeptInodeFilter::EveryInodeAtWalkLimit => {
+                vec![MetadataSkippedWork::ExpiredRowRemovalWalkLimit]
+            }
+            KeptInodeFilter::EveryInode | KeptInodeFilter::Reached(_) => Vec::new(),
+        };
         Self {
             store: basis.store,
             basis_runs: &basis.scan_runs,
@@ -176,6 +184,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupCompaction<'a, S> {
             input_runs,
             result: GroupCompactionReport {
                 input_bytes,
+                skipped,
                 ..GroupCompactionReport::default()
             },
             canonical_digest: RowDigest::default(),

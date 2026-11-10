@@ -35,9 +35,13 @@ const KEPT_INODE_SCAN_ROWS: usize = DIRECTORY_PAGE_RAW_SCAN_LIMIT;
 /// The inodes whose rows a base compaction keeps.
 pub(crate) enum KeptInodeFilter {
     /// The compaction keeps every row, because it isn't a base compaction of a group
-    /// that stores rows by inode, because the basis manifest's retention
-    /// floor is 0, or because the walk would exceed its depth limit.
+    /// that stores rows by inode, or because the basis manifest's retention
+    /// floor is 0.
     EveryInode,
+    /// The compaction keeps every row, because the walk would keep more than
+    /// `MAX_KEPT_INODE_WALK_DEPTH` directories at once. The compaction reports
+    /// that it skipped removing hidden rows.
+    EveryInodeAtWalkLimit,
     /// The inodes that the walk reached. The filter can also match an inode
     /// that the walk didn't reach, which keeps that inode's rows for one
     /// compaction.
@@ -104,8 +108,9 @@ fn removes_hidden_rows(group: MetadataFamilyGroup) -> bool {
 /// still store rows that the deletion hides.
 ///
 /// The filter uses ten bits per expected inode, capped at
-/// `MAX_BLOOM_FILTER_BYTES`. Its seed is the output run number. A walk
-/// deeper than `MAX_KEPT_INODE_WALK_DEPTH` keeps every row.
+/// `MAX_BLOOM_FILTER_BYTES`. Its seed is the output run number. A walk that
+/// would keep more than `MAX_KEPT_INODE_WALK_DEPTH` directories at once keeps
+/// every row and returns `KeptInodeFilter::EveryInodeAtWalkLimit`.
 pub(crate) async fn load_kept_inode_filter<S: ObjectStore + ?Sized>(
     basis: &VerifiedMetadataSegments<'_, S>,
     namespace_id: &NamespaceId,
@@ -141,7 +146,7 @@ pub(crate) async fn load_kept_inode_filter<S: ObjectStore + ?Sized>(
         ControlFlow::Break(WalkStop::TooDeep) => {
             tracing::info!(namespace_id = %namespace_id, max_depth = MAX_KEPT_INODE_WALK_DEPTH,
                 "kept inode walk exceeded its depth limit; kept every row");
-            Ok(Ok(KeptInodeFilter::EveryInode))
+            Ok(Ok(KeptInodeFilter::EveryInodeAtWalkLimit))
         }
     }
 }

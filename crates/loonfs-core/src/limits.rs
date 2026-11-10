@@ -28,8 +28,8 @@ pub const MAX_BLOOM_FILTER_BYTES: usize = 64 * 1024 * 1024;
 /// inode ID and the row key where the walk resumes that directory, which is
 /// at most about 1.6 KiB for a name key of `MAX_NAME_KEY_BYTES`, so the stack
 /// takes at most about 7 MiB. A move can nest a tree deeper than any request
-/// path, and a compaction that meets a deeper tree keeps every row it would
-/// have tested.
+/// path, and a compaction whose walk would need more levels keeps every row it
+/// would have tested and reports that it skipped removing hidden rows.
 pub const MAX_KEPT_INODE_WALK_DEPTH: usize = 4_096;
 
 /// Most encoded segment bytes that one fold or compaction keeps in memory

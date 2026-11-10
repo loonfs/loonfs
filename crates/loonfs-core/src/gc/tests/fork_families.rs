@@ -20,6 +20,7 @@ use loonfs_types::format::control::UploadSessionPayload;
 use loonfs_types::format::manifest::ContentLayoutRecord;
 use loonfs_types::{
     ChangeSeq, ChecksumAlgorithm, ContentExtent, ContentId, ContentLayout, ExtentObject,
+    GcSkippedWork,
 };
 
 /// Creates `names[0]`, then forks each later name from the one before it,
@@ -358,6 +359,10 @@ async fn an_unreadable_member_skips_the_content_sweep_and_the_collection_sweeps_
             .await
             .expect("the root's collection continues");
         assert_eq!(report.deleted.content_objects, 0, "`{}`", family[corrupt]);
+        assert_eq!(
+            report.skipped,
+            [GcSkippedWork::ContentSweepUnreadableMember]
+        );
         assert!(exists(&store, &unreferenced).await);
         assert_eq!(report.deleted.temporary_objects, 1);
         assert!(!exists(&store, &temporary).await);
@@ -381,12 +386,14 @@ async fn a_collection_past_the_family_roots_budget_skips_the_content_sweep() {
         .await
         .expect("the late collection");
     assert_eq!(report.deleted.content_objects, 0);
+    assert_eq!(report.skipped, [GcSkippedWork::ContentSweepFamilyBudget]);
     assert!(exists(&store, &unreferenced).await);
     let report = crate::test_support::namespace_store(&store, root)
         .gc(None, &options(), &aged.clock())
         .await
         .expect("a collection within the budget");
     assert_eq!(report.deleted.content_objects, 1);
+    assert_eq!(report.skipped, []);
     assert!(!exists(&store, &unreferenced).await);
 }
 

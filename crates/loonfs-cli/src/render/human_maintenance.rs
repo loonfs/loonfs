@@ -8,8 +8,8 @@ use loonfs_merge::{
 };
 use loonfs_types::{
     ChangeSeq, DeleteNamespaceResponse, DeleteSnapshotResponse, GrepIndex, ListChangesResponse,
-    ListCheckpointsResponse, ListSnapshotsResponse, MetadataMaintenanceOutcome, NamespaceMetadata,
-    RunMaintenanceResponse, Snapshot, StoreProbeResponse,
+    ListCheckpointsResponse, ListSnapshotsResponse, MetadataMaintenanceOutcome,
+    MetadataSkippedWork, NamespaceMetadata, RunMaintenanceResponse, Snapshot, StoreProbeResponse,
 };
 use loonfs_types::{MergeConflict, MergeConflictKind};
 
@@ -146,16 +146,28 @@ pub(super) fn human_maintenance_ran(ran: &MaintenanceRan) -> String {
             "administrator recovery for {}: access revision {} at seq {}",
             recovery.namespace_id, recovery.access_revision_no, recovery.committed_seq,
         ),
-        RunMaintenanceResponse::Metadata(metadata) => format!(
-            "metadata maintenance for {}: {} ({} compaction units published)",
-            metadata.namespace_id,
-            match metadata.outcome {
-                MetadataMaintenanceOutcome::CaughtUp => "caught up",
-                MetadataMaintenanceOutcome::Due => "work still due, run again later",
-                MetadataMaintenanceOutcome::Unknown => "outcome unknown to this CLI",
-            },
-            metadata.compaction_units,
-        ),
+        RunMaintenanceResponse::Metadata(metadata) => {
+            let mut lines = vec![format!(
+                "metadata maintenance for {}: {} ({} compaction units published)",
+                metadata.namespace_id,
+                match metadata.outcome {
+                    MetadataMaintenanceOutcome::CaughtUp => "caught up",
+                    MetadataMaintenanceOutcome::Due => "work still due, run again later",
+                    MetadataMaintenanceOutcome::Unknown => "outcome unknown to this CLI",
+                },
+                metadata.compaction_units,
+            )];
+            lines.extend(metadata.skipped.iter().map(|reason| {
+                match reason {
+                    MetadataSkippedWork::ExpiredRowRemovalWalkLimit => {
+                        "skipped the removal of rows that expired deletions hide: the kept inode walk reached its limit of 4,096 open directories"
+                    }
+                    MetadataSkippedWork::Unknown => "skipped work for a reason unknown to this CLI",
+                }
+                .to_owned()
+            }));
+            lines.join("\n")
+        }
         RunMaintenanceResponse::Gc(gc) => {
             format!("gc for {}: {}", gc.namespace_id, gc_summary(gc))
         }
