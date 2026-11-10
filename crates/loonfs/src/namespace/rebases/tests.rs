@@ -220,7 +220,7 @@ async fn a_replay_that_deletes_a_directory_plans_again_after_the_new_fork_change
     };
     let PlannedCommit {
         candidate,
-        slot,
+        reservation,
         record,
         report,
         ..
@@ -233,7 +233,7 @@ async fn a_replay_that_deletes_a_directory_plans_again_after_the_new_fork_change
         .expect("another writer of the new fork");
 
     let error = rebase
-        .submit_merge(candidate, &slot)
+        .submit_merge(candidate, &reservation)
         .await
         .expect_err("the new fork's head moved");
     assert_eq!(error.code(), ErrorCode::StaleHead);
@@ -243,7 +243,7 @@ async fn a_replay_that_deletes_a_directory_plans_again_after_the_new_fork_change
         ..request
     };
     let PlannedMerge::Candidate(replanned) = rebase
-        .plan_replay(&replan, Some(slot))
+        .plan_replay(&replan, Some(reservation))
         .await
         .expect("the second plan")
     else {
@@ -256,7 +256,7 @@ async fn a_replay_that_deletes_a_directory_plans_again_after_the_new_fork_change
         .collect();
     assert_eq!(kinds, [(MergeConflictKind::Subtree, true)]);
     rebase
-        .submit_merge(replanned.candidate, &replanned.slot)
+        .submit_merge(replanned.candidate, &replanned.reservation)
         .await
         .expect("the second plan commits");
     assert_eq!(

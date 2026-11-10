@@ -176,10 +176,7 @@ impl Family {
                 &self.pinned_context().await,
                 &request,
                 self.writer.now_ms,
-                MergeAllowance {
-                    max_bytes: usize::MAX,
-                    peak_per_planned_byte: 3,
-                },
+                MergeAllowance::unshared(usize::MAX, 3),
             )
             .await?;
         let conflicts = plan.conflicts().to_vec();
@@ -226,10 +223,7 @@ impl Family {
                 &read_context(&self.store, source).await,
                 &request,
                 self.writer.now_ms,
-                MergeAllowance {
-                    max_bytes: usize::MAX,
-                    peak_per_planned_byte: 3,
-                },
+                MergeAllowance::unshared(usize::MAX, 3),
             )
             .await
             .expect("plan the merge")

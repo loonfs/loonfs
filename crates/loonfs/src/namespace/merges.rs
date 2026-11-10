@@ -1,10 +1,10 @@
 //! Merging a fork into a writable [`Namespace`]: the receipt lookup, the
-//! merge slot, the checks, the fork's fold, the plan, and the commit. Also
+//! merge's reservation, the checks, the fork's fold, the plan, and the commit. Also
 //! the next-range query, which reads where a fork's next merge starts.
 
 use crate::pinned_read::PinnedRead;
 use crate::publish::CommitCandidate;
-use crate::publisher::MergeSlot;
+use crate::publisher::MergeReservation;
 use crate::trace::{self, operation_span};
 use crate::{
     ActorId, Commit, CommitId, Consistency, CoreError, Error, MergeForkOptions, Mode, Namespace,
@@ -12,7 +12,7 @@ use crate::{
 };
 use futures::future::BoxFuture;
 use loonfs_core::limits::DIRECT_TRANSFER_URL_TTL_MS;
-use loonfs_core::MergeRequest;
+use loonfs_core::{MergeAllowance, MergeRequest};
 use loonfs_types::format::wal::MergeRecord;
 use std::sync::{Mutex, MutexGuard};
 
@@ -30,14 +30,14 @@ pub(crate) enum PlannedMerge<R = ()> {
     Candidate(Box<PlannedCommit<R>>),
 }
 
-/// The commit that makes a merge, the merge slot that the merge keeps, the
+/// The commit that makes a merge, the reservation that the merge keeps, the
 /// merge's record, whose range a later plan of the request applies, what
 /// the plan reports with the commit (nothing for a merge, which refuses a
 /// conflict, and the conflict report for a replay commit), and the pin on
 /// the fork's manifest that the plan read, which the commit releases.
 pub(crate) struct PlannedCommit<R = ()> {
     pub(crate) candidate: CommitCandidate,
-    pub(crate) slot: MergeSlot,
+    pub(crate) reservation: MergeReservation,
     pub(crate) record: MergeRecord,
     pub(crate) report: R,
     pub(crate) fork_pin: PinId,
@@ -132,7 +132,9 @@ impl Namespace<Writable> {
     /// planned operation needs. A runtime whose merge allowance
     /// ([`ExecutionBudgetBuilder::max_merge_bytes`](crate::ExecutionBudgetBuilder::max_merge_bytes))
     /// is zero has merges turned off, and a merge returns `not_supported` for
-    /// `filesystem.merges` before it reads either namespace.
+    /// `filesystem.merges` before it reads either namespace. A merge whose
+    /// reservation of the allowance doesn't fit beside other merges'
+    /// reservations returns `server_busy`.
     pub async fn merge_fork_with_options(
         &self,
         source_namespace_id: &NamespaceId,
@@ -153,8 +155,8 @@ impl Namespace<Writable> {
                 };
                 let planned = self.plan_merge(&request, None).await?;
                 let (MergeOutcome::Found(commit) | MergeOutcome::Committed { commit, .. }) = self
-                    .commit_merge(&request, planned, |request, slot| {
-                        Box::pin(async move { self.plan_merge(&request, Some(slot)).await })
+                    .commit_merge(&request, planned, |request, reservation| {
+                        Box::pin(async move { self.plan_merge(&request, Some(reservation)).await })
                     })
                     .await?;
                 Ok(commit)
@@ -165,18 +167,18 @@ impl Namespace<Writable> {
 
     /// Returns the merge that this namespace committed under the request's
     /// commit ID, or the commit that makes the merge, planned against this
-    /// namespace's head under `slot`, or under a merge slot that the plan
-    /// takes (see [`Self::plan_commit`]). The plan checks the fork and the
+    /// namespace's head under `reservation`, or under a reservation that the
+    /// plan takes (see [`Self::plan_commit`]). The plan checks the fork and the
     /// floors and finds the range's start, folds and pins the fork, and
     /// plans. It checks the merge's size, and then its conflicts.
     pub(crate) async fn plan_merge(
         &self,
         request: &MergeRequest,
-        slot: Option<MergeSlot>,
+        reservation: Option<MergeReservation>,
     ) -> Result<PlannedMerge> {
         let source_namespace_id = &request.source_namespace_id;
         // Boxed so the merge's future stays within the compiler's layout depth.
-        self.plan_commit(request, slot, |main| {
+        self.plan_commit(request, reservation, |main, allowance| {
             Box::pin(async move {
                 let main = &main;
                 self.core
@@ -204,7 +206,7 @@ impl Namespace<Writable> {
                             &fork.context,
                             request,
                             prepared_at_ms,
-                            self.session().merge_allowance(),
+                            allowance,
                         )
                         .await?;
                     let record = plan.record().clone();
@@ -221,24 +223,26 @@ impl Namespace<Writable> {
     /// Returns the merge or replay commit that this namespace committed under
     /// the request's commit ID, or the commit, its record, its report, and
     /// the pin on the fork that `plan` plans from this namespace's head under
-    /// `slot`, or under a merge slot that this call takes.
+    /// `reservation`, or under a reservation that this call takes. `plan`
+    /// plans against the merge allowance with the reservation, and grows
+    /// the reservation as it plans.
     ///
     /// The receipt lookup comes first, so a retry of a commit that committed
-    /// takes no slot and folds nothing, even after the fork was deleted. The
-    /// receipt lookup and the plan read one view of this namespace, as a
+    /// reserves nothing and folds nothing, even after the fork was deleted.
+    /// The receipt lookup and the plan read one view of this namespace, as a
     /// read does: a view that a newer manifest replaced, whose segments a
     /// collection removed, is read once more from the current manifest, and
-    /// the slot that the first view took stays with the second.
+    /// the reservation that the first view took stays with the second.
     pub(super) async fn plan_commit<R, Plan>(
         &self,
         request: &MergeRequest,
-        slot: Option<MergeSlot>,
-        plan: impl Fn(PinnedRead) -> Plan,
+        reservation: Option<MergeReservation>,
+        plan: impl Fn(PinnedRead, MergeAllowance) -> Plan,
     ) -> Result<PlannedMerge<R>>
     where
         Plan: std::future::Future<Output = Result<(CommitCandidate, MergeRecord, R, PinId)>>,
     {
-        let held = Mutex::new(slot);
+        let held = Mutex::new(reservation);
         self.core
             .read(
                 &self.namespace_id,
@@ -248,22 +252,22 @@ impl Namespace<Writable> {
                     {
                         return Ok(PlannedMerge::Committed(commit));
                     }
-                    let slot = match lock_slot(&held).take() {
-                        Some(slot) => slot,
-                        None => self.session().acquire_merge_slot()?,
+                    let reservation = match lock_reservation(&held).take() {
+                        Some(reservation) => reservation,
+                        None => self.session().reserve_merge()?,
                     };
-                    match plan(target).await {
+                    match plan(target, reservation.allowance()).await {
                         Ok((candidate, record, report, fork_pin)) => {
                             Ok(PlannedMerge::Candidate(Box::new(PlannedCommit {
                                 candidate,
-                                slot,
+                                reservation,
                                 record,
                                 report,
                                 fork_pin,
                             })))
                         }
                         Err(error) => {
-                            *lock_slot(&held) = Some(slot);
+                            *lock_reservation(&held) = Some(reservation);
                             Err(missing_fork(&request.source_namespace_id, error))
                         }
                     }
@@ -284,13 +288,13 @@ impl Namespace<Writable> {
         &'a self,
         request: &MergeRequest,
         mut planned: PlannedMerge<R>,
-        mut replan: impl FnMut(MergeRequest, MergeSlot) -> BoxFuture<'a, Result<PlannedMerge<R>>>,
+        mut replan: impl FnMut(MergeRequest, MergeReservation) -> BoxFuture<'a, Result<PlannedMerge<R>>>,
     ) -> Result<MergeOutcome<R>> {
         let mut plans = 1;
         loop {
             let PlannedCommit {
                 candidate,
-                slot,
+                reservation,
                 record,
                 report,
                 fork_pin,
@@ -298,7 +302,7 @@ impl Namespace<Writable> {
                 PlannedMerge::Committed(commit) => return Ok(MergeOutcome::Found(commit)),
                 PlannedMerge::Candidate(planned) => *planned,
             };
-            let committed = self.submit_merge(candidate, &slot).await;
+            let committed = self.submit_merge(candidate, &reservation).await;
             self.release_fork_pin(&request.source_namespace_id, &fork_pin)
                 .await;
             match committed {
@@ -309,25 +313,25 @@ impl Namespace<Writable> {
                         through_seq: Some(record.source_through_seq),
                         ..request.clone()
                     };
-                    planned = replan(request, slot).await?;
+                    planned = replan(request, reservation).await?;
                 }
                 result => return result.map(|commit| MergeOutcome::Committed { commit, report }),
             }
         }
     }
 
-    /// Submits a merge's commit under the merge slot that the merge keeps, as this
-    /// handle's subject.
+    /// Submits a merge's commit under the reservation that the merge keeps,
+    /// as this handle's subject.
     pub(crate) async fn submit_merge(
         &self,
         candidate: CommitCandidate,
-        slot: &MergeSlot,
+        reservation: &MergeReservation,
     ) -> Result<Commit> {
         let candidate = match self.core.subject() {
             Some(subject) => candidate.with_subject(subject.clone()),
             None => candidate,
         };
-        self.session().submit_merge(candidate, slot).await
+        self.session().submit_merge(candidate, reservation).await
     }
 
     /// Folds the fork, pins the manifest that covers its tail, and reads the
@@ -414,12 +418,14 @@ impl Namespace<Writable> {
     }
 }
 
-/// Locks the slot that a plan keeps while its view is read once more.
-fn lock_slot(held: &Mutex<Option<MergeSlot>>) -> MutexGuard<'_, Option<MergeSlot>> {
-    // A critical section under this lock only moves the slot, so it can't
-    // panic and poison the lock.
+/// Locks the reservation that a plan keeps while its view is read once more.
+fn lock_reservation(
+    held: &Mutex<Option<MergeReservation>>,
+) -> MutexGuard<'_, Option<MergeReservation>> {
+    // A critical section under this lock only moves the reservation, so it
+    // can't panic and poison the lock.
     held.lock()
-        .expect("the merge slot lock should not be poisoned")
+        .expect("the merge reservation lock should not be poisoned")
 }
 
 /// Returns `invalid_request` for a fork that doesn't exist or was deleted,

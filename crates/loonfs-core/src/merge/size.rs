@@ -24,7 +24,7 @@ const SPLIT_BISECTIONS: usize = 3;
 /// Returns `merge_too_large` when a merge whose planned WAL bytes are
 /// `planned_bytes` doesn't fit one WAL object, or when its estimated peak
 /// doesn't fit `allowance`.
-pub fn check_planned_bytes(planned_bytes: usize, allowance: MergeAllowance) -> Result<()> {
+pub fn check_planned_bytes(planned_bytes: usize, allowance: &MergeAllowance) -> Result<()> {
     let document_bytes = planned_bytes.saturating_add(WAL_OBJECT_OVERHEAD_BYTES);
     if document_bytes > MAX_WAL_OBJECT_BYTES {
         return Err(CoreError::MergeTooLarge {
@@ -47,7 +47,7 @@ pub(super) async fn with_split_hint<T, S: ObjectStore + ?Sized>(
     fork_view: &LoadedMetadataView<'_, S>,
     (after_seq, through_seq): (ChangeSeq, ChangeSeq),
     fields_bytes: usize,
-    allowance: MergeAllowance,
+    allowance: &MergeAllowance,
 ) -> Result<T> {
     match result {
         Err(CoreError::MergeTooLarge {
@@ -59,8 +59,14 @@ pub(super) async fn with_split_hint<T, S: ObjectStore + ?Sized>(
             bound,
             estimated_bytes,
             max_bytes,
-            split_at_seq: split_hint(fork_view, after_seq, through_seq, fields_bytes, allowance)
-                .await?,
+            split_at_seq: split_hint(
+                fork_view,
+                after_seq,
+                through_seq,
+                fields_bytes,
+                &allowance.unshared_copy(),
+            )
+            .await?,
         }),
         result => result,
     }
@@ -76,7 +82,7 @@ async fn split_hint<S: ObjectStore + ?Sized>(
     after_seq: ChangeSeq,
     through_seq: ChangeSeq,
     fields_bytes: usize,
-    allowance: MergeAllowance,
+    allowance: &MergeAllowance,
 ) -> Result<Option<ChangeSeq>> {
     let mut search = SplitSearch::new(after_seq, through_seq);
     // The search ends after at most four probes.
@@ -164,7 +170,7 @@ async fn net_change_fits<S: ObjectStore + ?Sized>(
     after_seq: ChangeSeq,
     through_seq: ChangeSeq,
     fields_bytes: usize,
-    allowance: MergeAllowance,
+    allowance: &MergeAllowance,
 ) -> Result<bool> {
     let fork = &fork_view.head().namespace_id;
     let end = fork_view.metadata_view_at(through_seq);

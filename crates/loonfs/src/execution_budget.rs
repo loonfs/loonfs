@@ -31,12 +31,12 @@ pub const DEFAULT_MAX_READ_WORKING_BYTES: usize = 256 * 1024 * 1024;
 pub const DEFAULT_MAX_CONCURRENT_CONTENT_WRITES: NonZeroUsize = NonZeroUsize::new(32).unwrap();
 const DEFAULT_MAX_ADMITTED_REQUESTS: NonZeroUsize = NonZeroUsize::new(8192).unwrap();
 const DEFAULT_MAX_ADMITTED_BYTES: NonZeroUsize = NonZeroUsize::new(64 * 1024 * 1024).unwrap();
-/// Default merge allowance, the estimated peak memory of publishing the one
-/// merge admitted at a time.
+/// Default merge allowance, the estimated peak memory of the merges that
+/// plan and publish at once.
 ///
 /// Admission estimates a merge's peak as three times its planned WAL bytes.
 /// A file create plans about 4,850 bytes, so the default admits a merge of
-/// about 36,000 file creates. One WAL object fits about 110,000 creates, and
+/// about 36,000 file creates while no other merge is admitted. One WAL object fits about 110,000 creates, and
 /// an allowance of 1.5 GiB, three times the WAL object's 512 MiB, admits
 /// every merge that fits one WAL object.
 pub const DEFAULT_MAX_MERGE_BYTES: usize = 512 * 1024 * 1024;
@@ -52,9 +52,12 @@ pub const DEFAULT_MAX_MERGE_BYTES: usize = 512 * 1024 * 1024;
 /// read, publication, fold, compaction, and content write permits from it, so the limits bound the
 /// work of every runtime that shares it. Publication admission never waits: a request
 /// past an admitted total fails at once with `commit_queue_full`. A merge
-/// isn't charged to the byte total. The budget admits one merge at a time,
-/// and a merge whose estimated peak, three times its planned WAL bytes,
-/// exceeds the merge allowance fails with `merge_too_large`. Permit
+/// isn't charged to the byte total. Merges share the merge allowance by
+/// their reservations, which grow to their estimated peaks, three times
+/// their planned WAL bytes, while they plan. A merge whose reservation
+/// doesn't fit beside the others fails at once with `server_busy`, and a
+/// merge whose estimated peak exceeds the whole allowance fails with
+/// `merge_too_large`. Permit
 /// waits are first come, first served, whichever runtime they belong to. No
 /// runtime has a reserved share, so an idle runtime reserves nothing. A
 /// host that wants to isolate runtimes from each other gives them separate
@@ -127,6 +130,7 @@ impl ExecutionBudget {
             admitted_requests: admitted.requests,
             admitted_bytes: admitted.bytes,
             admitted_merges: admitted.merges,
+            admitted_merge_bytes: admitted.merge_bytes,
             reads_running: reads.running,
             reads_waiting: reads.waiting,
             publications_running: publications.running,
@@ -149,8 +153,9 @@ impl ExecutionBudget {
     }
 
     /// Charges one admitted publication request to the totals. A request
-    /// past a total, or a merge while another merge is admitted, is refused,
-    /// and the change says so and charges nothing. Pass the change to
+    /// past a total, or a merge whose reservation doesn't fit the merge
+    /// allowance beside the other merges' reservations, is refused, and the
+    /// change says so and charges nothing. Pass the change to
     /// [`Self::report_admission`] once the caller has unlocked every lock.
     pub(crate) fn charge_admission(&self, charge: AdmissionCharge) -> AdmissionChange {
         self.inner.admission.charge(charge)
@@ -164,6 +169,15 @@ impl ExecutionBudget {
         self.inner.admission.reweigh(from, to)
     }
 
+    /// Grows an admitted merge's reservation of the merge allowance from
+    /// `from` bytes to `to` bytes. A growth past the allowance is refused,
+    /// and the change says so and leaves the totals as they were. Pass the
+    /// change to [`Self::report_admission`] once the caller has unlocked
+    /// every lock.
+    pub(crate) fn grow_merge_reservation(&self, from: usize, to: usize) -> AdmissionChange {
+        self.inner.admission.grow_merge_reservation(from, to)
+    }
+
     /// Returns what [`Self::charge_admission`] charged, once the request's
     /// work settles. Pass the change to [`Self::report_admission`] once the
     /// caller has unlocked every lock.
@@ -171,8 +185,9 @@ impl ExecutionBudget {
         self.inner.admission.refund(charge)
     }
 
-    /// Returns the merge allowance, the estimated peak memory that publishing
-    /// one merge may have, which is zero when merges are off.
+    /// Returns the merge allowance, the estimated peak memory that the merges
+    /// planning and publishing at once may have, which is zero when merges
+    /// are off.
     pub fn max_merge_bytes(&self) -> usize {
         self.inner.admission.max_merge_bytes
     }
@@ -183,10 +198,15 @@ impl ExecutionBudget {
         let instruments = &self.inner.admission.instruments;
         match change {
             AdmissionChange::Admitted(totals) => {
-                instruments.report(totals.requests, totals.bytes, totals.merges);
+                instruments.report(
+                    totals.requests,
+                    totals.bytes,
+                    totals.merges,
+                    totals.merge_bytes,
+                );
             }
             AdmissionChange::Rejected => instruments.rejection(),
-            AdmissionChange::MergeSlotTaken => {}
+            AdmissionChange::MergeAllowanceInUse => {}
         }
     }
 
@@ -268,10 +288,11 @@ impl ExecutionBudgetBuilder {
     }
 
     /// Sets the merge allowance, which limits the estimated peak memory of
-    /// publishing one merge, three times the merge's planned WAL bytes. The
-    /// runtimes that share the budget admit one merge at a time, and a merge
-    /// that arrives while one is admitted fails at once with
-    /// `commit_queue_full`. A merge whose estimate exceeds the allowance
+    /// the merges that plan and publish at once. A merge's estimate is three
+    /// times its planned WAL bytes. The runtimes that share the budget admit
+    /// merges while their reservations fit the allowance, and a merge whose
+    /// reservation doesn't fit beside the others fails at once with
+    /// `server_busy`. A merge whose estimate exceeds the whole allowance
     /// fails with `merge_too_large`. Defaults to
     /// [`DEFAULT_MAX_MERGE_BYTES`]; zero turns merges off, so a merge, a
     /// rebase, and the next-range query return `not_supported`.
@@ -396,8 +417,10 @@ pub struct ExecutionBudgetStats {
     /// Estimated retained bytes of the publication requests admitted and not
     /// yet settled, other than a merge.
     pub admitted_bytes: usize,
-    /// Merges admitted and not yet settled, which is at most one.
+    /// Merges admitted and not yet settled.
     pub admitted_merges: usize,
+    /// Bytes of the merge allowance that the admitted merges reserve.
+    pub admitted_merge_bytes: usize,
     /// Public reads that have a read permit.
     pub reads_running: usize,
     /// Public reads waiting for a read permit.
@@ -430,14 +453,12 @@ struct AdmittedTotals {
     instruments: AdmissionInstruments,
 }
 
-/// The merges that the runtimes sharing a budget admit at once.
-const MAX_ADMITTED_MERGES: usize = 1;
-
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Admitted {
     requests: usize,
     bytes: usize,
     merges: usize,
+    merge_bytes: usize,
 }
 
 /// What one admitted publication request is charged to the totals.
@@ -445,9 +466,9 @@ pub(crate) struct Admitted {
 pub(crate) enum AdmissionCharge {
     /// One request and its estimated bytes.
     Request { estimated_bytes: usize },
-    /// One request and one merge. The merge's estimated bytes fit the merge
-    /// allowance, and no byte total is charged for them.
-    Merge,
+    /// One request and one merge, which reserves `reserved_bytes` of the
+    /// merge allowance. No byte total is charged for the merge.
+    Merge { reserved_bytes: usize },
 }
 
 impl AdmissionCharge {
@@ -455,12 +476,20 @@ impl AdmissionCharge {
     pub(crate) fn estimated_bytes(self) -> usize {
         match self {
             Self::Request { estimated_bytes } => estimated_bytes,
-            Self::Merge => 0,
+            Self::Merge { .. } => 0,
         }
     }
 
     fn merges(self) -> usize {
-        usize::from(self == Self::Merge)
+        usize::from(matches!(self, Self::Merge { .. }))
+    }
+
+    /// Returns the bytes of the merge allowance that the charge reserves.
+    pub(crate) fn reserved_merge_bytes(self) -> usize {
+        match self {
+            Self::Request { .. } => 0,
+            Self::Merge { reserved_bytes } => reserved_bytes,
+        }
     }
 }
 
@@ -473,9 +502,10 @@ pub(crate) enum AdmissionChange {
     /// The charge would pass the request total or the byte total, so nothing
     /// was charged.
     Rejected,
-    /// The charge is a merge's, and another merge is admitted, so nothing was
+    /// The charge is a merge's, and the merge allowance doesn't have room for
+    /// its reservation beside the other merges' reservations, so nothing was
     /// charged.
-    MergeSlotTaken,
+    MergeAllowanceInUse,
 }
 
 impl AdmittedTotals {
@@ -487,18 +517,30 @@ impl AdmittedTotals {
 
     fn charge(&self, charge: AdmissionCharge) -> AdmissionChange {
         let mut admitted = self.lock();
-        let (estimated_bytes, merges) = (charge.estimated_bytes(), charge.merges());
+        let estimated_bytes = charge.estimated_bytes();
+        let reserved_merge_bytes = charge.reserved_merge_bytes();
         if admitted.requests >= self.max_requests.get()
             || estimated_bytes > self.max_bytes.get().saturating_sub(admitted.bytes)
         {
             return AdmissionChange::Rejected;
         }
-        if merges > MAX_ADMITTED_MERGES - admitted.merges {
-            return AdmissionChange::MergeSlotTaken;
+        if reserved_merge_bytes > self.max_merge_bytes.saturating_sub(admitted.merge_bytes) {
+            return AdmissionChange::MergeAllowanceInUse;
         }
         admitted.requests += 1;
         admitted.bytes += estimated_bytes;
-        admitted.merges += merges;
+        admitted.merges += charge.merges();
+        admitted.merge_bytes += reserved_merge_bytes;
+        AdmissionChange::Admitted(*admitted)
+    }
+
+    fn grow_merge_reservation(&self, from: usize, to: usize) -> AdmissionChange {
+        let mut admitted = self.lock();
+        let others = admitted.merge_bytes - from;
+        if to > self.max_merge_bytes.saturating_sub(others) {
+            return AdmissionChange::MergeAllowanceInUse;
+        }
+        admitted.merge_bytes = others + to;
         AdmissionChange::Admitted(*admitted)
     }
 
@@ -515,12 +557,13 @@ impl AdmittedTotals {
     fn refund(&self, charge: AdmissionCharge) -> AdmissionChange {
         // A refund runs in a drop, which can run while a panic unwinds, and a
         // second panic then aborts the process, so this recovers a poisoned
-        // lock instead of panicking. The critical section only updates three
+        // lock instead of panicking. The critical section only updates four
         // counts.
         let mut admitted = self.admitted.lock().unwrap_or_else(PoisonError::into_inner);
         admitted.requests -= 1;
         admitted.bytes -= charge.estimated_bytes();
         admitted.merges -= charge.merges();
+        admitted.merge_bytes -= charge.reserved_merge_bytes();
         AdmissionChange::Admitted(*admitted)
     }
 }

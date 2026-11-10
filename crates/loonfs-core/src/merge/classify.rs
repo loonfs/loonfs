@@ -354,7 +354,7 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
                 .planned_bytes
                 .saturating_add(merge_operation_bytes(operation, layout_extents));
         }
-        check_planned_bytes(self.planned_bytes, self.allowance)?;
+        check_planned_bytes(self.planned_bytes, &self.allowance)?;
         self.plans.push(plan);
         Ok(())
     }

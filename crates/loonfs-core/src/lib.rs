@@ -218,7 +218,9 @@ pub use manifest::{
     FoldedWalTail, ManifestLoadError, PublicationReport, PublishedManifest, RetentionPlan,
     RetentionTarget,
 };
-pub use merge::{check_planned_bytes, MergeAllowance, MergePlan, MergeRequest, ReplayPlan};
+pub use merge::{
+    check_planned_bytes, MergeAllowance, MergePlan, MergeRequest, MergeReservation, ReplayPlan,
+};
 pub use namespace::store::NamespaceStore;
 pub use options::{CreateNamespaceOptions, DeleteNamespaceOptions};
 pub use path::read::{

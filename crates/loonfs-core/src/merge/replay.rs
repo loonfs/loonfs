@@ -195,7 +195,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
                 (fork_point_seq, source_after_seq),
                 request,
                 prepared_at_ms,
-                allowance,
+                &allowance,
             )
             .await?;
         Ok(ReplayPlan {

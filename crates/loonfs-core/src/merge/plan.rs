@@ -50,7 +50,9 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// the classification, or when the ordered commit, with the temporary
     /// moves that the ordering adds, doesn't fit them. Either refusal has
     /// the split hint that the fork's net change over shorter ranges gives
-    /// (see [`with_split_hint`]).
+    /// (see [`with_split_hint`]). Each check grows the merge's reservation of
+    /// the allowance, and returns `server_busy` when other merges'
+    /// reservations leave no room for the growth.
     #[allow(
         clippy::too_many_arguments,
         reason = "a merge and a replay commit share every input, and a replay commit adds the pin"
@@ -64,7 +66,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         (fork_point_seq, source_after_seq): (ChangeSeq, ChangeSeq),
         request: &MergeRequest,
         prepared_at_ms: u64,
-        allowance: MergeAllowance,
+        allowance: &MergeAllowance,
     ) -> Result<PlannedMergeCommit> {
         let fork_head = fork_view.head();
         let source_namespace_id = &fork_head.namespace_id;
@@ -98,7 +100,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             )?,
             record: &record,
             fork_point_seq,
-            allowance,
+            allowance: allowance.clone(),
             own_seqs: HashMap::new(),
             plans: Vec::new(),
             layouts: HashMap::new(),
