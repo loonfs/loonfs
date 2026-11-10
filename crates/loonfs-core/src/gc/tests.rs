@@ -37,6 +37,7 @@ use crate::options::DeleteNamespaceOptions;
 use bytes::Bytes;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::PutMode;
+use loonfs_test_support::ids::numbered_content_id;
 use loonfs_test_support::stores::{
     replace_object, BlockingStore, ConcurrencyWatchStore, FailStore, InjectedError, KeyPredicate,
     MetadataMapStore, OperationContext, OperationKind, OperationSelector, RecordingStore,
@@ -312,7 +313,7 @@ async fn deleted_namespace_keeps_its_tombstone_and_segments() {
     let mut content_keys = publish_owned_content(&store, &namespace_id, 2).await;
     content_keys.sort();
     let unreferenced_key =
-        loonfs_objectstore::keys::content_blob(&namespace_id, &loonfs_types::ContentId::generate());
+        loonfs_objectstore::keys::content_blob(&namespace_id, &numbered_content_id(3));
     store
         .put_if_absent(&unreferenced_key, Bytes::from_static(b"unreferenced"))
         .await
@@ -1251,8 +1252,22 @@ async fn content_an_expired_deletion_hid_is_deleted_once_its_rows_are_removed() 
         .create()
         .await
         .expect("bootstrap");
-    let hidden = put_file_content(&store, &namespace_id, "/old/file", b"hidden").await;
-    let kept = put_file_content(&store, &namespace_id, "/kept", b"kept").await;
+    let hidden = put_file_content_with_id(
+        &store,
+        &namespace_id,
+        "/old/file",
+        b"hidden",
+        numbered_content_id(1),
+    )
+    .await;
+    let kept = put_file_content_with_id(
+        &store,
+        &namespace_id,
+        "/kept",
+        b"kept",
+        numbered_content_id(2),
+    )
+    .await;
     crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
         .delete_path("/old", None)
         .await
@@ -1277,8 +1292,15 @@ async fn content_an_expired_deletion_hid_is_deleted_once_its_rows_are_removed() 
     // folds it and compacts every group that the file gave a delta run. The
     // first collection removes the hidden revision, but its layout compaction can run
     // before its revisions compaction, so the second collection drops the chain.
-    for path in ["/later-1", "/later-2"] {
-        put_file_content(&store, &namespace_id, path, b"later").await;
+    for (number, path) in [(3, "/later-1"), (4, "/later-2")] {
+        put_file_content_with_id(
+            &store,
+            &namespace_id,
+            path,
+            b"later",
+            numbered_content_id(number),
+        )
+        .await;
         compact_below_the_floor(&store, &namespace_id).await;
     }
 
@@ -2732,8 +2754,14 @@ async fn publish_owned_content<S: ObjectStore>(
 ) -> Vec<String> {
     let mut keys = Vec::new();
     for number in 0..count {
-        let content_ref =
-            put_file_content(store, namespace_id, &format!("/file-{number}"), b"content").await;
+        let content_ref = put_file_content_with_id(
+            store,
+            namespace_id,
+            &format!("/file-{number}"),
+            b"content",
+            numbered_content_id(number + 1),
+        )
+        .await;
         keys.push(loonfs_objectstore::keys::content_blob(
             namespace_id,
             &content_ref.content_id,
@@ -3413,8 +3441,16 @@ async fn folded_namespace_with_two_files(store: &LocalFsStore, namespace_id: &Na
         .create()
         .await
         .expect("bootstrap");
-    write_test_file(store, namespace_id, "/docs/one.txt", "gc-one", &setup).await;
-    write_test_file(store, namespace_id, "/docs/two.txt", "gc-two", &setup).await;
+    for (number, path) in [(1, "/docs/one.txt"), (2, "/docs/two.txt")] {
+        put_file_content_with_id(
+            store,
+            namespace_id,
+            path,
+            b"body\n",
+            numbered_content_id(number),
+        )
+        .await;
+    }
     create_checkpoint(store, namespace_id, &setup)
         .await
         .expect("checkpoint");

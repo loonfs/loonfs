@@ -16,7 +16,7 @@ use loonfs_types::format::wal::{
     WalObjectPayload,
 };
 use loonfs_types::{
-    AbsolutePath, ActorId, ChangeSeq, Commit, CommitId, DeleteDirectoryBehavior,
+    AbsolutePath, ActorId, ChangeSeq, Commit, CommitId, ContentId, DeleteDirectoryBehavior,
     DestinationBehavior, NamespaceMetadata, RevisionNo,
 };
 
@@ -106,7 +106,7 @@ impl<S: ObjectStore + Clone> NamespaceFixture<S> {
         commit_id: Option<&CommitId>,
     ) -> Result<Commit> {
         let prepared_content = self
-            .store_file_bytes_before_metadata_publish(absolute_path, bytes)
+            .store_file_bytes_before_metadata_publish(absolute_path, bytes, ContentId::generate())
             .await?;
         let content_ref = prepared_content.content_ref().clone();
         self.submit_operation(
@@ -139,6 +139,32 @@ impl<S: ObjectStore + Clone> NamespaceFixture<S> {
         .await
     }
 
+    /// Puts `bytes` at `absolute_path` as the content object of `content_id`,
+    /// replacing any file there.
+    pub async fn write_file_bytes_with_content_id(
+        &self,
+        absolute_path: &str,
+        bytes: &[u8],
+        content_id: ContentId,
+    ) -> Result<Commit> {
+        let prepared_content = self
+            .store_file_bytes_before_metadata_publish(absolute_path, bytes, content_id)
+            .await?;
+        let content_ref = prepared_content.content_ref().clone();
+        self.submit_operation(
+            CommitId::generate(),
+            FilesystemOperation::PutFile {
+                path: parse_mutation_path(absolute_path)?,
+                content: loonfs_types::FileContent::Ref(content_ref),
+                behavior: DestinationBehavior::Replace,
+                expected_inode_id: None,
+                expected_revision_no: None,
+            },
+            vec![prepared_content],
+        )
+        .await
+    }
+
     /// Writes several files in one commit, for fixtures that need many rows but
     /// not a commit per row.
     pub async fn write_files_bytes(
@@ -150,7 +176,11 @@ impl<S: ObjectStore + Clone> NamespaceFixture<S> {
         let mut prepared = Vec::with_capacity(absolute_paths.len());
         for absolute_path in absolute_paths {
             let content = self
-                .store_file_bytes_before_metadata_publish(absolute_path, bytes)
+                .store_file_bytes_before_metadata_publish(
+                    absolute_path,
+                    bytes,
+                    ContentId::generate(),
+                )
                 .await?;
             operations.push(FilesystemOperation::PutFile {
                 path: parse_mutation_path(absolute_path)?,

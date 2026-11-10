@@ -28,7 +28,7 @@ async fn a_collection_heads_only_the_discovery_probe_and_successor() {
         .expect("hint")
         .state
         .manifest_no;
-    let orphan = content_blob(&namespace_id, &loonfs_types::ContentId::generate());
+    let orphan = content_blob(&namespace_id, &numbered_content_id(3));
     store
         .put_if_absent(&orphan, Bytes::from_static(b"orphan"))
         .await
