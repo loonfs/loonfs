@@ -337,39 +337,15 @@ impl Scheduler {
     /// failure that ended it once the collections it had started returned.
     async fn collect_every_pool(&self) -> Result<usize, ObjectStoreError> {
         let inner = &self.inner;
-        // Boxed for the same reason as the namespace listing.
-        let pages = futures::stream::try_unfold(Some(None), move |start_after| async move {
-            let Some(start_after) = start_after else {
-                return Ok(None);
-            };
-            let page = list_pool_ids(&*inner.store, start_after.as_ref(), inner.page_limit).await?;
-            Ok(Some((page.pool_ids, page.next_cursor.map(Some))))
-        })
-        .boxed();
-        let mut listed = 0;
-        let mut listing = Ok(());
-        pages
-            .filter_map(|page| {
-                let pool_ids = match page {
-                    Ok(pool_ids) => {
-                        listed += pool_ids.len();
-                        Some(futures::stream::iter(pool_ids))
-                    }
-                    Err(error) => {
-                        listing = Err(error);
-                        None
-                    }
-                };
-                futures::future::ready(pool_ids)
-            })
-            .flatten()
-            .take_until(inner.stop.cancelled())
-            .for_each_concurrent(inner.config.max_concurrent_maintenance.get(), |pool_id| {
-                // Boxed for the same reason as a namespace's steps.
-                async move { self.gc_pool(&pool_id).await }.boxed()
-            })
-            .await;
-        listing.map(|()| listed)
+        self.sweep_listed_ids(
+            |start_after| async move {
+                let page =
+                    list_pool_ids(&*inner.store, start_after.as_ref(), inner.page_limit).await?;
+                Ok((page.pool_ids, page.next_cursor))
+            },
+            |pool_id| async move { self.gc_pool(&pool_id).await },
+        )
+        .await
     }
 
     async fn sweep_every_namespace(
@@ -377,46 +353,73 @@ impl Scheduler {
         garbage: GarbageCollection,
     ) -> Result<usize, ObjectStoreError> {
         let inner = &self.inner;
-        // Boxed for the same reason as a namespace's steps: the spawned
+        self.sweep_listed_ids(
+            |start_after| async move {
+                let page =
+                    list_namespace_ids(&*inner.store, start_after.as_ref(), inner.page_limit)
+                        .await?;
+                Ok((page.namespace_ids, page.next_cursor))
+            },
+            |namespace_id| self.sweep_namespace(namespace_id, garbage),
+        )
+        .await
+    }
+
+    /// Runs `work` on every ID that `list_page` lists, with
+    /// `max_concurrent_maintenance` at once, and returns how many IDs it
+    /// listed, or the listing failure that ended it once the work it had
+    /// started returned.
+    ///
+    /// `list_page` lists the page after a cursor, or the first page for
+    /// `None`, and returns the page's IDs and the next page's cursor. The
+    /// sweep lists a page when a slot is free, and starts no more work after
+    /// a listing failure or after the [`Scheduler`] is stopped.
+    async fn sweep_listed_ids<Id, Cursor, Page, Work>(
+        &self,
+        list_page: impl Fn(Option<Cursor>) -> Page + Send + Sync,
+        work: impl Fn(Id) -> Work + Send + Sync,
+    ) -> Result<usize, ObjectStoreError>
+    where
+        Id: Send,
+        Cursor: Send,
+        Page: Future<Output = Result<(Vec<Id>, Option<Cursor>), ObjectStoreError>> + Send,
+        Work: Future<Output = ()> + Send,
+    {
+        let inner = &self.inner;
+        let list_page = &list_page;
+        // Boxed for the same reason as the work on each ID: the spawned
         // scheduler's `Send` check fails on the unboxed listing future.
         let pages = futures::stream::try_unfold(Some(None), move |start_after| async move {
             let Some(start_after) = start_after else {
                 return Ok(None);
             };
-            let page =
-                list_namespace_ids(&*inner.store, start_after.as_ref(), inner.page_limit).await?;
-            Ok(Some((page.namespace_ids, page.next_cursor.map(Some))))
+            let (ids, next_cursor) = list_page(start_after).await?;
+            Ok(Some((ids, next_cursor.map(Some))))
         })
         .boxed();
         let mut listed = 0;
         let mut listing = Ok(());
         pages
             .filter_map(|page| {
-                let namespace_ids = match page {
-                    Ok(namespace_ids) => {
-                        listed += namespace_ids.len();
-                        Some(futures::stream::iter(namespace_ids))
+                let ids = match page {
+                    Ok(ids) => {
+                        listed += ids.len();
+                        Some(futures::stream::iter(ids))
                     }
                     Err(error) => {
                         listing = Err(error);
                         None
                     }
                 };
-                futures::future::ready(namespace_ids)
+                futures::future::ready(ids)
             })
             .flatten()
             .take_until(inner.stop.cancelled())
-            .for_each_concurrent(
-                inner.config.max_concurrent_maintenance.get(),
-                |namespace_id| {
-                    // Boxed so the spawned scheduler's `Send` check does not
-                    // recurse through every engine future a namespace's steps
-                    // await.
-                    self.sweep_namespace(namespace_id, garbage)
-                        .map(drop)
-                        .boxed()
-                },
-            )
+            .for_each_concurrent(inner.config.max_concurrent_maintenance.get(), |id| {
+                // Boxed so the spawned scheduler's `Send` check does not
+                // recurse through every engine future that the work awaits.
+                work(id).boxed()
+            })
             .await;
         listing.map(|()| listed)
     }
