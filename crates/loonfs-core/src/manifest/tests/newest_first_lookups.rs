@@ -483,10 +483,36 @@ struct FalsePositiveKeys {
     plain_revision: InodeId,
 }
 
+/// The fixtures that the search for false positive keys builds before it
+/// gives up.
+///
+/// The 512 fillers of one fixture have no key that exactly one delta filter
+/// admits in about one fixture in 150 (15 of 2,360 measured). Five fixtures
+/// have none in about one run in 10^11, and in fewer than one run in 10^9
+/// even at twice the measured rate.
+const FALSE_POSITIVE_FIXTURES: usize = 5;
+
+/// Builds fixtures until the fillers of one have false positive keys, and
+/// returns that fixture with its keys.
+async fn fixture_with_false_positive_keys() -> (ManyRunFixture, FalsePositiveKeys) {
+    for _ in 0..FALSE_POSITIVE_FIXTURES {
+        let fixture = many_run_fixture().await;
+        let (verified, _) = fixture.load(None).await;
+        let keys = false_positive_keys(&fixture, &verified).await;
+        drop(verified);
+        if let Some(keys) = keys {
+            return (fixture, keys);
+        }
+    }
+    panic!("no fixture has a filler that exactly one delta filter admits");
+}
+
+/// The false positive keys among `fixture`'s fillers, or `None` when a family
+/// has no filler that exactly one delta filter admits.
 async fn false_positive_keys(
     fixture: &ManyRunFixture,
     verified: &scan::VerifiedMetadataSegments<'_, ConcurrencyWatchStore<LocalFsStore>>,
-) -> FalsePositiveKeys {
+) -> Option<FalsePositiveKeys> {
     let (mut bindings, mut revisions) = ([None, None], [None, None]);
     for (name, inode_id) in &fixture.fillers {
         let admitting = delta_segments_admitting(
@@ -513,17 +539,17 @@ async fn false_positive_keys(
         }
     }
     let [Some(binding), Some(plain_binding)] = bindings else {
-        panic!("some filler names are admitted by a delta filter and some aren't");
+        return None;
     };
     let [Some(revision), Some(plain_revision)] = revisions else {
-        panic!("some filler inodes are admitted by a delta filter and some aren't");
+        return None;
     };
-    FalsePositiveKeys {
+    Some(FalsePositiveKeys {
         binding,
         plain_binding,
         revision,
         plain_revision,
-    }
+    })
 }
 
 /// The segment GETs that a cold lookup of `name`'s slot and of `inode_id`'s
@@ -558,10 +584,9 @@ async fn cold_lookup_gets(
 /// round trip) than a lookup that no newer filter admits.
 #[tokio::test]
 async fn a_false_positive_in_a_newer_run_falls_through_to_the_run_with_the_row() {
-    let fixture = many_run_fixture().await;
+    let (fixture, keys) = fixture_with_false_positive_keys().await;
     let cache = MetadataSegmentCache::unshared(usize::MAX);
     let (verified, combined) = fixture.load(Some(&cache)).await;
-    let keys = false_positive_keys(&fixture, &verified).await;
     let (docs, head) = (fixture.docs, fixture.head());
 
     let view = MetadataView::over_manifest_segments(&verified, head);
