@@ -3618,10 +3618,6 @@
             "$ref": "#/components/schemas/ActorId",
             "description": "The actor that created the namespace, as the application supplied it."
           },
-          "family_root_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "The namespace whose prefix stores the content of this namespace's fork family. For a\nnamespace that wasn't created by a fork, this is the namespace itself. A fork has the same\nfamily root as its source."
-          },
           "fork_basis": {
             "$ref": "#/components/schemas/NamespaceForkBasis",
             "description": "The namespace and sequence this namespace was forked from. Only a forked namespace has this\nfield."
@@ -3633,6 +3629,10 @@
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
             "description": "The namespace ID."
+          },
+          "pool_id": {
+            "$ref": "#/components/schemas/PoolId",
+            "description": "The pool that stores the namespace's content objects and upload records. A fork has the\nsame pool as its source."
           },
           "retention_floor_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
@@ -3650,7 +3650,7 @@
           "namespace_id",
           "created_at_ms",
           "created_by",
-          "family_root_id",
+          "pool_id",
           "head_seq",
           "retention_floor_seq"
         ],
@@ -4065,6 +4065,12 @@
         "description": "The durable ID of one pin.\n\nThe manifest number in the ID determines which namespace manifest the pin protects.",
         "example": "pin_00000000000000000001-0000000000000002",
         "pattern": "^pin_[0-9]{20}-[0-9a-f]{16}$",
+        "type": "string"
+      },
+      "PoolId": {
+        "description": "The ID of one pool, the set of namespaces that share one set of content objects. See\n[Pools](https://github.com/loonfs/loonfs/blob/main/docs/design/pools.md).",
+        "example": "pool_3s0drmj8em84yb4mnetqkz2j0x",
+        "pattern": "^pool_[0-7][0-9a-hjkmnp-tv-z]{25}$",
         "type": "string"
       },
       "PrincipalId": {

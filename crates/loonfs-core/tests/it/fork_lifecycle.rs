@@ -416,7 +416,8 @@ async fn a_created_namespace_reads_manifest_one_before_its_first_fold() {
         .expect("read back");
     assert_eq!(file.bytes, b"hello");
     let content_ref = file.entry.content_ref().expect("content reference");
-    let content_key = content_blob(&namespace_id, &content_ref.content_id);
+    let pool_id = loonfs_core::test_support::load_pool_id(&store, &namespace_id).await;
+    let content_key = content_blob(&pool_id, &content_ref.content_id);
     let keys = namespace_keys(&store, &namespace_id).await;
     assert!(
         keys.iter().all(|key| key == &hint(&namespace_id)
@@ -673,9 +674,9 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
     assert_eq!(store.inner().counts().puts, 0);
     assert_eq!(
         store.inner().take_get_keys(),
-        vec![format!(
-            "namespaces/demo/content/{}",
-            inherited_ref.content_id
+        vec![loonfs_objectstore::keys::content_blob(
+            &loonfs_core::test_support::load_pool_id(store.inner(), &clone_namespace_id).await,
+            &inherited_ref.content_id
         )]
     );
     let stale_clone_changes = list_changes_after(&store, &clone_namespace_id, ChangeSeq(0))
@@ -721,13 +722,11 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
     .await
     .expect("clone replace");
     assert_eq!(clone_write.committed_seq, ChangeSeq(2));
-    // An upload in a fork is stored under the family root's prefix, so the
-    // fork's own content and uploads prefixes stay empty.
+    // An upload in a fork is stored under the prefix of its source's pool,
+    // so the fork's own prefix stores no content and no upload records.
+    let pool_id = loonfs_core::test_support::load_pool_id(&store, &source_namespace_id).await;
     assert!(store
-        .head(&content_blob(
-            &source_namespace_id,
-            &uploaded_ref.content_id
-        ))
+        .head(&content_blob(&pool_id, &uploaded_ref.content_id))
         .await
         .expect("family root content")
         .is_some());
@@ -1190,6 +1189,7 @@ async fn a_create_losing_to_a_foreign_head_reports_the_id_as_taken() {
     // Another writer's complete head for the same id, already durable.
     let foreign = loonfs_types::format::manifest::NamespaceManifestPayload::initial(
         namespace_id.clone(),
+        loonfs_types::PoolId::generate(),
         1_000,
         loonfs_test_support::test_actor(),
         loonfs_types::NamespaceAccess::Unrestricted {},
@@ -1745,12 +1745,13 @@ async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_cont
         .await
         .expect("source");
     let source_ref = source_file.entry.content_ref().expect("source content");
-    let source_key = content_blob(&source, &source_ref.content_id);
+    let pool_id = loonfs_core::test_support::load_pool_id(&store, &source).await;
+    let source_key = content_blob(&pool_id, &source_ref.content_id);
     let sibling_file = read_file_bytes(&store, &sibling, "/docs/sibling.txt")
         .await
         .expect("sibling");
     let sibling_ref = sibling_file.entry.content_ref().expect("sibling content");
-    let sibling_key = content_blob(&source, &sibling_ref.content_id);
+    let sibling_key = content_blob(&pool_id, &sibling_ref.content_id);
     let options = loonfs_core::GcOptions::default();
     let mut aged = setup.clone();
     aged.now_ms = u64::MAX / 4;
@@ -1778,8 +1779,8 @@ async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_cont
             .await
             .expect("leaf");
         let leaf_ref = leaf_file.entry.content_ref().expect("leaf content");
-        // The leaf's content is stored under the family root's prefix.
-        let leaf_key = content_blob(&source, &leaf_ref.content_id);
+        // The leaf's content is stored under the prefix of its source's pool.
+        let leaf_key = content_blob(&pool_id, &leaf_ref.content_id);
         assert!(namespace_keys(&store, &leaf)
             .await
             .iter()

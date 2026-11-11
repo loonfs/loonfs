@@ -424,9 +424,10 @@ mod tests {
             1_000,
             loonfs_test_support::test_actor(),
         );
-        fork.family_root_id = root.clone();
+        let pool_id = loonfs_test_support::ids::numbered_pool_id(1);
+        fork.pool_id = pool_id.clone();
         let fork = VerifiedNamespaceCatalogEntry::from_head(&fork);
-        assert_eq!(fork.family_root_id(), &root);
+        assert_eq!(fork.pool_id(), &pool_id);
         assert_eq!(
             verify_content_token("secret", &fork, &token, 1_000),
             Err(ContentTokenError::NamespaceMismatch)

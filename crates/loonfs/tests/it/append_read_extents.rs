@@ -79,9 +79,10 @@ async fn warm_read_of_an_appended_file_gets_every_extent_at_once() {
     // the next extent is at most twice as long as the bytes merged so far.
     // Twelve one-line tails leave extents of 8, 3, and 1 lines.
     let content_id = &read.entry.content_ref().expect("file content").content_id;
+    let pool_id = loonfs_core::test_support::load_pool_id(recording.inner(), &namespace_id).await;
     let expected_keys = [(0, 8), (8, 11), (11, 12)].map(|(start_line, end_line)| {
         content_span(
-            &namespace_id,
+            &pool_id,
             content_id,
             start_line * LINE_BYTES,
             end_line * LINE_BYTES,

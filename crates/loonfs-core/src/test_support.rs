@@ -90,12 +90,12 @@ pub(crate) fn proxied_upload_session(
 }
 
 /// Writes an upload session's record, and its outcome record when `outcome`
-/// is set, under the prefix of `family_root_id`, as a session that ended that
+/// is set, under the prefix of `pool_id`, as a session that ended that
 /// way leaves them. Returns the key of the session record.
 #[cfg(test)]
 pub(crate) async fn write_upload_records<S: loonfs_objectstore::ObjectStore + ?Sized>(
     store: &S,
-    family_root_id: &NamespaceId,
+    pool_id: &PoolId,
     session: &loonfs_types::format::control::UploadSessionPayload,
     outcome: Option<loonfs_types::format::control::UploadOutcome>,
 ) -> String {
@@ -103,7 +103,7 @@ pub(crate) async fn write_upload_records<S: loonfs_objectstore::ObjectStore + ?S
     use loonfs_types::format::control::{
         encode_control_state, ControlObjectKind, UploadOutcomePayload,
     };
-    let key = loonfs_objectstore::keys::upload_session(family_root_id, &session.upload_id);
+    let key = loonfs_objectstore::keys::upload_session(pool_id, &session.upload_id);
     let bytes =
         encode_control_state(ControlObjectKind::UploadSession, session).expect("encode session");
     store
@@ -120,7 +120,7 @@ pub(crate) async fn write_upload_records<S: loonfs_objectstore::ObjectStore + ?S
             .expect("encode outcome");
         store
             .put_if_absent(
-                &loonfs_objectstore::keys::upload_outcome(family_root_id, &session.upload_id),
+                &loonfs_objectstore::keys::upload_outcome(pool_id, &session.upload_id),
                 bytes::Bytes::from(bytes),
             )
             .await
@@ -207,7 +207,7 @@ use crate::engine::NamespaceWriterEngine;
 use crate::namespace::store::NamespaceStore;
 use crate::segment::{MetadataRunPolicy, MetadataSegmentCache};
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::{ManifestNo, NamespaceId, WallClock, WriterId};
+use loonfs_types::{ManifestNo, NamespaceId, PoolId, WallClock, WriterId};
 use std::sync::Arc;
 
 /// Returns `namespace_id`'s components over `store`, for a test whose caches,
@@ -250,6 +250,18 @@ pub fn namespace_store_with_segment_cache<S>(
         segment_cache: Arc::new(segment_cache()),
         ..namespace_store(store, namespace_id)
     }
+}
+
+/// Returns the pool that the current manifest of `namespace_id` records, for a
+/// test that builds the key of a content object or an upload record.
+pub async fn load_pool_id<S: ObjectStore>(store: S, namespace_id: &NamespaceId) -> PoolId {
+    namespace_store(store, namespace_id)
+        .load_current_manifest()
+        .await
+        .expect("the namespace should have a current manifest")
+        .payload()
+        .pool_id
+        .clone()
 }
 
 /// Folds the namespace's WAL tail and returns the manifest that covers it,

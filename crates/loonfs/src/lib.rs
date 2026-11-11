@@ -109,10 +109,11 @@ pub use loonfs_types::{
     ListCheckpointsResponse, ListFileRevisionsResponse, ListInodeChildrenResponse,
     ListPathEntriesResponse, ListSnapshotsResponse, ManifestNo, MetadataMaintenanceOutcome,
     MetadataMaintenanceResponse, MetadataSkippedWork, NameKey, NamespaceDiagnostics, NamespaceId,
-    NamespaceMetadata, Page, PageRequest, PathEntry, PathEntryKind, PinId, RetainedCandidates,
-    RetainedReason, RevisionNo, SetRetentionWindowResponse, Snapshot, TrashEntry, UploadId,
-    WriterId, API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0, FEATURE_DOWNLOADS_DIRECT_GET,
-    FEATURE_MERGES, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, PROTOCOL_VERSION,
+    NamespaceMetadata, Page, PageRequest, PathEntry, PathEntryKind, PinId, PoolId,
+    RetainedCandidates, RetainedReason, RevisionNo, SetRetentionWindowResponse, Snapshot,
+    TrashEntry, UploadId, WriterId, API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0,
+    FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_MERGES, FEATURE_UPLOADS_DIRECT_MULTIPART,
+    FEATURE_UPLOADS_DIRECT_PUT, PROTOCOL_VERSION,
 };
 pub use loonfs_types::{
     Commit, CompleteUploadBody, CreateUploadBody, DiffEntry, DiffEntryKind, DiffResponse,

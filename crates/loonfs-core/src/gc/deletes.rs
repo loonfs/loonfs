@@ -28,9 +28,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
                         .delete(key)
                         .await
                         .map_err(|error| CoreError::store(key, &error))?,
-                    Decision::DeleteUploadSession { upload_id } => {
-                        // Only a family root's collection sweeps upload records.
-                        self.delete_upload_session_records(&self.namespace_id, upload_id)
+                    Decision::DeleteUploadSession { pool_id, upload_id } => {
+                        self.delete_upload_session_records(pool_id, upload_id)
                             .await?
                     }
                     Decision::Retain { .. } | Decision::Gone => {}

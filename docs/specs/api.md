@@ -899,7 +899,7 @@ Upload cleanup times include the lease plus grace, the abort grace, and the comp
 
 A GC response also includes `reclaimable_at_ms` when the current manifest is deleted. It's the retirement deadline defined in [Retirement](format.md#95-retirement), and it's included even when pins still block retirement. It's absent for an active namespace.
 
-A GC response includes `listed_bytes`: the bytes of every object that the collection listed under the namespace, each object once, as the provider reported them, before the collection's deletes. The core collector lists every object family that it collects. A fork's prefix stores no content objects or upload records, so a fork's collection lists neither. The collection on the fork's [family root](glossary.md#family-root) lists the content objects and upload records of the whole fork family. When a family root's collection skips the content objects (because the collection couldn't read every member's roots), the collection lists the content prefix once to measure the content. So the value is the storage under the namespace's prefix at the time of the collection, except the hint and any extension object that isn't a segment. An application that meters storage samples the value on each collection.
+A GC response includes `listed_bytes`: the bytes of every object that the collection listed under the namespace, each object once, as the provider reported them, before the collection's deletes. The core collector lists every object family that it collects. A fork's collection lists no content objects, upload records, or temporary objects. The collection on the fork's [family root](glossary.md#family-root) lists the content objects, upload records, and temporary objects of the whole fork family, which are stored under the prefix of the family's [pool](glossary.md#pool). When a family root's collection skips the content objects (because the collection couldn't read every member's roots), the collection lists the content prefix once to measure the content. So the value is the storage under the namespace's prefix at the time of the collection, and on a family root also the storage under its pool's prefix, except the hint and any extension object that isn't a segment. An application that meters storage samples the value on each collection.
 
 A GC response groups related counts:
 
@@ -908,7 +908,7 @@ A GC response groups related counts:
 
 Each deletion is counted once. When a fork's target namespace deletes its source pin, the deletion counts toward `fork` if the pin was present before the deletion, and repeating that deletion on an absent pin adds nothing. Every count field is present, including fields whose value is zero.
 
-`content_objects` counts the content objects that no retained view references (on a family root, the views of every member of its fork family), which the collection deleted once they were older than the grace window. `retired_content_objects` counts the keys that the collection listed under a retired family root's content prefix and successfully deleted. That prefix stores the content of the family root's whole fork family. A fork's retirement deletes no content, so `retired_content_objects` is zero for a fork. If there are no new objects, a repeated collection of that prefix makes one empty LIST request and no DELETE requests, and it reports zero. The `retired_content_objects` count contributes to maintenance progress. `temporary_objects` counts the store's temporary objects that the collection deleted once they were older than the grace window.
+`content_objects` counts the content objects that no retained view references (on a family root, the views of every member of its fork family), which the collection deleted once they were older than the grace window. `retired_content_objects` counts the keys that the collection listed under the content prefix of a retired family root's pool and successfully deleted. That prefix stores the content of the family root's whole fork family. A fork's retirement deletes no content, so `retired_content_objects` is zero for a fork. If there are no new objects, a repeated collection of that prefix makes one empty LIST request and no DELETE requests, and it reports zero. The `retired_content_objects` count contributes to maintenance progress. `temporary_objects` counts the store's temporary objects that the collection deleted once they were older than the grace window.
 
 Every core GC response also includes `retained`, which counts the candidates the collection kept, grouped by the reason each one was kept. The reasons are a closed set, so every field is always present, a zero means nothing was kept for that reason, and the fields sum to the total:
 
@@ -1205,7 +1205,7 @@ The session record includes the provider's upload ID. So when a session is abort
 
 ### Content references and tokens
 
-A content reference contains `kind`, `content_id`, `size_bytes`, and `checksum`. It doesn't identify a namespace. The content ID and the reading namespace's [family root](glossary.md#family-root) determine where the bytes are stored, so a reference identifies the same content in every member of a fork family (see [File contents and ownership](format.md#15-file-contents-and-ownership)). Clients send the complete reference back unchanged.
+A content reference contains `kind`, `content_id`, `size_bytes`, and `checksum`. It doesn't identify a namespace. The content ID and the reading namespace's [pool](glossary.md#pool) determine where the bytes are stored, so a reference identifies the same content in every member of a fork family (see [File contents and ownership](format.md#15-file-contents-and-ownership)). Clients send the complete reference back unchanged.
 
 A server can return a short-lived `content_token` for completed content. Clients treat the token as opaque, and they can copy it directly into a commit request. A token is valid only in the namespace where the content's upload session was completed. LoonFS rejects the token in every other namespace, including another member of the same fork family. Reading a completed session returns a new token while its token-issuing window is still open, and the session's `content_ref` stays available after that.
 
@@ -1291,7 +1291,7 @@ Returns the metadata of one namespace, without listing every namespace. A missin
   "access": {"kind": "unrestricted"},
   "created_at_ms": 1752623000000,
   "created_by": "usr_8f3c",
-  "family_root_id": "demo",
+  "pool_id": "pool_3s0drmj8em84yb4mnetqkz2j0x",
   "head_seq": 418,
   "retention_floor_seq": 120
 }
@@ -1306,7 +1306,7 @@ The `NamespaceMetadata` object has exactly these fields:
 | `created_at_ms` | The time the namespace was created, in Unix milliseconds. |
 | `created_by` | The actor that created or forked the namespace, as supplied by the application. |
 | `fork_basis` | The namespace and sequence this namespace was forked from, as `source_namespace_id` and `source_head_seq`, which records the fork point (the source namespace's sequence at which the fork was taken). It also includes the fork pin that keeps the source's state at that sequence readable (`source_pin_id`) and, for a namespace that a rebase created, `rebased_from` (see [`POST /forks`](#613-post-forks)). Only a forked namespace has this field. |
-| `family_root_id` | The namespace's [family root](glossary.md#family-root), whose prefix stores the content objects and upload records of the namespace's [fork family](glossary.md#fork-family) (see [File contents and ownership](format.md#15-file-contents-and-ownership)). A namespace that wasn't created by a fork is its own family root, and a fork has the same family root as its source. |
+| `pool_id` | The namespace's [pool](glossary.md#pool), whose prefix stores the namespace's content objects and upload records (see [File contents and ownership](format.md#15-file-contents-and-ownership)). A namespace that wasn't created by a fork records a pool ID that its create call generated, and a fork has the same pool as its source. |
 | `head_seq` | The namespace's current visible sequence. |
 | `retention_floor_seq` | The namespace's retention floor. A change feed request can set `after_seq` to this sequence or any later one, and the feed returns the commits after it. |
 | `retention_window_ms` | The namespace's [retention window](glossary.md#retention-window), in milliseconds. Only a namespace with a window has this field. |
@@ -2631,7 +2631,7 @@ Representative response:
     "source_head_seq": 418,
     "source_pin_id": "pin_00000000000000000031-3f9c2a7d41e05b68"
   },
-  "family_root_id": "demo",
+  "pool_id": "pool_3s0drmj8em84yb4mnetqkz2j0x",
   "head_seq": 418,
   "retention_floor_seq": 418
 }
@@ -2655,7 +2655,7 @@ The snapshot has to stay unexpired, and the source namespace has to stay live, w
 
 Forking doesn't extend the snapshot, and a later deletion of the snapshot doesn't affect the fork. The fork records the `Loonfs-Actor` header as `created_by`, independently of the source's creator. Namespace creation and forking produce no change-feed event.
 
-The new namespace has the same family root as its source. It reads inherited content under the family root's prefix, and it starts its own metadata history. The fork shares the source's existing content and metadata objects instead of copying the filesystem. To create the fork, the server:
+The new namespace has the same pool as its source. It reads inherited content under the pool's prefix, and it starts its own metadata history. The fork shares the source's existing content and metadata objects instead of copying the filesystem. To create the fork, the server:
 
 1. Might first fold the source's outstanding WAL tail, if the fork captures the current head. The fold writes that tail's inline content to content objects.
 2. Creates a fork pin in the source, so the source-owned immutable metadata segments stay available for as long as the target might still read them.
@@ -2878,7 +2878,7 @@ Representative response:
       "source_pin_id": "pin_00000000000000000035-5c2e8f1a9b7d4e60",
       "rebased_from": {"source_namespace_id": "demo-branch", "resume_after_seq": 418}
     },
-    "family_root_id": "demo",
+    "pool_id": "pool_3s0drmj8em84yb4mnetqkz2j0x",
     "head_seq": 432,
     "retention_floor_seq": 431
   },
@@ -3030,7 +3030,7 @@ A conforming server MUST:
 2. Publish visible metadata only through logical commits stored in visible numbered WAL objects.
 3. Make referenced content durable no later than the commit that references it (see [File contents and ownership](format.md#15-file-contents-and-ownership)).
 4. Preserve `(namespace_id, inode_id)` as the canonical identity of an item, and preserve the namespace lifetime described in [Namespaces and identity](format.md#11-namespaces-and-identity).
-5. Resolve content through the reading namespace's family root and the reference's content ID.
+5. Resolve content through the reading namespace's pool and the reference's content ID.
 6. Implement tombstone-first delete.
 7. Serve replay from the highest-numbered verified manifest found through `hint.json`, plus the numbered WAL objects after the folded boundary, replayed as logical commits. Pins keep manifest versions for retention, stable reads, restore, and forks.
 8. Map sibling names to name keys exactly as described in [Names and paths](format.md#14-names-and-paths).

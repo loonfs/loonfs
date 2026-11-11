@@ -107,7 +107,7 @@ fn namespace_metadata(
         created_at_ms: head.created_at_ms,
         created_by: head.created_by,
         fork_basis: fork_basis(head.fork_basis),
-        family_root_id: head.family_root_id,
+        pool_id: head.pool_id,
         namespace_id: head.namespace_id,
         head_seq: head.seq,
         retention_floor_seq: head.retention_floor_seq,

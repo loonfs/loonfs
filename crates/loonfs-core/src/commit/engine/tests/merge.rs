@@ -519,7 +519,7 @@ async fn merge_a_forks_file() -> (tempfile::TempDir, MergedFile) {
     let [main, fork] = ["main", "main-fork"].map(|name| NamespaceId::parse(name).expect("ns"));
     let store = RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::prefix(loonfs_objectstore::keys::content_prefix(&main)),
+        KeyPredicate::content_blob(),
     );
     let writer = context("writer");
     let main_fixture = NamespaceFixture::new(&store, &main, &writer);

@@ -158,7 +158,9 @@ async fn a_streamed_read_rejects_content_that_stopped_matching_its_reference() {
     let entry = namespace.stat(PATH).await.expect("stat file");
     let content_ref = entry.content_ref().cloned().expect("a file has content");
 
-    let key = content_blob(&namespace_id, &content_ref.content_id);
+    let pool_id =
+        loonfs_core::test_support::load_pool_id(store(temp_dir.path()), &namespace_id).await;
+    let key = content_blob(&pool_id, &content_ref.content_id);
     let mut corrupted = payload.clone();
     corrupted[0] ^= 0xff;
     replace_object(&store(temp_dir.path()), &key, corrupted.into())

@@ -18,7 +18,9 @@ use loonfs_test_support::stores::{KeyPredicate, RecordedOperation, RecordingStor
 use loonfs_types::format::wal::{decode_wal_object_envelope_zstd, WalDelta, WalInlineContent};
 use loonfs_types::options::AttributeInclusion;
 use loonfs_types::PathEntryKind;
-use loonfs_types::{AbsolutePath, ContentRef, DestinationBehavior, InodeId, RevisionNo, WriterId};
+use loonfs_types::{
+    AbsolutePath, ContentRef, DestinationBehavior, InodeId, PoolId, RevisionNo, WriterId,
+};
 use std::assert_matches;
 
 /// A commit engine over the recording store that [`setup`] returns.
@@ -35,7 +37,7 @@ async fn setup() -> (
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
     ));
-    let namespace_id = family_root_id();
+    let namespace_id = namespace_id();
     let context = WriterAt {
         writer_id: WriterId::parse("writer").expect("writer"),
         now_ms: 1_000,
@@ -57,10 +59,15 @@ async fn setup() -> (
     (directory, store, engine, context)
 }
 
-/// The namespace that [`setup`] creates, which is the root of its own fork
-/// family, so its prefix stores its content.
-fn family_root_id() -> NamespaceId {
+/// The namespace that [`setup`] creates.
+fn namespace_id() -> NamespaceId {
     NamespaceId::parse("inline").expect("namespace")
+}
+
+/// Returns the pool of the namespace that [`setup`] creates, which the test
+/// reads from the inner store so that `store` records no request.
+async fn pool_id(store: &RecordingStore<LocalFsStore>) -> PoolId {
+    crate::test_support::load_pool_id(store.inner(), &namespace_id()).await
 }
 
 fn inline(bytes: Bytes) -> InlineContent {
@@ -511,7 +518,7 @@ async fn inline_tail_replay_matches_publication_and_materializes_before_metadata
             fold::assert_content_before_metadata(&store, values.len());
             for value in &values {
                 let key = crate::storage::content::content_object_key_for_ref(
-                    &family_root_id(),
+                    &pool_id(&store).await,
                     value.content_ref(),
                 );
                 assert_eq!(

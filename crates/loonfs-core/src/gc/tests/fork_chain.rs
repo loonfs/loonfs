@@ -106,8 +106,8 @@ async fn live_grandchild_keeps_deleted_ancestors_pinned_until_retirement_runs_le
             .expect("retire from leaf to root");
         if index > 0 {
             // A fork's retirement releases its source pin and deletes no
-            // content, because the family root's prefix stores the content
-            // that the fork wrote.
+            // content, because the pool's prefix stores the content that the
+            // fork wrote.
             assert_eq!(report.deleted.retired_content_objects, 0);
             for key in &keys {
                 assert!(store.head(key).await.expect("family object").is_some());

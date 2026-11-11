@@ -1404,16 +1404,30 @@ fn openapi_documents_string_id_contracts_without_dead_schemas() {
             "OpenAPI schema `{name}` is not referenced by a path"
         );
     }
-    let content_id = schemas.get("ContentId").expect("ContentId schema");
-
-    assert_eq!(
-        content_id.get("pattern").and_then(Value::as_str),
-        Some(r"^con_[0-7][0-9a-hjkmnp-tv-z]{25}$")
-    );
-    assert_eq!(
-        content_id.get("example").and_then(Value::as_str),
-        Some("con_4z59p0wjvx9a8b2frdhhf6mat1")
-    );
+    for (name, pattern, example) in [
+        (
+            "ContentId",
+            r"^con_[0-7][0-9a-hjkmnp-tv-z]{25}$",
+            "con_4z59p0wjvx9a8b2frdhhf6mat1",
+        ),
+        (
+            "PoolId",
+            r"^pool_[0-7][0-9a-hjkmnp-tv-z]{25}$",
+            "pool_3s0drmj8em84yb4mnetqkz2j0x",
+        ),
+    ] {
+        let schema = schemas.get(name).unwrap_or_else(|| panic!("{name} schema"));
+        assert_eq!(
+            schema.get("pattern").and_then(Value::as_str),
+            Some(pattern),
+            "{name}"
+        );
+        assert_eq!(
+            schema.get("example").and_then(Value::as_str),
+            Some(example),
+            "{name}"
+        );
+    }
 }
 
 #[test]

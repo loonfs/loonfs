@@ -13,7 +13,10 @@ async fn one_collection_deletes_an_aged_upload_and_every_expired_snapshot_among_
     let namespace_id = NamespaceId::parse("many-pins").expect("namespace");
     let store = RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::prefix(loonfs_objectstore::keys::namespace_prefix(&namespace_id)),
+        KeyPredicate::new({
+            let prefix = loonfs_objectstore::keys::namespace_prefix(&namespace_id);
+            move |key| key.starts_with(&prefix) || key.starts_with("pools/")
+        }),
     );
     let setup = context(1_000);
     crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
@@ -47,9 +50,10 @@ async fn one_collection_deletes_an_aged_upload_and_every_expired_snapshot_among_
             .expect("expired pin");
     }
     let session = crate::test_support::proxied_upload_session(&namespace_id, 2_000);
+    let pool_id = crate::test_support::load_pool_id(&store, &namespace_id).await;
     let session_key = crate::test_support::write_upload_records(
         &store,
-        &namespace_id,
+        &pool_id,
         &session,
         Some(UploadOutcome::Aborted {
             aborted_at_ms: 2_000,
@@ -85,25 +89,23 @@ async fn one_collection_deletes_an_aged_upload_and_every_expired_snapshot_among_
             _ => None,
         })
         .collect();
+    let pool_id = crate::test_support::load_pool_id(&store, &namespace_id).await;
     assert_eq!(
         listings,
         vec![
             // Root content before reading the WAL tail, and sweep the sessions.
-            upload_session_prefix(&namespace_id),
+            upload_session_prefix(&pool_id),
             pin_prefix(&namespace_id),
             metadata_manifest_prefix(&namespace_id),
             wal_prefix(&namespace_id),
             metadata_segment_prefix(&namespace_id),
             extensions_prefix(&namespace_id),
             pin_prefix(&namespace_id),
-            content_prefix(&namespace_id),
-            temporary_prefix(&namespace_id),
+            content_prefix(&pool_id),
+            temporary_prefix(&pool_id),
         ]
     );
-    for key in [
-        session_key,
-        upload_outcome(&namespace_id, &session.upload_id),
-    ] {
+    for key in [session_key, upload_outcome(&pool_id, &session.upload_id)] {
         assert!(store.inner().head(&key).await.expect("head").is_none());
     }
     assert_eq!(

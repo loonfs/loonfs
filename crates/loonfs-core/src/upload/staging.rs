@@ -37,7 +37,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             open_owned_staging_session(&self.namespace.store, catalog, subject_id, &clock).await?;
         let stored = stage_bytes_under_content_id(
             &self.namespace.store,
-            catalog.family_root_id(),
+            catalog.pool_id(),
             session.content_id.clone(),
             bytes,
             ContentKeyOwner::FreshIdentity,
@@ -87,7 +87,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let session = open_owned_staging_session(&self.store, catalog, subject_id, clock).await?;
         let content_ref = stage_streamed_under_content_id(
             &self.store,
-            catalog.family_root_id(),
+            catalog.pool_id(),
             session.content_id.clone(),
             body,
             ContentKeyOwner::FreshIdentity,
@@ -136,7 +136,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         clock: &OperationClock,
     ) -> Result<PreparedContent> {
         Ok(self
-            .record_completion(catalog.family_root_id(), session, written, clock)
+            .record_completion(catalog.pool_id(), session, written, clock)
             .await?
             .prepared)
     }

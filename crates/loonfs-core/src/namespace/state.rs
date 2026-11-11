@@ -2,7 +2,7 @@
 
 use loonfs_types::format::control::{ForkBasis, NamespaceStatus, WriterBlock};
 use loonfs_types::format::manifest::NamespaceManifestPayload;
-use loonfs_types::{ActorId, ChangeSeq, NamespaceAccess, NamespaceId, WalNo, WriterEpoch};
+use loonfs_types::{ActorId, ChangeSeq, NamespaceAccess, NamespaceId, PoolId, WalNo, WriterEpoch};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -12,7 +12,7 @@ pub struct NamespaceReadState {
     pub created_by: ActorId,
     pub access: NamespaceAccess,
     pub fork_basis: Option<ForkBasis>,
-    pub family_root_id: NamespaceId,
+    pub pool_id: PoolId,
     pub status: NamespaceStatus,
     pub writer_epoch: WriterEpoch,
     pub writer: Option<WriterBlock>,
@@ -59,7 +59,7 @@ impl From<&NamespaceManifestPayload> for NamespaceReadState {
             created_by: manifest.created_by.clone(),
             access: manifest.access.clone(),
             fork_basis: manifest.fork_basis.clone(),
-            family_root_id: manifest.family_root_id.clone(),
+            pool_id: manifest.pool_id.clone(),
             status: manifest.status,
             writer_epoch: manifest.writer_epoch,
             writer: manifest.writer.clone(),
@@ -76,6 +76,8 @@ impl NamespaceReadState {
     pub fn initial(namespace_id: NamespaceId, created_at_ms: u64, created_by: ActorId) -> Self {
         Self::from(&NamespaceManifestPayload::initial(
             namespace_id,
+            PoolId::parse("pool_00000000000000000000000001")
+                .expect("a static pool ID should parse"),
             created_at_ms,
             created_by,
             loonfs_types::NamespaceAccess::Unrestricted {},

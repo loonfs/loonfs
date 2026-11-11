@@ -41,7 +41,7 @@ fn request(pattern: &str) -> GrepRequest {
 async fn content_blob_keys(store: &SharedObjectStore) -> BTreeSet<String> {
     let content_blob = KeyPredicate::content_blob();
     store
-        .list_prefix("namespaces/")
+        .list_prefix("pools/")
         .await
         .expect("list content blobs")
         .into_iter()

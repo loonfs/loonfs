@@ -31,7 +31,7 @@ use loonfs_types::format::control::{PinOwner, PinPayload};
 use loonfs_types::format::manifest::{
     MetadataRowFamily, MetadataSegmentRef, NamespaceManifestPayload,
 };
-use loonfs_types::{ContentId, ManifestNo, NamespaceId, UploadId, WalNo};
+use loonfs_types::{ContentId, ManifestNo, NamespaceId, PoolId, UploadId, WalNo};
 use std::collections::BTreeSet;
 use std::pin::pin;
 use std::sync::Arc;
@@ -108,10 +108,13 @@ pub(super) struct ListedPins {
 
 pub(super) struct LiveSet {
     /// Whether the collected namespace is a fork or the root of its fork
-    /// family. Only the collection on a family root collects content and upload
-    /// records, because the family root's prefix stores them for the whole
-    /// family.
+    /// family. Only the collection on a family root collects the content and
+    /// upload records that the pool's prefix stores for the whole family.
     pub(super) collected: Roots,
+    /// The pool that the collected namespace's current manifest records, whose
+    /// prefix stores the content and upload records that the collection on a
+    /// family root collects.
+    pub(super) pool_id: PoolId,
     pub(super) current_tombstone: Option<NamespaceManifestPayload>,
     pub(super) discovery_start_manifest_no: ManifestNo,
     pub(super) objects: ChargedSet<String>,
@@ -169,16 +172,18 @@ impl LiveSet {
         let namespace_id = &namespace.namespace_id;
         let observed = Observation::now(Arc::clone(&namespace.timer));
         let (manifest, hint) = namespace.load_current_manifest_with_hint().await?;
-        let roots = if manifest.payload().is_family_root() {
+        let roots = if manifest.payload().fork_basis.is_none() {
             Roots::CollectedFamilyRoot
         } else {
             Roots::CollectedFork
         };
+        let pool_id = manifest.payload().pool_id.clone();
         // Sessions are listed before the WAL tail is read. A session this collection
         // misses is newer than the collection, or it ended before the tail read and
         // the tail or a rooted manifest names every commit of its content. Only
-        // a family root's prefix stores upload sessions, and a deleted family
-        // root's collection still sweeps content, so its sessions are still roots.
+        // a family root's collection sweeps its pool's upload sessions, and a
+        // deleted family root's collection still sweeps content, so its sessions
+        // are still roots.
         let memory = CollectionMemory::new(
             namespace_id,
             read_working_memory(Some(namespace.segment_cache.as_ref())),
@@ -188,7 +193,7 @@ impl LiveSet {
         let mut uploads = ChargedQueue::new(&memory);
         if roots == Roots::CollectedFamilyRoot {
             namespace
-                .load_upload_sessions(session_cache, |listed, session| {
+                .load_upload_sessions(&pool_id, session_cache, |listed, session| {
                     match session {
                         Some(ListedUploadSession::Completed { upload_id, session }) => {
                             content_ids.insert(session.content_id.clone())?;
@@ -209,6 +214,7 @@ impl LiveSet {
         let head = anchor.manifest.payload();
         let mut live = Self {
             collected: roots,
+            pool_id,
             current_tombstone: head.status.is_deleted().then(|| head.clone()),
             discovery_start_manifest_no: anchor.hint.state.manifest_no,
             objects: ChargedSet::new(&memory),
@@ -465,8 +471,9 @@ impl LiveSet {
             }
     }
 
-    /// Returns whether the collection collects content and upload records, which
-    /// only the collection on a family root does.
+    /// Returns whether the collection collects the content, upload records, and
+    /// temporary objects of its pool, which only the collection on a family
+    /// root does.
     pub(super) fn collects_family_content(&self) -> bool {
         self.collected == Roots::CollectedFamilyRoot
     }

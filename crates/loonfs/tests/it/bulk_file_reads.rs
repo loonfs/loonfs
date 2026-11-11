@@ -893,7 +893,8 @@ async fn read_content_ref_refuses_bytes_that_do_not_match_the_reference() {
 
     // Same length, different bytes: the size check passes and the digest
     // check is what has to catch it.
-    let object_key = loonfs_objectstore::keys::content_blob(&namespace_id, &content_ref.content_id);
+    let pool_id = loonfs_core::test_support::load_pool_id(&store, &namespace_id).await;
+    let object_key = loonfs_objectstore::keys::content_blob(&pool_id, &content_ref.content_id);
     replace_object(
         &store,
         &object_key,

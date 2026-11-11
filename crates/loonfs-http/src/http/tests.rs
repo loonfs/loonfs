@@ -627,7 +627,7 @@ async fn invalid_presign_content_is_a_bad_request() {
 
     let response =
         super::handlers_uploads::presign_issuer_error(ObjectStoreError::InvalidRequest {
-            object_key: "namespaces/demo/content/con_1".to_owned(),
+            object_key: "pools/pool_00000000000000000000000001/content/con_1".to_owned(),
             message: "invalid checksum".to_owned(),
         })
         .into_response();
@@ -2094,7 +2094,7 @@ async fn put_streamed_writes_a_multi_part_payload_one_part_at_a_time() {
 
     let payload = distinct_bytes(MEMORY_BOUND_PAYLOAD_BYTES);
     let key = loonfs_objectstore::keys::content_blob(
-        &loonfs_types::NamespaceId::parse("demo").expect("namespace id"),
+        &loonfs_test_support::ids::numbered_pool_id(1),
         &loonfs_types::ContentId::parse("con_014d2pf2dbsqqg28t5cy4tqkff").expect("content id"),
     );
     // Use HTTP-sized chunks so the store must regroup them.
@@ -4439,8 +4439,9 @@ async fn download_body_streams_one_chunk_and_aborts_on_late_corruption() {
             let namespace = reader.namespace(&ns);
             let entry = namespace.stat("/large.bin").await.expect("entry");
 
+            let pool_id = loonfs_core::test_support::load_pool_id(&plain, &ns).await;
             let key = loonfs_objectstore::keys::content_blob(
-                &ns,
+                &pool_id,
                 &entry.content_ref().expect("file").content_id,
             );
             let mut changed = payload.clone();

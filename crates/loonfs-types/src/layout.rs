@@ -19,8 +19,8 @@ pub enum ExtentObject {
     },
 }
 
-/// One run of chain bytes stored in an immutable object under the family
-/// root's prefix.
+/// One run of chain bytes stored in an immutable object under the pool's
+/// prefix.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContentExtent {

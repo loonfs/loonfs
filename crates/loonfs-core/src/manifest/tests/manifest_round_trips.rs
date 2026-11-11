@@ -670,7 +670,7 @@ async fn manifest_run_rejects_rows_after_run_seq() {
         access: loonfs_types::NamespaceAccess::Unrestricted {},
         retention_window_ms: None,
         fork_basis: None,
-        family_root_id: namespace_id.clone(),
+        pool_id: loonfs_test_support::ids::numbered_pool_id(1),
         status: loonfs_types::format::control::NamespaceStatus::Active {},
         writer: None,
         folded_wal_no: loonfs_types::WalNo(0),

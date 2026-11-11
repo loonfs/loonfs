@@ -25,13 +25,19 @@ async fn a_sweep_and_the_session_steps_never_run_on_the_same_namespace_together(
             LocalFsStore::new(directory.path()).expect("store"),
             KeyPredicate::any().except_hints(),
         ),
-        KeyPredicate::prefix(loonfs_objectstore::keys::namespace_prefix(&namespace_id))
-            .except_hints(),
+        KeyPredicate::new({
+            let namespace_prefix = loonfs_objectstore::keys::namespace_prefix(&namespace_id);
+            move |key| key.starts_with(&namespace_prefix) || key.starts_with("pools/")
+        })
+        .except_hints(),
         OperationSelector::Any,
     ));
     let mut config = scheduler_config(None);
     // The session's metadata step and the sweep's metadata call each fold
-    // the session's tail, so the gate parks either one at its first request.
+    // the session's tail, so the gate parks either one at its first request,
+    // which writes the folded content under the pool's prefix. A gate on the
+    // namespace's prefix alone would park one of the fold's concurrent segment
+    // puts and let the others through.
     config.idle_fold_after_ms = Some(1);
     let server = SchedulerServer::start(store.clone(), &config, 0).await;
     server
@@ -83,7 +89,7 @@ async fn a_sweep_and_the_session_steps_never_run_on_the_same_namespace_together(
                 1
             );
             let operations = store.inner().take();
-            assert_eq!(operations.len(), 1);
+            assert_eq!(operations.len(), 1, "{operations:?}");
             assert_matches!(&operations[0], RecordedOperation::List { .. });
             assert_eq!(operations[0].key(), "namespaces/");
         } else {

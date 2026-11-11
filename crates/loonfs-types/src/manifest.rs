@@ -7,6 +7,7 @@ use crate::envelope::EnvelopeCodecError;
 use crate::metadata_rows::MetadataRowFamily;
 use crate::segment_blocks::BlockHandle;
 use crate::CompactorEpoch;
+use crate::PoolId;
 use crate::{AccessGrants, ActorId, ChangeSeq, ManifestNo, MetadataSegmentId, NamespaceId, RunNo};
 use crate::{ExtensionName, IndexSegmentId, PrincipalScope, WalNo, WriterEpoch};
 use serde::{Deserialize, Serialize};
@@ -332,11 +333,11 @@ pub struct NamespaceManifestPayload {
     /// Fork provenance and source checkpoint identity for this namespace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork_basis: Option<ForkBasis>,
-    /// The namespace whose prefix stores the content of this namespace's
-    /// [fork family](https://github.com/loonfs/loonfs/blob/main/docs/specs/glossary.md#fork-family).
-    /// A plain create records the namespace itself, a fork copies its
-    /// source's value, and a successor can't change it.
-    pub family_root_id: NamespaceId,
+    /// The pool whose prefix stores the namespace's content objects and
+    /// upload records. A namespace created without a source records a pool ID
+    /// that its create call generates, a fork copies its source's pool, and
+    /// the value can't change.
+    pub pool_id: PoolId,
     /// Lifecycle state of this namespace.
     pub status: NamespaceStatus,
     /// Writer that acquired the current epoch.
@@ -400,23 +401,18 @@ impl NamespaceManifestPayload {
             .unwrap_or(self.head_seq)
     }
 
-    /// Returns whether this namespace is the root of its fork family, which
-    /// is true exactly when it wasn't forked from another namespace.
-    pub fn is_family_root(&self) -> bool {
-        self.family_root_id == self.namespace_id
-    }
-
-    /// Constructs manifest 1 with no retention window, as the root of its own
-    /// fork family.
+    /// Constructs manifest 1 with no retention window and no fork basis, which
+    /// records `pool_id`.
     pub fn initial(
         namespace_id: NamespaceId,
+        pool_id: PoolId,
         created_at_ms: u64,
         created_by: ActorId,
         access: NamespaceAccess,
     ) -> Self {
         Self {
-            family_root_id: namespace_id.clone(),
             namespace_id,
+            pool_id,
             created_at_ms,
             created_by,
             access,
@@ -439,7 +435,7 @@ impl NamespaceManifestPayload {
 
     /// Constructs manifest 1 of a fork of `source` at `fork_basis`, which lists
     /// the runs and copies the extension entries of `source`, records the
-    /// family root of `source`, and starts its retention floor at the fork's head.
+    /// pool of `source`, and starts its retention floor at the fork's head.
     pub fn initial_fork(
         namespace_id: NamespaceId,
         created_at_ms: u64,
@@ -451,7 +447,6 @@ impl NamespaceManifestPayload {
         Self {
             retention_window_ms: source.retention_window_ms,
             fork_basis: Some(fork_basis),
-            family_root_id: source.family_root_id.clone(),
             head_seq: source.head_seq,
             next_run_no: source.next_run_no,
             retention_floor_seq: fork_seq,
@@ -459,6 +454,7 @@ impl NamespaceManifestPayload {
             extensions: source.extensions.clone(),
             ..Self::initial(
                 namespace_id,
+                source.pool_id.clone(),
                 created_at_ms,
                 created_by,
                 source.access.clone(),
@@ -480,7 +476,7 @@ impl NamespaceManifestPayload {
             access: self.access.clone(),
             retention_window_ms: self.retention_window_ms,
             fork_basis: self.fork_basis.clone(),
-            family_root_id: self.family_root_id.clone(),
+            pool_id: self.pool_id.clone(),
             status: self.status,
             writer: self.writer.clone(),
             folded_wal_no: self.folded_wal_no,
@@ -605,8 +601,8 @@ impl NamespaceManifestPayload {
         if successor.fork_basis != self.fork_basis {
             return invalid("fork_basis");
         }
-        if successor.family_root_id != self.family_root_id {
-            return invalid("family_root_id");
+        if successor.pool_id != self.pool_id {
+            return invalid("pool_id");
         }
         if self.status.is_deleted() {
             return invalid("status");
@@ -683,6 +679,10 @@ mod tests {
     use crate::{ChangeSeq, ManifestNo, MetadataSegmentId, NamespaceId, RunNo, WriterEpoch};
     use std::assert_matches;
 
+    fn pool_id() -> crate::PoolId {
+        crate::PoolId::parse("pool_3s0drmj8em84yb4mnetqkz2j0x").expect("valid pool ID")
+    }
+
     #[test]
     fn activity_arithmetic_and_successors_reject_invalid_totals() {
         let counter = super::ActivityCounter::parse(crate::MAX_PUBLIC_INTEGER).expect("maximum");
@@ -693,6 +693,7 @@ mod tests {
         };
         let initial = NamespaceManifestPayload::initial(
             NamespaceId::parse("activity").expect("namespace"),
+            pool_id(),
             0,
             crate::ActorId::parse("test").expect("actor"),
             super::NamespaceAccess::unrestricted(),
@@ -762,6 +763,7 @@ mod tests {
     fn successor_preserves_identity() {
         let initial = NamespaceManifestPayload::initial(
             NamespaceId::parse("original").expect("namespace"),
+            pool_id(),
             1_000,
             crate::ActorId::parse("test").expect("actor"),
             super::NamespaceAccess::Unrestricted {},
@@ -773,7 +775,7 @@ mod tests {
             ("created_at_ms", 1),
             ("fork_basis", 2),
             ("access", 3),
-            ("family_root_id", 4),
+            ("pool_id", 4),
         ] {
             let mut successor = next.clone();
             match change {
@@ -794,7 +796,7 @@ mod tests {
                         rebased_from: None,
                     })
                 }
-                4 => successor.family_root_id = NamespaceId::parse("another").expect("namespace"),
+                4 => successor.pool_id = crate::PoolId::generate(),
                 _ => {
                     successor.access = super::NamespaceAccess::Acl {
                         principal_scope: crate::PrincipalScope::parse("org_test").expect("scope"),
@@ -842,6 +844,7 @@ mod tests {
     fn a_later_manifest_keeps_the_chain_rules_without_the_next_number() {
         let initial = NamespaceManifestPayload::initial(
             NamespaceId::parse("later").expect("namespace"),
+            pool_id(),
             1_000,
             crate::ActorId::parse("test").expect("actor"),
             super::NamespaceAccess::Unrestricted {},
@@ -905,7 +908,7 @@ mod tests {
             access: super::NamespaceAccess::Unrestricted {},
             retention_window_ms: None,
             fork_basis: None,
-            family_root_id: NamespaceId::parse("demo").expect("valid namespace id"),
+            pool_id: pool_id(),
             status: crate::control::NamespaceStatus::Active {},
             writer: None,
             folded_wal_no: crate::WalNo(0),
@@ -951,7 +954,7 @@ mod tests {
             access: super::NamespaceAccess::Unrestricted {},
             retention_window_ms: None,
             fork_basis: None,
-            family_root_id: NamespaceId::parse("demo").expect("valid namespace id"),
+            pool_id: pool_id(),
             status: crate::control::NamespaceStatus::Active {},
             writer: None,
             folded_wal_no: crate::WalNo(0),
@@ -999,6 +1002,7 @@ mod tests {
     fn decoder_accepts_the_manifest_limit_and_rejects_the_next_byte_before_decoding() {
         let encoded = encode_namespace_manifest_json(NamespaceManifestPayload::initial(
             NamespaceId::parse("bounded").expect("namespace"),
+            pool_id(),
             0,
             crate::ActorId::parse("test").expect("actor"),
             super::NamespaceAccess::unrestricted(),

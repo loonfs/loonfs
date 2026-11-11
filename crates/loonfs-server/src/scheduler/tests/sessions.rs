@@ -153,12 +153,12 @@ async fn session_steps_leave_a_tail_below_the_fold_triggers_until_it_is_idle() {
         .await
         .expect("publish");
     }
-    let content_prefix = loonfs_objectstore::keys::content_prefix(&namespace_id);
+    let content_objects = KeyPredicate::content_blob();
     assert!(
         store
             .take()
             .iter()
-            .all(|operation| !operation.key().starts_with(&content_prefix)),
+            .all(|operation| !content_objects.matches(operation.key())),
         "every value is written inline, so the tail has 3 MiB of inline bytes"
     );
     let tail_objects = server.wal_tail_objects(&namespace_id).await;
@@ -677,6 +677,9 @@ async fn collection_runs_hourly_only_when_the_session_moved() {
         .run_steps_after(config.maintenance_interval_ms.get())
         .await;
     server.scheduler.run_due_steps().await;
+    let moved_pool = loonfs_objectstore::keys::pool_prefix(
+        &loonfs_core::test_support::load_pool_id(store.inner(), &moved).await,
+    );
     store.reset();
     server
         .run_steps_after(config.gc_interval_ms.get() - config.maintenance_interval_ms.get() - 1)
@@ -691,7 +694,8 @@ async fn collection_runs_hourly_only_when_the_session_moved() {
     );
     assert!(operations.iter().all(|op| op
         .key()
-        .starts_with(&loonfs_objectstore::keys::namespace_prefix(&moved))));
+        .starts_with(&loonfs_objectstore::keys::namespace_prefix(&moved))
+        || op.key().starts_with(&moved_pool)));
     server.run_steps_after(config.gc_interval_ms.get()).await;
     assert!(
         store.take().is_empty(),

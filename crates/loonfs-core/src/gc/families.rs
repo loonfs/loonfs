@@ -13,7 +13,7 @@ use loonfs_objectstore::keys::{
 use loonfs_objectstore::layout::{
     content_id_of, manifest_no_of, parse_object_key, DurableObjectFamily,
 };
-use loonfs_types::NamespaceId;
+use loonfs_types::{NamespaceId, PoolId};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum CandidateFamily {
@@ -82,15 +82,15 @@ impl CandidateFamily {
         })
     }
 
-    pub(super) fn prefix(self, namespace_id: &NamespaceId) -> String {
+    pub(super) fn prefix(self, namespace_id: &NamespaceId, pool_id: &PoolId) -> String {
         match self {
             Self::Manifests => metadata_manifest_prefix(namespace_id),
             Self::WalObjects => wal_prefix(namespace_id),
             Self::MetadataSegments => metadata_segment_prefix(namespace_id),
             Self::ExtensionSegments => extensions_prefix(namespace_id),
             Self::Pins => pin_prefix(namespace_id),
-            Self::Content => content_prefix(namespace_id),
-            Self::Temporary => temporary_prefix(namespace_id),
+            Self::Content => content_prefix(pool_id),
+            Self::Temporary => temporary_prefix(pool_id),
         }
     }
 }

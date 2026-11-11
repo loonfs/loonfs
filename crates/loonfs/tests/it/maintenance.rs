@@ -684,9 +684,7 @@ async fn a_second_collection_reads_no_completed_session_record() {
     let namespace_id = namespace_id("demo");
     let store = Arc::new(RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
-        KeyPredicate::prefix(loonfs_objectstore::keys::upload_session_prefix(
-            &namespace_id,
-        )),
+        KeyPredicate::upload_records(),
     ));
     let fs = open_runtime_with_async(store.clone(), "session-cache-test", |builder| {
         builder.config(loonfs::RuntimeConfig {

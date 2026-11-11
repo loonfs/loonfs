@@ -9,7 +9,7 @@ use crate::error::{CoreError, Result};
 use crate::namespace::store::NamespaceStore;
 use bytes::Bytes;
 use loonfs_objectstore::keys::pin;
-use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
+use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily, KeyPrefix};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::{
     encode_control_state, ControlObjectKind, PinOwner, PinPayload,
@@ -83,7 +83,11 @@ pub(crate) fn pin_key_ids(
             reason: format!("the key belongs to durable family `{:?}`", parsed.family()),
         });
     }
-    let namespace = parsed.prefix_namespace_id();
+    let namespace = match parsed.prefix() {
+        KeyPrefix::Namespace(namespace) => Some(namespace),
+        KeyPrefix::Pool(_) => None,
+    }
+    .expect("`parse_object_key` should find every pin key under a namespace prefix");
     let identifier = parsed
         .identifier()
         .expect("`parse_object_key` should give every pin key its pin ID");

@@ -562,7 +562,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             view.resolve_published_content_location(content_ref).await
         } else {
             Ok(ContentLocation::whole(
-                &context.read_basis.head.family_root_id,
+                &context.read_basis.head.pool_id,
                 content_ref,
             ))
         }

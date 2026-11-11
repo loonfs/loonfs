@@ -7,7 +7,8 @@ use crate::options::CreateNamespaceOptions;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{NamespaceAccess, NamespaceManifestPayload};
 use loonfs_types::{
-    AccessRevisionNo, AccessRight, ActorId, ChangeSeq, InodeKind, NamespaceMetadata, ROOT_INODE_ID,
+    AccessRevisionNo, AccessRight, ActorId, ChangeSeq, InodeKind, NamespaceMetadata, PoolId,
+    ROOT_INODE_ID,
 };
 
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
@@ -33,6 +34,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             retention_window_ms: options.retention_window_ms,
             ..NamespaceManifestPayload::initial(
                 self.namespace.namespace_id.clone(),
+                PoolId::generate(),
                 clock.request_at_ms(),
                 actor_id.clone(),
                 options.access.clone(),

@@ -13,7 +13,7 @@ use crate::time::OperationClock;
 use futures::{future, stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::keys::content_prefix;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::GcResponse;
+use loonfs_types::{GcResponse, PoolId};
 use std::sync::atomic::AtomicU64;
 
 impl<S: ObjectStore> NamespaceStore<S> {
@@ -22,8 +22,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// On a family root, the collection also reads the roots of every other member
     /// of its fork family, which it finds through fork pins, and protects the
     /// content that any member refers to. A collection on a fork lists and sweeps no
-    /// content and no upload records, because the family root's prefix stores
-    /// them.
+    /// content, upload records, or temporary objects of its pool, because the
+    /// collection on the family root sweeps them.
     ///
     /// The content sweep reads the extent filter of each distinct layout
     /// segment of the rooted manifests through the segment cache, charges the
@@ -64,7 +64,10 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 }
                 continue;
             }
-            let prefix = family.prefix(&self.namespace_id);
+            if family == CandidateFamily::Temporary && !live.collects_family_content() {
+                continue;
+            }
+            let prefix = family.prefix(&self.namespace_id, &live.pool_id);
             // Unboxed, rustc cannot prove the collection future `Send` through this stream.
             let decisions = self
                 .store
@@ -86,16 +89,16 @@ impl<S: ObjectStore> NamespaceStore<S> {
         // A skipped content sweep or a retained tombstone leaves the family's
         // content unlisted, but the content still occupies storage.
         if !content_listed && live.collects_family_content() {
-            report.listed_bytes += self.list_content_bytes().await?;
+            report.listed_bytes += self.list_content_bytes(&live.pool_id).await?;
         }
         report.listed_bytes += sweep.listed_bytes.into_inner();
         Ok(report)
     }
 
-    /// Lists the content prefix of this namespace, a family root, and returns
-    /// the sum of the listed object sizes.
-    async fn list_content_bytes(&self) -> Result<u64> {
-        let prefix = content_prefix(&self.namespace_id);
+    /// Lists the content prefix of `pool_id` and returns the sum of the listed
+    /// object sizes.
+    async fn list_content_bytes(&self, pool_id: &PoolId) -> Result<u64> {
+        let prefix = content_prefix(pool_id);
         self.store
             .list_entries_from_stream(&prefix, None)
             .map_err(|error| CoreError::store(&prefix, &error))

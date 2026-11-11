@@ -122,7 +122,7 @@ A deleted namespace's final manifest, which records that the namespace was delet
 
 ### Content object
 
-An immutable object that stores file bytes, under the family root's prefix (`namespaces/{family_root_id}/content/`). A file's bytes can be stored in one content object or spread across several. See [File contents and ownership](format.md#15-file-contents-and-ownership).
+An immutable object that stores file bytes, under the prefix of the namespace's [pool](#pool) (`pools/{pool_id}/content/`). A file's bytes can be stored in one content object or spread across several. See [File contents and ownership](format.md#15-file-contents-and-ownership).
 
 ### Content reference
 
@@ -164,11 +164,11 @@ An object-store operation that creates one new immutable object from ranges of e
 
 ### Temporary object
 
-An object that an assembly writes for intermediate results (for example, when GCS composes more than 32 sources) and deletes when it finishes. Temporary objects are stored under `namespaces/{namespace_id}/temporary/`. Nothing references them, so garbage collection deletes any that are older than the [grace window](#grace-window) (for example, after a crash).
+An object that an assembly writes for intermediate results (for example, when GCS composes more than 32 sources) and deletes when it finishes. A temporary object is stored under the prefix of the object that the assembly writes, so a content assembly's temporary objects are stored under `pools/{pool_id}/temporary/`. Nothing references them, so garbage collection deletes any that are older than the [grace window](#grace-window) (for example, after a crash).
 
 ### Upload session
 
-The stored state of one upload, kept as two records that are each written once. The session record is written when the upload starts, and it includes the content ID that's assigned to the upload, the transfer mode, and when the session expires. The outcome record is written when the upload completes or is aborted. Both records are stored under the family root's prefix, and each one records the namespace that created the session. The session's status (`open`, `completed`, or `aborted`) follows from which records exist. For example, a session record without an outcome record is an open session. Completing an upload doesn't automatically update a file in a LoonFS namespace. A file changes only when a later commit references the uploaded content. See [Upload sessions](format.md#51-upload-sessions).
+The stored state of one upload, kept as two records that are each written once. The session record is written when the upload starts, and it includes the content ID that's assigned to the upload, the transfer mode, and when the session expires. The outcome record is written when the upload completes or is aborted. Both records are stored under the prefix of the namespace's [pool](#pool), and each one records the namespace that created the session. The session's status (`open`, `completed`, or `aborted`) follows from which records exist. For example, a session record without an outcome record is an open session. Completing an upload doesn't automatically update a file in a LoonFS namespace. A file changes only when a later commit references the uploaded content. See [Upload sessions](format.md#51-upload-sessions).
 
 ### Presigned URL
 
@@ -257,7 +257,7 @@ The maintenance API's "checkpoint" inventory lists every pin of a namespace, so 
 
 ### Fork
 
-A new namespace that starts as a copy of another namespace at one point in its history. The fork shares the source's stored objects, and the source keeps a pin for the fork until the fork is retired. The fork is a member of its source's [fork family](#fork-family), so it reads inherited content and writes new content under the family root's prefix. After the fork, commits to one namespace appear in the other only when a [merge](#merge) applies them. See [Forking a namespace](format.md#92-forking-a-namespace).
+A new namespace that starts as a copy of another namespace at one point in its history. The fork shares the source's stored objects, and the source keeps a pin for the fork until the fork is retired. The fork is a member of its source's [fork family](#fork-family), so it reads inherited content and writes new content under the prefix of its source's [pool](#pool). After the fork, commits to one namespace appear in the other only when a [merge](#merge) applies them. See [Forking a namespace](format.md#92-forking-a-namespace).
 
 ### Source
 
@@ -269,11 +269,15 @@ The source namespace's sequence at which a fork was taken. The fork basis record
 
 ### Fork family
 
-A set of namespaces: one namespace that was created without a source (the [family root](#family-root)), and every namespace forked from it, directly or through other forks. Each namespace in the set is a "member" of the family, and a member leaves the fork family when it's retired. The members store their content objects and upload records under the family root's prefix, so a content reference identifies the same object in every member. The family root's [collection](#collection) deletes the family's unreferenced content, with roots from every member. The collection finds the members through fork pins, because each fork pins the namespace it was forked from. For example, if `sandbox` is a fork of `main`, and `trial` is a fork of `sandbox`, all three are members of `main`'s family, and their content objects are stored under `namespaces/main/content/`. See [Namespaces and identity](format.md#11-namespaces-and-identity).
+A set of namespaces: one namespace that was created without a source (the [family root](#family-root)), and every namespace forked from it, directly or through other forks. Each namespace in the set is a "member" of the family, and a member leaves the fork family when it's retired. The members store their content objects and upload records under the prefix of the family's [pool](#pool), so a content reference identifies the same object in every member. The family root's [collection](#collection) deletes the family's unreferenced content, with roots from every member. The collection finds the members through fork pins, because each fork pins the namespace it was forked from. For example, if `sandbox` is a fork of `main`, and `trial` is a fork of `sandbox`, all three are members of `main`'s family. If `main` records the pool `pool_3s0drmj8em84yb4mnetqkz2j0x`, their content objects are stored under `pools/pool_3s0drmj8em84yb4mnetqkz2j0x/content/`. See [Namespaces and identity](format.md#11-namespaces-and-identity).
 
 ### Family root
 
-The member of a [fork family](#fork-family) that was created without a source. Every member's manifest records the family root (`family_root_id`), and the family root's prefix stores the family's content objects and upload records. A family root is the last member of its family to be retired, because each fork pins its source. Its collections keep deleting the family's unreferenced content after the family root is deleted, until the family root itself is retired. See [File contents and ownership](format.md#15-file-contents-and-ownership) and [Retirement](format.md#95-retirement).
+The member of a [fork family](#fork-family) that was created without a source. Every member's manifest records the family's [pool](#pool) (`pool_id`), whose prefix stores the family's content objects and upload records. A family root is the last member of its family to be retired, because each fork pins its source. Its collections keep deleting the family's unreferenced content after the family root is deleted, until the family root itself is retired. See [File contents and ownership](format.md#15-file-contents-and-ownership) and [Retirement](format.md#95-retirement).
+
+### Pool
+
+A set of namespaces that share one set of content objects, together with the key prefix that stores those objects (`pools/{pool_id}/`). A pool is identified by a generated pool ID, such as `pool_3s0drmj8em84yb4mnetqkz2j0x`. Every manifest records the namespace's pool (`pool_id`). A namespace created without a source records a pool ID that its create call generates, and a fork records its source's pool, so every member of a [fork family](#fork-family) records one pool. The pool's prefix stores the content objects and upload records of every namespace in the pool, and the temporary objects of content assemblies, so one content reference identifies the same object in every namespace in the pool, and a fork or a merge shares content without copying bytes. For example, if `main` records `pool_3s0drmj8em84yb4mnetqkz2j0x` and `sandbox` is a fork of `main`, a file that `sandbox` uploads is stored under `pools/pool_3s0drmj8em84yb4mnetqkz2j0x/content/`, and a revision in `main` can refer to the same object after a merge. See [Pools](../design/pools.md).
 
 ### Merge
 
@@ -373,7 +377,7 @@ How old an unreferenced manifest, WAL object, content object, or temporary objec
 
 ### Namespace retirement
 
-The point at which garbage collection deletes a deleted fork's pin on its source, or deletes the objects under a deleted family root's content prefix. A deleted namespace is retired once its retirement grace has passed and no pins on it remain. See [Retirement](format.md#95-retirement).
+The point at which garbage collection deletes a deleted fork's pin on its source, or deletes the objects under the content prefix of a deleted family root's pool. A deleted namespace is retired once its retirement grace has passed and no pins on it remain. See [Retirement](format.md#95-retirement).
 
 ## API
 

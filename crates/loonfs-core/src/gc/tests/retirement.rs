@@ -186,9 +186,10 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
     .await
     .expect("prepare capability");
     let expires_at_ms = clock.now_ms() + DIRECT_TRANSFER_URL_TTL_MS;
+    let pool_id = crate::test_support::load_pool_id(&inner, &namespace_id).await;
     let store = RecordingStore::new(
         inner,
-        KeyPredicate::prefix(format!("namespaces/{namespace_id}/content/")),
+        KeyPredicate::prefix(loonfs_objectstore::keys::content_prefix(&pool_id)),
     );
     clock.advance_ms(1);
     crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context(clock.now_ms()))

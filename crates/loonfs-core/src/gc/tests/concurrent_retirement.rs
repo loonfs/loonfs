@@ -44,20 +44,20 @@ async fn overlapping_retirement_retries_a_lost_pin_delete_and_preserves_a_live_s
         )
         .await;
     }
-    // The target's content is stored under the family root's prefix.
+    // The target's content is stored under the prefix of the source's pool.
+    let pool_id = crate::test_support::load_pool_id(&inner, &source).await;
+    assert_eq!(
+        crate::test_support::load_pool_id(&inner, &target).await,
+        pool_id
+    );
     let target_keys = inner
-        .list_prefix(&content_prefix(&source))
+        .list_prefix(&content_prefix(&pool_id))
         .await
         .expect("family content")
         .into_iter()
         .filter(|key| !source_keys.contains(key))
         .collect::<Vec<_>>();
     assert_eq!(target_keys.len(), 3);
-    assert!(inner
-        .list_prefix(&content_prefix(&target))
-        .await
-        .expect("target content")
-        .is_empty());
     let source_pin_of = |manifest: &crate::namespace::control::LoadedManifest| {
         manifest
             .payload()

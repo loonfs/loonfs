@@ -73,7 +73,7 @@ async fn gc_keeps_inline_wal_until_fold_publication_then_reads_use_objects() {
         .await
         .expect("list WAL");
     assert!(!wal_before.is_empty());
-    let key = content_object_key_for_ref(&family_root_id(), values[1].content_ref());
+    let key = content_object_key_for_ref(&pool_id(&store).await, values[1].content_ref());
     let blocked = BlockingStore::new(
         store.clone(),
         KeyPredicate::exact(&key),

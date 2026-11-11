@@ -97,10 +97,7 @@ async fn fixture<S: ObjectStore>(
             length: length as u64,
         };
         store
-            .put_immutable_verified(
-                &extent_object_key(&HEAD.family_root_id, &extent),
-                bytes.clone(),
-            )
+            .put_immutable_verified(&extent_object_key(&HEAD.pool_id, &extent), bytes.clone())
             .await
             .expect("source");
         crc = crc
@@ -150,7 +147,7 @@ async fn large_extents_assemble_with_only_source_heads_and_retry_without_writes(
         ContentWrites::new(&store, &pool, &HEAD),
         &layout,
         &content,
-        assemble_tail_content(&HEAD.family_root_id, &content).expect("pieces"),
+        assemble_tail_content(&HEAD.pool_id, &content).expect("pieces"),
     )
     .await
     .expect("assembly");
@@ -182,7 +179,7 @@ async fn large_extents_assemble_with_only_source_heads_and_retry_without_writes(
             );
         }
     }
-    let key = extent_object_key(&HEAD.family_root_id, extent);
+    let key = extent_object_key(&HEAD.pool_id, extent);
     let metadata = store.head(&key).await.expect("head").expect("span");
     assert_eq!(metadata.checksum, Some(reference.checksum.clone()));
     local.reset();
@@ -190,7 +187,7 @@ async fn large_extents_assemble_with_only_source_heads_and_retry_without_writes(
         ContentWrites::new(&store, &pool, &HEAD),
         &layout,
         &content,
-        assemble_tail_content(&HEAD.family_root_id, &content).expect("pieces"),
+        assemble_tail_content(&HEAD.pool_id, &content).expect("pieces"),
     )
     .await
     .expect("retry");
@@ -218,7 +215,7 @@ async fn extent_bound_assembles_behind_the_largest_own_extent_and_keeps_shared_e
         ),
         &layout,
         &content,
-        assemble_tail_content(&HEAD.family_root_id, &content).expect("pieces"),
+        assemble_tail_content(&HEAD.pool_id, &content).expect("pieces"),
     )
     .await
     .expect("bounded layout");
@@ -254,7 +251,7 @@ async fn assembly_sources_require_whole_extents_and_stored_checksums_in_the_stor
                 extent.offset = offset;
                 extent.length -= offset;
                 let located = LocatedExtent {
-                    object_key: extent_object_key(&HEAD.family_root_id, &extent),
+                    object_key: extent_object_key(&HEAD.pool_id, &extent),
                     extent,
                 };
                 let result = assembly_sources(&store, "destination", &[located], &[]).await;
@@ -288,7 +285,7 @@ async fn local_large_tail_assembles_without_sources() {
     let mut tail = ProjectedWalTail::default();
     tail.push_object(&records, 0).expect("tail");
     let content = tail.content(&reference).expect("content");
-    let pieces = assemble_tail_content(&HEAD.family_root_id, &content).expect("pieces");
+    let pieces = assemble_tail_content(&HEAD.pool_id, &content).expect("pieces");
     assert_eq!(pieces.len(), 13);
     for (actual, resident) in pieces.iter().zip(&content.pieces) {
         assert_eq!(actual.as_ptr(), resident.bytes.as_ptr());
@@ -308,7 +305,7 @@ async fn local_large_tail_assembles_without_sources() {
     );
     let stored = store
         .head(&extent_object_key(
-            &HEAD.family_root_id,
+            &HEAD.pool_id,
             &written.layout.extents[0],
         ))
         .await
@@ -333,7 +330,7 @@ async fn materialized_tail_prefixes_keep_own_extents_whole() {
             end: size,
         };
         extent.length = layout_size;
-        let key = extent_object_key(&HEAD.family_root_id, extent);
+        let key = extent_object_key(&HEAD.pool_id, extent);
         let bytes = Bytes::from(
             [
                 b"aaaaaa".as_slice(),
@@ -356,7 +353,7 @@ async fn materialized_tail_prefixes_keep_own_extents_whole() {
             ),
             &layout,
             &content,
-            assemble_tail_content(&HEAD.family_root_id, &content).expect("pieces"),
+            assemble_tail_content(&HEAD.pool_id, &content).expect("pieces"),
         )
         .await
         .expect("write");
