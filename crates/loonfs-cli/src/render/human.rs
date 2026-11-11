@@ -71,6 +71,7 @@ fn human_success_text(output: &CommandOutput) -> String {
             steps,
         } => human_merge_session(record_path, session, steps),
         CommandData::MaintenanceRan(response) => human_maintenance_ran(response),
+        CommandData::PoolMaintenanceRan(response) => human_pool_maintenance_ran(response),
         CommandData::Changes(response) => human_changes(response),
         CommandData::Trash(listing) => human_trash(listing),
         CommandData::PathEntries {

@@ -635,7 +635,7 @@ fn doctor_failures_show_request_ids_in_json_and_remote_human_output() {
     }
 }
 #[test]
-fn gc_summaries_report_counts_retention_and_namespace_retirement() {
+fn gc_summaries_report_counts_retention_namespace_retirement_and_skipped_pool_work() {
     use super::summaries::gc_summary;
     use loonfs_types::{GcResponse, RetainedReason};
 
@@ -685,6 +685,34 @@ fn gc_summaries_report_counts_retention_and_namespace_retirement() {
     assert!(!empty.contains("namespace is retired"), "{empty}");
     assert!(empty.contains("0 fork checkpoints, 0 snapshots"), "{empty}");
     assert!(!empty.contains("skipped"), "{empty}");
+
+    let mut pool = loonfs_types::PoolGcResponse::empty(
+        loonfs_types::PoolId::parse("pool_3s0drmj8em84yb4mnetqkz2j0x").expect("pool id"),
+    );
+    pool.deleted.content_objects = 2;
+    pool.retain(loonfs_types::PoolRetainedReason::UploadSessionWindow);
+    pool.listed_bytes = 4_096;
+    assert_eq!(
+        super::summaries::pool_gc_summary(&pool),
+        "gc deleted 2 content objects, 0 upload sessions, 0 temporary objects (1 retained); \
+         mostly upload_session_window: 1\nlisted 4096 bytes under the pool"
+    );
+    pool.next_reclamation_at_ms = Some(1_700_000_000_000);
+    pool.skipped = vec![
+        loonfs_types::GcSkippedWork::ContentSweepPoolBudget,
+        loonfs_types::GcSkippedWork::ContentSweepUnreadableMember,
+    ];
+    assert_eq!(
+        super::summaries::pool_gc_summary(&pool)
+            .lines()
+            .skip(2)
+            .collect::<Vec<_>>(),
+        [
+            "next reclamation at 2023-11-14 22:13:20Z",
+            "skipped the content sweep: the pass couldn't read every pool member's roots within its budget",
+            "skipped the content sweep: the pass couldn't read one pool member's roots",
+        ]
+    );
 }
 
 #[test]

@@ -8,9 +8,10 @@ use loonfs_types::options::GcOptions;
 use loonfs_types::{
     headers, ActorId, AdvanceRetentionRequest, AdvanceRetentionResponse, Checkpoint, GcRequest,
     GcResponse, ListCheckpointsResponse, MetadataMaintenanceRequest, MetadataMaintenanceResponse,
-    NamespaceDiagnostics, NamespaceId, PageRequest, Pager, PinId, PrincipalId,
-    RecoverAdministratorRequest, RecoverAdministratorResponse, RunMaintenanceRequest,
-    RunMaintenanceResponse, SetRetentionWindowRequest, SetRetentionWindowResponse,
+    NamespaceDiagnostics, NamespaceId, PageRequest, Pager, PinId, PoolGcResponse, PoolId,
+    PrincipalId, RecoverAdministratorRequest, RecoverAdministratorResponse, RunMaintenanceRequest,
+    RunMaintenanceResponse, RunPoolMaintenanceRequest, RunPoolMaintenanceResponse,
+    SetRetentionWindowRequest, SetRetentionWindowResponse,
 };
 use loonfs_types::{GrepIndex, StoreProbeRequest, StoreProbeResponse};
 use std::num::NonZeroU64;
@@ -21,9 +22,9 @@ pub type CheckpointsPager = Pager<ListCheckpointsResponse, ClientError>;
 /// Returns the response of the job that a typed maintenance method asked
 /// for, or a protocol error when the server ran a different one.
 macro_rules! job_response {
-    ($response:expr, $variant:ident) => {
+    ($response:expr, $job:ident::$variant:ident) => {
         match $response {
-            RunMaintenanceResponse::$variant(response) => Ok(response),
+            $job::$variant(response) => Ok(response),
             _ => Err(ClientError::Protocol(format!(
                 "the server returned another job's response to a `{}` maintenance job",
                 stringify!($variant)
@@ -151,7 +152,7 @@ impl Client {
                 &RunMaintenanceRequest::Metadata(options.clone()),
             )
             .await?;
-        job_response!(response, Metadata)
+        job_response!(response, RunMaintenanceResponse::Metadata)
     }
 
     /// Runs one garbage collection of a namespace with the server's
@@ -165,7 +166,7 @@ impl Client {
                 &RunMaintenanceRequest::Gc(GcRequest::default()),
             )
             .await?;
-        job_response!(response, Gc)
+        job_response!(response, RunMaintenanceResponse::Gc)
     }
 
     /// Runs one garbage collection of a namespace with the grace
@@ -185,7 +186,55 @@ impl Client {
                 }),
             )
             .await?;
-        job_response!(response, Gc)
+        job_response!(response, RunMaintenanceResponse::Gc)
+    }
+
+    /// Runs one garbage collection of a pool with the server's default grace
+    /// window.
+    ///
+    /// See [`Self::gc_pool_with_options`].
+    pub async fn gc_pool(&self, pool_id: &PoolId) -> Result<PoolGcResponse> {
+        let response = self
+            .run_pool_maintenance(
+                pool_id,
+                &RunPoolMaintenanceRequest::Gc(GcRequest::default()),
+            )
+            .await?;
+        job_response!(response, RunPoolMaintenanceResponse::Gc)
+    }
+
+    /// Runs one garbage collection of a pool with the grace window that
+    /// `options` sets.
+    ///
+    /// A pool with no pool record returns `pool_not_found`. Retrying this
+    /// request starts a distinct attempt.
+    pub async fn gc_pool_with_options(
+        &self,
+        pool_id: &PoolId,
+        options: &GcOptions,
+    ) -> Result<PoolGcResponse> {
+        let response = self
+            .run_pool_maintenance(
+                pool_id,
+                &RunPoolMaintenanceRequest::Gc(GcRequest {
+                    grace_window_ms: Some(options.grace_window_ms),
+                }),
+            )
+            .await?;
+        job_response!(response, RunPoolMaintenanceResponse::Gc)
+    }
+
+    async fn run_pool_maintenance(
+        &self,
+        pool_id: &PoolId,
+        request: &RunPoolMaintenanceRequest,
+    ) -> Result<RunPoolMaintenanceResponse> {
+        let url = format!("{}/v0/maintenance/pools/{pool_id}/runs", self.base_url);
+        self.send_json(
+            self.request(operations::RUN_POOL_MAINTENANCE, &url)
+                .json(request)?,
+        )
+        .await
     }
 
     /// Advances the namespace's retention floor toward the folded manifest
@@ -218,7 +267,7 @@ impl Client {
                 &RunMaintenanceRequest::Retention(options.clone()),
             )
             .await?;
-        job_response!(response, Retention)
+        job_response!(response, RunMaintenanceResponse::Retention)
     }
 
     /// Sets the namespace's retention window, or clears it when
@@ -239,7 +288,7 @@ impl Client {
                 }),
             )
             .await?;
-        job_response!(response, RetentionWindow)
+        job_response!(response, RunMaintenanceResponse::RetentionWindow)
     }
 
     /// Grants `admin` on the root to `principal_id`, through a commit that
@@ -261,7 +310,7 @@ impl Client {
                 Some(actor),
             )
             .await?;
-        job_response!(response, RecoverAdministrator)
+        job_response!(response, RunMaintenanceResponse::RecoverAdministrator)
     }
 
     /// Proves the server's backing store honours the object-store contract

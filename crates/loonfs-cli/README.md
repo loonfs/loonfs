@@ -176,7 +176,8 @@ Namespace management
     retention_window_ms setting, if the server has that setting
 
   loonfs namespace show [namespace]
-    Show the selected namespace's status, creator, and retention window
+    Show the selected namespace's status, creator, retention window, and
+    pool ID
 
   loonfs namespace fork <source> <new-namespace> [--snapshot <id>] [--actor-id <stable-id>]
     Fork a namespace into a new one. The fork shares the source's existing
@@ -441,12 +442,30 @@ Maintenance
     unreferenced manifests, WAL objects, metadata segments, extension
     segments, and pins. The namespace's content objects, upload records,
     and temporary objects are stored in its pool, and this command doesn't
-    delete them. A server's sweep runs a collection of each pool.
+    delete them. `loonfs maintenance pool gc` collects them, and a
+    server's sweep runs a collection of each pool.
     --grace-window-ms protects objects younger than the window.
     --json includes every retention reason.
     deleted.extension_segments counts the gram content index's segments
     that no retained manifest lists. Like metadata segments, they're
     deleted once they're more than 24 hours old, whatever the window.
+
+  loonfs maintenance pool gc [<pool-id>] [--grace-window-ms <ms>]
+    Run one collection of a pool and print its report. A pool stores the
+    content objects, upload records, and temporary objects of a namespace
+    and its forks. This command deletes the pool's unreferenced content
+    objects, upload records, and temporary objects, and
+    `loonfs maintenance gc` doesn't. Without <pool-id>, the command
+    collects the pool of the selected namespace, which
+    `loonfs namespace show` prints as `pool`. With <pool-id>, the command
+    doesn't read a namespace. --grace-window-ms protects objects younger
+    than the window. --json includes every retention reason. For example:
+
+      gc for pool_3s0drmj8em84yb4mnetqkz2j0x: gc deleted 12 content objects, 1 upload sessions, 0 temporary objects (240 retained); mostly referenced: 236
+      listed 734003200 bytes under the pool
+      next reclamation at 2026-11-11 09:30:00Z
+
+    A pool with no pool record returns `pool_not_found`.
 
   loonfs maintenance checkpoint list [--limit <n>] [--page-size <n>]
                                [--cursor <cursor>] [--all] [--jsonl]
@@ -778,7 +797,8 @@ Behavior notes
   LoonFS folds the namespace's WAL tail when the tail reaches the
   threshold, and compacts metadata after the fold. Everything else needs
   a one-off command: `loonfs maintenance metadata` folds an idle tail,
-  `loonfs maintenance gc` collects the namespace's garbage, and
+  `loonfs maintenance gc` collects the namespace's garbage,
+  `loonfs maintenance pool gc` collects the namespace's pool, and
   `loonfs maintenance index enable` brings the grep index up to the
   namespace head. By default, servers maintain every namespace in their
   store on a regular schedule.

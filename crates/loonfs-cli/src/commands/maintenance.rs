@@ -7,7 +7,8 @@ use super::pagination::{collect_or_stream_pages, PagedListing};
 use crate::args::{
     ChangesArgs, MaintenanceCheckpointCommand, MaintenanceCheckpointListArgs, MaintenanceCommand,
     MaintenanceGcArgs, MaintenanceIndexCommand, MaintenanceIndexEnableArgs,
-    MaintenanceMetadataArgs, MaintenanceRecoverAdministratorArgs, MaintenanceRetentionAdvanceArgs,
+    MaintenanceMetadataArgs, MaintenancePoolCommand, MaintenancePoolGcArgs,
+    MaintenanceRecoverAdministratorArgs, MaintenanceRetentionAdvanceArgs,
     MaintenanceRetentionCommand, MaintenanceRetentionWindowArgs, MaintenanceStoreCommand,
 };
 use crate::backend::StepBudget;
@@ -15,7 +16,7 @@ use crate::error::Result;
 use loonfs_client::{GcOptions, ListChangesOptions, ReadAt};
 use loonfs_types::{
     AdvanceRetentionRequest, ChangeSeq, GrepIndexStatus, MetadataMaintenanceRequest,
-    RunMaintenanceResponse,
+    RunMaintenanceResponse, RunPoolMaintenanceResponse,
 };
 
 pub(crate) async fn run_maintenance_command(
@@ -49,6 +50,9 @@ pub(crate) async fn run_maintenance_command(
             }
         },
         MaintenanceCommand::Gc(args) => run_maintenance_gc(invocation, args).await,
+        MaintenanceCommand::Pool { command } => match command {
+            MaintenancePoolCommand::Gc(args) => run_maintenance_pool_gc(invocation, args).await,
+        },
         MaintenanceCommand::Store { command } => match command {
             MaintenanceStoreCommand::Probe => run_maintenance_store_probe(invocation).await,
         },
@@ -142,6 +146,37 @@ async fn run_maintenance_gc(
         &context,
         RunMaintenanceResponse::Gc(response),
     ))
+}
+
+async fn run_maintenance_pool_gc(
+    invocation: &Invocation,
+    args: MaintenancePoolGcArgs,
+) -> Result<CommandOutput, CommandFailure> {
+    let context = ProfileContext::resolve_as_subject(invocation).await?;
+    let client = &context.target.client;
+    let pool_id = match args.pool_id {
+        Some(pool_id) => pool_id,
+        None => {
+            let namespace = context.namespace(invocation.selectors.namespace.as_ref())?;
+            client
+                .get_namespace(&namespace)
+                .await
+                .map_err(|error| context.fail(error))?
+                .pool_id
+        }
+    };
+    let response = match args.gc.grace_window_ms {
+        Some(grace_window_ms) => {
+            client
+                .gc_pool_with_options(&pool_id, &GcOptions { grace_window_ms })
+                .await
+        }
+        None => client.gc_pool(&pool_id).await,
+    }
+    .map_err(|error| context.fail(error))?;
+    Ok(context.output(CommandData::PoolMaintenanceRan(
+        RunPoolMaintenanceResponse::Gc(response),
+    )))
 }
 
 async fn run_maintenance_checkpoint_list(

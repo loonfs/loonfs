@@ -324,6 +324,7 @@ impl Command {
                         | MaintenanceCommand::Fold
                         | MaintenanceCommand::Retention { .. }
                         | MaintenanceCommand::Gc(_)
+                        | MaintenanceCommand::Pool { .. }
                         | MaintenanceCommand::RecoverAdministrator(_),
                 }
         )

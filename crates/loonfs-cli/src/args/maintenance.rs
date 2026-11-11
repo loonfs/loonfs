@@ -3,7 +3,7 @@
 use super::flags::{ActorSelectorArgs, PaginationArgs};
 use super::parse::parse_change_seq;
 use clap::{Args, Subcommand, ValueHint};
-use loonfs_types::{ChangeSeq, PrincipalId};
+use loonfs_types::{ChangeSeq, PoolId, PrincipalId};
 use std::num::NonZeroU64;
 
 #[derive(Debug, Subcommand)]
@@ -37,6 +37,11 @@ pub(crate) enum MaintenanceCommand {
     /// Collect aged, unreferenced objects, including gram index objects when the deployment
     /// maintains the index.
     Gc(MaintenanceGcArgs),
+    /// Collect a pool's content objects, upload records, and temporary objects.
+    Pool {
+        #[command(subcommand)]
+        command: MaintenancePoolCommand,
+    },
     /// Inspect and manage the profile's object store.
     Store {
         #[command(subcommand)]
@@ -87,6 +92,16 @@ pub(crate) enum MaintenanceRetentionCommand {
     /// history. Once the namespace's window is cleared, the sweep doesn't
     /// advance the namespace's floor.
     Window(MaintenanceRetentionWindowArgs),
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum MaintenancePoolCommand {
+    /// Collect a pool's aged, unreferenced content objects, upload records,
+    /// and temporary objects.
+    ///
+    /// Without a pool ID, the command collects the pool of the selected
+    /// namespace, which `loonfs namespace show` prints.
+    Gc(MaintenancePoolGcArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -155,4 +170,13 @@ pub(crate) struct MaintenanceGcArgs {
     /// omitted).
     #[arg(long)]
     pub grace_window_ms: Option<u64>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct MaintenancePoolGcArgs {
+    /// Pool to collect. When omitted, the selected namespace's pool.
+    #[arg(value_hint = ValueHint::Other, conflicts_with = "namespace")]
+    pub pool_id: Option<PoolId>,
+    #[command(flatten)]
+    pub gc: MaintenanceGcArgs,
 }
