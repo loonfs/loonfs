@@ -42,7 +42,7 @@ The position of one object in a numbered series, such as a manifest number (`man
 
 ### Garbage collection (`gc`)
 
-The process that deletes stored objects that nothing references anymore, such as replaced manifests, folded WAL objects, and unused content objects. Code uses the short form `gc` in names, as in `gc_namespace`. Each call runs one [collection](#collection).
+The process that deletes stored objects that nothing references anymore, such as replaced manifests, folded WAL objects, and unused content objects. Code uses the short form `gc` in names, as in `gc_pool`. Each call runs one [collection](#collection).
 
 ### Head
 

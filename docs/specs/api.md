@@ -159,7 +159,7 @@ Every error response has a JSON body in this form:
 {
   "code": "writer_fenced",
   "message": "writer session fenced: epoch 3 was fenced by epoch 4 (writer `server-b`, acquired at 1739459200000 ms)",
-  "request_id": "req_9c2f4a1b7d8e4f21a0b3c4d5e6f70819",
+  "request_id": "req_4k8m2v9qx7d3hn5tbwa6jc1rfe",
   "details": {
     "fenced_writer_epoch": 3,
     "active_writer_epoch": 4,
@@ -1746,7 +1746,7 @@ The first operation that fails aborts the whole request, and nothing that it or 
 {
   "code": "path_conflict",
   "message": "destination `/reports/2026/january.pdf` already exists",
-  "request_id": "req_9c2f4a1b7d8e4f21a0b3c4d5e6f70819",
+  "request_id": "req_4k8m2v9qx7d3hn5tbwa6jc1rfe",
   "details": {
     "commit_id": "c_2a41d0c6b9f34e7d8a1b5c9e0f234567",
     "operation_index": 1

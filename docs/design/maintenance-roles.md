@@ -3,7 +3,7 @@
 This note describes which processes can publish a namespace's manifests and delete its objects, and what fences a rival. A namespace has two roles:
 
 - The "writer" commits and deletes the namespace, under the [writer epoch](../specs/glossary.md#writer-epoch).
-- The "maintainer" folds, compacts, publishes an extension's entry, advances the retention floor, and collects garbage. Compaction claims the [compactor epoch](../specs/glossary.md#compactor-epoch), and the maintainer's other publications copy the current compactor epoch from their predecessor.
+- The "maintainer" folds, compacts, publishes an extension's entry, advances the retention floor, sets the retention window, and collects garbage. Compaction claims the [compactor epoch](../specs/glossary.md#compactor-epoch), and the maintainer's other publications copy the current compactor epoch from their predecessor.
 
 Pins, forks, and namespace creation belong to no role. Every other publication is made by one role. The numbered create fences every publication, and compaction's claim fences a replaced runtime.
 
@@ -11,7 +11,7 @@ Pins, forks, and namespace creation belong to no role. Every other publication i
 
 A manifest is created at its predecessor's number plus one with put-if-absent, so two publishers can't both create the same number. The manifest records the writer epoch and the compactor epoch, so a publisher can check whether it still has the role it acts under. Compaction uses both mechanisms. A runtime claims the compactor epoch before its first compaction, every compaction publication has to match the current epoch, and a newer claim stops an older compactor at its next check.
 
-Folds start in several places. A writer's host folds its session's tail after a commit that reaches the fold thresholds or when the tail reaches the idle fold age, a maintenance job or the host's sweep runs an explicit fold, and a pin from the current head or a namespace deletion folds the tail first. Two folds of one namespace can run at once in two processes. If a session's fold were bound to the writer epoch and the other folds weren't, LoonFS would have two kinds of fold that follow different rules. The binding would exist to keep the session's position off a manifest published after another writer's claim, and the writer position's epoch rule (the position never moves onto a manifest with a newer writer epoch) already does that job.
+Folds start in several places. A writer's host folds its session's tail after a commit that reaches the fold thresholds or when the tail reaches the idle fold age, a `metadata` maintenance job or the host's sweep folds the tail when a fold is due, a call to `Maintenance::fold_wal` folds the tail whatever its size, and a pin from the current head or a namespace deletion folds the tail first. Two folds of one namespace can run at once in two processes. If a session's fold were bound to the writer epoch and the other folds weren't, LoonFS would have two kinds of fold that follow different rules. The binding would exist to keep the session's position off a manifest published after another writer's claim, and the writer position's epoch rule (the position never moves onto a manifest with a newer writer epoch) already does that job.
 
 ## Two roles
 
@@ -22,8 +22,11 @@ Folds start in several places. A writer's host folds its session's tail after a 
 | Compactor claim | Maintainer | Compactor epoch plus one | The numbered create |
 | Compaction | Maintainer | Compactor epoch | A newer claim, found at the next check |
 | Fold | Maintainer | The current compactor epoch, copied from the predecessor | The numbered create |
+| Extension publication | Maintainer | The current compactor epoch, copied from the predecessor | The numbered create, and a change to the extension's entry after the publication's basis, which ends the publication without a manifest |
 | Retention advance | Maintainer | The current writer epoch, copied without a claim into a "[floor object](../specs/glossary.md#floor-object)", a WAL object with no commits that records the new floor (the fold after the floor object is an ordinary fold) | The numbered create |
+| Retention window change | Maintainer | The current compactor epoch, copied from the predecessor | The numbered create |
 | Garbage collection | Maintainer | None (it publishes nothing) | Nothing. Concurrent collectors are safe under the age rules, and an object that's already gone needs no cleanup |
+| Pool collection | Maintainer | None (it publishes nothing) | Nothing, for the same reasons as a namespace's garbage collection |
 | Pin creation and deletion | None | None (a pin is its own record, and the fold before a pin is the maintainer's) | Put-if-absent on the pin, and the verification against the current manifest |
 | Fork | None | None for the source pin, and the writer epoch of the new namespace's first manifest | The source pin's verification, and the first manifest's create |
 | Namespace creation | None | The writer epoch of manifest 1 | The create of manifest 1 |
