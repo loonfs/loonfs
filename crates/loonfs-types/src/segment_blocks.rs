@@ -54,8 +54,9 @@ pub const EXTENT_FILTER_BITS_PER_KEY: usize = 20;
 ///
 /// The extent filter, a compaction's layout filter and kept inode filter,
 /// and grep's pruning filters keep data that LoonFS would otherwise delete
-/// when they match a key, and a 64-bit filter of three keys matches about
-/// one other key in 114.
+/// when they match a key. A filter with 10 bits for each key matches another
+/// key about once in 100 to 120 at any size, and a 4,096-bit filter of 30
+/// keys matches about once in 1.2 billion.
 pub const MIN_KEEP_FILTER_BITS: usize = 4096;
 
 const FILTER_HASH_SEED_ONE: u64 = 0;
@@ -637,7 +638,7 @@ impl SegmentFilter {
     /// hashes the key once.
     pub fn may_contain_hashes(&self, (h1, h2): (u64, u64)) -> bool {
         for probe in 0..u64::from(self.n_hashes) {
-            let bit = h1.wrapping_add(probe.wrapping_mul(h2)) % self.bit_len;
+            let bit = filter_bit((h1, h2), probe, self.bit_len);
             let byte = self.bits[crate::usize_from_u64(bit / 8)];
             if byte & (1 << (bit % 8)) == 0 {
                 return false;
@@ -803,9 +804,9 @@ impl SegmentFilterBuilder {
         self.insert_hashes(filter_key_hashes(filter_key));
     }
 
-    fn insert_hashes(&mut self, (h1, h2): (u64, u64)) {
+    fn insert_hashes(&mut self, hashes: (u64, u64)) {
         for probe in 0..u64::from(FILTER_HASH_COUNT) {
-            let bit = h1.wrapping_add(probe.wrapping_mul(h2)) % self.bit_len;
+            let bit = filter_bit(hashes, probe, self.bit_len);
             self.bits[crate::usize_from_u64(bit / 8)] |= 1 << (bit % 8);
         }
     }
@@ -819,6 +820,17 @@ impl SegmentFilterBuilder {
         payload.extend_from_slice(&self.bits);
         payload
     }
+}
+
+/// Returns the bit of a `bit_len`-bit filter that probe `probe` of a key with
+/// the two hashes `(h1, h2)` sets and tests.
+///
+/// The bit depends on all 64 bits of both hashes. Without the mix, the bit
+/// would depend only on each hash modulo `bit_len`, so a small filter would
+/// have few distinct probe sequences, and a step of a small order (such as
+/// zero) would test the same one or two bits seven times.
+pub fn filter_bit((h1, h2): (u64, u64), probe: u64, bit_len: u64) -> u64 {
+    crate::entropy::mix64(h1.wrapping_add(probe.wrapping_mul(h2))) % bit_len
 }
 
 /// Returns the two hashes of `filter_key` that every probe of a filter

@@ -2348,7 +2348,16 @@ h1 = XXH64(key, seed = 0)
 h2 = XXH64(key, seed = 0x9e3779b97f4a7c15)
 ```
 
-For each probe `i` from zero through `n_hashes - 1`, calculate `(h1 + i * h2)` with unsigned 64-bit wrapping arithmetic, and then take the remainder modulo `bit_len`. Bit `b` is stored in byte `b / 8`, at the mask `1 << (b % 8)`.
+For each probe `i` from zero through `n_hashes - 1`, calculate `x = h1 + i * h2`, mix `x` with the splitmix64 finalizer, and take the remainder modulo `bit_len`, with unsigned 64-bit wrapping arithmetic throughout:
+
+```text
+x = h1 + i * h2
+x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9
+x = (x ^ (x >> 27)) * 0x94d049bb133111eb
+b = (x ^ (x >> 31)) % bit_len
+```
+
+Bit `b` is stored in byte `b / 8`, at the mask `1 << (b % 8)`. The mix makes each probe depend on all 64 bits of both hashes. Without it, a filter would read only `h1` and `h2` modulo `bit_len`, so a small filter would have few distinct probe sequences, and a key whose `h2` is a multiple of `bit_len` would test one bit seven times.
 
 A valid negative filter result means the lookup can skip the segment. A positive result doesn't replace the row-level visibility rules.
 
@@ -2365,7 +2374,7 @@ The reference producer sizes each Bloom filter by what a false match costs. A fi
 | A compaction's layout filter and kept inode filter ([Row retention during a base compaction](#103-row-retention-during-a-base-compaction)) | Keeps a row until a compaction with another seed | 10 | 4,096 |
 | A reorganization's value and revision filters ([Pruning the index](#d5-pruning-the-index)) | Keeps an index row until a later reorganization | 10 | 4,096 |
 
-A filter whose false match keeps data has the larger minimum because a filter of a few keys matches more often than a large one. Two hashes select few distinct probe positions among a few dozen bits, so a 64-bit filter of three keys matches about one other key in 114. A 4,096-bit filter matches about one in 465,000 with four keys and one in 59,000 with 30, and a filter of 410 keys or more has 10 bits for each key and matches about one in 120.
+A filter with 10 bits for each key matches another key about once in 100 to 120 at any size (a 40-bit filter of four keys about once in 99, and a 4,100-bit filter of 410 keys about once in 122). That's too often for a filter whose false match keeps data, so such a filter has at least 4,096 bits, and with 30 keys it matches another key about once in 1.2 billion, with 100 keys about once in 426,000, and with 200 keys about once in 5,800. A segment's filter has the smaller minimum because its false match costs one read, and a 64-bit filter of three keys matches about once in 6,300.
 
 #### Extent filter
 

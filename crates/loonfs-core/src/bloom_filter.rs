@@ -1,7 +1,7 @@
 //! Bounded approximate membership for byte strings.
 
 use crate::limits::MAX_BLOOM_FILTER_BYTES;
-use loonfs_types::format::segment_blocks::MIN_KEEP_FILTER_BITS;
+use loonfs_types::format::segment_blocks::{filter_bit, MIN_KEEP_FILTER_BITS};
 use std::f64::consts::LN_2;
 use xxhash_rust::xxh64::xxh64;
 
@@ -141,7 +141,7 @@ impl BloomLevel {
         let step = xxh64(bytes, self.seed.wrapping_add(1));
         let bit_len = self.bits.len() as u64 * 8;
         (0..self.hash_positions).map(move |index| {
-            loonfs_types::usize_from_u64(first.wrapping_add(index.wrapping_mul(step)) % bit_len)
+            loonfs_types::usize_from_u64(filter_bit((first, step), index, bit_len))
         })
     }
 

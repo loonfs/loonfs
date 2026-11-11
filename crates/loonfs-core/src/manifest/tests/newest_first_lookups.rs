@@ -486,11 +486,12 @@ struct FalsePositiveKeys {
 /// The fixtures that the search for false positive keys builds before it
 /// gives up.
 ///
-/// The 512 fillers of one fixture have no key that exactly one delta filter
-/// admits in about one fixture in 150 (15 of 2,360 measured). Five fixtures
-/// have none in about one run in 10^11, and in fewer than one run in 10^9
-/// even at twice the measured rate.
-const FALSE_POSITIVE_FIXTURES: usize = 5;
+/// The 512 fillers of one fixture have a binding and a revision that exactly
+/// one delta filter admits in about 46% of fixtures (115 of 250 measured),
+/// because the delta segments have a few keys each. So 48 fixtures have none
+/// in about one run in 10^13, and in fewer than one run in 10^10 at the
+/// rate's 95% upper bound.
+const FALSE_POSITIVE_FIXTURES: usize = 48;
 
 /// Builds fixtures until the fillers of one have false positive keys, and
 /// returns that fixture with its keys.
