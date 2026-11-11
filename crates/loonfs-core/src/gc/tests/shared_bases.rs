@@ -254,7 +254,26 @@ async fn a_false_match_of_an_extent_filter_stays_until_no_root_lists_its_segment
         KeyPredicate::any(),
     );
     let namespace_id = NamespaceId::parse("extent-false-match").expect("namespace");
-    let (manifest, protected) = shared_layout_manifest(&store, &namespace_id, 1).await;
+    // One layout segment of eight chains, each of 25 whole objects, so the
+    // segment's extent filter lists 200 names.
+    let rows = (0..8_u64).map(|chain| ContentLayoutRecord {
+        content_id: ContentId::parse(format!("con_1{chain:025}")).expect("chain id"),
+        size_bytes: 25,
+        committed_seq: ChangeSeq(1),
+        layout: ContentLayout {
+            creator_namespace_id: namespace_id.clone(),
+            extents: (0..25)
+                .map(|object| ContentExtent {
+                    content_id: ContentId::parse(format!("con_3{:025}", chain * 25 + object))
+                        .expect("object id"),
+                    object: ExtentObject::Whole,
+                    offset: object,
+                    length: 1,
+                })
+                .collect(),
+        },
+    });
+    let (manifest, protected) = layout_manifest(&store, &namespace_id, rows).await;
     let segment = manifest
         .runs
         .iter()
@@ -275,11 +294,13 @@ async fn a_false_match_of_an_extent_filter_stays_until_no_root_lists_its_segment
         .expect("read the extent filter")
         .expect("the segment");
     let filter = decode_filter_block(&stored, &handle).expect("decode the extent filter");
-    // The filter has the minimum 4,096 bits for two names, so about one name
-    // in 900,000 matches it by chance. This name is the first match among the
-    // names `con_7{index:025}`.
-    let orphan = ContentId::parse("con_70000000000000000004909343").expect("orphan id");
-    assert!(filter.may_contain(orphan.as_str()));
+    // The filter has the minimum 4,096 bits for its 200 names, so about one
+    // name in 5,800 matches it by chance, and 200,000 candidates contain no
+    // match about once in 10^15.
+    let orphan = (0..200_000)
+        .map(|index| ContentId::parse(format!("con_7{index:025}")).expect("orphan id"))
+        .find(|content_id| filter.may_contain(content_id.as_str()))
+        .expect("a name that the filter matches by chance");
     let orphan = content_blob(&manifest.pool_id, &orphan);
     store
         .put_if_absent(&orphan, Bytes::from_static(b"orphan"))
