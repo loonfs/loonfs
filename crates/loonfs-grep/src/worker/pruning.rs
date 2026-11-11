@@ -88,7 +88,9 @@ fn revision_filter_key(inode_id: InodeId, revision_no: RevisionNo) -> String {
 /// because a build step indexes commits that aren't folded yet, and a filter
 /// without them would drop a value that only an unfolded commit refers to.
 /// Each filter is sized for the inputs' rows, an upper bound on the
-/// revisions that the inputs index.
+/// revisions that the inputs index, and has at least
+/// `MIN_KEEP_FILTER_BITS`, because a reorganization keeps every row that a
+/// filter matches.
 pub(super) async fn first_step_filters(
     reads: &NamespaceReads,
     reorganize: &mut GrepReorganizeState,
@@ -106,8 +108,8 @@ pub(super) async fn first_step_filters(
         .map(|segment| usize::try_from(segment.row_count).unwrap_or(usize::MAX))
         .fold(0, usize::saturating_add)
         .min(MAX_PRUNING_FILTER_BYTES * 8 / 10);
-    let mut values = SegmentFilterBuilder::new(expected_keys);
-    let mut revisions = SegmentFilterBuilder::new(expected_keys);
+    let mut values = SegmentFilterBuilder::keep_filter(expected_keys);
+    let mut revisions = SegmentFilterBuilder::keep_filter(expected_keys);
     // The listing orders each file's revisions newest first, so the first
     // revision at or below the floor is the file's state at the floor.
     let mut floor_state: Option<(InodeId, bool)> = None;

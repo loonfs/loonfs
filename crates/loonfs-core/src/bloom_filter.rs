@@ -1,17 +1,16 @@
 //! Bounded approximate membership for byte strings.
 
 use crate::limits::MAX_BLOOM_FILTER_BYTES;
+use loonfs_types::format::segment_blocks::MIN_KEEP_FILTER_BITS;
 use std::f64::consts::LN_2;
 use xxhash_rust::xxh64::xxh64;
 
 /// Bits that a level has for each expected entry when its byte limit allows.
 const BITS_PER_ENTRY: u64 = 10;
 
-/// Fewest bytes of a level when its byte limit allows, which is 4,096 bits.
-///
-/// A compaction keeps every row that its filter matches, and a level of 40
-/// bits with four entries matches about one other entry in 34.
-const MIN_LEVEL_BYTES: u64 = 512;
+/// Fewest bytes of a level when its byte limit allows, because a compaction
+/// keeps every row that its filter matches.
+const MIN_LEVEL_BYTES: u64 = MIN_KEEP_FILTER_BITS as u64 / 8;
 
 /// Most positions that a level sets for one entry, which is the count that
 /// ten bits per entry calls for.

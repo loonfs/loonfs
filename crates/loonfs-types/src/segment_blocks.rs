@@ -50,12 +50,13 @@ pub const FILTER_HASH_COUNT: u32 = 7;
 pub const FILTER_MIN_BITS: usize = 64;
 /// Extent filter sizing: bits reserved per inserted content object name.
 pub const EXTENT_FILTER_BITS_PER_KEY: usize = 20;
-/// Extent filter sizing: the fewest bits of an extent filter.
+/// Bloom filter sizing: the fewest bits of a filter whose match keeps data.
 ///
-/// A garbage collection keeps a content object whose name an extent filter
-/// matches, and a 64-bit filter of three names matches about one other name
-/// in 100.
-pub const EXTENT_FILTER_MIN_BITS: usize = 4096;
+/// The extent filter, a compaction's layout filter and kept inode filter,
+/// and grep's pruning filters keep data that LoonFS would otherwise delete
+/// when they match a key, and a 64-bit filter of three keys matches about
+/// one other key in 114.
+pub const MIN_KEEP_FILTER_BITS: usize = 4096;
 
 const FILTER_HASH_SEED_ONE: u64 = 0;
 const FILTER_HASH_SEED_TWO: u64 = 0x9e37_79b9_7f4a_7c15;
@@ -402,7 +403,7 @@ impl SegmentBlocksBuilder {
         let extent_filter = match &self.extent_hashes {
             Some(hashes) => Some(append_section(
                 &mut bytes,
-                &build_filter_payload(hashes, EXTENT_FILTER_BITS_PER_KEY, EXTENT_FILTER_MIN_BITS),
+                &build_filter_payload(hashes, EXTENT_FILTER_BITS_PER_KEY, MIN_KEEP_FILTER_BITS),
                 false,
             )?),
             None => None,
@@ -780,8 +781,17 @@ impl SegmentFilterBuilder {
         Self::with_sizing(expected_keys, FILTER_BITS_PER_KEY, FILTER_MIN_BITS)
     }
 
+    /// Returns a builder for a filter whose false match keeps data, with
+    /// [`FILTER_BITS_PER_KEY`] bits for each of `expected_keys` keys, and at
+    /// least [`MIN_KEEP_FILTER_BITS`] bits.
+    pub fn keep_filter(expected_keys: usize) -> Self {
+        Self::with_sizing(expected_keys, FILTER_BITS_PER_KEY, MIN_KEEP_FILTER_BITS)
+    }
+
     fn with_sizing(expected_keys: usize, bits_per_key: usize, min_bits: usize) -> Self {
-        let bit_len = expected_keys.saturating_mul(bits_per_key).max(min_bits);
+        let bit_len = expected_keys
+            .saturating_mul(bits_per_key)
+            .max(min_bits.max(FILTER_MIN_BITS));
         Self {
             bit_len: bit_len as u64,
             bits: vec![0; bit_len.div_ceil(8)],
@@ -1334,6 +1344,20 @@ mod tests {
 
     #[test]
     fn filter_has_no_false_negatives_and_few_false_positives() {
+        for (mut builder, min_bits) in [
+            (SegmentFilterBuilder::new(0), FILTER_MIN_BITS),
+            (SegmentFilterBuilder::new(1), FILTER_MIN_BITS),
+            (SegmentFilterBuilder::keep_filter(0), MIN_KEEP_FILTER_BITS),
+            (SegmentFilterBuilder::keep_filter(1), MIN_KEEP_FILTER_BITS),
+            (SegmentFilterBuilder::with_sizing(1, 1, 1), FILTER_MIN_BITS),
+            (SegmentFilterBuilder::with_sizing(0, 0, 0), FILTER_MIN_BITS),
+        ] {
+            builder.insert("inserted");
+            let payload = builder.finish();
+            assert_eq!(payload.len(), 12 + min_bits / 8);
+            let filter = SegmentFilter::from_payload(&payload).expect("a valid filter");
+            assert!(filter.may_contain("inserted"));
+        }
         let rows = 2_000;
         let built = build_segment(rows);
         let filter = decode_filter_block(section(&built.bytes, &built.filter), &built.filter)
@@ -1431,7 +1455,7 @@ mod tests {
                 built
                     .extent_filter
                     .map(|handle| handle.decoded_bytes as usize),
-                enabled.then_some(12 + EXTENT_FILTER_MIN_BITS / 8)
+                enabled.then_some(12 + MIN_KEEP_FILTER_BITS / 8)
             );
         }
     }
