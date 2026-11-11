@@ -21,5 +21,5 @@ pub use config::{
 };
 pub use error::{Result, ServerError};
 pub use http::{app, check_config, probe_store, serve, serve_with_shutdown, AppConfig, AppState};
-pub use scheduler::{GarbageCollection, Scheduler};
+pub use scheduler::Scheduler;
 pub use trace::init_tracing_from_env;

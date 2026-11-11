@@ -115,7 +115,7 @@ A maintenance job can run on a pool as well as on a namespace. `POST /v0/mainten
 
 A pool's result includes `pool_id`, the `deleted` counts (`content_objects`, `upload_sessions`, and `temporary_objects`), the `retained` counts, `listed_bytes` for the objects under the pool's prefix that the collection listed, `next_reclamation_at_ms`, and `skipped`. The result doesn't report the deletion of a pool record. A pool's collection reports `content_sweep_pool_budget` in `skipped` when it couldn't read every member's roots in time, and `content_sweep_unreadable_member` when it couldn't read one member's roots. A namespace's `gc` job reports no content objects, upload sessions, or temporary objects, its result has no `skipped` list, and its `listed_bytes` covers the namespace's own prefix.
 
-The reference server's [sweep](../specs/glossary.md#sweep) collects pools. A sweep that collects runs every listed namespace's steps, and then runs a collection of every pool that it lists under `pools/`, with the same concurrency. A session's collection step collects the namespace and nothing else, so a pool's content, upload records, and temporary objects are collected by sweeps. The server records a failed collection of a pool under the call name `pool_gc`, and the next sweep tries the collection again. A listed pool that returns `pool_not_found` isn't a failure, because a create call can delete its pool record between the listing and the collection.
+The reference server's [sweep](../specs/glossary.md#sweep) collects pools. A sweep runs every listed namespace's steps, and then runs a collection of every pool that it lists under `pools/`, with the same concurrency. A session's collection step collects the namespace and nothing else, so a pool's content, upload records, and temporary objects are collected by sweeps. The server records a failed collection of a pool under the call name `pool_gc`, and the next sweep tries the collection again. A listed pool that returns `pool_not_found` isn't a failure, because a create call can delete its pool record between the listing and the collection.
 
 An application that meters storage reads a pool's stored bytes from the pool job's `listed_bytes`, and a namespace's metadata bytes from the namespace job's `listed_bytes`.
 
@@ -132,7 +132,7 @@ This section lists what the design costs, compared with a pool stored under its 
 - Storage is measured for a pool, and a member's share of a pool's content isn't visible from object keys. Upload admission limits apply to each member, and nothing else limits a pool's content.
 - A namespace can't move to another pool, because `pool_id` is set when the namespace is created.
 - A failed create can leave a pool record, which stays until a collection of that pool finds the record older than its creation grace. The sweep finds such a pool by listing the pools.
-- A pool whose first member is retired keeps its pool record, and a sweep that collects still runs a collection of that pool, in the same way that a deleted namespace stays in the sweep's listing.
+- A pool whose first member is retired keeps its pool record, and a sweep still runs a collection of that pool, in the same way that a deleted namespace stays in the sweep's listing.
 - A pool's content is collected by sweeps (once a day by default), and not by a session's collection step.
 
 ## Alternatives considered

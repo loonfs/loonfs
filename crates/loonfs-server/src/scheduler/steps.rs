@@ -3,7 +3,7 @@
 
 use super::calls::Overlap;
 use super::retries::MaintenanceCall;
-use super::{index_pending, lock, GarbageCollection, RunningScheduler, Scheduler, SchedulerState};
+use super::{index_pending, lock, RunningScheduler, Scheduler, SchedulerState};
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt as _, StreamExt as _};
 use loonfs::{ChangeSeq, MetadataMaintenanceOutcome, NamespaceId, NamespaceSessionStatus};
@@ -255,7 +255,7 @@ impl Scheduler {
                 () = inner.stop.cancelled() => return,
                 _ = interval.tick() => {}
             }
-            let _ = self.run_sweep(GarbageCollection::Collect).await;
+            let _ = self.run_sweep().await;
         }
     }
 

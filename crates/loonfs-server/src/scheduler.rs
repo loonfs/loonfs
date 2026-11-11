@@ -102,15 +102,6 @@ pub(crate) struct StepRetry {
     pub(crate) attempts: u32,
 }
 
-/// Whether a sweep also collects each namespace's garbage.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GarbageCollection {
-    /// Collect each namespace's garbage.
-    Collect,
-    /// Run each namespace's other steps without collecting garbage.
-    Skip,
-}
-
 /// Runs each open session's due steps every `maintenance_interval_ms`, and
 /// sweeps every namespace in the store every `sweep_interval_ms`.
 ///
@@ -276,9 +267,9 @@ impl Scheduler {
         self
     }
 
-    /// Runs one sweep: the steps of every namespace that the store lists.
-    /// With [`GarbageCollection::Collect`], each namespace also gets a
-    /// collection, and then every pool that the store lists gets a collection.
+    /// Runs one sweep: the steps of every namespace that the store lists,
+    /// including a collection, and then a collection of every pool that the
+    /// store lists.
     /// Each namespace's retention floor is advanced under its retention window.
     ///
     /// Returns how many namespaces the sweep listed, or the listing failure
@@ -286,16 +277,12 @@ impl Scheduler {
     /// failed call on one namespace or pool does not fail the sweep. After the
     /// [`Scheduler`] is stopped, no namespace starts its steps, no pool starts
     /// its collection, and a running compaction unit stops at its next block.
-    pub async fn run_sweep(&self, garbage: GarbageCollection) -> Result<usize, ObjectStoreError> {
+    pub async fn run_sweep(&self) -> Result<usize, ObjectStoreError> {
         let inner = &self.inner;
         let started_at_ms = inner.timer.monotonic_now_ms();
-        let collect_garbage = garbage == GarbageCollection::Collect;
         let swept = async {
-            let namespaces = self.sweep_every_namespace(garbage).await?;
-            let pools = match garbage {
-                GarbageCollection::Collect => self.collect_every_pool().await?,
-                GarbageCollection::Skip => 0,
-            };
+            let namespaces = self.sweep_every_namespace().await?;
+            let pools = self.collect_every_pool().await?;
             Ok((namespaces, pools))
         }
         .await;
@@ -311,19 +298,12 @@ impl Scheduler {
                     .metrics
                     .namespaces
                     .set(i64::try_from(*namespaces).unwrap_or(i64::MAX));
-                tracing::info!(
-                    namespaces,
-                    pools,
-                    collect_garbage,
-                    elapsed_ms,
-                    "maintenance sweep finished"
-                );
+                tracing::info!(namespaces, pools, elapsed_ms, "maintenance sweep finished");
             }
             Err(error) => {
                 inner.metrics.sweeps_failed.increment(1);
                 tracing::warn!(
                     error = %error,
-                    collect_garbage,
                     elapsed_ms,
                     "namespace or pool listing failed; the next sweep lists again"
                 );
@@ -348,10 +328,7 @@ impl Scheduler {
         .await
     }
 
-    async fn sweep_every_namespace(
-        &self,
-        garbage: GarbageCollection,
-    ) -> Result<usize, ObjectStoreError> {
+    async fn sweep_every_namespace(&self) -> Result<usize, ObjectStoreError> {
         let inner = &self.inner;
         self.sweep_listed_ids(
             |start_after| async move {
@@ -360,7 +337,7 @@ impl Scheduler {
                         .await?;
                 Ok((page.namespace_ids, page.next_cursor))
             },
-            |namespace_id| self.sweep_namespace(namespace_id, garbage),
+            |namespace_id| self.sweep_namespace(namespace_id),
         )
         .await
     }
