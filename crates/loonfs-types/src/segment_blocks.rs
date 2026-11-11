@@ -781,14 +781,17 @@ impl SegmentFilterBuilder {
         Self::with_sizing(expected_keys, FILTER_BITS_PER_KEY, FILTER_MIN_BITS)
     }
 
-    /// Returns a builder with [`FILTER_BITS_PER_KEY`] bits for each of
-    /// `expected_keys` keys, and at least `min_bits` bits.
-    pub fn with_min_bits(expected_keys: usize, min_bits: usize) -> Self {
-        Self::with_sizing(expected_keys, FILTER_BITS_PER_KEY, min_bits)
+    /// Returns a builder for a filter whose false match keeps data, with
+    /// [`FILTER_BITS_PER_KEY`] bits for each of `expected_keys` keys, and at
+    /// least [`MIN_KEEP_FILTER_BITS`] bits.
+    pub fn keep_filter(expected_keys: usize) -> Self {
+        Self::with_sizing(expected_keys, FILTER_BITS_PER_KEY, MIN_KEEP_FILTER_BITS)
     }
 
     fn with_sizing(expected_keys: usize, bits_per_key: usize, min_bits: usize) -> Self {
-        let bit_len = expected_keys.saturating_mul(bits_per_key).max(min_bits);
+        let bit_len = expected_keys
+            .saturating_mul(bits_per_key)
+            .max(min_bits.max(FILTER_MIN_BITS));
         Self {
             bit_len: bit_len as u64,
             bits: vec![0; bit_len.div_ceil(8)],
@@ -1341,6 +1344,20 @@ mod tests {
 
     #[test]
     fn filter_has_no_false_negatives_and_few_false_positives() {
+        for (mut builder, min_bits) in [
+            (SegmentFilterBuilder::new(0), FILTER_MIN_BITS),
+            (SegmentFilterBuilder::new(1), FILTER_MIN_BITS),
+            (SegmentFilterBuilder::keep_filter(0), MIN_KEEP_FILTER_BITS),
+            (SegmentFilterBuilder::keep_filter(1), MIN_KEEP_FILTER_BITS),
+            (SegmentFilterBuilder::with_sizing(1, 1, 1), FILTER_MIN_BITS),
+            (SegmentFilterBuilder::with_sizing(0, 0, 0), FILTER_MIN_BITS),
+        ] {
+            builder.insert("inserted");
+            let payload = builder.finish();
+            assert_eq!(payload.len(), 12 + min_bits / 8);
+            let filter = SegmentFilter::from_payload(&payload).expect("a valid filter");
+            assert!(filter.may_contain("inserted"));
+        }
         let rows = 2_000;
         let built = build_segment(rows);
         let filter = decode_filter_block(section(&built.bytes, &built.filter), &built.filter)

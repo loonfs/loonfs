@@ -10,9 +10,7 @@ use crate::segments::GrepSegments;
 use crate::{GrepError, Result};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::ExtensionSegmentRef;
-use loonfs_types::format::segment_blocks::{
-    SegmentFilter, SegmentFilterBuilder, MIN_KEEP_FILTER_BITS,
-};
+use loonfs_types::format::segment_blocks::{SegmentFilter, SegmentFilterBuilder};
 use loonfs_types::{u64_from_usize, ChangeSeq, ErrorCode, InodeId, RevisionNo, RunNo};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -110,8 +108,8 @@ pub(super) async fn first_step_filters(
         .map(|segment| usize::try_from(segment.row_count).unwrap_or(usize::MAX))
         .fold(0, usize::saturating_add)
         .min(MAX_PRUNING_FILTER_BYTES * 8 / 10);
-    let mut values = SegmentFilterBuilder::with_min_bits(expected_keys, MIN_KEEP_FILTER_BITS);
-    let mut revisions = SegmentFilterBuilder::with_min_bits(expected_keys, MIN_KEEP_FILTER_BITS);
+    let mut values = SegmentFilterBuilder::keep_filter(expected_keys);
+    let mut revisions = SegmentFilterBuilder::keep_filter(expected_keys);
     // The listing orders each file's revisions newest first, so the first
     // revision at or below the floor is the file's state at the floor.
     let mut floor_state: Option<(InodeId, bool)> = None;
