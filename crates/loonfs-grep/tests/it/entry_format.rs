@@ -79,7 +79,7 @@ fn the_decoder_rejects_an_entry_that_omits_its_event_index() {
 
 #[test]
 fn the_decoder_rejects_other_versions_without_fallback() {
-    for version in [1, 3] {
+    for version in [0, 2] {
         let decoded = decode_edited(ACTIVE_ENTRY_FIXTURE, |entry| {
             entry["version"] = serde_json::Value::from(version);
         });

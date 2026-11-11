@@ -1967,7 +1967,7 @@ There are five kinds of control object: `hint`, `pin`, `upload_session`, `upload
 | Upload outcome record | `upload_outcome` | Uncompressed JSON | 1 |
 | Pool record | `pool_record` | Uncompressed JSON | 1 |
 | Content object | No envelope | Immutable extent bytes | Not versioned. A layout lists the whole and span objects for a `blob_v1` chain prefix. |
-| Grep segment | No envelope | Block sections with grep rows | 2, given by the grep entry's `version` |
+| Grep segment | No envelope | Block sections with grep rows | 1, given by the grep entry's `version` |
 
 ### A.2 Envelope layout
 
@@ -2680,12 +2680,12 @@ Grep's entry has these members:
 
 | Member | Meaning |
 | --- | --- |
-| `version` | The grep format's version, which is 2. |
+| `version` | The grep format's version, which is 1. |
 | `status` | The index's lifecycle state and its position fields (see [Index lifecycle](#d2-index-lifecycle)). |
 | `reorganize?` | The in-progress reorganization, if there is one. |
 | `runs` | The index's runs in list order, each with its run number, its level, and its segment descriptors (see [Control and manifest payloads](#a4-control-and-manifest-payloads)). |
 
-Grep decodes `status` and `reorganize`, and it rejects any other version, a member that it doesn't define, and invalid nested state. If grep rejects an entry of version 2, disabling grep replaces that entry with a disabled entry, so the index can be enabled again. Disabling grep fails for an entry of another version and leaves the entry in place, so a build never discards an index in a format version that the build doesn't read. A namespace whose manifest has no `grep` entry has no index, and enabling grep builds one.
+Grep decodes `status` and `reorganize`, and it rejects any other version, a member that it doesn't define, and invalid nested state. If grep rejects an entry of version 1, disabling grep replaces that entry with a disabled entry, so the index can be enabled again. Disabling grep fails for an entry of another version and leaves the entry in place, so a build never discards an index in a format version that the build doesn't read. A namespace whose manifest has no `grep` entry has no index, and enabling grep builds one.
 
 A grep "step" is one bounded unit of work: a backfill step, a build step, or a reorganization step. A host runs steps in a "run of steps", such as the index steps that the reference server's scheduler runs for one namespace at a time. A step starts from the entry that the earlier steps of its run of steps left pending (the "pending entry"), writes its segments, and records its change in the pending entry. A run that a step writes has a provisional number in the pending entry, which differs from every run number that the change's basis lists. The change's publication assigns each new run its number from the `next_run_no` of the manifest that the change is published over, as a compaction assigns its run's number. A change publishes the pending entry and `next_run_no` in a manifest of its own, which is a maintainer publication under the current compactor epoch, without a claim, and it changes nothing else (see [Extensions](#124-extensions)).
 
@@ -2746,7 +2746,7 @@ Why doesn't a reorganization wait until a build step finds the index up to date?
 
 ### D.3 Tokenization and postings
 
-Content is eligible for the version 2 gram index when it's at most 8 MiB, and its first 8 KiB contain no NUL byte and pass the text check. The sample MUST be valid UTF-8, except that an incomplete final character is accepted when it follows a nonempty valid prefix. The check reads only the sample, so the bytes after it don't have to be UTF-8.
+Content is eligible for the version 1 gram index when it's at most 8 MiB, and its first 8 KiB contain no NUL byte and pass the text check. The sample MUST be valid UTF-8, except that an incomplete final character is accepted when it follows a nonempty valid prefix. The check reads only the sample, so the bytes after it don't have to be UTF-8.
 
 For eligible content, the tokenizer folds ASCII letters to lowercase and takes every overlapping three-byte window. Grams are bytes, not Unicode characters, and this folding is different from the Unicode rule that's used to compare file names.
 
@@ -2787,7 +2787,7 @@ Why do postings refer to ordinals instead of content IDs? A content ID is 16 ran
 
 The segment framing is exactly the data, filter, and index format in Appendix A, with grep CBOR rows instead of metadata rows, and per-block CRCs verify ranged reads.
 
-Grep's version 2 governs the tokenizer, the posting representation, and the meaning of row keys. They aren't implementation choices that can change while an existing index is read under the same version.
+Grep's version 1 governs the tokenizer, the posting representation, and the meaning of row keys. They aren't implementation choices that can change while an existing index is read under the same version.
 
 ### D.4 The `texts` and `content_revisions` families
 

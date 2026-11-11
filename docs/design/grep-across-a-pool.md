@@ -92,7 +92,7 @@ The core manifest has an `extensions` field, a JSON object that maps each extens
 
 | Field | Meaning |
 | --- | --- |
-| `version` | The grep format's version, which is 2. |
+| `version` | The grep format's version, which is 1. |
 | `status` | The lifecycle state and its position fields: `disabled`, `backfilling` with its pin and cursor, or `active` with the `captured_seq` of the backfill that built the index, the watermark, and `next_event_index`. |
 | `reorganize` | The in-progress reorganization, if any. A reorganization into the base level also records `filter_seq` and the retention floor. |
 | `runs` | The index's runs, each with its run number, its level, and its segment descriptors. A descriptor has the segment's owner, row count, key range, block handles, and inline filter, in the same representation as a metadata segment descriptor. |

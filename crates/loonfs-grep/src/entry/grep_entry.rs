@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// The version of grep's format that this build reads and writes, which
 /// governs grep's entry and the rows of its segments.
-pub const GREP_ENTRY_VERSION: u32 = 2;
+pub const GREP_ENTRY_VERSION: u32 = 1;
 
 /// Returns the name of grep's entry in a namespace manifest, which is also
 /// part of the key of each grep segment.
