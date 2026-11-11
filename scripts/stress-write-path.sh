@@ -7,7 +7,7 @@
 # and last 60 output lines. Full logs remain in the printed temporary directory.
 # A missing, renamed, or ignored test fails the gate. Success removes the logs.
 # Each selected test holds competing write-path work open: a fold, a compaction,
-# a permit wait, or a sweep visit. Tests that only repeat work are left out.
+# a permit wait, or a sweep of a namespace. Tests that only repeat work are left out.
 
 set -eu
 

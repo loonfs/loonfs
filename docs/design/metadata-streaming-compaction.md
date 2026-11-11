@@ -20,7 +20,7 @@ The unit compacts the whole window it selects, whatever its size.
 | Eight-run limit | Applies to every unit. |
 | Compaction input | At most 64 MiB of decoded data-block input in memory at once. |
 
-A large backlog needs several units. Each unit rewrites one window, and a maintenance pass runs units while one is due. Size tiering reduces repeated rewrites of the base, but obsolete metadata can stay until enough newer data builds up.
+A large backlog needs several units. Each unit rewrites one window, and a `metadata` job runs units while one is due. Size tiering reduces repeated rewrites of the base, but obsolete metadata can stay until enough newer data builds up.
 
 A compaction that starts at the group's oldest run produces a base run, and it can remove rows under the format's retention rules. A compaction that starts above the oldest run produces a delta run, and it keeps every row.
 
