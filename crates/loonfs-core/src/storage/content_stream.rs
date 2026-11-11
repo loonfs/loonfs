@@ -345,7 +345,7 @@ mod tests {
                 revision_committed_by: loonfs_types::ActorId::loonfs(),
                 revision_committed_at_ms: 1,
             },
-            head_seq: loonfs_types::ChangeSeq(1),
+            head_seq: loonfs_types::CommitSeq(1),
             parent_inode_id: None,
             display_name: None,
             binding_version: None,

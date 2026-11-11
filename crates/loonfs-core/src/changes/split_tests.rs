@@ -8,7 +8,7 @@ use crate::path::write::{CommitIntent, FilesystemOperation};
 use crate::test_support::{namespace_store, writer_at, NamespaceFixture};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_types::{
-    ChangeFeedPosition, ChangeSeq, Commit, CommitId, DisplayName, EffectiveLimit, NamespaceId,
+    ChangeFeedPosition, Commit, CommitId, CommitSeq, DisplayName, EffectiveLimit, NamespaceId,
     ROOT_INODE_ID,
 };
 use std::assert_matches;
@@ -89,7 +89,7 @@ impl Feed {
         splitting: CommitSplitting,
         budget: usize,
     ) -> Vec<loonfs_types::ListChangesResponse> {
-        let mut position = ChangeFeedPosition::after(ChangeSeq(0));
+        let mut position = ChangeFeedPosition::after(CommitSeq(0));
         let mut pages = Vec::new();
         loop {
             let page = self

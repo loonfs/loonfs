@@ -3,7 +3,7 @@
 use crate::common::{in_walk_order, page_request, GrepHost};
 use loonfs::publish::{CommitIntent, FilesystemOperation};
 use loonfs::{
-    ChangeSeq, CommitId, DestinationBehavior, ErrorCode, LoonFs, MetadataCache, NamespaceId,
+    CommitId, CommitSeq, DestinationBehavior, ErrorCode, LoonFs, MetadataCache, NamespaceId,
     SharedObjectStore,
 };
 use loonfs_grep::codec::MAX_INDEX_GRAMS_FILE_BYTES;
@@ -94,7 +94,7 @@ async fn drive_worker_step(
 async fn grams_built_through_seq(
     store: &SharedObjectStore,
     namespace_id: &NamespaceId,
-) -> ChangeSeq {
+) -> CommitSeq {
     crate::common::control::grep_entry(store, namespace_id)
         .await
         .expect("grep entry exists")

@@ -5,7 +5,7 @@ use super::state::InodeState;
 use crate::error::{CoreError, Result};
 use crate::metadata::RevisionRecord;
 use loonfs_types::{
-    AttributesRevisionNo, BindingVersion, ChangeSeq, CommitPrecondition, ContentRef,
+    AttributesRevisionNo, BindingVersion, CommitPrecondition, CommitSeq, ContentRef,
     DeleteDirectoryBehavior, DisplayName, FilesystemOperation, InodeId, InodeKind, NamespaceId,
     RevisionNo,
 };
@@ -80,7 +80,7 @@ pub(super) fn binding_change(
     namespace_id: &NamespaceId,
     ours: &InodeState,
     theirs: &InodeState,
-    deletion_seq: Option<ChangeSeq>,
+    deletion_seq: Option<CommitSeq>,
 ) -> Result<Option<BindingChange>> {
     if ours.same_binding(theirs) {
         return Ok(None);
@@ -95,7 +95,7 @@ pub(super) fn binding_change(
             expected_binding_version: crate::binding_version::encode(from.binding, namespace_id),
             expected_revision_no: theirs.revision.as_ref().map(|row| row.revision_no),
         },
-        (None, Some(to), Some(deletion_seq)) => BindingChange::Undelete {
+        (None, Some(to), Some(deletion_seq)) => BindingChange::RestoreDeleted {
             deletion_seq,
             parent_inode_id: to.parent_inode_id,
             display_name: display_name(&to.display_name)?,
@@ -132,9 +132,9 @@ pub(super) enum BindingChange {
     /// The merged-into namespace deleted the inode in an earlier merge of
     /// the fork, and the fork undid the deletion, so the merge undoes it too
     /// and gives the inode its parent and name in the fork. The deletion's
-    /// sequence identifies the deletion that the undelete reverses.
-    Undelete {
-        deletion_seq: ChangeSeq,
+    /// sequence identifies the deletion that the restore reverses.
+    RestoreDeleted {
+        deletion_seq: CommitSeq,
         parent_inode_id: InodeId,
         display_name: DisplayName,
     },
@@ -186,14 +186,14 @@ impl BindingChange {
                 destination_display_name: display_name.clone(),
                 precondition: loonfs_types::DestinationPrecondition::default(),
             },
-            Self::Undelete {
+            Self::RestoreDeleted {
                 deletion_seq,
                 parent_inode_id,
                 display_name,
-            } => FilesystemOperation::Undelete {
+            } => FilesystemOperation::RestoreDeleted {
                 inode_id,
                 deletion_seq: *deletion_seq,
-                destination: loonfs_types::options::UndeleteDestination::Name {
+                destination: loonfs_types::options::RestoreDeletedDestination::Name {
                     parent_inode_id: *parent_inode_id,
                     display_name: display_name.clone(),
                 },

@@ -1,12 +1,12 @@
 //! Retention advances through floor objects: the order of a session's
-//! undeletes around an advance in its queue, an undelete that takes the
+//! restores around an advance in its queue, a restore that takes the
 //! number that another runtime's floor object was planned for, an advance
-//! by another runtime that a session's undelete collides with, and a read
+//! by another runtime that a session's restore collides with, and a read
 //! from a cached head after a floor object.
 
 use super::*;
 use loonfs_types::format::manifest::NamespaceManifestPayload;
-use loonfs_types::{DeleteDirectoryBehavior, ErrorCode, FilesystemChange, InodeId, WalNo};
+use loonfs_types::{DeleteDirectoryBehavior, ErrorCode, FilesystemEvent, InodeId, WalNo};
 
 /// The inode rows that the current manifest's segments store.
 async fn inode_rows(store: &dyn ObjectStore, namespace_id: &NamespaceId) -> u64 {
@@ -34,7 +34,7 @@ async fn current_manifest(
 async fn wal_no_of_commit(
     store: &dyn ObjectStore,
     namespace_id: &NamespaceId,
-    committed_seq: ChangeSeq,
+    committed_seq: CommitSeq,
 ) -> WalNo {
     for key in store
         .list_prefix(&wal_prefix(namespace_id))
@@ -94,7 +94,7 @@ async fn create_directories(namespace: &crate::Namespace<crate::Writable>, name:
 async fn delete_a_directory(
     namespace: &crate::Namespace<crate::Writable>,
     name: &str,
-) -> (InodeId, ChangeSeq) {
+) -> (InodeId, CommitSeq) {
     let deleted = namespace
         .commit_candidate(CommitCandidate::new(CommitIntent::single(
             CommitId::parse(format!("delete-{name}")).expect("commit id"),
@@ -112,7 +112,7 @@ async fn delete_a_directory(
         .events
         .iter()
         .find_map(|event| match event {
-            FilesystemChange::Deleted { inode_id, .. } => Some(*inode_id),
+            FilesystemEvent::Deleted { inode_id, .. } => Some(*inode_id),
             _ => None,
         })
         .expect("the delete reports its deletion");
@@ -181,13 +181,13 @@ async fn wal_object_at(
 }
 
 /// Checks the first example of a retention advance in the WAL: a session's
-/// queue with an undelete, an advance, and a second undelete of the same
-/// deletion. The first undelete commits, the floor object follows it at the
-/// next WAL number, and the second undelete returns `not_deleted`, as does
-/// an undelete of another deletion that the new floor expired. The manifest
-/// that records the floor contains the first undelete.
+/// queue with a restore, an advance, and a second restore of the same
+/// deletion. The first restore commits, the floor object follows it at the
+/// next WAL number, and the second restore returns `not_deleted`, as does
+/// a restore of another deletion that the new floor expired. The manifest
+/// that records the floor contains the first restore.
 #[tokio::test]
-async fn an_advance_orders_the_undeletes_queued_around_it() {
+async fn an_advance_orders_the_restores_queued_around_it() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
     let clock = Arc::new(ManualClock::at_system_time());
@@ -220,12 +220,16 @@ async fn an_advance_orders_the_undeletes_queued_around_it() {
     // The worker takes nothing while every publication permit is taken, so
     // the requests queue in the order they're made.
     let permits = hold_every_publication_permit(&writer).await;
-    let undelete = |inode_id, deletion_seq| {
+    let restore_deleted = |inode_id, deletion_seq| {
         let namespace = namespace.clone();
         let actor = actor.clone();
-        tokio::spawn(async move { namespace.undelete(inode_id, deletion_seq, &actor).await })
+        tokio::spawn(async move {
+            namespace
+                .restore_deleted(inode_id, deletion_seq, &actor)
+                .await
+        })
     };
-    let before = undelete(restored, restored_seq);
+    let before = restore_deleted(restored, restored_seq);
     wait_for_queued_candidates(&publisher, 1).await;
     let advance = tokio::spawn({
         let maintenance = maintenance.clone();
@@ -233,31 +237,31 @@ async fn an_advance_orders_the_undeletes_queued_around_it() {
         async move { maintenance.advance_retention_floor(&namespace_id).await }
     });
     wait_for_queued_advance(&publisher).await;
-    let again = undelete(restored, restored_seq);
+    let again = restore_deleted(restored, restored_seq);
     wait_for_queued_candidates(&publisher, 2).await;
-    let after = undelete(expired, expired_seq);
+    let after = restore_deleted(expired, expired_seq);
     wait_for_queued_candidates(&publisher, 3).await;
     drop(permits);
 
     let before = before
         .await
         .expect("join")
-        .expect("the undelete before the advance");
+        .expect("the restore before the advance");
     let advanced = advance.await.expect("join").expect("the advance");
     assert_eq!(advanced.retention_floor_seq, expired_seq);
     for refused in [again, after] {
         let error = refused
             .await
             .expect("join")
-            .expect_err("an undelete after the advance");
+            .expect_err("a restore after the advance");
         assert_eq!(error.code(), ErrorCode::NotDeleted, "{error:?}");
     }
 
-    let undeleted_at = wal_no_of_commit(store.as_ref(), &namespace_id, before.committed_seq).await;
+    let restored_at = wal_no_of_commit(store.as_ref(), &namespace_id, before.committed_seq).await;
     let floor_object = wal_object_at(
         store.as_ref(),
         &namespace_id,
-        undeleted_at.successor().expect("next WAL number"),
+        restored_at.successor().expect("next WAL number"),
     )
     .await;
     assert!(floor_object.records.is_empty());
@@ -266,18 +270,18 @@ async fn an_advance_orders_the_undeletes_queued_around_it() {
     assert_eq!(floor.retention_floor_seq, expired_seq);
     assert!(
         floor.folded_wal_no >= floor_object.wal_no && floor.head_seq >= before.committed_seq,
-        "the manifest that records the floor folds the undelete queued before the advance"
+        "the manifest that records the floor folds the restore queued before the advance"
     );
     writer.shutdown().await.expect("shutdown");
 }
 
 /// Checks the third example of a retention advance in the WAL: a writer's
-/// undelete takes the WAL number that another runtime planned its floor
+/// restore takes the WAL number that another runtime planned its floor
 /// object for. The advance's put collides, its floor object goes to the
 /// next number, and the manifest that records the floor contains the
-/// undelete, so a base compaction keeps the restored item's rows.
+/// restore, so a base compaction keeps the restored item's rows.
 #[tokio::test]
-async fn an_undelete_at_the_floor_objects_number_is_folded_before_the_floor() {
+async fn a_restore_at_the_floor_objects_number_is_folded_before_the_floor() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
@@ -326,22 +330,21 @@ async fn an_undelete_at_the_floor_objects_number_is_folded_before_the_floor() {
         async move { maintenance.advance_retention_floor(&namespace_id).await }
     });
     gated.wait_until_blocked().await;
-    // The writer's session trusts its tip, and its undelete takes the WAL
+    // The writer's session trusts its tip, and its restore takes the WAL
     // number that the floor object waits for.
     let restored = namespace
-        .undelete(inode_id, deletion_seq, &actor)
+        .restore_deleted(inode_id, deletion_seq, &actor)
         .await
-        .expect("an undelete against the old floor");
+        .expect("a restore against the old floor");
     gated.release();
 
     let advanced = advance.await.expect("join").expect("the advance");
     assert_eq!(advanced.retention_floor_seq, deletion_seq);
-    let undeleted_at =
-        wal_no_of_commit(store.as_ref(), &namespace_id, restored.committed_seq).await;
+    let restored_at = wal_no_of_commit(store.as_ref(), &namespace_id, restored.committed_seq).await;
     let floor_object = wal_object_at(
         store.as_ref(),
         &namespace_id,
-        undeleted_at.successor().expect("next WAL number"),
+        restored_at.successor().expect("next WAL number"),
     )
     .await;
     assert_eq!(floor_object.retention_floor_seq, Some(deletion_seq));
@@ -353,7 +356,7 @@ async fn an_undelete_at_the_floor_objects_number_is_folded_before_the_floor() {
     );
     assert!(
         floor.head_seq >= restored.committed_seq,
-        "the advance's fold covers the undelete"
+        "the advance's fold covers the restore"
     );
     let rows = inode_rows(store.as_ref(), &namespace_id).await;
     assert!(drain_compaction(&maintenance, &namespace_id).await > 0);
@@ -374,7 +377,7 @@ async fn an_undelete_at_the_floor_objects_number_is_folded_before_the_floor() {
 }
 
 /// Checks that an advance by another runtime leaves the writer's session
-/// unfenced. The session's undelete of a deletion that the advance expired
+/// unfenced. The session's restore of a deletion that the advance expired
 /// collides with the floor object, plans again against the new floor, and
 /// returns `not_deleted`, and the session's next commit succeeds. A base
 /// compaction over the manifest that records the floor removes the
@@ -423,7 +426,7 @@ async fn an_advance_by_another_runtime_leaves_a_session_on_the_old_floor_unfence
     assert!(advanced.retention_floor_seq >= deletion_seq);
 
     let error = namespace
-        .undelete(inode_id, deletion_seq, &actor)
+        .restore_deleted(inode_id, deletion_seq, &actor)
         .await
         .expect_err("the deletion has expired");
     assert_eq!(error.code(), ErrorCode::NotDeleted, "{error:?}");
@@ -502,7 +505,7 @@ async fn an_advance_without_a_session_folds_its_floor_object_after_a_session_ope
     gated.release();
 
     let advanced = advance.await.expect("join").expect("the advance");
-    assert!(advanced.retention_floor_seq > ChangeSeq(0));
+    assert!(advanced.retention_floor_seq > CommitSeq(0));
     assert_eq!(
         current_manifest(gated.inner(), &namespace_id)
             .await
@@ -515,7 +518,7 @@ async fn an_advance_without_a_session_folds_its_floor_object_after_a_session_ope
 
 /// The deletion sequences that a strong listing of the namespace's trash
 /// returns.
-async fn listed_deletions(namespace: &crate::Namespace<crate::Writable>) -> Vec<ChangeSeq> {
+async fn listed_deletions(namespace: &crate::Namespace<crate::Writable>) -> Vec<CommitSeq> {
     namespace
         .list_trash_with_options(&crate::ListTrashOptions {
             consistency: Some(crate::Consistency::Strong),
@@ -585,7 +588,7 @@ async fn a_read_from_a_cached_head_finds_an_unfolded_floor_object() {
         current_manifest(store.as_ref(), &namespace_id)
             .await
             .retention_floor_seq,
-        ChangeSeq(0),
+        CommitSeq(0),
         "no manifest records the floor yet"
     );
     assert_eq!(listed_deletions(&reads).await, []);

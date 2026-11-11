@@ -2,7 +2,7 @@
 
 use loonfs_types::format::control::{ForkBasis, NamespaceStatus, WriterBlock};
 use loonfs_types::format::manifest::NamespaceManifestPayload;
-use loonfs_types::{ActorId, ChangeSeq, NamespaceAccess, NamespaceId, PoolId, WalNo, WriterEpoch};
+use loonfs_types::{ActorId, CommitSeq, NamespaceAccess, NamespaceId, PoolId, WalNo, WriterEpoch};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -16,14 +16,14 @@ pub struct NamespaceReadState {
     pub status: NamespaceStatus,
     pub writer_epoch: WriterEpoch,
     pub writer: Option<WriterBlock>,
-    pub seq: ChangeSeq,
+    pub seq: CommitSeq,
     pub wal_no: WalNo,
     pub folded_wal_no: WalNo,
     /// The retention floor of the view at this head: the manifest's
     /// `retention_floor_seq`, raised by each floor object in the WAL tail
     /// that replay read to reach the head (format spec, "Replaying the
     /// visible WAL").
-    pub retention_floor_seq: ChangeSeq,
+    pub retention_floor_seq: CommitSeq,
 }
 
 impl NamespaceReadState {

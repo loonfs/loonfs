@@ -22,13 +22,13 @@ fn merge_through(commit_id: &str, name: &str, after_seq: u64, through_seq: u64) 
         CommitCandidate::new(create_directory_request(commit_id, name)),
         MergeRecord {
             source_namespace_id: NamespaceId::parse("fork").expect("namespace"),
-            source_after_seq: ChangeSeq(after_seq),
-            source_through_seq: ChangeSeq(through_seq),
+            source_after_seq: CommitSeq(after_seq),
+            source_through_seq: CommitSeq(through_seq),
         },
-        ChangeSeq(3),
+        CommitSeq(3),
         BTreeMap::from([(
             0,
-            InodeId::generate(ChangeSeq(after_seq + 1), NonZeroU32::MIN),
+            InodeId::generate(CommitSeq(after_seq + 1), NonZeroU32::MIN),
         )]),
     )
 }

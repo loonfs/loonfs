@@ -18,7 +18,7 @@ use crate::time::{Observation, OperationClock};
 use crate::wal::{prepare_floor_object, publish_wal_object, WalPublishError};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{
-    ChangeSeq, Commit, CommitId, DeleteNamespaceResponse, ManifestNo, NamespaceId, WalNo, WriterId,
+    Commit, CommitId, CommitSeq, DeleteNamespaceResponse, ManifestNo, NamespaceId, WalNo, WriterId,
 };
 use std::sync::{Arc, Mutex};
 
@@ -307,7 +307,7 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
     pub async fn publish_floor_object(
         &mut self,
         planned: &LoadedManifest,
-        target: ChangeSeq,
+        target: CommitSeq,
         clock: &OperationClock,
     ) -> Result<FloorObjectReport> {
         verify_manifest_segments_exist(&self.namespace.store, planned.payload()).await?;
@@ -610,7 +610,7 @@ impl PositionState {
         &mut self,
         namespace: &NamespaceStore<S>,
         loaded: LoadedPublishView<'_, S>,
-        target: ChangeSeq,
+        target: CommitSeq,
     ) -> Result<FloorObjectReport> {
         let LoadedPublishView {
             view,

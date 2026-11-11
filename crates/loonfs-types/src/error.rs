@@ -231,7 +231,7 @@ impl ErrorCode {
             // The namespace's access mode is unrestricted, so it has no access rows.
             | ErrorCode::NamespaceUnrestricted
             | ErrorCode::BindingVersionMismatch
-            // Undelete's target is not the root of a live deletion: a
+            // A restore's target is not the root of a live deletion: a
             // state conflict, resolved by re-reading namespace state.
             | ErrorCode::NotDeleted
             | ErrorCode::WriterFenced
@@ -385,10 +385,10 @@ impl ErrorCode {
     /// The commit's preconditions return `stale_head`, `stale_revision`,
     /// `stale_attributes`, `stale_access`, and `binding_version_mismatch`.
     /// The commit returns `path_conflict` when another inode took a name that
-    /// a create, move, or undelete needs, `inode_not_found` when a deletion
+    /// a create, move, or restore needs, `inode_not_found` when a deletion
     /// hid an inode that the merge changes or the directory that an inode
-    /// goes into, and `not_deleted` when another writer undeleted an inode
-    /// that the merge undeletes. A later plan reports a changed row that isn't
+    /// goes into, and `not_deleted` when another writer restored an inode
+    /// that the merge restores. A later plan reports a changed row that isn't
     /// the fork's own as `merge_conflict`. The plan checks a subject's rights
     /// as the commit does, so the commit's `inode_not_found` isn't a subject's
     /// missing rights.

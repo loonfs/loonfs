@@ -919,7 +919,7 @@ fn take_slice<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ChangeSeq, InodeId, InodeKind};
+    use crate::{CommitSeq, InodeId, InodeKind};
     use std::assert_matches;
 
     #[test]
@@ -953,7 +953,7 @@ mod tests {
         let row = MetadataRow::Inode(crate::metadata_rows::InodeRecord {
             inode_id: InodeId(u128::from(inode_id)),
             inode_kind: InodeKind::File,
-            committed_seq: ChangeSeq(inode_id),
+            committed_seq: CommitSeq(inode_id),
             commit_id: crate::CommitId::parse(format!("c_row_{inode_id}"))
                 .expect("valid commit id"),
             committed_by: crate::ActorId::loonfs(),

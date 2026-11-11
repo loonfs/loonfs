@@ -84,7 +84,7 @@ use loonfs_types::format::segment_blocks::{
     SegmentBlocksBuilder, SegmentIndexEntry, DEFAULT_TARGET_BLOCK_BYTES,
 };
 use loonfs_types::{
-    AbsolutePath, ChangeSeq, CommitId, DestinationBehavior, EffectiveLimit, InodeId, ManifestNo,
+    AbsolutePath, CommitId, CommitSeq, DestinationBehavior, EffectiveLimit, InodeId, ManifestNo,
     NameKey, NamespaceId, PinId, RevisionNo, RunNo,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -237,7 +237,7 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
 async fn read_floor_seq<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-) -> ChangeSeq {
+) -> CommitSeq {
     let head = crate::test_support::namespace_store(store, namespace_id)
         .load_read_state()
         .await
@@ -255,7 +255,7 @@ async fn read_floor_seq<S: ObjectStore + ?Sized>(
 async fn advance_floor_through<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    deletion_seq: ChangeSeq,
+    deletion_seq: CommitSeq,
     context: &WriterAt,
 ) {
     crate::test_support::namespace_store(store, namespace_id)
@@ -306,7 +306,7 @@ async fn checkpoint_then_compact<S: ObjectStore + ?Sized>(
 fn compact_rows_with_retention(
     group: MetadataFamilyGroup,
     rows_by_family: &mut BTreeMap<ApiMetadataRowFamily, Vec<MetadataRow>>,
-    floor_seq: ChangeSeq,
+    floor_seq: CommitSeq,
 ) -> crate::error::Result<()> {
     for cluster in retention_clusters(group) {
         // The stream a compaction sees: the cluster's rows by locality, then family,
@@ -720,7 +720,7 @@ pub(crate) fn test_context() -> WriterAt {
     writer_at("test-writer", 1_000)
 }
 
-fn manifest_no(seq: ChangeSeq) -> ManifestNo {
+fn manifest_no(seq: CommitSeq) -> ManifestNo {
     ManifestNo(seq.0)
 }
 
@@ -729,7 +729,7 @@ async fn write_file_and_checkpoint(
     namespace_id: &NamespaceId,
     context: &WriterAt,
     index: u64,
-) -> ChangeSeq {
+) -> CommitSeq {
     let path = format!("/docs/file-{index}.txt");
     let bytes = format!("file {index}\n");
     crate::test_support::NamespaceFixture::new(store, namespace_id, context)
@@ -760,7 +760,7 @@ fn delta_run_count(payload: &NamespaceManifestPayload) -> usize {
 pub(crate) struct ManifestMetadataSource<'a> {
     pub(crate) head: &'a NamespaceReadState,
     pub(crate) basis_manifest_no: Option<ManifestNo>,
-    pub(crate) retention_floor_seq: ChangeSeq,
+    pub(crate) retention_floor_seq: CommitSeq,
     pub(crate) metadata_state: &'a MetadataState,
 }
 
@@ -891,7 +891,7 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
 
 #[cfg(test)]
 fn is_bootstrap_seed_manifest(payload: &NamespaceManifestPayload) -> bool {
-    payload.head_seq == ChangeSeq(0) && payload.base_seq() == ChangeSeq(0)
+    payload.head_seq == CommitSeq(0) && payload.base_seq() == CommitSeq(0)
 }
 
 pub(crate) async fn write_namespace_manifest<S: ObjectStore + ?Sized>(
@@ -979,7 +979,7 @@ pub(super) async fn publish_manifest_with_segments<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     manifest_no: ManifestNo,
-    head_seq: ChangeSeq,
+    head_seq: CommitSeq,
     segments: Vec<MetadataSegmentRef>,
 ) -> ManifestNo {
     let manifest_number = manifest_no;
@@ -1002,7 +1002,7 @@ pub(super) async fn publish_manifest_with_segments<S: ObjectStore + ?Sized>(
 
         writer_epoch: loonfs_types::WriterEpoch(1),
         next_run_no: RunNo(1),
-        retention_floor_seq: ChangeSeq(0),
+        retention_floor_seq: CommitSeq(0),
         runs: vec![MetadataRunRef {
             run_no: RunNo(0),
             run_seq: head_seq,

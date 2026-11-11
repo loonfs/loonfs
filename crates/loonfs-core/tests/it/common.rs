@@ -9,7 +9,7 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::page_limit;
 use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
-use loonfs_types::{AbsolutePath, ChangeSeq, CommitId, ContentRef, NamespaceId};
+use loonfs_types::{AbsolutePath, CommitId, CommitSeq, ContentRef, NamespaceId};
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -125,7 +125,7 @@ pub(crate) async fn prepared_candidate<S: ObjectStore + ?Sized>(
 pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    after_seq: ChangeSeq,
+    after_seq: CommitSeq,
 ) -> Result<loonfs_types::ListChangesResponse, CoreError> {
     let context = read_context(store, namespace_id).await;
     namespace_engine(store, namespace_id, &default_writer())

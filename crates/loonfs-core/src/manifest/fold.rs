@@ -23,7 +23,7 @@ use futures::{stream, TryStreamExt};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::ContentLayoutRecord;
 use loonfs_types::format::manifest::{MetadataRunRef, NamespaceManifestPayload, RunTier};
-use loonfs_types::{ChangeSeq, ContentId, ManifestNo, NamespaceId, RunNo};
+use loonfs_types::{CommitSeq, ContentId, ManifestNo, NamespaceId, RunNo};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tracing::Instrument;
@@ -44,11 +44,11 @@ pub struct FoldWalResponse {
     /// Namespace whose WAL tail was folded.
     pub namespace_id: NamespaceId,
     /// Head sequence the fold attempted to cover.
-    pub target_head_seq: ChangeSeq,
+    pub target_head_seq: CommitSeq,
     /// Current manifest number after the operation.
     pub manifest_no: ManifestNo,
     /// Sequence covered by that manifest.
-    pub manifest_head_seq: ChangeSeq,
+    pub manifest_head_seq: CommitSeq,
     /// Whether this call published the current manifest.
     pub outcome: FoldWalOutcome,
 }
@@ -348,7 +348,7 @@ pub struct FoldedWalTail {
 impl FoldedWalTail {
     fn new(
         namespace_id: &NamespaceId,
-        target_head_seq: ChangeSeq,
+        target_head_seq: CommitSeq,
         manifest: PublishedManifest,
         outcome: FoldWalOutcome,
     ) -> Self {

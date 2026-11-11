@@ -1,7 +1,7 @@
 //! The inode ID type, its spellings, and the root directory's ID.
 
 use crate::id_macros::validation_error;
-use crate::ChangeSeq;
+use crate::CommitSeq;
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
@@ -61,7 +61,7 @@ impl InodeId {
     /// wrap after 2^32 commits. The next 32 bits are `create_no`, which is 1
     /// for the first inode that the commit creates and is never 0, so no
     /// generated ID is [`ROOT_INODE_ID`]. The low 64 bits are random.
-    pub fn generate(committed_seq: ChangeSeq, create_no: NonZeroU32) -> Self {
+    pub fn generate(committed_seq: CommitSeq, create_no: NonZeroU32) -> Self {
         let seq_bits = (u128::from(committed_seq.0) & u128::from(u32::MAX)) << 96;
         let create_no_bits = u128::from(create_no.get()) << 64;
         let random_bits = u128::from(crate::ids::random_u64());
@@ -228,7 +228,7 @@ pub mod public {
 #[cfg(test)]
 mod tests {
     use super::{InodeId, EXAMPLE, INVALID_REASON, ROOT_INODE_ID};
-    use crate::ChangeSeq;
+    use crate::CommitSeq;
     use serde::{Deserialize, Serialize};
     use std::collections::BTreeSet;
     use std::num::NonZeroU32;
@@ -251,9 +251,9 @@ mod tests {
 
     #[test]
     fn generated_ids_order_by_commit_then_create_number() {
-        let first = InodeId::generate(ChangeSeq(7), create_no(2));
-        let next_in_commit = InodeId::generate(ChangeSeq(7), create_no(3));
-        let next_commit = InodeId::generate(ChangeSeq(8), NonZeroU32::MIN);
+        let first = InodeId::generate(CommitSeq(7), create_no(2));
+        let next_in_commit = InodeId::generate(CommitSeq(7), create_no(3));
+        let next_commit = InodeId::generate(CommitSeq(8), NonZeroU32::MIN);
         assert!(first < next_in_commit, "{first} < {next_in_commit}");
         assert!(
             next_in_commit < next_commit,
@@ -264,10 +264,10 @@ mod tests {
     #[test]
     fn the_high_word_records_the_sequence_and_the_create_number() {
         for (committed_seq, number, seq) in [
-            (ChangeSeq(1), 1, 1),
-            (ChangeSeq(418), 7, 418),
-            (ChangeSeq(u64::from(u32::MAX)), u32::MAX, u32::MAX),
-            (ChangeSeq((1 << 32) + 5), 2, 5),
+            (CommitSeq(1), 1, 1),
+            (CommitSeq(418), 7, 418),
+            (CommitSeq(u64::from(u32::MAX)), u32::MAX, u32::MAX),
+            (CommitSeq((1 << 32) + 5), 2, 5),
         ] {
             let id = InodeId::generate(committed_seq, create_no(number));
             assert_eq!(high_word(id), (seq, number), "{committed_seq}");
@@ -277,7 +277,7 @@ mod tests {
     #[test]
     fn ids_generated_for_one_create_number_differ_in_the_random_word() {
         let ids: BTreeSet<InodeId> = (0..1_000)
-            .map(|_| InodeId::generate(ChangeSeq(12), NonZeroU32::MIN))
+            .map(|_| InodeId::generate(CommitSeq(12), NonZeroU32::MIN))
             .collect();
         assert_eq!(ids.len(), 1_000);
         assert!(ids.iter().all(|id| high_word(*id) == (12, 1)));
@@ -285,7 +285,7 @@ mod tests {
 
     #[test]
     fn no_generated_id_is_the_root() {
-        for committed_seq in [ChangeSeq(0), ChangeSeq(1), ChangeSeq(1 << 32)] {
+        for committed_seq in [CommitSeq(0), CommitSeq(1), CommitSeq(1 << 32)] {
             let id = InodeId::generate(committed_seq, NonZeroU32::MIN);
             assert_ne!(id, ROOT_INODE_ID);
             assert_ne!(id.0 >> 64, 0, "{committed_seq}: the high word isn't zero");

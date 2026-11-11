@@ -19,7 +19,7 @@ use crate::wal::load_replayed_wal_tail;
 use crate::wal::ProjectedWalTail;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::options::AttributeInclusion;
-use loonfs_types::{AccessRight, ChangeSeq, InodeId, ManifestNo, PathEntry};
+use loonfs_types::{AccessRight, CommitSeq, InodeId, ManifestNo, PathEntry};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -30,9 +30,9 @@ use std::sync::Arc;
 /// also the fields used to key the WAL-tail cache.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ReadAnchor {
-    pub(crate) head_seq: ChangeSeq,
+    pub(crate) head_seq: CommitSeq,
     pub(crate) manifest_no: ManifestNo,
-    pub(crate) manifest_head_seq: ChangeSeq,
+    pub(crate) manifest_head_seq: CommitSeq,
 }
 
 impl<S: ObjectStore> NamespaceStore<S> {
@@ -137,7 +137,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
 pub(crate) struct LoadedMetadataView<'a, S: ObjectStore + ?Sized> {
     pub(super) head: NamespaceReadState,
     /// The sequence that reads of this view see, at or below `head`.
-    pub(super) visible_seq: ChangeSeq,
+    pub(super) visible_seq: CommitSeq,
     pub(super) segments: VerifiedMetadataSegments<'a, S>,
     pub(crate) wal_tail: Arc<ProjectedWalTail>,
     pub(crate) anchor: ReadAnchor,
@@ -151,13 +151,13 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     }
 
     /// Returns the sequence that reads of this view see.
-    pub(crate) fn visible_seq(&self) -> ChangeSeq {
+    pub(crate) fn visible_seq(&self) -> CommitSeq {
         self.visible_seq
     }
 
     /// Returns the view's retention floor, the head's (format spec,
     /// "Replaying the visible WAL").
-    pub(crate) fn retention_floor_seq(&self) -> ChangeSeq {
+    pub(crate) fn retention_floor_seq(&self) -> CommitSeq {
         self.head.retention_floor_seq
     }
 
@@ -245,7 +245,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
 
     /// Returns the view of this basis at `visible_seq`, a retained sequence
     /// at or below the head.
-    pub(crate) fn metadata_view_at(&self, visible_seq: ChangeSeq) -> MetadataView<'_, '_, S> {
+    pub(crate) fn metadata_view_at(&self, visible_seq: CommitSeq) -> MetadataView<'_, '_, S> {
         assert!(
             visible_seq <= self.head.seq,
             "a view of a loaded basis should be at or below the basis's head"
@@ -358,7 +358,7 @@ mod tests {
         let mut payload = loonfs_types::format::wal::decode_wal_object_envelope_zstd(&bytes)
             .expect("decode")
             .into_payload();
-        payload.head_seq = ChangeSeq(payload.head_seq.0 + 1);
+        payload.head_seq = CommitSeq(payload.head_seq.0 + 1);
         let bytes = loonfs_types::format::wal::encode_wal_object_envelope_zstd(payload)
             .expect("encode")
             .into_bytes();

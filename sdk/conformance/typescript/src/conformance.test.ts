@@ -1124,7 +1124,7 @@ function splitBytes(bytes: Uint8Array, partSize: number): Uint8Array[] {
 }
 
 async function uploadPresigned(
-    access: LoonFS.ObjectTransferAccess,
+    access: LoonFS.ObjectTransfer,
     bytes: Uint8Array,
     label: string,
 ): Promise<Response> {
@@ -2223,18 +2223,18 @@ conformanceTest("inode_addressing", async (activeHarness, testCase) => {
         deleteCommit(namespaceId, "conf-inode-addressing-delete-copy", childPath(request.copy_file_name)),
         actorHeaders,
     );
-    await commit("conf-inode-addressing-undelete", {
-        kind: "undelete",
+    await commit("conf-inode-addressing-restore-deleted", {
+        kind: "restore_deleted",
         inode_id: copyEntry.inode_id,
         deletion_seq: deletion.committed_seq,
         destination_parent_inode_id: parent.inode_id,
         destination_display_name: request.restored_file_name,
     });
-    const undeleted = await client.files.retrieve({
+    const restoredDeleted = await client.files.retrieve({
         namespace_id: namespaceId,
         path: childPath(request.restored_file_name),
     });
-    assert.equal(undeleted.inode_id, copyEntry.inode_id);
+    assert.equal(restoredDeleted.inode_id, copyEntry.inode_id);
 
     await client.commits.create(
         deleteCommit(
@@ -2641,8 +2641,8 @@ test("proxy", { skip: environmentSkip }, async (context) => {
     );
     assert.equal(directBegin.mode, "direct_put");
     assert.ok(directBegin.status === "open");
-    assert.ok(directBegin.access);
-    await uploadPresigned(directBegin.access, payload, "proxy direct PUT");
+    assert.ok(directBegin.transfer);
+    await uploadPresigned(directBegin.transfer, payload, "proxy direct PUT");
     const directClaim: LoonFS.UploadContentClaim = {
         size_bytes: payload.byteLength,
         checksum: checksum(directBegin.checksum_algorithm, payload),
@@ -3026,10 +3026,10 @@ conformanceTest("upload_direct_put", async (activeHarness, testCase) => {
     assert.equal(begin.status, expected.begin_status);
     assert.ok(begin.status === "open");
     const directPut = begin;
-    assert.ok(directPut.access);
+    assert.ok(directPut.transfer);
     assert.equal(directPut.checksum_algorithm, expected.checksum_algorithm);
 
-    await uploadPresigned(directPut.access, payload, "direct PUT");
+    await uploadPresigned(directPut.transfer, payload, "direct PUT");
     const claim: LoonFS.UploadContentClaim = {
         size_bytes: payload.byteLength,
         checksum: checksum(directPut.checksum_algorithm, payload),
@@ -3116,7 +3116,7 @@ conformanceTest("upload_multipart", async (activeHarness, testCase) => {
         assert.ok(chunk !== undefined, `signed part ${signedPart.part_number} has no payload`);
         assert.ok(claim !== undefined, `signed part ${signedPart.part_number} has no claim`);
         const response = await uploadPresigned(
-            signedPart.access,
+            signedPart.transfer,
             chunk,
             `multipart part ${signedPart.part_number}`,
         );
@@ -3366,7 +3366,7 @@ conformanceTest("read_consistency", async (activeHarness, testCase) => {
     );
 });
 
-function signedRange(access: LoonFS.ObjectTransferAccess): string | undefined {
+function signedRange(access: LoonFS.ObjectTransfer): string | undefined {
     return Object.entries(access.headers ?? {}).find(([name]) => name.toLowerCase() === "range")?.[1];
 }
 
@@ -3427,7 +3427,7 @@ conformanceTest("append", async (activeHarness, testCase) => {
     const wholeGrant = await client.files.createDownload({ namespace_id: request.namespace_id, path: request.path });
     assert.equal(wholeGrant.ranges.length, 2);
     assert.equal(grant.content_ref.size_bytes, expected.previous_size_bytes);
-    assert.equal(signedRange(grant.ranges[0]!.access), expected.previous_range);
+    assert.equal(signedRange(grant.ranges[0]!.transfer), expected.previous_range);
     const previous = await client.files.download({
         namespace_id: request.namespace_id,
         path: request.path,
@@ -3440,8 +3440,8 @@ conformanceTest("append", async (activeHarness, testCase) => {
         path: request.path,
         start_offset: expected.resume_offset,
     });
-    assert.equal(signedRange(resumed.ranges[0]!.access), expected.resumed_range);
-    const rest = await fetch(resumed.ranges[0]!.access.url, { headers: resumed.ranges[0]!.access.headers });
+    assert.equal(signedRange(resumed.ranges[0]!.transfer), expected.resumed_range);
+    const rest = await fetch(resumed.ranges[0]!.transfer.url, { headers: resumed.ranges[0]!.transfer.headers });
     assert.ok(rest.ok, `resumed download failed with HTTP ${rest.status}`);
     assert.equal(resumed.ranges.length, 1);
     assert.equal(resumed.ranges[0]!.start_offset, expected.resume_offset);
@@ -3495,7 +3495,7 @@ conformanceTest("append", async (activeHarness, testCase) => {
         path: request.empty_path,
     });
     assert.equal(emptyGrant.content_ref.size_bytes, 0);
-    assert.equal(signedRange(emptyGrant.ranges[0]!.access), undefined);
+    assert.equal(signedRange(emptyGrant.ranges[0]!.transfer), undefined);
     const empty = await client.files.download({
         namespace_id: request.namespace_id,
         path: request.empty_path,

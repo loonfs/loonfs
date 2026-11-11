@@ -14,7 +14,7 @@ use crate::wal::{
 };
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::ManifestRef;
-use loonfs_types::{ChangeSeq, ManifestNo, WalNo, WriterEpoch};
+use loonfs_types::{CommitSeq, ManifestNo, WalNo, WriterEpoch};
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
@@ -31,7 +31,7 @@ pub struct NamespaceReadAnchor {
 impl NamespaceReadAnchor {
     /// Returns the retention floor of the anchor's view: the manifest's
     /// floor, raised by the floor objects in the anchor's WAL tail.
-    pub fn retention_floor_seq(&self) -> ChangeSeq {
+    pub fn retention_floor_seq(&self) -> CommitSeq {
         self.read_state.retention_floor_seq
     }
 

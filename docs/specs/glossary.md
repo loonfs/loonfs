@@ -112,7 +112,7 @@ A committed deletion record. Deleting an item removes its name from its parent d
 
 ### Restore
 
-Bringing a deleted file or directory back, or making a prior revision's content current again. Restoring a deletion revokes its [tombstone](#tombstone) and binds the deleted root again, under its saved parent and name or at a new destination, so the whole subtree reappears with its revision history. Only a recoverable deletion can be restored. The API spells this operation `undelete`, and the change feed reports it as an `undeleted` event. Restoring a revision (`restore_revision`) makes that revision's content the file's current content. See [File and subtree deletion](format.md#16-file-and-subtree-deletion).
+An operation that brings back an earlier state of a file or directory. LoonFS has two kinds of restore. A restore of a deleted item (`restore_deleted`) revokes a recoverable deletion's [tombstone](#tombstone) and binds the deleted root again, under its saved parent and name or at a new destination, so the whole subtree reappears with its revision history, and the change feed reports it as a `restored` event. Only a recoverable deletion can be restored this way. A restore of a revision (`restore_revision`) makes an earlier revision's content the file's current content, and the change feed reports it as a `content_changed` event. For example, after `report.txt` is deleted, `restore_deleted` with the deletion's inode ID and sequence brings `report.txt` back, and after a bad write to `report.txt`, `restore_revision` with revision 3 makes revision 3's content current again. See [File and subtree deletion](format.md#16-file-and-subtree-deletion).
 
 ### Namespace tombstone
 
@@ -265,7 +265,7 @@ The namespace that an operation reads from. For a fork, the source is the namesp
 
 ### Fork point
 
-The source namespace's sequence at which a fork was taken. The fork basis records it (`fork_basis.source_head_seq`), the fork's retention floor starts at it, and the fork's first merge or rebase starts from it. For example, if `sandbox` was forked from `main` at sequence 100, the fork point is 100, and the first merge of `sandbox` into `main` applies `sandbox`'s commits after 100.
+The source namespace's sequence at which a fork was taken. The fork basis records it (`fork_basis.fork_point_seq`), the fork's retention floor starts at it, and the fork's first merge or rebase starts from it. For example, if `sandbox` was forked from `main` at sequence 100, the fork point is 100, and the first merge of `sandbox` into `main` applies `sandbox`'s commits after 100.
 
 ### Pool
 
@@ -347,7 +347,7 @@ The role that folds a namespace's WAL, compacts its metadata, publishes an exten
 
 ### Job
 
-One maintenance API request (`POST .../runs`) and the work it does. The request body's `kind` selects the job: a `metadata` job folds the WAL tail and compacts metadata, the retention jobs (`retention` and `retention_window`) advance the retention floor and set the namespace's retention window, a `gc` job runs one [collection](#collection) of the namespace, or of a [pool](#pool) on the pool's route, and a `recover_administrator` job grants a principal `admin` on the root again. A job runs to completion and returns its report in the response. A job never creates a snapshot. See [Maintenance jobs](api.md#maintenance-jobs).
+One maintenance API request (`POST .../jobs`) and the work it does. The request body's `kind` selects the job: a `metadata` job folds the WAL tail and compacts metadata, the retention jobs (`retention` and `retention_window`) advance the retention floor and set the namespace's retention window, a `gc` job runs one [collection](#collection) of the namespace, or of a [pool](#pool) on the pool's route, and a `recover_administrator` job grants a principal `admin` on the root again. A job runs to completion and returns its report in the response. A job never creates a snapshot. See [Maintenance jobs](api.md#maintenance-jobs).
 
 ### Step
 

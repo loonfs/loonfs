@@ -11,7 +11,7 @@ use loonfs_types::format::manifest::{
     NamespaceManifestPayload, RunTier, METADATA_SEGMENT_ENCODING,
 };
 use loonfs_types::format::segment_blocks::BlockHandle;
-use loonfs_types::{ChangeSeq, ManifestNo, NamespaceId, RunNo};
+use loonfs_types::{CommitSeq, ManifestNo, NamespaceId, RunNo};
 #[cfg(test)]
 use std::collections::BTreeSet;
 use std::collections::HashSet;
@@ -78,7 +78,7 @@ pub(super) fn validate_manifest_sequence_ranges(
     // An extension's publication can allocate run numbers before the first
     // fold, so an empty manifest's next run number can be above zero.
     if payload.runs.is_empty() {
-        if payload.head_seq == ChangeSeq(0) {
+        if payload.head_seq == CommitSeq(0) {
             return Ok(());
         }
         return Err(ManifestLoadError::RunManifestMismatch {
@@ -468,7 +468,7 @@ fn validate_one_base_run_per_family_group(
 pub(crate) fn validate_manifest_row_seq_range<'a>(
     object_key: &str,
     rows: impl IntoIterator<Item = &'a MetadataRow>,
-    max_seq: ChangeSeq,
+    max_seq: CommitSeq,
 ) -> Result<(), ManifestLoadError> {
     for (row_index, row) in rows.into_iter().enumerate() {
         let row_seq = manifest_row_commit_seq(row);

@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// The inodes whose binding a merge changes, by what happens to them.
 struct Rebound {
-    /// The directories that the merge creates or undeletes.
+    /// The directories that the merge creates or restores.
     created_directories: HashSet<InodeId>,
     /// The inodes that the merge deletes or moves, which leave their names.
     leaving: HashSet<InodeId>,
@@ -50,7 +50,7 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
                         display_name,
                         ..
                     }
-                    | BindingChange::Undelete {
+                    | BindingChange::RestoreDeleted {
                         parent_inode_id,
                         display_name,
                         ..
@@ -135,7 +135,7 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
         for plan in &self.plans {
             match (&plan.binding, plan.kind) {
                 (
-                    Some(BindingChange::Create { .. } | BindingChange::Undelete { .. }),
+                    Some(BindingChange::Create { .. } | BindingChange::RestoreDeleted { .. }),
                     InodeKind::Directory,
                 ) => {
                     rebound.created_directories.insert(plan.inode_id);

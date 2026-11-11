@@ -24,7 +24,7 @@ use loonfs_types::format::segment_blocks::{
     DEFAULT_MAX_DELTA_RUNS, DEFAULT_MAX_ROWS_PER_SEGMENT, DEFAULT_TARGET_BLOCK_BYTES,
 };
 use loonfs_types::GrepIndex;
-use loonfs_types::{ChangeSeq, NamespaceId, PinId, RunNo};
+use loonfs_types::{CommitSeq, NamespaceId, PinId, RunNo};
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
 
@@ -115,12 +115,12 @@ pub enum GrepDisableOutcome {
 pub enum GrepBuildOutcome {
     NotEnabled,
     UpToDate {
-        built_through_seq: ChangeSeq,
+        built_through_seq: CommitSeq,
     },
     /// The step indexed a range of the namespace's files or commits, and its
     /// change to grep's entry is pending or published.
     Indexed {
-        built_through_seq: ChangeSeq,
+        built_through_seq: CommitSeq,
         /// Revisions whose content value the step read and tokenized.
         indexed_revisions: u64,
         /// Revisions whose content value the step didn't tokenize, because
@@ -129,7 +129,7 @@ pub enum GrepBuildOutcome {
         segments_written: u64,
     },
     BackfillRestarted {
-        captured_seq: ChangeSeq,
+        captured_seq: CommitSeq,
     },
     /// Another process changed grep's entry before the step's publication,
     /// so the step's change and every change pending before it weren't

@@ -1,5 +1,5 @@
-//! Maintenance runs: the metadata job's loop, the retention window job, runs
-//! against namespaces that do not exist or are deleted, and runs on a pool.
+//! Maintenance jobs: the metadata job's loop, the retention window job, jobs
+//! against namespaces that do not exist or are deleted, and jobs on a pool.
 
 use super::*;
 use loonfs::MaintainMetadataOptions;
@@ -15,7 +15,7 @@ async fn run(
     namespace_id: &NamespaceId,
     body: &str,
 ) -> (StatusCode, serde_json::Value) {
-    let uri = format!("/v0/maintenance/namespaces/{namespace_id}/runs");
+    let uri = format!("/v0/maintenance/namespaces/{namespace_id}/jobs");
     send(router, "POST", &uri, body).await
 }
 
@@ -33,7 +33,7 @@ async fn send(
                 .uri(uri)
                 .header("authorization", "Bearer test-token")
                 .header("content-type", "application/json")
-                .header("Loonfs-Actor", "maintenance-runs")
+                .header("Loonfs-Actor", "maintenance-jobs")
                 .body(axum::body::Body::from(body.to_owned()))
                 .expect("request"),
         )
@@ -175,7 +175,7 @@ async fn one_metadata_run_does_the_work_of_repeated_metadata_steps() {
 async fn runtime_jobs_answer_a_missing_and_a_deleted_namespace_with_fixed_codes() {
     let directory = tempdir().expect("tempdir");
     let (router, state) = test_app(
-        test_options(directory.path(), "maintenance-runs"),
+        test_options(directory.path(), "maintenance-jobs"),
         TestAppOptions::default(),
     )
     .await
@@ -229,7 +229,7 @@ async fn runtime_jobs_answer_a_missing_and_a_deleted_namespace_with_fixed_codes(
 async fn a_pool_run_collects_the_pool_and_rejects_a_missing_or_invalid_pool() {
     let directory = tempdir().expect("tempdir");
     let (router, state) = test_app(
-        test_options(directory.path(), "maintenance-runs"),
+        test_options(directory.path(), "maintenance-jobs"),
         TestAppOptions::default(),
     )
     .await
@@ -244,7 +244,7 @@ async fn a_pool_run_collects_the_pool_and_rejects_a_missing_or_invalid_pool() {
         send(
             &router,
             "POST",
-            &format!("/v0/maintenance/pools/{pool}/runs"),
+            &format!("/v0/maintenance/pools/{pool}/jobs"),
             body,
         )
         .await

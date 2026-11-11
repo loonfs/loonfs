@@ -16,7 +16,7 @@ use crate::manifest::{move_read_basis, PublishedManifest};
 use crate::namespace::basis::ReadBasis;
 use crate::time::Observation;
 use crate::wal::ProjectedWalTail;
-use loonfs_types::{ChangeSeq, ManifestNo, NamespaceId, WalNo};
+use loonfs_types::{CommitSeq, ManifestNo, NamespaceId, WalNo};
 use std::sync::Arc;
 
 /// Identifies one projected WAL tail, the tail above a manifest that ends
@@ -29,7 +29,7 @@ use std::sync::Arc;
 pub struct WalTailCacheKey {
     pub namespace_id: NamespaceId,
     pub manifest_no: ManifestNo,
-    pub head_seq: ChangeSeq,
+    pub head_seq: CommitSeq,
     pub wal_no: WalNo,
 }
 
@@ -68,7 +68,7 @@ impl CachedHead {
     /// The durable order that [`HeadAndWalTailCache::replace_head`] compares
     /// heads in: head sequence, then manifest number, then WAL number. A
     /// floor object moves the WAL number alone.
-    fn order(&self) -> (ChangeSeq, ManifestNo, WalNo) {
+    fn order(&self) -> (CommitSeq, ManifestNo, WalNo) {
         (
             self.read_basis.head.seq,
             self.read_basis.basis.manifest_no(),
@@ -443,7 +443,7 @@ mod tests {
     use futures::poll;
     use loonfs_types::format::control::{ManifestRef, NamespaceStatus};
 
-    use loonfs_types::{ActorId, ChangeSeq, InodeId, InodeKind, ManifestNo, NamespaceId};
+    use loonfs_types::{ActorId, CommitSeq, InodeId, InodeKind, ManifestNo, NamespaceId};
     use loonfs_types::{WalNo, WriterEpoch};
     use std::pin::pin;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
@@ -456,7 +456,7 @@ mod tests {
         let key = WalTailCacheKey {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
             manifest_no: ManifestNo(7),
-            head_seq: ChangeSeq(12),
+            head_seq: CommitSeq(12),
             wal_no: WalNo(12),
         };
         let actors = [
@@ -470,7 +470,7 @@ mod tests {
                 vec![InodeRecord {
                     inode_id: InodeId(42),
                     inode_kind: InodeKind::File,
-                    committed_seq: ChangeSeq(3),
+                    committed_seq: CommitSeq(3),
                     commit_id: loonfs_types::CommitId::parse("c_cache_row").expect("commit id"),
                     committed_by: actor.clone(),
                     committed_at_ms: 3_000 + offset as u64,
@@ -524,15 +524,15 @@ mod tests {
                     status: NamespaceStatus::Active {},
                     writer_epoch: WriterEpoch(1),
                     writer: None,
-                    seq: ChangeSeq(seq),
+                    seq: CommitSeq(seq),
                     wal_no: WalNo(seq),
                     folded_wal_no: WalNo(0),
-                    retention_floor_seq: ChangeSeq(0),
+                    retention_floor_seq: CommitSeq(0),
                 },
                 basis: MetadataBasis::new(ManifestRef {
                     owner_namespace_id: namespace_id,
                     manifest_no: ManifestNo(manifest_no),
-                    head_seq: ChangeSeq(0),
+                    head_seq: CommitSeq(0),
                     payload_checksum: loonfs_types::sha256_digest(b"checksum"),
                 }),
             },
@@ -580,7 +580,7 @@ mod tests {
             writer_epoch: WriterEpoch(1),
             status: NamespaceStatus::Active {},
             folded_wal_no: WalNo(0),
-            retention_floor_seq: ChangeSeq(0),
+            retention_floor_seq: CommitSeq(0),
             started: Some(started.clone()),
         }
     }
@@ -645,12 +645,12 @@ mod tests {
         cache.replace_head(head_at(5, 1, &now));
         let mut after_floor_object = head_at(5, 1, &now);
         after_floor_object.read_basis.head.wal_no = WalNo(6);
-        after_floor_object.read_basis.head.retention_floor_seq = ChangeSeq(3);
+        after_floor_object.read_basis.head.retention_floor_seq = CommitSeq(3);
         let installed = cache.replace_head(after_floor_object);
-        assert_eq!(installed.read_basis.head.retention_floor_seq, ChangeSeq(3));
+        assert_eq!(installed.read_basis.head.retention_floor_seq, CommitSeq(3));
         let kept = cache.replace_head(head_at(5, 1, &now));
         assert_eq!(kept.read_basis.head.wal_no, WalNo(6));
-        assert_eq!(kept.read_basis.head.retention_floor_seq, ChangeSeq(3));
+        assert_eq!(kept.read_basis.head.retention_floor_seq, CommitSeq(3));
     }
 
     /// Checks that a candidate equal to the cached head takes the newer of
@@ -779,7 +779,7 @@ mod tests {
         let tail_key = WalTailCacheKey {
             namespace_id: demo.clone(),
             manifest_no: ManifestNo(1),
-            head_seq: ChangeSeq(6),
+            head_seq: CommitSeq(6),
             wal_no: WalNo(6),
         };
         cache.insert_tail(tail_key, Arc::new(ProjectedWalTail::default()));
@@ -825,7 +825,7 @@ mod tests {
         let tail_key = WalTailCacheKey {
             namespace_id: demo.clone(),
             manifest_no: ManifestNo(1),
-            head_seq: ChangeSeq(6),
+            head_seq: CommitSeq(6),
             wal_no: WalNo(6),
         };
         cache.insert_tail(tail_key, Arc::new(ProjectedWalTail::default()));
@@ -900,7 +900,7 @@ mod tests {
                 .map(|inode| InodeRecord {
                     inode_id: InodeId(inode),
                     inode_kind: InodeKind::File,
-                    committed_seq: ChangeSeq(3),
+                    committed_seq: CommitSeq(3),
                     commit_id: loonfs_types::CommitId::parse("c_cache_row").expect("commit id"),
                     committed_by: loonfs_test_support::test_actor(),
                     committed_at_ms: 3_000,
@@ -920,7 +920,7 @@ mod tests {
             let key = WalTailCacheKey {
                 namespace_id: namespace("demo"),
                 manifest_no: ManifestNo(index as u64),
-                head_seq: ChangeSeq(5),
+                head_seq: CommitSeq(5),
                 wal_no: WalNo(5),
             };
             cache.insert_tail(key, Arc::new(ProjectedWalTail::from_rows(rows)));
@@ -1015,7 +1015,7 @@ mod tests {
         let key = WalTailCacheKey {
             namespace_id: namespace("demo"),
             manifest_no: ManifestNo(1),
-            head_seq: ChangeSeq(5),
+            head_seq: CommitSeq(5),
             wal_no: WalNo(5),
         };
         let tail = Arc::new(ProjectedWalTail::default());

@@ -181,7 +181,7 @@ async fn delete_recursively<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     path: &str,
     context: &WriterAt,
-) -> ChangeSeq {
+) -> CommitSeq {
     let operation = FilesystemOperation::DeletePath {
         path: AbsolutePath::parse(path).expect("path"),
         behavior: DeleteDirectoryBehavior::Recursive,
@@ -353,7 +353,7 @@ const INODE_FAMILIES: [ApiMetadataRowFamily; 6] = [
 
 /// One inode's state at `seq`: its inode row, and its newest revision,
 /// attribute row, and access row.
-fn inode_state(state: &MetadataState, inode_id: InodeId, seq: ChangeSeq) -> String {
+fn inode_state(state: &MetadataState, inode_id: InodeId, seq: CommitSeq) -> String {
     format!(
         "{:?} {:?} {:?} {:?}",
         state.inode_at_seq(inode_id, seq),
@@ -379,7 +379,7 @@ fn inode_state(state: &MetadataState, inode_id: InodeId, seq: ChangeSeq) -> Stri
 /// and whether each of `inode_ids` is visible. The questions are the
 /// differential suite's, asked of one namespace before and after a
 /// compaction instead of core and the model.
-fn visible_metadata(state: &MetadataState, inode_ids: &[InodeId], seq: ChangeSeq) -> Vec<String> {
+fn visible_metadata(state: &MetadataState, inode_ids: &[InodeId], seq: CommitSeq) -> Vec<String> {
     let mut lines = Vec::new();
     let mut directories = vec![(AbsolutePath::root(), ROOT_INODE_ID)];
     while let Some((path, directory)) = directories.pop() {
@@ -426,7 +426,7 @@ async fn visible_metadata_at_retained_sequences<S: ObjectStore + ?Sized>(
         .await
         .expect("load the namespace's rows");
     (floor_seq.0..=head.seq.0)
-        .map(|seq| visible_metadata(&state, inode_ids, ChangeSeq(seq)))
+        .map(|seq| visible_metadata(&state, inode_ids, CommitSeq(seq)))
         .collect()
 }
 
@@ -482,10 +482,10 @@ async fn a_base_compaction_of_each_group_removes_every_row_an_expired_deletion_h
         views_before,
         "the visible metadata at every retained sequence is unchanged"
     );
-    let undelete = commit(
+    let restore_deleted = commit(
         &store,
         &namespace_id,
-        FilesystemOperation::undelete(
+        FilesystemOperation::restore_deleted(
             docs.docs,
             before[&ApiMetadataRowFamily::ActiveDeletions]
                 .iter()
@@ -494,14 +494,14 @@ async fn a_base_compaction_of_each_group_removes_every_row_an_expired_deletion_h
                     _ => None,
                 })
                 .expect("the deletion's trash rows"),
-            &loonfs_types::options::UndeleteDestination::Recorded,
+            &loonfs_types::options::RestoreDeletedDestination::Recorded,
         ),
         Vec::new(),
         &context,
     )
     .await
-    .expect_err("an expired deletion can't be undeleted");
-    assert_eq!(undelete.code(), ErrorCode::NotDeleted);
+    .expect_err("an expired deletion can't be restored");
+    assert_eq!(restore_deleted.code(), ErrorCode::NotDeleted);
 }
 
 /// Checks that the base compactions that remove an expired deletion's rows
@@ -589,8 +589,8 @@ struct NestedDeletions {
     kept_file: InodeId,
     inner: InodeId,
     gone: InodeId,
-    inner_seq: ChangeSeq,
-    outer_seq: ChangeSeq,
+    inner_seq: CommitSeq,
+    outer_seq: CommitSeq,
 }
 
 async fn delete_nested<S: ObjectStore>(
@@ -1301,7 +1301,7 @@ async fn kept_inode_filter_and_walk_reads(
             CompactionPlacement::Base {
                 output_seq: current.payload().head_seq,
             },
-            ChangeSeq(0),
+            CommitSeq(0),
         ),
         &MetadataCompactionCancellation::default(),
     )
@@ -1343,7 +1343,7 @@ pub(super) async fn compact_group<S: ObjectStore + ?Sized>(
 async fn listed_deletions<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-) -> Vec<ChangeSeq> {
+) -> Vec<CommitSeq> {
     family_rows(store, namespace_id, ApiMetadataRowFamily::ActiveDeletions)
         .await
         .into_iter()
@@ -1383,7 +1383,7 @@ async fn a_base_compaction_walks_the_tree_once_the_floor_is_above_zero() {
         .fold_wal()
         .await
         .expect("fold the deletions");
-    assert_eq!(read_floor_seq(&store, &namespace_id).await, ChangeSeq(0));
+    assert_eq!(read_floor_seq(&store, &namespace_id).await, CommitSeq(0));
 
     let (filter, walk_reads) = kept_inode_filter_and_walk_reads(&store, &namespace_id).await;
     assert!(
@@ -1411,7 +1411,7 @@ async fn a_base_compaction_walks_the_tree_once_the_floor_is_above_zero() {
         MetadataRow::FileRevision(crate::metadata::RevisionRecord {
             inode_id,
             revision_no: RevisionNo(1),
-            committed_seq: ChangeSeq(1),
+            committed_seq: CommitSeq(1),
             commit_id: CommitId::parse("c_probe").expect("commit id"),
             committed_by: loonfs_types::ActorId::loonfs(),
             committed_at_ms: 1_000,
@@ -1518,7 +1518,7 @@ async fn a_base_compaction_over_the_advance_removes_an_expired_deletions_rows() 
         .expect("load the advance's manifest");
     let head = namespace.load_read_state().await.expect("read the head");
     assert_eq!(head.wal_no, advanced.folded_wal_no());
-    assert!(advanced.retention_floor_seq() > ChangeSeq(0));
+    assert!(advanced.retention_floor_seq() > CommitSeq(0));
 
     compact_groups_without_false_positives(
         &store,

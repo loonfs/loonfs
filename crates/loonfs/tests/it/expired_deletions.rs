@@ -2,7 +2,7 @@
 //! reached, and the trash listing of a fork.
 
 use loonfs::{
-    AccessState, ChangeSeq, CreateNamespaceOptions, DeleteDirectoryBehavior, DeleteOptions,
+    AccessState, CommitSeq, CreateNamespaceOptions, DeleteDirectoryBehavior, DeleteOptions,
     ErrorCode, InodeId, LoonFs, Namespace, PinId, ReadAt, ReadOnly, RevisionNo, SharedObjectStore,
     StatOptions, Writable,
 };
@@ -22,7 +22,7 @@ use std::sync::Arc;
 async fn advance_floor_through(
     store: &SharedObjectStore,
     namespace_id: &NamespaceId,
-    deletion_seq: ChangeSeq,
+    deletion_seq: CommitSeq,
 ) {
     // The floor passes a commit once it's an hour old, so this
     // engine's clock is that far ahead of the writer's.
@@ -384,7 +384,7 @@ async fn once_a_deletion_expires_no_principal_reads_its_subtree_by_inode() {
     );
 }
 
-fn deletion_seqs(page: loonfs_types::ListTrashResponse) -> Vec<ChangeSeq> {
+fn deletion_seqs(page: loonfs_types::ListTrashResponse) -> Vec<CommitSeq> {
     page.entries
         .into_iter()
         .map(|entry| entry.deletion_seq)
@@ -445,7 +445,7 @@ async fn a_fork_lists_only_the_deletions_it_made_and_its_source_keeps_its_own() 
         };
         assert_eq!(
             trash(&fork_id).await,
-            Vec::<ChangeSeq>::new(),
+            Vec::<CommitSeq>::new(),
             "{access_mode:?}: a new fork"
         );
         let own = writer

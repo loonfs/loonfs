@@ -3,7 +3,7 @@
 
 use crate::metadata::{DeltaPosition, DirentryBindingRecord, DirentryBindingState, MetadataState};
 use crate::{ModelError, Result};
-use loonfs_types::{ChangeSeq, InodeId, NameKey};
+use loonfs_types::{CommitSeq, InodeId, NameKey};
 use std::collections::{BTreeMap, BTreeSet};
 
 impl DirentryBindingRecord {
@@ -26,7 +26,7 @@ impl MetadataState {
         &self,
         parent_inode_id: InodeId,
         name_key: &NameKey,
-        seq: ChangeSeq,
+        seq: CommitSeq,
     ) -> Option<&DirentryBindingRecord> {
         self.direntry_binds
             .iter()
@@ -43,7 +43,7 @@ impl MetadataState {
     pub fn parent_binding(
         &self,
         child_inode_id: InodeId,
-        seq: ChangeSeq,
+        seq: CommitSeq,
     ) -> Option<&DirentryBindingRecord> {
         self.direntry_binds
             .iter()
@@ -54,7 +54,7 @@ impl MetadataState {
 
     /// `inode_id`, then each ancestor reached through parent bindings at
     /// `seq`.
-    pub(crate) fn ancestry(&self, inode_id: InodeId, seq: ChangeSeq) -> Result<Vec<InodeId>> {
+    pub(crate) fn ancestry(&self, inode_id: InodeId, seq: CommitSeq) -> Result<Vec<InodeId>> {
         let mut ancestry = vec![inode_id];
         let mut current = inode_id;
         while let Some(binding) = self.parent_binding(current, seq) {
@@ -74,7 +74,7 @@ impl MetadataState {
     /// each child has at most one parent binding, each slot at most one
     /// child, the bound values current in slot order are the ones current in
     /// child order, and no inode is its own ancestor.
-    pub(crate) fn verify_bindings(&self, seq: ChangeSeq) -> Result<()> {
+    pub(crate) fn verify_bindings(&self, seq: CommitSeq) -> Result<()> {
         let mut by_slot = BTreeMap::new();
         let mut by_child = BTreeMap::new();
         for row in &self.direntry_binds {
@@ -133,11 +133,11 @@ mod tests {
     use crate::metadata::DeltaPosition;
     use crate::{bootstrap_metadata_state, ModelError};
     use loonfs_types::format::wal::WalDelta;
-    use loonfs_types::{ActorId, ChangeSeq, CommitId, DisplayName, InodeId, InodeKind, NameKey};
+    use loonfs_types::{ActorId, CommitId, CommitSeq, DisplayName, InodeId, InodeKind, NameKey};
 
     fn position(seq: u64, delta_index: u32) -> DeltaPosition {
         DeltaPosition {
-            seq: ChangeSeq(seq),
+            seq: CommitSeq(seq),
             delta_index,
         }
     }
@@ -203,7 +203,7 @@ mod tests {
         let mut state = bootstrap_metadata_state(0);
         for (seq, deltas) in (1..).zip(commits) {
             match state.apply_committed_wal_deltas(
-                ChangeSeq(seq),
+                CommitSeq(seq),
                 &commit_id,
                 &ActorId::loonfs(),
                 0,
@@ -224,7 +224,7 @@ mod tests {
         assert_eq!(
             first_violation(&[create(2, File, 0, "a"), create(3, File, 0, "a")]),
             Some(ModelError::SlotHasTwoChildren {
-                seq: ChangeSeq(2),
+                seq: CommitSeq(2),
                 parent_inode_id: loonfs_types::ROOT_INODE_ID,
                 name_key: NameKey::parse("a").expect("valid name key"),
                 bindings: [position(1, 1), position(2, 1)],
@@ -233,7 +233,7 @@ mod tests {
         assert_eq!(
             first_violation(&[create(2, File, 0, "a"), vec![bind(0, 2, File, 0, "b")]]),
             Some(ModelError::ChildHasTwoParents {
-                seq: ChangeSeq(2),
+                seq: CommitSeq(2),
                 child_inode_id: InodeId(2),
                 bindings: [position(1, 1), position(2, 0)],
             })
@@ -246,7 +246,7 @@ mod tests {
                 vec![unbind(0, 3, File, 0, "a", position(1, 1))],
             ]),
             Some(ModelError::BindingIndexesDisagree {
-                seq: ChangeSeq(2),
+                seq: CommitSeq(2),
                 binding: position(1, 1),
             })
         );
@@ -260,7 +260,7 @@ mod tests {
                 ],
             ]),
             Some(ModelError::AncestorCycle {
-                seq: ChangeSeq(3),
+                seq: CommitSeq(3),
                 inode_id: InodeId(2),
             })
         );

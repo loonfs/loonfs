@@ -36,16 +36,16 @@ pub(crate) fn store_probe_run_outcome(
 }
 
 pub(crate) fn store_probe_summary_line(response: &loonfs_types::StoreProbeResponse) -> String {
-    let run_id = &response.run_id;
+    let probe_id = &response.probe_id;
     let total = response.checks.len();
     match store_probe_run_outcome(response) {
         StoreProbeRunOutcome::Failed { checks } => {
-            format!("store probe {run_id}: {checks} of {total} checks failed")
+            format!("store probe {probe_id}: {checks} of {total} checks failed")
         }
         StoreProbeRunOutcome::Unsupported { checks } => {
-            format!("store probe {run_id}: {checks} of {total} checks are unsupported")
+            format!("store probe {probe_id}: {checks} of {total} checks are unsupported")
         }
-        StoreProbeRunOutcome::Passed => format!("store probe {run_id}: {total} checks passed"),
+        StoreProbeRunOutcome::Passed => format!("store probe {probe_id}: {total} checks passed"),
     }
 }
 
@@ -241,30 +241,30 @@ pub(super) fn format_utc_ms(unix_ms: u64) -> String {
 }
 
 /// Formats one change-feed event for human-readable output.
-pub(super) fn event_descriptor(event: &loonfs_types::FilesystemChange) -> String {
-    use loonfs_types::FilesystemChange;
+pub(super) fn event_descriptor(event: &loonfs_types::FilesystemEvent) -> String {
+    use loonfs_types::FilesystemEvent;
     match event {
-        FilesystemChange::DirectoryCreated { display_name, .. }
-        | FilesystemChange::FileCreated { display_name, .. } => {
+        FilesystemEvent::DirectoryCreated { display_name, .. }
+        | FilesystemEvent::FileCreated { display_name, .. } => {
             format!("create '{display_name}'")
         }
-        FilesystemChange::ContentChanged {
+        FilesystemEvent::ContentChanged {
             inode_id,
             revision_no,
             ..
         } => format!("write inode {inode_id} rev #{}", revision_no.0),
-        FilesystemChange::Moved {
+        FilesystemEvent::Moved {
             source_display_name,
             destination_display_name,
             ..
         } => format!("move '{source_display_name}' -> '{destination_display_name}'"),
-        FilesystemChange::Deleted {
+        FilesystemEvent::Deleted {
             deleted_binding, ..
         } => format!("delete '{}'", deleted_binding.display_name),
-        FilesystemChange::Undeleted { display_name, .. } => {
+        FilesystemEvent::Restored { display_name, .. } => {
             format!("undelete '{display_name}'")
         }
-        FilesystemChange::AttributesChanged {
+        FilesystemEvent::AttributesChanged {
             inode_id,
             attributes_revision_no,
             ..
@@ -272,16 +272,16 @@ pub(super) fn event_descriptor(event: &loonfs_types::FilesystemChange) -> String
             "attributes inode {inode_id} rev #{}",
             attributes_revision_no.0
         ),
-        FilesystemChange::AccessChanged {
+        FilesystemEvent::AccessChanged {
             inode_id,
             access_revision_no,
             ..
         } => format!("access inode {inode_id} rev #{}", access_revision_no.0),
-        FilesystemChange::Unknown => "unknown event".to_owned(),
+        FilesystemEvent::Unknown => "unknown event".to_owned(),
     }
 }
 
-pub(super) fn event_summary(events: &[loonfs_types::FilesystemChange]) -> String {
+pub(super) fn event_summary(events: &[loonfs_types::FilesystemEvent]) -> String {
     const SHOWN: usize = 3;
     if events.is_empty() {
         return "-".to_owned();

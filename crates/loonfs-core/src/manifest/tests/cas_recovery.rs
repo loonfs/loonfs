@@ -328,7 +328,7 @@ async fn publishers_racing_one_number_load_the_winner_and_retry_when_needed() {
                 ManifestMetadataSource {
                     head: &projection.head,
                     basis_manifest_no: Some(predecessor),
-                    retention_floor_seq: ChangeSeq(0),
+                    retention_floor_seq: CommitSeq(0),
                     metadata_state: &projection.metadata_state,
                 },
                 MetadataRunPolicy::default(),
@@ -955,8 +955,8 @@ async fn namespace_status_and_change_feed_reload_a_head_behind_the_floor() {
         .load_metadata()
         .await
         .expect("status reloads the stale head");
-    assert_eq!(namespace.head_seq, ChangeSeq(1));
-    assert_eq!(namespace.retention_floor_seq, ChangeSeq(1));
+    assert_eq!(namespace.head_seq, CommitSeq(1));
+    assert_eq!(namespace.retention_floor_seq, CommitSeq(1));
 
     let feed_store = StaleObjectOnceStore {
         inner: LocalFsStore::new(temp_dir.path()).expect("change-feed store"),
@@ -970,13 +970,13 @@ async fn namespace_status_and_change_feed_reload_a_head_behind_the_floor() {
         .expect("load feed view");
     let changes = list_changes_after(
         &view,
-        loonfs_types::ChangeFeedPosition::after(ChangeSeq(1)),
+        loonfs_types::ChangeFeedPosition::after(CommitSeq(1)),
         EffectiveLimit::new(NonZeroU32::new(10).expect("nonzero")),
         loonfs_types::options::CommitSplitting::Whole,
     )
     .await
     .expect("change feed reloads the stale head");
-    assert_eq!(changes.head_seq, ChangeSeq(1));
+    assert_eq!(changes.head_seq, CommitSeq(1));
     assert!(changes.changes.is_empty());
 }
 

@@ -510,7 +510,7 @@ string_id! {
     /// The ID of one run of the store contract probe.
     ///
     /// The probe stores its temporary objects under a key prefix that includes this ID.
-    ProbeRunId,
+    ProbeId,
     prefix = "probe",
     schema(
         pattern = r"^probe_[0-7][0-9a-hjkmnp-tv-z]{25}$",
@@ -576,7 +576,7 @@ numeric_id! {
     /// The sequence number of one namespace commit.
     ///
     /// Commits become visible in the order of these numbers.
-    ChangeSeq,
+    CommitSeq,
     public_ordinal,
     schema_description = "The sequence number of one namespace commit. Commits become visible in the order of these numbers."
 }
@@ -624,7 +624,7 @@ numeric_id! {
 #[cfg(test)]
 mod tests {
     use super::{
-        next_public_ordinal, BindingVersion, ChangeSeq, CommitId, ContentId, ManifestNo,
+        next_public_ordinal, BindingVersion, CommitId, CommitSeq, ContentId, ManifestNo,
         MetadataSegmentId, NameKey, NamespaceId, PinId, PoolId, RevisionNo, RunNo, UploadId, WalNo,
         WriterEpoch, WriterId, MAX_PUBLIC_INTEGER,
     };
@@ -671,7 +671,7 @@ mod tests {
         }
 
         assert_range!(RevisionNo);
-        assert_range!(ChangeSeq);
+        assert_range!(CommitSeq);
         assert_range!(AttributesRevisionNo);
         assert_range!(ManifestNo);
         assert_range!(WalNo);

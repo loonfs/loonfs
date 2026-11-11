@@ -8,12 +8,12 @@ use super::{
 };
 use loonfs_types::format::manifest::{DeltaPosition, DirentryBindingState, RevisionSummary};
 use loonfs_types::format::wal::{WalCommitPayload, WalDelta};
-use loonfs_types::{ActorId, ChangeSeq, CommitId, InodeKind};
+use loonfs_types::{ActorId, CommitId, CommitSeq, InodeKind};
 
 impl MetadataState {
     pub fn apply_committed_wal_deltas(
         &self,
-        committed_seq: ChangeSeq,
+        committed_seq: CommitSeq,
         commit_id: &CommitId,
         actor: &ActorId,
         committed_at_ms: u64,
@@ -32,7 +32,7 @@ impl MetadataState {
 
     pub fn apply_committed_wal_deltas_mut(
         &mut self,
-        committed_seq: ChangeSeq,
+        committed_seq: CommitSeq,
         commit_id: &CommitId,
         actor: &ActorId,
         committed_at_ms: u64,
@@ -59,7 +59,7 @@ impl MetadataState {
     /// diverge from what replay later persists.
     pub(crate) fn apply_committed_wal_delta_mut(
         &mut self,
-        committed_seq: ChangeSeq,
+        committed_seq: CommitSeq,
         commit_id: &CommitId,
         actor: &ActorId,
         committed_at_ms: u64,

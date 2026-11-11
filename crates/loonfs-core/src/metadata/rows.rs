@@ -10,7 +10,7 @@ use loonfs_types::format::manifest::{
 };
 use loonfs_types::format::segment_blocks::string_prefix_upper_bound;
 use loonfs_types::format::wal::WalCommitPayload;
-use loonfs_types::{ActorId, ChangeSeq, CommitId, InodeId, InodeKind};
+use loonfs_types::{ActorId, CommitId, CommitSeq, InodeId, InodeKind};
 use std::mem::size_of;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,7 +61,7 @@ impl Default for MetadataState {
 /// truth.
 pub(crate) fn hiding_tombstone_from_records(
     records: impl IntoIterator<Item = SubtreeTombstoneRecord>,
-    visible_seq: ChangeSeq,
+    visible_seq: CommitSeq,
 ) -> Option<SubtreeTombstoneRecord> {
     newest_tombstone_from_records(records, visible_seq)
         .filter(|tombstone| tombstone.action.hides_subtree())
@@ -71,7 +71,7 @@ pub(crate) fn hiding_tombstone_from_records(
 /// `revoke`, which is the event that [`hiding_tombstone_from_records`] reads.
 pub(crate) fn newest_tombstone_from_records(
     records: impl IntoIterator<Item = SubtreeTombstoneRecord>,
-    visible_seq: ChangeSeq,
+    visible_seq: CommitSeq,
 ) -> Option<SubtreeTombstoneRecord> {
     records
         .into_iter()
@@ -142,10 +142,10 @@ pub(crate) fn recoverable_deletion_from_active_record(
 pub(crate) struct RecoverableDeletion {
     pub(crate) root_inode_id: InodeId,
     pub(crate) inode_kind: InodeKind,
-    pub(crate) deletion_seq: ChangeSeq,
+    pub(crate) deletion_seq: CommitSeq,
     pub(crate) deleted_at_ms: u64,
     pub(crate) deleted_by: ActorId,
-    /// The binding the delete removed and an in-place undelete restores.
+    /// The binding the delete removed and an in-place restore binds again.
     pub(crate) deleted_binding: DeletedBinding,
 }
 
@@ -161,7 +161,7 @@ pub(crate) struct ActiveDeletionRange {
 impl ActiveDeletionRange {
     /// The deletions after the one at `start_after`, or every deletion when
     /// it's `None`, as a trash listing page reads them.
-    pub(crate) fn after(start_after: Option<(ChangeSeq, InodeId)>) -> Self {
+    pub(crate) fn after(start_after: Option<(CommitSeq, InodeId)>) -> Self {
         Self {
             lower_bound: match start_after {
                 Some((deletion_seq, root_inode_id)) => {
@@ -174,7 +174,7 @@ impl ActiveDeletionRange {
     }
 
     /// Starts the range above `after_seq` without moving it backward.
-    pub(crate) fn above_seq(self, after_seq: ChangeSeq) -> Self {
+    pub(crate) fn above_seq(self, after_seq: CommitSeq) -> Self {
         Self {
             lower_bound: self
                 .lower_bound
@@ -233,7 +233,7 @@ impl MetadataState {
     /// to an at-head query. The seq-gated read methods below rely on this to
     /// route to the indexes; only queries strictly below `indexed_seq()` need
     /// the historical scans.
-    pub fn indexed_seq(&self) -> ChangeSeq {
+    pub fn indexed_seq(&self) -> CommitSeq {
         self.indexes.indexed_seq()
     }
 

@@ -3,22 +3,22 @@
 use crate::{NamespaceId, PoolId};
 use serde::{Deserialize, Serialize};
 
-/// Optional overrides for one garbage collection pass.
+/// Optional overrides for one garbage collection.
 ///
 /// The server rejects unknown fields.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct GcRequest {
-    /// The minimum age, in milliseconds, that an object must reach before the pass can delete it.
-    /// The value must be at least the server's advertised safety floor. The grep index's collector
-    /// keeps its own age rules, so this value doesn't change them.
+    /// The minimum age, in milliseconds, that an object must reach before the collection can delete
+    /// it. The value must be at least the server's advertised safety floor. The grep index's
+    /// collector keeps its own age rules, so this value doesn't change them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub grace_window_ms: Option<u64>,
 }
 
-/// The candidates that one garbage collection pass of a namespace inspected but didn't delete,
+/// The candidates that one garbage collection of a namespace inspected but didn't delete,
 /// counted by reason.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -31,14 +31,14 @@ pub struct RetainedCandidates {
     /// The unreferenced candidates that had no provider timestamp, so their age was unknown.
     pub no_provider_timestamp: u64,
     /// The keys that garbage collection didn't recognize in the object families it scanned. The
-    /// pass keeps these objects.
+    /// collection keeps these objects.
     pub unrecognized_key: u64,
-    /// The checkpoint records that the pass couldn't delete because of their owner or their grace
-    /// window.
+    /// The checkpoint records that the collection couldn't delete because of their owner or their
+    /// grace window.
     pub checkpoint_not_deletable: u64,
 }
 
-/// The candidates that one garbage collection pass of a pool inspected but didn't delete, counted
+/// The candidates that one garbage collection of a pool inspected but didn't delete, counted
 /// by reason.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -53,32 +53,32 @@ pub struct PoolRetainedCandidates {
     /// The unreferenced candidates that had no provider timestamp, so their age was unknown.
     pub no_provider_timestamp: u64,
     /// The keys that garbage collection didn't recognize in the object families it scanned. The
-    /// pass keeps these objects.
+    /// collection keeps these objects.
     pub unrecognized_key: u64,
     /// The upload sessions that a lease or grace window still protected.
     pub upload_session_window: u64,
-    /// The upload sessions that the pass couldn't prove safe to delete.
+    /// The upload sessions that the collection couldn't prove safe to delete.
     pub upload_session_undecided: u64,
 }
 
-/// The number of objects that one garbage collection pass of a namespace deleted, grouped by
+/// The number of objects that one garbage collection of a namespace deleted, grouped by
 /// object family.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DeletedObjectCounts {
-    /// The unreferenced WAL objects that the pass deleted.
+    /// The unreferenced WAL objects that the collection deleted.
     pub wal_objects: u64,
-    /// The unreferenced metadata segments that the pass deleted.
+    /// The unreferenced metadata segments that the collection deleted.
     pub metadata_segments: u64,
-    /// The unreferenced extension segments, such as the grep index's segments, that the pass
+    /// The unreferenced extension segments, such as the grep index's segments, that the collection
     /// deleted.
     pub extension_segments: u64,
-    /// The unreferenced manifests that the pass deleted.
+    /// The unreferenced manifests that the collection deleted.
     pub manifests: u64,
 }
 
 impl DeletedObjectCounts {
-    /// Adds counts from another pass.
+    /// Adds counts from another collection.
     pub fn add(&mut self, other: &Self) {
         let Self {
             wal_objects,
@@ -93,22 +93,23 @@ impl DeletedObjectCounts {
     }
 }
 
-/// The number of objects that one garbage collection pass of a pool deleted, grouped by object
+/// The number of objects that one garbage collection of a pool deleted, grouped by object
 /// family.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct PoolDeletedObjectCounts {
-    /// The content objects the pass deleted because no member's retained view referenced them and
-    /// they were older than the grace window.
+    /// The content objects the collection deleted because no member's retained view referenced them
+    /// and they were older than the grace window.
     pub content_objects: u64,
-    /// The upload sessions whose records the pass deleted after their grace windows passed.
+    /// The upload sessions whose records the collection deleted after their grace windows passed.
     pub upload_sessions: u64,
-    /// The temporary objects that the pass deleted because they were older than the grace window.
+    /// The temporary objects that the collection deleted because they were older than the grace
+    /// window.
     pub temporary_objects: u64,
 }
 
 impl PoolDeletedObjectCounts {
-    /// Adds counts from another pass.
+    /// Adds counts from another collection.
     pub fn add(&mut self, other: &Self) {
         let Self {
             content_objects,
@@ -121,18 +122,18 @@ impl PoolDeletedObjectCounts {
     }
 }
 
-/// The number of checkpoint records that one garbage collection pass deleted, grouped by owner.
+/// The number of checkpoint records that one garbage collection deleted, grouped by owner.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DeletedCheckpointsByOwner {
-    /// The user pins that the pass deleted after they expired or their namespace was deleted.
+    /// The user pins that the collection deleted after they expired or their namespace was deleted.
     pub user: u64,
-    /// The fork pins that the pass deleted because their target namespaces no longer exist.
+    /// The fork pins that the collection deleted because their target namespaces no longer exist.
     pub fork: u64,
 }
 
 impl DeletedCheckpointsByOwner {
-    /// Adds counts from another pass.
+    /// Adds counts from another collection.
     pub fn add(&mut self, other: &Self) {
         let Self { user, fork } = other;
         self.user += user;
@@ -144,16 +145,16 @@ impl DeletedCheckpointsByOwner {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct GcResponse {
-    /// The namespace that the pass ran against.
+    /// The namespace that the collection ran against.
     pub namespace_id: NamespaceId,
-    /// The objects that the pass deleted, counted by object family.
+    /// The objects that the collection deleted, counted by object family.
     pub deleted: DeletedObjectCounts,
-    /// The checkpoint records that the pass deleted, counted by owner.
+    /// The checkpoint records that the collection deleted, counted by owner.
     pub deleted_checkpoints_by_owner: DeletedCheckpointsByOwner,
-    /// The candidates that the pass kept at deletion time, counted by reason.
+    /// The candidates that the collection kept at deletion time, counted by reason.
     pub retained: RetainedCandidates,
-    /// The bytes of every object that the pass listed under the namespace, each object once, before
-    /// the pass's deletes.
+    /// The bytes of every object that the collection listed under the namespace, each object once,
+    /// before the collection's deletes.
     pub listed_bytes: u64,
     /// The earliest future retirement deadline or pin deletion time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -169,33 +170,34 @@ pub struct GcResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct PoolGcResponse {
-    /// The pool that the pass ran against.
+    /// The pool that the collection ran against.
     pub pool_id: PoolId,
-    /// The objects that the pass deleted, counted by object family.
+    /// The objects that the collection deleted, counted by object family.
     pub deleted: PoolDeletedObjectCounts,
-    /// The candidates that the pass kept at deletion time, counted by reason.
+    /// The candidates that the collection kept at deletion time, counted by reason.
     pub retained: PoolRetainedCandidates,
-    /// The bytes of every object that the pass listed under the pool, each object once, before the
-    /// pass's deletes.
+    /// The bytes of every object that the collection listed under the pool, each object once,
+    /// before the collection's deletes.
     pub listed_bytes: u64,
     /// The earliest future upload cleanup time, or the end of the pool record's creation grace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub next_reclamation_at_ms: Option<u64>,
-    /// The work that this pass skipped at a limit, by reason. Empty when the pass skipped nothing.
+    /// The work that this collection skipped at a limit, by reason. Empty when the collection
+    /// skipped nothing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped: Vec<GcSkippedWork>,
 }
 
-/// A part of a garbage collection pass of a pool that the pass skipped.
+/// A part of a collection of a pool that the collection skipped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum GcSkippedWork {
-    /// The pass deleted no content objects, because it couldn't read every pool member's roots
-    /// within its budget.
+    /// The collection deleted no content objects, because it couldn't read every pool member's
+    /// roots within its budget.
     ContentSweepPoolBudget,
-    /// The pass deleted no content objects, because it couldn't read one pool member's roots.
+    /// The collection deleted no content objects, because it couldn't read one pool member's roots.
     ContentSweepUnreadableMember,
     /// A reason from a newer server.
     #[serde(other)]
@@ -303,7 +305,7 @@ impl PoolRetainedReason {
 }
 
 impl RetainedCandidates {
-    /// Counts all candidates retained by the pass.
+    /// Counts all candidates retained by the collection.
     pub fn total(&self) -> u64 {
         self.by_reason().into_iter().map(|(_, count)| count).sum()
     }
@@ -326,7 +328,7 @@ impl RetainedCandidates {
         ]
     }
 
-    /// Adds counts from another pass.
+    /// Adds counts from another collection.
     pub fn add(&mut self, other: &Self) {
         let Self {
             referenced,
@@ -345,14 +347,14 @@ impl RetainedCandidates {
     /// Returns the reason with the highest count, and that count.
     ///
     /// `None` when nothing was retained. Ties go to the first reason in the
-    /// fixed table order, so one pass's report is stable.
+    /// fixed table order, so one collection's report is stable.
     pub fn top_reason(&self) -> Option<(&'static str, u64)> {
         top_reason(self.by_reason())
     }
 }
 
 impl PoolRetainedCandidates {
-    /// Counts all candidates retained by the pass.
+    /// Counts all candidates retained by the collection.
     pub fn total(&self) -> u64 {
         self.by_reason().into_iter().map(|(_, count)| count).sum()
     }
@@ -377,7 +379,7 @@ impl PoolRetainedCandidates {
         ]
     }
 
-    /// Adds counts from another pass.
+    /// Adds counts from another collection.
     pub fn add(&mut self, other: &Self) {
         let Self {
             referenced,
@@ -398,7 +400,7 @@ impl PoolRetainedCandidates {
     /// Returns the reason with the highest count, and that count.
     ///
     /// `None` when nothing was retained. Ties go to the first reason in the
-    /// fixed table order, so one pass's report is stable.
+    /// fixed table order, so one collection's report is stable.
     pub fn top_reason(&self) -> Option<(&'static str, u64)> {
         top_reason(self.by_reason())
     }

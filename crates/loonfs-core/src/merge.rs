@@ -30,7 +30,7 @@ use loonfs_types::format::control::{ForkBasis, RebasedFrom};
 use loonfs_types::format::manifest::MergeIndexRecord;
 use loonfs_types::format::wal::{MergeRecord, MAX_WAL_OBJECT_BYTES, WAL_OBJECT_OVERHEAD_BYTES};
 use loonfs_types::{
-    ActorId, ChangeSeq, Commit, CommitId, CommitPrecondition, FilesystemOperation, MergeConflict,
+    ActorId, Commit, CommitId, CommitPrecondition, CommitSeq, FilesystemOperation, MergeConflict,
     NamespaceId,
 };
 use std::fmt;
@@ -46,13 +46,13 @@ pub struct MergeRequest {
     pub source_namespace_id: NamespaceId,
     /// The fork sequence to merge through, or `None` for the fork's folded
     /// head.
-    pub through_seq: Option<ChangeSeq>,
+    pub through_seq: Option<CommitSeq>,
     /// The fork sequence that the range has to start after, or `None` to
     /// take the start from the merge index. A caller that plans a merge again
     /// sets the first plan's range, so that the merge never applies a longer
     /// range than it first planned, and another merge of the fork in between
     /// returns `merge_range_conflict`.
-    pub after_seq: Option<ChangeSeq>,
+    pub after_seq: Option<CommitSeq>,
     /// The merge's idempotency key.
     pub commit_id: CommitId,
     /// The actor responsible for the merge.
@@ -227,11 +227,11 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             source_after_seq: request
                 .after_seq
                 .or(committed.as_ref().map(|merge| merge.source_after_seq))
-                .unwrap_or(ChangeSeq(0)),
+                .unwrap_or(CommitSeq(0)),
             source_through_seq: request
                 .through_seq
                 .or(committed.as_ref().map(|merge| merge.source_through_seq))
-                .unwrap_or(ChangeSeq(0)),
+                .unwrap_or(CommitSeq(0)),
         };
         let namespace_id = &self.namespace.namespace_id;
         let identity = merge_fingerprint(
@@ -394,7 +394,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
 /// history that is below the floor, and the floor.
 pub(crate) struct FloorRefusal {
     below: HistoryPosition,
-    retention_floor_seq: ChangeSeq,
+    retention_floor_seq: CommitSeq,
 }
 
 impl From<FloorRefusal> for CoreError {
@@ -410,7 +410,7 @@ impl From<FloorRefusal> for CoreError {
 /// rule.
 pub(crate) struct MergeStart {
     /// The fork sequence that the next merge starts after.
-    pub(crate) after_seq: ChangeSeq,
+    pub(crate) after_seq: CommitSeq,
     /// The fork's newest merge that the range rule reads, or `None` before
     /// the fork's first merge, or before a rebase's first replay commit.
     pub(crate) previous: Option<MergeIndexRecord>,
@@ -434,7 +434,7 @@ pub(crate) async fn merge_start<S: ObjectStore + ?Sized>(
     view: &MetadataView<'_, '_, S>,
     head: &NamespaceReadState,
     source_namespace_id: &NamespaceId,
-    fork_point_seq: ChangeSeq,
+    fork_point_seq: CommitSeq,
 ) -> Result<std::result::Result<MergeStart, FloorRefusal>> {
     let rebase = rebase_basis(head, source_namespace_id);
     let checked_fork_point_seq =
@@ -492,7 +492,7 @@ async fn range_start<S: ObjectStore + ?Sized>(
     fork_view: &LoadedMetadataView<'_, S>,
     request: &MergeRequest,
     source: &NamespaceId,
-) -> Result<(ChangeSeq, ChangeSeq)> {
+) -> Result<(CommitSeq, CommitSeq)> {
     let fork_head = fork_view.head();
     let fork_point_seq = fork_point(fork_head, source)?;
     let source_namespace_id = &fork_head.namespace_id;
@@ -523,7 +523,7 @@ async fn range_start<S: ObjectStore + ?Sized>(
 /// no longer keeps.
 fn ensure_range_start_retained<S: ObjectStore + ?Sized>(
     fork_view: &LoadedMetadataView<'_, S>,
-    source_after_seq: ChangeSeq,
+    source_after_seq: CommitSeq,
 ) -> std::result::Result<(), FloorRefusal> {
     let fork_floor_seq = fork_view.retention_floor_seq();
     if source_after_seq < fork_floor_seq {
@@ -542,7 +542,7 @@ fn ensure_range_start_retained<S: ObjectStore + ?Sized>(
 /// folded head of the fork's basis manifest, a sequence of `namespace_id`. A
 /// namespace whose basis manifest belongs to another namespace isn't a fork
 /// of `namespace_id`.
-fn fork_point(fork_head: &NamespaceReadState, namespace_id: &NamespaceId) -> Result<ChangeSeq> {
+fn fork_point(fork_head: &NamespaceReadState, namespace_id: &NamespaceId) -> Result<CommitSeq> {
     match &fork_head.fork_basis {
         Some(basis) if basis.manifest.owner_namespace_id == *namespace_id => {
             Ok(basis.manifest.head_seq)
@@ -562,10 +562,10 @@ fn fork_point(fork_head: &NamespaceReadState, namespace_id: &NamespaceId) -> Res
 /// the fork's folded head, `folded_seq`.
 fn through_seq(
     fork: &NamespaceId,
-    folded_seq: ChangeSeq,
-    after_seq: ChangeSeq,
-    requested: Option<ChangeSeq>,
-) -> Result<ChangeSeq> {
+    folded_seq: CommitSeq,
+    after_seq: CommitSeq,
+    requested: Option<CommitSeq>,
+) -> Result<CommitSeq> {
     let through_seq = requested.unwrap_or(folded_seq);
     let refused = |message: String| CoreError::InvalidMerge {
         param: "through_seq",

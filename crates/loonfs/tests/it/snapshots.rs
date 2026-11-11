@@ -2,7 +2,7 @@
 
 use crate::common::*;
 use loonfs::{
-    ChangeSeq, CheckpointOwner, CreateSnapshotOptions, DownloadOptions, ErrorCode,
+    CheckpointOwner, CommitSeq, CreateSnapshotOptions, DownloadOptions, ErrorCode,
     ForkNamespaceOptions, ListChangesOptions, ListSnapshotsResponse, LoonFs, NamespaceId, ReadAt,
     ReadFileOptions, ReadOnly, RevisionNo, SharedObjectStore,
 };
@@ -568,7 +568,7 @@ async fn shared_file_and_download_options_select_the_snapshot() {
     assert_eq!(by_inode.bytes, b"before");
     let feed = reader
         .list_changes_with_options(
-            ChangeSeq(0),
+            CommitSeq(0),
             &ListChangesOptions {
                 at: at.clone(),
                 ..ListChangesOptions::default()

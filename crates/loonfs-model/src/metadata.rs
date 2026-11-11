@@ -12,7 +12,7 @@
 
 use crate::Result;
 use loonfs_types::format::wal::WalDelta;
-use loonfs_types::{ActorId, ChangeSeq, CommitId, ContentRef, InodeId, InodeKind, RevisionNo};
+use loonfs_types::{ActorId, CommitId, CommitSeq, ContentRef, InodeId, InodeKind, RevisionNo};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MetadataState {
@@ -29,7 +29,7 @@ pub struct MetadataState {
 pub struct InodeRecord {
     pub inode_id: InodeId,
     pub inode_kind: InodeKind,
-    pub committed_seq: ChangeSeq,
+    pub committed_seq: CommitSeq,
     pub commit_id: CommitId,
     pub committed_by: ActorId,
     pub committed_at_ms: u64,
@@ -40,7 +40,7 @@ pub struct DirentryBindingRecord {
     pub parent_inode_id: InodeId,
     pub name_key: loonfs_types::NameKey,
     pub child_inode_id: InodeId,
-    pub committed_seq: ChangeSeq,
+    pub committed_seq: CommitSeq,
     pub delta_index: u32,
     pub state: DirentryBindingState,
 }
@@ -57,7 +57,7 @@ pub enum DirentryBindingState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContentLayoutRecord {
     pub content_id: loonfs_types::ContentId,
-    pub committed_seq: ChangeSeq,
+    pub committed_seq: CommitSeq,
     pub size_bytes: u64,
     pub layout: loonfs_types::ContentLayout,
 }
@@ -66,7 +66,7 @@ pub struct ContentLayoutRecord {
 pub struct RevisionRecord {
     pub inode_id: InodeId,
     pub revision_no: RevisionNo,
-    pub committed_seq: ChangeSeq,
+    pub committed_seq: CommitSeq,
     pub commit_id: CommitId,
     pub committed_at_ms: u64,
     pub committed_by: ActorId,
@@ -77,7 +77,7 @@ pub struct RevisionRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubtreeTombstoneRecord {
     pub root_inode_id: InodeId,
-    pub committed_seq: ChangeSeq,
+    pub committed_seq: CommitSeq,
     pub delta_index: u32,
     pub commit_id: CommitId,
     pub committed_at_ms: u64,
@@ -94,7 +94,7 @@ pub struct SubtreeTombstoneRecord {
 pub struct AttributeRevisionRecord {
     pub inode_id: InodeId,
     pub revision_no: u64,
-    pub committed_seq: ChangeSeq,
+    pub committed_seq: CommitSeq,
     pub commit_id: CommitId,
     pub delta_index: u32,
     pub committed_by: ActorId,
@@ -117,7 +117,7 @@ pub struct AttributeEntry {
 pub struct AccessRevisionRecord {
     pub inode_id: InodeId,
     pub revision_no: u64,
-    pub committed_seq: ChangeSeq,
+    pub committed_seq: CommitSeq,
     pub commit_id: CommitId,
     pub delta_index: u32,
     pub committed_by: ActorId,
@@ -139,7 +139,7 @@ pub struct GrantEntry {
 /// to identify the exact deletion it cancels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DeltaPosition {
-    pub seq: ChangeSeq,
+    pub seq: CommitSeq,
     pub delta_index: u32,
 }
 
@@ -169,7 +169,7 @@ impl MetadataState {
     /// sequence.
     pub fn apply_committed_wal_deltas(
         &self,
-        committed_seq: ChangeSeq,
+        committed_seq: CommitSeq,
         commit_id: &CommitId,
         actor: &ActorId,
         committed_at_ms: u64,
@@ -411,7 +411,7 @@ mod tests {
     fn bind_direntry_replay_uses_persisted_name_key() {
         let applied = MetadataState::default()
             .apply_committed_wal_deltas(
-                ChangeSeq(1),
+                CommitSeq(1),
                 &commit_id(),
                 &ActorId::loonfs(),
                 4_200,
@@ -443,7 +443,7 @@ mod tests {
     fn tombstone_replay_restates_the_deleted_binding_and_the_revoked_position() {
         let applied = MetadataState::default()
             .apply_committed_wal_deltas(
-                ChangeSeq(9),
+                CommitSeq(9),
                 &commit_id(),
                 &ActorId::loonfs(),
                 4_200,
@@ -463,7 +463,7 @@ mod tests {
                         delta_index: 2,
                         root_inode_id: InodeId(2),
                         target: DeltaPosition {
-                            seq: ChangeSeq(4),
+                            seq: CommitSeq(4),
                             delta_index: 3,
                         },
                     },
@@ -488,7 +488,7 @@ mod tests {
                 },
                 SubtreeTombstoneAction::Revoke {
                     target: super::DeltaPosition {
-                        seq: ChangeSeq(4),
+                        seq: CommitSeq(4),
                         delta_index: 3,
                     },
                 },

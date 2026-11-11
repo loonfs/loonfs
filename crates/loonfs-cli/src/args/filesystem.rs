@@ -6,7 +6,7 @@ use super::parse::{
     parse_public_inode_id, parse_revision_no,
 };
 use clap::{ArgGroup, Args, Subcommand, ValueHint};
-use loonfs_types::{AccessRevisionNo, AttributesRevisionNo, ChangeSeq, InodeId, PinId, RevisionNo};
+use loonfs_types::{AccessRevisionNo, AttributesRevisionNo, CommitSeq, InodeId, PinId, RevisionNo};
 
 #[derive(Debug, Args)]
 pub(crate) struct FilesystemLsArgs {
@@ -315,7 +315,7 @@ pub(crate) struct FilesystemUndeleteArgs {
     /// `rm` and the change feed. Scopes recovery to that exact deletion,
     /// so a stale command can't cancel a later delete.
     #[arg(long, value_parser = parse_change_seq)]
-    pub deletion_seq: ChangeSeq,
+    pub deletion_seq: CommitSeq,
     #[command(flatten)]
     pub commit: CommitArgs,
 }
@@ -331,7 +331,7 @@ pub(crate) struct ChangesArgs {
     /// Return committed changes after this sequence (defaults to 0, the
     /// start of retained history).
     #[arg(long, value_parser = parse_change_seq)]
-    pub after: Option<ChangeSeq>,
+    pub after: Option<CommitSeq>,
     #[command(flatten)]
     pub pagination: SeqPaginationArgs,
     /// End the change feed at this snapshot.

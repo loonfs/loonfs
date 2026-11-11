@@ -863,7 +863,7 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
 
 #[tokio::test]
 async fn an_advance_that_moves_no_floor_loads_the_manifest_once_and_writes_nothing() {
-    use crate::{AdvanceRetentionFloorOptions, ChangeSeq, RetentionTarget};
+    use crate::{AdvanceRetentionFloorOptions, CommitSeq, RetentionTarget};
     use loonfs_test_support::stores::{KeyPredicate, RecordedOperation, RecordingStore};
 
     let directory = tempdir().expect("tempdir");
@@ -902,20 +902,20 @@ async fn an_advance_that_moves_no_floor_loads_the_manifest_once_and_writes_nothi
     let maintenance = || maintenance_past_the_grace_window(store.clone());
     for (floor, advances) in [
         (
-            ChangeSeq(1),
+            CommitSeq(1),
             [
-                (RetentionTarget::Seq(ChangeSeq(0)), 4),
-                (RetentionTarget::Seq(ChangeSeq(1)), 4),
+                (RetentionTarget::Seq(CommitSeq(0)), 4),
+                (RetentionTarget::Seq(CommitSeq(1)), 4),
                 // The scan reads commit 2 from the commits segment, and
                 // commit 2 is later than the cutoff.
                 (RetentionTarget::Cutoff { cutoff_at_ms: 0 }, 5),
             ],
         ),
         (
-            ChangeSeq(2),
+            CommitSeq(2),
             [
                 (RetentionTarget::Head, 4),
-                (RetentionTarget::Seq(ChangeSeq(u64::MAX)), 4),
+                (RetentionTarget::Seq(CommitSeq(u64::MAX)), 4),
                 // No folded commit is above the head, so the scan reads no
                 // segment.
                 (

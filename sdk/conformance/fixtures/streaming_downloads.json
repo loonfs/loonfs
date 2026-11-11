@@ -181,7 +181,7 @@
     "size_bytes": 9,
     "range": "bytes=0-8",
     "error_message": null,
-    "direct_error_message": "download grant has invalid ranges",
+    "direct_error_message": "download has invalid ranges",
     "object_requests": [],
     "ranges": [
       {
@@ -206,7 +206,7 @@
     "size_bytes": 9,
     "range": "bytes=0-8",
     "error_message": null,
-    "direct_error_message": "download grant has invalid ranges",
+    "direct_error_message": "download has invalid ranges",
     "object_requests": [],
     "ranges": [
       {
@@ -231,7 +231,7 @@
     "size_bytes": 9,
     "range": "bytes=0-8",
     "error_message": null,
-    "direct_error_message": "download grant has invalid ranges",
+    "direct_error_message": "download has invalid ranges",
     "object_requests": [],
     "ranges": [
       {
@@ -250,7 +250,7 @@
     "size_bytes": 9,
     "range": "bytes=0-8",
     "error_message": null,
-    "direct_error_message": "download grant has invalid ranges",
+    "direct_error_message": "download has invalid ranges",
     "object_requests": [],
     "ranges": []
   }

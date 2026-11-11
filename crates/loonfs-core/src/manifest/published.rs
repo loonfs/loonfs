@@ -9,7 +9,7 @@ use crate::time::Observation;
 use crate::wal::ProjectedWalTail;
 use loonfs_types::format::control::{ManifestRef, NamespaceStatus};
 use loonfs_types::format::manifest::NamespaceManifestEnvelope;
-use loonfs_types::{ChangeSeq, WalNo, WriterEpoch};
+use loonfs_types::{CommitSeq, WalNo, WriterEpoch};
 use std::sync::Arc;
 
 /// A manifest above a writer session's position, with the fields that
@@ -27,7 +27,7 @@ pub struct PublishedManifest {
     pub folded_wal_no: WalNo,
     /// The manifest's retention floor. A head that moves onto the manifest
     /// keeps the higher of this floor and its own.
-    pub retention_floor_seq: ChangeSeq,
+    pub retention_floor_seq: CommitSeq,
     /// When this runtime started the call that published the manifest, or
     /// that found it current. No manifest followed it then, so a position
     /// that moves onto it takes this as its last successor check. `None`

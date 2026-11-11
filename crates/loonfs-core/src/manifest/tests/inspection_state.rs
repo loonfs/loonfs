@@ -25,7 +25,7 @@ use loonfs_types::format::manifest::{
     MetadataRow, MetadataRowFamily, MetadataSegmentRef, NamespaceManifestEnvelope,
 };
 use loonfs_types::format::segment_blocks::{index_blocks_for_key_range, DecodedDataBlock};
-use loonfs_types::{ChangeSeq, ManifestNo, NamespaceId};
+use loonfs_types::{CommitSeq, ManifestNo, NamespaceId};
 use std::sync::Arc;
 
 #[cfg(test)]
@@ -105,7 +105,7 @@ pub(super) async fn append_manifest_segments_to_metadata<S>(
     store: &S,
     _namespace_id: &NamespaceId,
     manifest_object_key: &str,
-    run_seq: ChangeSeq,
+    run_seq: CommitSeq,
     segments_by_family: &[MetadataFamilySegments],
     metadata_state: &mut MetadataStateBuilder,
 ) -> Result<(), ManifestLoadError>
@@ -163,7 +163,7 @@ where
 #[cfg(test)]
 pub(super) async fn load_manifest_segment_rows<S: ObjectStore + ?Sized>(
     store: &S,
-    run_seq: ChangeSeq,
+    run_seq: CommitSeq,
     descriptor: &MetadataSegmentRef,
 ) -> Result<SegmentKeyRangeBlocks, ManifestLoadError> {
     load_manifest_segment_rows_with_cache(store, None, run_seq, descriptor).await
@@ -176,7 +176,7 @@ pub(super) async fn load_manifest_segment_rows<S: ObjectStore + ?Sized>(
 pub(super) async fn load_manifest_segment_rows_with_cache<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: Option<&MetadataSegmentCache>,
-    run_seq: ChangeSeq,
+    run_seq: CommitSeq,
     descriptor: &MetadataSegmentRef,
 ) -> Result<SegmentKeyRangeBlocks, ManifestLoadError> {
     let row_set = load_manifest_segment_rows_in_key_range_with_cache(
@@ -336,7 +336,7 @@ pub(crate) async fn load_manifest_segment_rows_in_key_range_with_cache<S: Object
     segment_cache: Option<&MetadataSegmentCache>,
     memo: &SessionBlockMemo,
     descriptor: &MetadataSegmentRef,
-    max_seq: ChangeSeq,
+    max_seq: CommitSeq,
     lower_bound: &str,
     upper_bound: Option<&str>,
     row_limit: usize,

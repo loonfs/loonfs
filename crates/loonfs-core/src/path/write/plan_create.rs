@@ -12,9 +12,9 @@ use crate::metadata::VisiblePathError;
 use crate::path::mutation_path::{ensure_mutation_path, final_component};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::TombstoneRowAction;
-use loonfs_types::options::UndeleteDestination;
+use loonfs_types::options::RestoreDeletedDestination;
 use loonfs_types::{
-    AbsolutePath, AccessRight, ChangeSeq, ContentRef, DestinationBehavior, DisplayName, InodeId,
+    AbsolutePath, AccessRight, CommitSeq, ContentRef, DestinationBehavior, DisplayName, InodeId,
     InodeKind, NameKey, RevisionNo, ROOT_INODE_ID,
 };
 
@@ -90,11 +90,11 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
         Ok(CompiledFilesystemOperation::new(ops))
     }
 
-    pub(super) async fn plan_undelete(
+    pub(super) async fn plan_restore_deleted(
         &self,
         inode_id: InodeId,
-        deletion_seq: ChangeSeq,
-        destination: UndeleteDestination,
+        deletion_seq: CommitSeq,
+        destination: RestoreDeletedDestination,
     ) -> Result<CompiledFilesystemOperation> {
         let deletion = self.view.metadata.recoverable_deletion(inode_id).await?;
         let deleted_binding = match deletion.map(|record| record.action) {
@@ -115,7 +115,9 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
                         Absence::Inode,
                     )
                     .await?;
-                return Err(CommitValidationError::UndeleteTargetNotDeleted { inode_id }.into());
+                return Err(
+                    CommitValidationError::RestoreDeletedTargetNotDeleted { inode_id }.into(),
+                );
             }
         };
         let saved_parent = deleted_binding.parent_inode_id;
@@ -123,15 +125,15 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
             .authorize(saved_parent, AccessRight::Remove.into(), Absence::Inode)
             .await?;
         let (parent_inode_id, display_name) = match destination {
-            UndeleteDestination::Path(absolute_path) => {
-                self.resolve_undelete_destination(
+            RestoreDeletedDestination::Path(absolute_path) => {
+                self.resolve_restore_deleted_destination(
                     inode_id,
                     saved_parent,
                     Destination::Path(&absolute_path),
                 )
                 .await?
             }
-            UndeleteDestination::Name {
+            RestoreDeletedDestination::Name {
                 parent_inode_id,
                 display_name,
             } => {
@@ -139,10 +141,10 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
                     parent_inode_id,
                     display_name: &display_name,
                 };
-                self.resolve_undelete_destination(inode_id, saved_parent, destination)
+                self.resolve_restore_deleted_destination(inode_id, saved_parent, destination)
                     .await?
             }
-            UndeleteDestination::Recorded => {
+            RestoreDeletedDestination::Recorded => {
                 self.view
                     .authorize(saved_parent, AccessRight::Create.into(), Absence::Inode)
                     .await?;
@@ -150,7 +152,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
             }
         };
         Ok(CompiledFilesystemOperation::new(vec![
-            CommitOperation::Undelete {
+            CommitOperation::RestoreDeleted {
                 inode_id,
                 deletion_seq,
                 parent_inode_id,
@@ -159,9 +161,9 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
         ]))
     }
 
-    /// Resolves the new destination of an undelete, which has to be vacant,
+    /// Resolves the new destination of a restore, which has to be vacant,
     /// and authorizes moving the deleted inode there from its saved parent.
-    async fn resolve_undelete_destination(
+    async fn resolve_restore_deleted_destination(
         &self,
         inode_id: InodeId,
         saved_parent: InodeId,

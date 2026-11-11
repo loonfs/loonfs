@@ -5,8 +5,8 @@ use crate::common::{
 };
 use bytes::Bytes;
 use loonfs::{
-    CreateNamespaceOptions, ErrorCode, LoonFs, NamespaceId, PutFileOptions, SharedObjectStore,
-    UndeleteDestination, UndeleteOptions,
+    CreateNamespaceOptions, ErrorCode, LoonFs, NamespaceId, PutFileOptions,
+    RestoreDeletedDestination, RestoreDeletedOptions, SharedObjectStore,
 };
 use loonfs_grep::entry::{grep_extension_name, GrepIndexStatus};
 use loonfs_grep::NamespaceReads;
@@ -25,7 +25,7 @@ use loonfs_test_support::stores::{
 use loonfs_types::format::control::PinOwner;
 use loonfs_types::format::manifest::ExtensionEntry;
 use loonfs_types::{
-    AbsolutePath, ChangeSeq, GrepRequest, GrepResponse, GrepScope, IndexSegmentId, PageRequest,
+    AbsolutePath, CommitSeq, GrepRequest, GrepResponse, GrepScope, IndexSegmentId, PageRequest,
     RunNo, MAX_PUBLIC_INTEGER,
 };
 use std::assert_matches;
@@ -546,7 +546,7 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
         .expect("write after watermark");
     let retention_floor_seq =
         fold_wal_and_advance_retention(&store, &maintenance, &namespace_id).await;
-    assert!(retention_floor_seq > ChangeSeq(0));
+    assert!(retention_floor_seq > CommitSeq(0));
     let indexed = crate::common::control::grep_entry(&store, &namespace_id)
         .await
         .expect("grep's entry")
@@ -854,7 +854,7 @@ async fn grep_segment_ids(
 async fn grep_built_through_seq(
     store: &SharedObjectStore,
     namespace_id: &NamespaceId,
-) -> ChangeSeq {
+) -> CommitSeq {
     crate::common::control::grep_entry(store, namespace_id)
         .await
         .expect("grep entry exists")
@@ -1052,11 +1052,11 @@ async fn a_move_reindexes_nothing_and_answers_the_new_path() {
 }
 
 #[tokio::test]
-async fn a_recursive_delete_hides_matches_and_an_undelete_restores_them() {
+async fn a_recursive_delete_hides_matches_and_a_restore_brings_them_back() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
-    let namespace_id = NamespaceId::parse("delete-undelete").expect("namespace id");
+    let namespace_id = NamespaceId::parse("delete-restore").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("delete-writer"))
         .config(loonfs::RuntimeConfig {
@@ -1131,42 +1131,42 @@ async fn a_recursive_delete_hides_matches_and_an_undelete_restores_them() {
     );
 
     namespace_writer
-        .undelete_with_options(
+        .restore_deleted_with_options(
             docs_inode_id,
             deleted.committed_seq,
             &loonfs_test_support::test_actor(),
-            &UndeleteOptions {
-                destination: UndeleteDestination::Path(
+            &RestoreDeletedOptions {
+                destination: RestoreDeletedDestination::Path(
                     AbsolutePath::parse("/docs").expect("valid destination path"),
                 ),
                 ..Default::default()
             },
         )
         .await
-        .expect("undelete the subtree");
+        .expect("restore the subtree");
     drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
 
     let restored = new_query(&store, &namespace_id, &request("subtree needle"))
         .await
-        .expect("query after the undelete");
+        .expect("query after the restore");
     assert_eq!(matched_paths(&restored), vec!["/docs/a.txt", "/docs/b.txt"]);
     assert_eq!(
         grep_segment_ids(&store, &namespace_id).await,
         segments_before,
-        "an undelete must write no new postings"
+        "a restore must write no new postings"
     );
     writer.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test]
-async fn undeleting_a_subtree_deleted_before_backfill_needs_no_rebuild() {
+async fn restoring_a_subtree_deleted_before_backfill_needs_no_rebuild() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
-    let namespace_id = NamespaceId::parse("undelete-after-backfill").expect("namespace id");
+    let namespace_id = NamespaceId::parse("restore-after-backfill").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id(
-            "undelete-backfill-writer",
+            "restore-backfill-writer",
         ))
         .config(loonfs::RuntimeConfig {
             min_publish_interval_ms: 0,
@@ -1223,24 +1223,24 @@ async fn undeleting_a_subtree_deleted_before_backfill_needs_no_rebuild() {
     );
     let segments_before = grep_segment_ids(&store, &namespace_id).await;
 
-    let undeleted = namespace_writer
-        .undelete_with_options(
+    let restored_deleted = namespace_writer
+        .restore_deleted_with_options(
             docs_inode_id,
             deleted.committed_seq,
             &loonfs_test_support::test_actor(),
-            &UndeleteOptions {
-                destination: UndeleteDestination::Path(
+            &RestoreDeletedOptions {
+                destination: RestoreDeletedDestination::Path(
                     AbsolutePath::parse("/docs").expect("valid destination path"),
                 ),
                 ..Default::default()
             },
         )
         .await
-        .expect("undelete subtree after backfill");
+        .expect("restore subtree after backfill");
 
     let restored = new_query(&store, &namespace_id, &request("restored needle"))
         .await
-        .expect("an exact query across the undelete");
+        .expect("an exact query across the restore");
     assert!(restored.tail_scanned);
     assert_eq!(matched_paths(&restored), vec!["/docs/a.txt", "/docs/b.txt"]);
 
@@ -1248,18 +1248,18 @@ async fn undeleting_a_subtree_deleted_before_backfill_needs_no_rebuild() {
         .steps(&namespace_id, 0)
         .build_step(GramIndexBuildPolicy::default())
         .await
-        .expect("build step after undelete");
+        .expect("build step after restore");
     assert_matches!(
         step,
         GrepBuildOutcome::Indexed {
             segments_written: 0,
             ..
         },
-        "an undelete only advances the watermark: {step:?}"
+        "a restore only advances the watermark: {step:?}"
     );
     assert_eq!(
         grep_built_through_seq(&store, &namespace_id).await,
-        undeleted.committed_seq
+        restored_deleted.committed_seq
     );
     assert_eq!(
         grep_segment_ids(&store, &namespace_id).await,
@@ -1689,7 +1689,7 @@ async fn planless_scan_covers_wal_revisions_at_or_below_index_watermark() {
 #[tokio::test]
 async fn grep_serves_a_match_under_a_derived_path_over_the_byte_limit() {
     use loonfs::publish::{CommitIntent, FilesystemOperation};
-    use loonfs::{CommitId, FilesystemChange};
+    use loonfs::{CommitId, FilesystemEvent};
     use loonfs_types::{DisplayName, MAX_PATH_BYTES, ROOT_INODE_ID};
 
     let temp_dir = tempdir().expect("tempdir");
@@ -1733,7 +1733,7 @@ async fn grep_serves_a_match_under_a_derived_path_over_the_byte_limit() {
             .await
             .expect("create a directory by inode");
         directory = match created.events.as_slice() {
-            [FilesystemChange::DirectoryCreated { inode_id, .. }] => *inode_id,
+            [FilesystemEvent::DirectoryCreated { inode_id, .. }] => *inode_id,
             other => panic!("expected one created directory, got {other:?}"),
         };
         directory_path = format!("{directory_path}/{}", name(level));
@@ -1984,7 +1984,7 @@ async fn grep_worker_pins_reorganized_tail_and_pagination_results() {
             .matches
     );
     inode_scope.scope = GrepScope::Inode(loonfs_types::InodeId::generate(
-        ChangeSeq(1_000),
+        CommitSeq(1_000),
         NonZeroU32::MIN,
     ));
     let error = new_query(&store, &namespace_id, &inode_scope)
@@ -2141,7 +2141,7 @@ async fn a_backfilling_manifest_never_reports_a_built_through_sequence() {
     assert_eq!(
         backfilling,
         loonfs_types::GrepIndexStatus::Backfilling {
-            captured_seq: ChangeSeq(1),
+            captured_seq: CommitSeq(1),
             cursor_inode_id: None,
             checkpoint_id: match &state {
                 GrepIndexStatus::Backfilling { pin_id, .. } => pin_id.clone(),
@@ -2186,7 +2186,7 @@ async fn a_backfilling_manifest_never_reports_a_built_through_sequence() {
     assert_eq!(
         active,
         loonfs_types::GrepIndexStatus::Active {
-            built_through_seq: ChangeSeq(1),
+            built_through_seq: CommitSeq(1),
             next_event_index: 0,
         }
     );

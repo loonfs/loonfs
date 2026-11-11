@@ -5,7 +5,7 @@ use crate::common::{
     open_compacting_runtime_with_async, open_runtime_async, open_runtime_with_async, store,
 };
 use loonfs::{
-    ChangeSeq, CreateSnapshotOptions, CurrentFile, DestinationBehavior, ErrorCode, ListOptions,
+    CommitSeq, CreateSnapshotOptions, CurrentFile, DestinationBehavior, ErrorCode, ListOptions,
     LoonFs, NamespaceId, PutFileOptions, ReadAt, RevisionNo,
 };
 use std::assert_matches;
@@ -868,7 +868,7 @@ async fn a_view_at_an_earlier_sequence_reads_that_sequence_until_the_floor_passe
     );
     let later = earlier.stat("/b.txt").await.expect_err("b is later");
     assert_eq!(later.code(), ErrorCode::PathNotFound);
-    let Err(ahead) = view.at_seq(ChangeSeq(view.head_seq().0 + 1)).await else {
+    let Err(ahead) = view.at_seq(CommitSeq(view.head_seq().0 + 1)).await else {
         panic!("a sequence above the head should be refused");
     };
     assert_eq!(ahead.code(), ErrorCode::InvalidRequest);

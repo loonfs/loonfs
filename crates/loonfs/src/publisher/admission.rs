@@ -486,14 +486,14 @@ mod tests {
             )),
             loonfs_types::format::wal::MergeRecord {
                 source_namespace_id: NamespaceId::parse("fork").expect("namespace"),
-                source_after_seq: loonfs_types::ChangeSeq(3),
-                source_through_seq: loonfs_types::ChangeSeq(7),
+                source_after_seq: loonfs_types::CommitSeq(3),
+                source_through_seq: loonfs_types::CommitSeq(7),
             },
-            loonfs_types::ChangeSeq(3),
+            loonfs_types::CommitSeq(3),
             std::collections::BTreeMap::from([(
                 0,
                 loonfs_types::InodeId::generate(
-                    loonfs_types::ChangeSeq(4),
+                    loonfs_types::CommitSeq(4),
                     std::num::NonZeroU32::MIN,
                 ),
             )]),

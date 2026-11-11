@@ -9,8 +9,8 @@ use loonfs_test_support::http::{
 use loonfs_test_support::ids::namespace_id;
 use loonfs_types::ROOT_INODE_ID;
 use loonfs_types::{
-    AbsolutePath, ChangeSeq, Commit, CommitId, CommitRequest, CompleteUploadBody, ContentRef,
-    CreateUploadBody, DestinationBehavior, ErrorCode, ErrorResponse, FilesystemChange,
+    AbsolutePath, Commit, CommitId, CommitRequest, CommitSeq, CompleteUploadBody, ContentRef,
+    CreateUploadBody, DestinationBehavior, ErrorCode, ErrorResponse, FilesystemEvent,
     FilesystemOperation, RevisionNo, UploadMode, UploadSession, UploadSessionStatus,
     LIMIT_UPLOAD_COMPLETE_MAX_REQUEST_BODY_BYTES,
 };
@@ -343,7 +343,7 @@ async fn completion_content_token_passes_unchanged_into_http_commit() {
         commit.commit_id,
         CommitId::parse("req-phase-2a-create-file").expect("valid commit id")
     );
-    assert_eq!(commit.committed_seq, ChangeSeq(1));
+    assert_eq!(commit.committed_seq, CommitSeq(1));
 
     let repeated_commit = send_put(&put_request);
     assert_eq!(repeated_commit, commit);
@@ -357,7 +357,7 @@ async fn completion_content_token_passes_unchanged_into_http_commit() {
         .events
         .iter()
         .find_map(|event| match event {
-            loonfs_types::FilesystemChange::FileCreated { inode_id, .. } => Some(*inode_id),
+            loonfs_types::FilesystemEvent::FileCreated { inode_id, .. } => Some(*inode_id),
             _ => None,
         })
         .expect("the commit creates the file");
@@ -372,12 +372,12 @@ async fn completion_content_token_passes_unchanged_into_http_commit() {
 
     let changes = harness
         .client
-        .list_changes(&namespace, ChangeSeq(0))
+        .list_changes(&namespace, CommitSeq(0))
         .page()
         .await
         .expect("list changes");
     assert_eq!(changes.namespace_id, namespace);
-    assert_eq!(changes.after_seq, ChangeSeq(0));
+    assert_eq!(changes.after_seq, CommitSeq(0));
     assert_eq!(changes.head_seq, commit.committed_seq);
     assert_eq!(changes.changes.len(), 1);
     let change = &changes.changes[0];
@@ -389,7 +389,7 @@ async fn completion_content_token_passes_unchanged_into_http_commit() {
     assert_eq!(change.events.len(), 1);
     assert_matches!(
         &change.events[0],
-        FilesystemChange::FileCreated {
+        FilesystemEvent::FileCreated {
             inode_id,
             parent_inode_id: ROOT_INODE_ID,
             display_name,
@@ -507,7 +507,7 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
     .expect("re-minted evidence admits its content");
     let commit: Commit =
         serde_json::from_reader(commit.into_reader()).expect("decode commit response");
-    assert_eq!(commit.committed_seq, ChangeSeq(1));
+    assert_eq!(commit.committed_seq, CommitSeq(1));
 
     let ureq::Error::Status(status_code, response) =
         *abort_upload(&harness.server_url, &upload_id).expect_err("a completed session is final")

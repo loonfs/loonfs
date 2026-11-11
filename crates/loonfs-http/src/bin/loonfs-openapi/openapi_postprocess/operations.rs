@@ -343,17 +343,17 @@ pub(crate) const OPERATION_SDK_NAMES: &[(&str, SdkName)] = &[
         },
     ),
     (
-        "run_maintenance",
+        "run_maintenance_job",
         SdkName {
-            group: &["maintenance", "runs"],
+            group: &["maintenance", "jobs"],
             method: "create",
             request: None,
         },
     ),
     (
-        "run_pool_maintenance",
+        "run_pool_maintenance_job",
         SdkName {
-            group: &["maintenance", "pools", "runs"],
+            group: &["maintenance", "pools", "jobs"],
             method: "create",
             request: None,
         },

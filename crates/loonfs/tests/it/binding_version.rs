@@ -1,7 +1,7 @@
 use crate::common::*;
-use loonfs::{ChangeSeq, DestinationBehavior, PutFileOptions};
+use loonfs::{CommitSeq, DestinationBehavior, PutFileOptions};
 use loonfs_test_support::ids::namespace_id;
-use loonfs_types::FilesystemChange;
+use loonfs_types::FilesystemEvent;
 use tempfile::tempdir;
 
 /// Checks that a file's binding version, as a stat and a listing report it,
@@ -90,7 +90,7 @@ fn binding_version_changes_on_move_but_not_content_update() {
     );
 
     let changes = fs
-        .list_changes_blocking(&namespace_id, ChangeSeq(moved_at.0 - 1))
+        .list_changes_blocking(&namespace_id, CommitSeq(moved_at.0 - 1))
         .expect("read the change feed");
     let events = &changes
         .changes
@@ -98,7 +98,7 @@ fn binding_version_changes_on_move_but_not_content_update() {
         .expect("the move is a committed change")
         .events;
     match events.as_slice() {
-        [FilesystemChange::Moved {
+        [FilesystemEvent::Moved {
             binding_version, ..
         }] => assert_eq!(
             *binding_version, renamed,

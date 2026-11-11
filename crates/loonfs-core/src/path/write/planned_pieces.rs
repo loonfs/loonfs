@@ -5,7 +5,7 @@ use crate::wal::{ProjectedContent, ProjectedPiece};
 use bytes::Bytes;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::WalInlineContent;
-use loonfs_types::{ChangeSeq, ContentId, ContentRef};
+use loonfs_types::{CommitSeq, ContentId, ContentRef};
 use std::collections::HashMap;
 
 #[derive(Default)]
@@ -25,7 +25,7 @@ impl PlannedPieces {
         below: Option<&ProjectedContent>,
         content_ref: &ContentRef,
         entry: &WalInlineContent,
-        committed_seq: ChangeSeq,
+        committed_seq: CommitSeq,
     ) {
         let piece = ProjectedPiece {
             offset: entry.offset,
@@ -68,7 +68,7 @@ impl<'a, S: ObjectStore + ?Sized> CommitPieces<'a, S> {
         &mut self,
         content_ref: &ContentRef,
         entry: &WalInlineContent,
-        committed_seq: ChangeSeq,
+        committed_seq: CommitSeq,
     ) {
         self.own.insert_piece(
             self.session.content(content_ref).as_ref(),

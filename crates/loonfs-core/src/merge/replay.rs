@@ -19,7 +19,7 @@ use crate::path::read::LoadedMetadataView;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::ForkBasis;
 use loonfs_types::format::wal::MergeRecord;
-use loonfs_types::{AbsolutePath, ChangeSeq, InodeId, InodeKind, MergeConflict, MergeConflictKind};
+use loonfs_types::{AbsolutePath, CommitSeq, InodeId, InodeKind, MergeConflict, MergeConflictKind};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// A replay commit planned against the head of a rebase's new fork, and the
@@ -65,8 +65,8 @@ pub(super) struct Replay<'v, S: ObjectStore + ?Sized> {
 /// that the range start was checked against.
 struct ReplayRange<'a> {
     basis: &'a ForkBasis,
-    fork_point_seq: ChangeSeq,
-    source_after_seq: ChangeSeq,
+    fork_point_seq: CommitSeq,
+    source_after_seq: CommitSeq,
 }
 
 /// One part of the history after the fork point that the subtree check
@@ -75,8 +75,8 @@ struct ReplayRange<'a> {
 /// new fork's own part above its fork point.
 pub(super) struct HistoryPart<'v, S: ObjectStore + ?Sized> {
     pub(super) view: &'v LoadedMetadataView<'v, S>,
-    pub(super) from_seq: ChangeSeq,
-    pub(super) to_seq: ChangeSeq,
+    pub(super) from_seq: CommitSeq,
+    pub(super) to_seq: CommitSeq,
     /// Each checked directory's path at the end of the part, with the
     /// directory's index in the checks. A directory with no path there is
     /// left out.
@@ -95,7 +95,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         context: &RuntimeReadContext,
         fork: &NamespaceEngine<S, F>,
         fork_context: &RuntimeReadContext,
-    ) -> Result<ChangeSeq> {
+    ) -> Result<CommitSeq> {
         let main = self.namespace.load_metadata_view(context).await?;
         let fork_view = fork.namespace.load_metadata_view(fork_context).await?;
         let fork_point_seq = fork_point(fork_view.head(), &main.head().namespace_id)?;
@@ -305,8 +305,8 @@ impl<'v, S: ObjectStore + ?Sized> Classifier<'v, S> {
     /// conflict for each change that depends on a skipped change, in the
     /// order that it finds them:
     ///
-    /// - a create, an undelete, or a move into a directory whose create or
-    ///   undelete it skips, as the merge's target check treats an undeleted
+    /// - a create, a restore, or a move into a directory whose create or
+    ///   restore it skips, as the merge's target check treats a restored
     ///   directory like a created one,
     /// - the delete of a directory that still contains an inode whose move
     ///   out of it was skipped, which the delete would delete in the new
@@ -328,7 +328,7 @@ impl<'v, S: ObjectStore + ?Sized> Classifier<'v, S> {
                 plan.kind == InodeKind::Directory
                     && matches!(
                         plan.binding,
-                        Some(BindingChange::Create { .. } | BindingChange::Undelete { .. })
+                        Some(BindingChange::Create { .. } | BindingChange::RestoreDeleted { .. })
                     )
             })
             .map(|plan| plan.inode_id)
@@ -361,8 +361,8 @@ impl<'v, S: ObjectStore + ?Sized> Classifier<'v, S> {
         Ok(())
     }
 
-    /// Records a `dependency` conflict for each create, undelete, or move
-    /// into a directory in `created_directories` whose create or undelete is
+    /// Records a `dependency` conflict for each create, restore, or move
+    /// into a directory in `created_directories` whose create or restore is
     /// skipped, and returns how many it recorded. `theirs` is the directory's
     /// version in the fork.
     async fn skip_creates_in_skipped_directories(
@@ -381,7 +381,7 @@ impl<'v, S: ObjectStore + ?Sized> Classifier<'v, S> {
                     | BindingChange::Move {
                         parent_inode_id, ..
                     }
-                    | BindingChange::Undelete {
+                    | BindingChange::RestoreDeleted {
                         parent_inode_id, ..
                     },
                 ) => *parent_inode_id,

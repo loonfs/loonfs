@@ -4,12 +4,12 @@ use super::{DestinationBehavior, DestinationPrecondition};
 use crate::options::{
     AccessState, AppendFileByInodeOptions, AppendFileOptions, AttributeChanges, CopyOptions,
     CreateDirectoryOptions, DeleteByInodeOptions, DeleteOptions, MoveOptions, PutFileOptions,
-    UndeleteDestination, UpdateAccessByInodeOptions, UpdateAccessOptions,
+    RestoreDeletedDestination, UpdateAccessByInodeOptions, UpdateAccessOptions,
     UpdateAttributesByInodeOptions, UpdateAttributesOptions,
 };
 use crate::{
     AbsolutePath, AccessGrants, AccessRevisionNo, AttributeKey, AttributeValue,
-    AttributesRevisionNo, BindingVersion, ChangeSeq, ContentRef, DisplayName, InodeId, RevisionNo,
+    AttributesRevisionNo, BindingVersion, CommitSeq, ContentRef, DisplayName, InodeId, RevisionNo,
 };
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -98,10 +98,10 @@ impl utoipa::ToSchema for FileContent {
     }
 }
 
-/// The wire fields of [`UndeleteDestination`], which an undelete includes beside its other fields.
+/// The wire fields of [`RestoreDeletedDestination`], which a restore of a deleted item includes beside its other fields.
 #[derive(Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-struct UndeleteDestinationFields {
+struct RestoreDeletedDestinationFields {
     /// The absolute path to restore the inode to. It can't be combined with
     /// `destination_parent_inode_id`.
     #[serde(default)]
@@ -117,9 +117,9 @@ struct UndeleteDestinationFields {
     destination_display_name: Option<DisplayName>,
 }
 
-impl Serialize for UndeleteDestination {
+impl Serialize for RestoreDeletedDestination {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut fields = serializer.serialize_struct("UndeleteDestination", 2)?;
+        let mut fields = serializer.serialize_struct("RestoreDeletedDestination", 2)?;
         match self {
             Self::Recorded => {}
             Self::Path(path) => fields.serialize_field("destination_path", path)?,
@@ -136,9 +136,9 @@ impl Serialize for UndeleteDestination {
     }
 }
 
-impl<'de> Deserialize<'de> for UndeleteDestination {
+impl<'de> Deserialize<'de> for RestoreDeletedDestination {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let fields = UndeleteDestinationFields::deserialize(deserializer)?;
+        let fields = RestoreDeletedDestinationFields::deserialize(deserializer)?;
         match (
             fields.destination_path,
             fields.destination_parent_inode_id,
@@ -165,21 +165,21 @@ impl<'de> Deserialize<'de> for UndeleteDestination {
 }
 
 #[cfg(feature = "openapi")]
-impl utoipa::PartialSchema for UndeleteDestination {
+impl utoipa::PartialSchema for RestoreDeletedDestination {
     fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
-        <UndeleteDestinationFields as utoipa::PartialSchema>::schema()
+        <RestoreDeletedDestinationFields as utoipa::PartialSchema>::schema()
     }
 }
 
 #[cfg(feature = "openapi")]
-impl utoipa::ToSchema for UndeleteDestination {
+impl utoipa::ToSchema for RestoreDeletedDestination {
     fn schemas(
         schemas: &mut Vec<(
             String,
             utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>,
         )>,
     ) {
-        <UndeleteDestinationFields as utoipa::ToSchema>::schemas(schemas);
+        <RestoreDeletedDestinationFields as utoipa::ToSchema>::schemas(schemas);
     }
 }
 
@@ -409,19 +409,22 @@ pub enum FilesystemOperation {
     /// An operation that restores the deletion that `inode_id` and `deletion_seq` identify.
     ///
     /// To choose the destination, set `destination_path`, or set `destination_parent_inode_id` and
-    /// `destination_display_name`. If you set neither, the undelete uses the parent and name
+    /// `destination_display_name`. If you set neither, the restore uses the parent and name
     /// recorded with the deletion.
-    #[cfg_attr(feature = "openapi", schema(title = "FilesystemOperationUndelete"))]
-    Undelete {
+    #[cfg_attr(
+        feature = "openapi",
+        schema(title = "FilesystemOperationRestoreDeleted")
+    )]
+    RestoreDeleted {
         /// The deleted inode to make reachable again.
         #[serde(with = "crate::inode_id::public")]
         inode_id: InodeId,
-        /// The deletion sequence that the caller observed. It prevents the undelete from cancelling
+        /// The deletion sequence that the caller observed. It prevents the restore from cancelling
         /// a newer deletion of the inode.
-        deletion_seq: ChangeSeq,
-        /// Where the undelete binds the restored inode.
+        deletion_seq: CommitSeq,
+        /// Where the restore binds the restored inode.
         #[serde(flatten)]
-        destination: UndeleteDestination,
+        destination: RestoreDeletedDestination,
     },
     /// An operation that restores an older revision as the current revision of the file at a path.
     #[cfg_attr(
@@ -778,14 +781,14 @@ impl FilesystemOperation {
         }
     }
 
-    /// Builds an undelete of the deletion of `inode_id` committed at
+    /// Builds a restore of the deletion of `inode_id` committed at
     /// `deletion_seq`, bound where `destination` says.
-    pub fn undelete(
+    pub fn restore_deleted(
         inode_id: InodeId,
-        deletion_seq: ChangeSeq,
-        destination: &UndeleteDestination,
+        deletion_seq: CommitSeq,
+        destination: &RestoreDeletedDestination,
     ) -> Self {
-        Self::Undelete {
+        Self::RestoreDeleted {
             inode_id,
             deletion_seq,
             destination: destination.clone(),
@@ -811,7 +814,7 @@ impl FilesystemOperation {
             | Self::MoveByInode { .. }
             | Self::CopyPath { .. }
             | Self::CopyByInode { .. }
-            | Self::Undelete { .. }
+            | Self::RestoreDeleted { .. }
             | Self::RestoreRevision { .. }
             | Self::RestoreRevisionByInode { .. }
             | Self::UpdateAttributes { .. }
@@ -837,7 +840,7 @@ impl FilesystemOperation {
             | Self::MoveByInode { .. }
             | Self::CopyPath { .. }
             | Self::CopyByInode { .. }
-            | Self::Undelete { .. }
+            | Self::RestoreDeleted { .. }
             | Self::RestoreRevision { .. }
             | Self::RestoreRevisionByInode { .. }
             | Self::UpdateAttributes { .. }
@@ -1065,7 +1068,7 @@ mod tests {
     }
 
     #[test]
-    fn an_undelete_destination_is_one_path_or_one_parent_and_name() {
+    fn a_restore_destination_is_one_path_or_one_parent_and_name() {
         for (destination, message) in [
             (
                 serde_json::json!({
@@ -1086,7 +1089,7 @@ mod tests {
             ),
         ] {
             let mut document = serde_json::json!({
-                "kind": "undelete",
+                "kind": "restore_deleted",
                 "inode_id": "ino_00000000000000000000000007",
                 "deletion_seq": 8
             });
@@ -1095,7 +1098,7 @@ mod tests {
                 .expect("operation object")
                 .extend(destination.as_object().expect("destination fields").clone());
             let error = serde_json::from_value::<FilesystemOperation>(document)
-                .expect_err("an undelete names at most one destination");
+                .expect_err("a restore names at most one destination");
             assert!(error.to_string().contains(message), "{error}");
         }
     }
@@ -1222,13 +1225,13 @@ mod tests {
                 }),
             ),
             (
-                FilesystemOperation::Undelete {
+                FilesystemOperation::RestoreDeleted {
                     inode_id: InodeId(7),
-                    deletion_seq: ChangeSeq(8),
-                    destination: UndeleteDestination::Path(path("/docs/restored")),
+                    deletion_seq: CommitSeq(8),
+                    destination: RestoreDeletedDestination::Path(path("/docs/restored")),
                 },
                 serde_json::json!({
-                    "kind": "undelete",
+                    "kind": "restore_deleted",
                     "inode_id": "ino_00000000000000000000000007",
                     "deletion_seq": 8,
                     "destination_path": "/docs/restored"
@@ -1341,7 +1344,7 @@ mod tests {
                 "destination_path": "relative"
             }),
             serde_json::json!({
-                "kind": "undelete",
+                "kind": "restore_deleted",
                 "inode_id": "ino_00000000000000000000000007",
                 "deletion_seq": 8,
                 "destination_path": "relative"
@@ -1371,7 +1374,7 @@ mod tests {
                 "expected_inode_id": "ino_0000000000000000000000000v"
             }),
             serde_json::json!({
-                "kind": "undelete",
+                "kind": "restore_deleted",
                 "inode_id": "ino_0000000000000000000000000v",
                 "deletion_seq": 8,
                 "destination_path": "/docs/restored"
@@ -1387,7 +1390,7 @@ mod tests {
             serde_json::from_value::<FilesystemOperation>(operation.clone())
                 .expect("valid public inode ID");
 
-            let inode_key = if operation["kind"] == "undelete" {
+            let inode_key = if operation["kind"] == "restore_deleted" {
                 "inode_id"
             } else {
                 "expected_inode_id"

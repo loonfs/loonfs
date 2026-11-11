@@ -31,7 +31,7 @@ use loonfs_types::format::wal::{
 };
 use loonfs_types::ContentId;
 use loonfs_types::{
-    ChangeSeq, ContentRef, PrincipalId, PrincipalScope, PrincipalSet, Subject, SubjectId,
+    CommitSeq, ContentRef, PrincipalId, PrincipalScope, PrincipalSet, Subject, SubjectId,
     WriterEpoch,
 };
 use std::assert_matches;
@@ -827,7 +827,7 @@ async fn a_quiet_writer_confirms_its_tip_with_a_wal_head_and_then_a_manifest_hea
         .wal_no;
     let planned = namespace.load_current_manifest().await.expect("planned");
     namespace
-        .publish_floor_object(&planned, ChangeSeq(1))
+        .publish_floor_object(&planned, CommitSeq(1))
         .await
         .expect("another process creates a floor object");
     timer.advance_ms(WAL_PUBLISH_BUDGET_MS + 1);
@@ -845,7 +845,7 @@ async fn a_quiet_writer_confirms_its_tip_with_a_wal_head_and_then_a_manifest_hea
     );
     let position = engine.writer_position().expect("a position");
     assert_eq!(position.read_basis.head.wal_no.0, tip.0 + 2);
-    assert_eq!(position.retention_floor_seq(), ChangeSeq(1));
+    assert_eq!(position.retention_floor_seq(), CommitSeq(1));
 }
 
 /// Checks that a writer that commits every few minutes for an hour, against
@@ -1080,7 +1080,7 @@ async fn a_session_drops_its_position_at_a_fold_past_its_tip() {
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let planned = namespace.load_current_manifest().await.expect("planned");
     namespace
-        .publish_floor_object(&planned, ChangeSeq(1))
+        .publish_floor_object(&planned, CommitSeq(1))
         .await
         .expect("another process creates a floor object");
     let folded = namespace
@@ -1114,7 +1114,7 @@ async fn a_session_drops_its_position_at_a_fold_past_its_tip() {
     publish_one(&mut engine, &writer, "beta").await;
     let position = engine.writer_position().expect("a position");
     assert_eq!(position.read_basis.head.wal_no.0, tip.0 + 2);
-    assert_eq!(position.retention_floor_seq(), ChangeSeq(1));
+    assert_eq!(position.retention_floor_seq(), CommitSeq(1));
 }
 
 /// Checks that a writer at the write stop whose fold finds its tail already
@@ -1649,13 +1649,13 @@ async fn publish_over_budget_writes_no_wal_object_and_a_retry_rebuilds() {
         .publish_batch(vec![create_dir("budgeted", "alpha")], &writer.clock())
         .await;
     let response = retried.results[0].as_ref().expect("rebuilt publish");
-    assert_eq!(response.committed_seq, ChangeSeq(1));
+    assert_eq!(response.committed_seq, CommitSeq(1));
     assert_eq!(wal_object_count(&store, &namespace_id).await, 3);
     let head_final = crate::test_support::namespace_store(&store, &namespace_id)
         .load_read_state()
         .await
         .expect("read head");
-    assert_eq!(head_final.seq, ChangeSeq(1));
+    assert_eq!(head_final.seq, CommitSeq(1));
     // Two engines are two sessions, and each acquires its own epoch: the
     // abandoned attempt took 1, the retry took 2.
     assert_eq!(head_final.writer_epoch, WriterEpoch(2));
@@ -1765,7 +1765,7 @@ async fn publish_views_reuse_cached_segment_blocks_across_publishes() {
 /// manifest, which records the floor. Returns that manifest.
 pub(super) async fn advance_in_session<S: ObjectStore>(
     engine: &mut NamespaceCommitEngine<S>,
-    target: ChangeSeq,
+    target: CommitSeq,
 ) -> crate::manifest::PublishedManifest {
     let clock = OperationClock::start(0, Arc::new(StdMonotonicTimer::default()));
     let planned = engine

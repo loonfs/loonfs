@@ -11,7 +11,7 @@ use loonfs_types::{
     LIMIT_UPLOAD_DIRECT_PUT_MAX_CONTENT_BYTES, LIMIT_UPLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES,
 };
 use loonfs_types::{
-    CompleteUploadBody, CompletedUploadPart, ContentToken, CreateUploadBody, ObjectTransferAccess,
+    CompleteUploadBody, CompletedUploadPart, ContentToken, CreateUploadBody, ObjectTransfer,
     UploadContentClaim, UploadMode, UploadSession, UploadSessionStatus,
 };
 use std::sync::{Arc, Mutex};
@@ -207,10 +207,10 @@ fn observed_direct_put_source(
 
 /// Builds a presigned PUT request, for a whole object or for one part.
 pub(super) fn presigned_put_request(
-    access: &ObjectTransferAccess,
+    access: &ObjectTransfer,
     policy: SendPolicy,
 ) -> Result<WireRequest> {
-    let ObjectTransferAccess::PresignedUrl {
+    let ObjectTransfer::PresignedUrl {
         method,
         url,
         headers,
@@ -405,7 +405,7 @@ impl Client {
             }
             let UploadSessionStatus::Open {
                 checksum_algorithm,
-                access: Some(access),
+                transfer: Some(access),
                 ..
             } = begin.status
             else {

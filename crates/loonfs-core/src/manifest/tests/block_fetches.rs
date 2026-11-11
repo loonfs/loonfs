@@ -50,7 +50,7 @@ async fn segment_with_block_target(
 fn one_segment_runs(descriptor: MetadataSegmentRef) -> Vec<MetadataRunManifest> {
     vec![MetadataRunManifest {
         run_no: RunNo(1),
-        run_seq: ChangeSeq(1),
+        run_seq: CommitSeq(1),
         tier: RunTier::Delta,
         segments: vec![MetadataFamilySegments {
             family: FAMILY,

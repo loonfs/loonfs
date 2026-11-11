@@ -16,7 +16,7 @@ use loonfs_types::format::wal::{
     WalObjectPayload,
 };
 use loonfs_types::{
-    AbsolutePath, ActorId, ChangeSeq, Commit, CommitId, ContentId, DeleteDirectoryBehavior,
+    AbsolutePath, ActorId, Commit, CommitId, CommitSeq, ContentId, DeleteDirectoryBehavior,
     DestinationBehavior, NamespaceMetadata, RevisionNo,
 };
 
@@ -333,9 +333,9 @@ impl<S: ObjectStore> NamespaceStore<S> {
         &self,
         deltas: Vec<WalDelta>,
         inline_content: Vec<WalInlineContent>,
-    ) -> Result<ChangeSeq> {
+    ) -> Result<CommitSeq> {
         let head = self.load_read_state().await?;
-        let committed_seq = ChangeSeq(head.seq.0 + 1);
+        let committed_seq = CommitSeq(head.seq.0 + 1);
         let wal_no = loonfs_types::WalNo(head.wal_no.0 + 1);
         let payload = WalObjectPayload {
             namespace_id: self.namespace_id.clone(),

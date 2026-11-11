@@ -39,13 +39,13 @@ pub(super) fn rows(start: usize, count: usize, sequence: u64) -> Vec<MetadataRow
                 child_kind: loonfs_types::InodeKind::File,
                 child_created_by: loonfs_types::ActorId::loonfs(),
                 child_created_at_ms: 4_200,
-                committed_seq: ChangeSeq(sequence),
+                committed_seq: CommitSeq(sequence),
                 delta_index: 0,
                 commit_id: crate::test_support::binding_commit_id(),
                 committed_by: loonfs_types::ActorId::loonfs(),
                 committed_at_ms: 0,
                 bind_position: loonfs_types::format::manifest::DeltaPosition {
-                    seq: ChangeSeq(sequence),
+                    seq: CommitSeq(sequence),
                     delta_index: 0,
                 },
             })
@@ -109,7 +109,7 @@ async fn bounded_pages_match_full_rows_across_ranges_and_eviction() {
                     Some(&cache),
                     &SessionBlockMemo::default(),
                     &descriptor,
-                    ChangeSeq(1),
+                    CommitSeq(1),
                     &lower,
                     upper.as_deref(),
                     limit,
@@ -155,7 +155,7 @@ async fn bounded_pages_combine_overlapping_runs_and_binding_versions() {
         .enumerate()
         .map(|(index, descriptor)| MetadataRunManifest {
             run_no: RunNo(index as u64 + 1),
-            run_seq: ChangeSeq(index as u64 + 1),
+            run_seq: CommitSeq(index as u64 + 1),
             tier: RunTier::Delta,
             segments: vec![MetadataFamilySegments {
                 family: FAMILY,
@@ -217,7 +217,7 @@ async fn bounded_pages_open_and_refill_segments_in_a_concurrent_window() {
         expected.extend(segment_rows);
         runs.push(MetadataRunManifest {
             run_no: RunNo(sequence),
-            run_seq: ChangeSeq(sequence),
+            run_seq: CommitSeq(sequence),
             tier: RunTier::Delta,
             segments: vec![MetadataFamilySegments {
                 family: FAMILY,
@@ -330,7 +330,7 @@ async fn a_key_range_scan_loads_a_cold_key_range_in_one_data_get() {
     let object_key = metadata_segment_object_key(&descriptor);
     let runs = vec![MetadataRunManifest {
         run_no: RunNo(1),
-        run_seq: ChangeSeq(1024),
+        run_seq: CommitSeq(1024),
         tier: RunTier::Delta,
         segments: vec![MetadataFamilySegments {
             family: FAMILY,
@@ -460,7 +460,7 @@ async fn a_prefix_scan_through_a_small_block_cache_fetches_and_decodes_each_bloc
     );
     let runs = vec![MetadataRunManifest {
         run_no: RunNo(1),
-        run_seq: ChangeSeq(96),
+        run_seq: CommitSeq(96),
         tier: RunTier::Delta,
         segments: vec![MetadataFamilySegments {
             family: FAMILY,
@@ -545,7 +545,7 @@ async fn bounded_pages_reject_corruption_when_the_damaged_block_is_requested() {
         None,
         &SessionBlockMemo::default(),
         &descriptor,
-        ChangeSeq(1),
+        CommitSeq(1),
         "",
         None,
         1,
@@ -560,7 +560,7 @@ async fn bounded_pages_reject_corruption_when_the_damaged_block_is_requested() {
             None,
             &SessionBlockMemo::default(),
             &descriptor,
-            ChangeSeq(1),
+            CommitSeq(1),
             &lower,
             None,
             1,
@@ -633,7 +633,7 @@ async fn a_damaged_block_fails_only_the_reads_that_decode_it() {
                 None,
                 &memo,
                 &descriptor,
-                ChangeSeq(1),
+                CommitSeq(1),
                 &lower,
                 string_prefix_upper_bound(&lower).as_deref(),
                 1,

@@ -370,7 +370,7 @@ async fn an_eventual_read_within_its_maximum_staleness_sends_no_store_request() 
     }
 }
 
-/// Checks that the trash and revision listings and the download grants see
+/// Checks that the trash and revision listings and the download requests see
 /// a write made through another runtime when they're `strong`, and that an
 /// `eventual` read within its maximum staleness reads the head that the
 /// server confirmed before the write. The eventual reads come first,

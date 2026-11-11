@@ -9,7 +9,7 @@ use loonfs::publish::{
 use loonfs_client::{ClientError, NamespacePath, PutFileOptions};
 use loonfs_test_support::ids::namespace_id;
 use loonfs_types::{
-    ChangeSeq, CommitId, DestinationBehavior, EntryInodeKind, API_GROUP_FILESYSTEM_V0,
+    CommitId, CommitSeq, DestinationBehavior, EntryInodeKind, API_GROUP_FILESYSTEM_V0,
     API_GROUP_MAINTENANCE_V0, API_GROUP_QUERY_V0, DEFAULT_PAGE_LIMIT,
     LIMIT_COMMIT_MAX_CONTENT_TOKENS, LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS,
     LIMIT_COMMIT_MAX_MESSAGE_BYTES, LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_COMMIT_MAX_PRECONDITIONS,
@@ -56,7 +56,7 @@ async fn delete_namespace_blocks_operations() {
         .delete_namespace_with_options(
             &namespace,
             &loonfs_client::DeleteNamespaceOptions {
-                expected_head_seq: Some(ChangeSeq(0)),
+                expected_head_seq: Some(CommitSeq(0)),
             },
         )
         .await
@@ -74,8 +74,8 @@ async fn delete_namespace_blocks_operations() {
             let details = response
                 .details
                 .expect("a stale precondition carries its sequences");
-            assert_eq!(details.expected_head_seq, Some(ChangeSeq(0)));
-            assert_eq!(details.actual_head_seq, Some(ChangeSeq(1)));
+            assert_eq!(details.expected_head_seq, Some(CommitSeq(0)));
+            assert_eq!(details.actual_head_seq, Some(CommitSeq(1)));
         }
         other => panic!("expected stale_head, got {other:?}"),
     }
@@ -91,7 +91,7 @@ async fn delete_namespace_blocks_operations() {
         .await
         .expect("delete namespace");
     assert_eq!(response.namespace_id.as_str(), "doomed");
-    assert_eq!(response.head_seq, ChangeSeq(1));
+    assert_eq!(response.head_seq, CommitSeq(1));
 
     // Status is 410, reads fail, and repeat deletes report deleted.
     let status = harness
@@ -266,8 +266,8 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
         .expect("create namespace");
     assert_eq!(created.namespace_id.as_str(), "demo");
     assert_eq!(created.created_by, creator);
-    assert_eq!(created.head_seq, ChangeSeq(0));
-    assert_eq!(created.retention_floor_seq, ChangeSeq(0));
+    assert_eq!(created.head_seq, CommitSeq(0));
+    assert_eq!(created.retention_floor_seq, CommitSeq(0));
     assert!(created.created_at_ms > 0);
     assert!(created.fork_basis.is_none());
     let directory = NamespacePath::parse("demo", "/notes").expect("parse directory path");
@@ -305,7 +305,7 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
         .expect("write bytes");
     // Path operations echo the commit id they committed under.
     assert_eq!(written.commit_id.as_str(), "smoke-write-1");
-    assert_eq!(written.committed_seq, ChangeSeq(2));
+    assert_eq!(written.committed_seq, CommitSeq(2));
 
     let entry = harness.client.stat(&target).await.expect("stat path");
     assert_eq!(entry.size_bytes(), Some(16));
@@ -319,7 +319,7 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
         .await
         .expect("namespace status");
     assert_eq!(status.namespace_id.as_str(), "demo");
-    assert_eq!(status.head_seq, ChangeSeq(2));
+    assert_eq!(status.head_seq, CommitSeq(2));
 
     let missing = harness
         .client
@@ -378,12 +378,12 @@ async fn http_namespace_fork_shares_content_and_diverges() {
         .expect("fork namespace");
     assert_eq!(forked.namespace_id.as_str(), "clone");
     assert_eq!(forked.created_by.as_str(), "forker");
-    assert_eq!(forked.head_seq, ChangeSeq(1));
-    assert_eq!(forked.retention_floor_seq, ChangeSeq(1));
+    assert_eq!(forked.head_seq, CommitSeq(1));
+    assert_eq!(forked.retention_floor_seq, CommitSeq(1));
     assert!(forked.created_at_ms > 0);
     let fork_basis = forked.fork_basis.expect("a fork has a fork basis");
     assert_eq!(fork_basis.source_namespace_id, namespace_id("demo"));
-    assert_eq!(fork_basis.source_head_seq, ChangeSeq(1));
+    assert_eq!(fork_basis.fork_point_seq, CommitSeq(1));
 
     let source_entry = harness
         .client
@@ -430,7 +430,7 @@ async fn http_namespace_fork_shares_content_and_diverges() {
         )
         .await
         .expect("replace clone");
-    assert_eq!(clone_write.committed_seq, ChangeSeq(2));
+    assert_eq!(clone_write.committed_seq, CommitSeq(2));
     assert_eq!(
         harness
             .client
@@ -450,7 +450,7 @@ async fn http_namespace_fork_shares_content_and_diverges() {
 
     match harness
         .client
-        .list_changes(&namespace_id("clone"), ChangeSeq(0))
+        .list_changes(&namespace_id("clone"), CommitSeq(0))
         .page()
         .await
     {
@@ -459,12 +459,12 @@ async fn http_namespace_fork_shares_content_and_diverges() {
     }
     let clone_changes = harness
         .client
-        .list_changes(&namespace_id("clone"), ChangeSeq(1))
+        .list_changes(&namespace_id("clone"), CommitSeq(1))
         .page()
         .await
         .expect("clone changes");
     assert_eq!(clone_changes.changes.len(), 1);
-    assert_eq!(clone_changes.changes[0].committed_seq, ChangeSeq(2));
+    assert_eq!(clone_changes.changes[0].committed_seq, CommitSeq(2));
 
     harness.server.abort();
 }
@@ -534,7 +534,7 @@ async fn http_namespace_fork_uses_the_snapshot_sequence() {
     assert!(fork.created_at_ms > 0);
     let fork_basis = fork.fork_basis.expect("a fork has a fork basis");
     assert_eq!(fork_basis.source_namespace_id, source);
-    assert_eq!(fork_basis.source_head_seq, snapshot.captured_seq);
+    assert_eq!(fork_basis.fork_point_seq, snapshot.captured_seq);
     assert_ne!(
         fork_basis.source_pin_id, snapshot.snapshot_id,
         "a fork of a snapshot pins the snapshot's manifest under a pin of its own"

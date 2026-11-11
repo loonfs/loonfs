@@ -200,7 +200,7 @@ async fn commit_piece(
                 name_key: loonfs_types::NameKey::parse("file.txt").expect("name key"),
                 display_name: loonfs_types::DisplayName::parse("file.txt").expect("display name"),
                 bind_position: loonfs_types::format::manifest::DeltaPosition {
-                    seq: loonfs_types::ChangeSeq(1),
+                    seq: loonfs_types::CommitSeq(1),
                     delta_index: 0,
                 },
                 child_created_by: loonfs_types::ActorId::loonfs(),

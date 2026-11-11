@@ -10,7 +10,7 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{DeltaPosition, RevisionSummary};
 
 use loonfs_types::{
-    AccessRevisionNo, AttributesRevisionNo, ChangeSeq, DisplayName, InodeId, InodeKind, NameKey,
+    AccessRevisionNo, AttributesRevisionNo, CommitSeq, DisplayName, InodeId, InodeKind, NameKey,
     RevisionNo,
 };
 
@@ -54,24 +54,26 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
     /// The floor check comes first, so a request for an expired deletion reads
     /// no tombstone. A base compaction relies on this rule: the writer
     /// validates against a floor that only its own epoch raises, so no
-    /// undelete of a deletion at or below the floor is accepted after the
+    /// restore of a deletion at or below the floor is accepted after the
     /// floor moves.
     pub(super) async fn resolve_recoverable_deletion(
         &self,
         inode_id: InodeId,
-        deletion_seq: ChangeSeq,
+        deletion_seq: CommitSeq,
     ) -> Result<SubtreeTombstoneRecord> {
         if deletion_seq <= self.view().retention_floor_seq() {
-            return Err(CommitValidationError::UndeleteTargetNotDeleted { inode_id }.into());
+            return Err(CommitValidationError::RestoreDeletedTargetNotDeleted { inode_id }.into());
         }
         let Some(deletion) = self.view().recoverable_deletion(inode_id).await? else {
-            return Err(CommitValidationError::UndeleteTargetNotDeleted { inode_id }.into());
+            return Err(CommitValidationError::RestoreDeletedTargetNotDeleted { inode_id }.into());
         };
         if deletion.committed_seq >= self.committed_seq {
-            return Err(CommitValidationError::UndeleteTargetsCurrentCommit { inode_id }.into());
+            return Err(
+                CommitValidationError::RestoreDeletedTargetsCurrentCommit { inode_id }.into(),
+            );
         }
         if deletion.committed_seq != deletion_seq {
-            return Err(CommitValidationError::UndeleteSequenceMismatch {
+            return Err(CommitValidationError::RestoreDeletedSequenceMismatch {
                 inode_id,
                 requested_seq: deletion_seq,
                 active_seq: deletion.committed_seq,

@@ -1,6 +1,6 @@
 {
   "name": "inode_addressing",
-  "intent": "Checks reads, copies, restores, attribute and access updates, and undeletes addressed by inode, and the inode binding and name absence preconditions.",
+  "intent": "Checks reads, copies, revision restores, attribute and access updates, and restores of deleted items addressed by inode, and the inode binding and name absence preconditions.",
   "request": {
     "namespace_id": "conf-inode-addressing",
     "directory": "/tree",

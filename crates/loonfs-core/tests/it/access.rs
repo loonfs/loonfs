@@ -9,14 +9,14 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_types::options::AttributeInclusion;
 use loonfs_types::options::{ListOptions, StatOptions};
-use loonfs_types::FilesystemChange;
+use loonfs_types::FilesystemEvent;
 use loonfs_types::{
     AbsolutePath, AccessGrants, AccessRevisionNo, AccessRight, AccessRights, CommitId,
     CommitPrecondition, DestinationBehavior, DisplayName, ErrorCode, InodeId, NamespaceAccess,
     NamespaceId, PrincipalId, PrincipalScope, ROOT_INODE_ID,
 };
 use loonfs_types::{
-    ChangeSeq, ContentRef, Page, PageRequest, RevisionNo, TrashEntry, TrashPageCursor,
+    CommitSeq, ContentRef, Page, PageRequest, RevisionNo, TrashEntry, TrashPageCursor,
 };
 use std::assert_matches;
 use std::num::NonZeroU64;
@@ -66,8 +66,8 @@ fn event(
     revision: u64,
     boundary: bool,
     grants: AccessGrants,
-) -> FilesystemChange {
-    FilesystemChange::AccessChanged {
+) -> FilesystemEvent {
+    FilesystemEvent::AccessChanged {
         inode_id,
         access_revision_no: AccessRevisionNo(revision),
         boundary,
@@ -621,10 +621,10 @@ async fn moves_are_authorized_as_the_equivalent_grant() {
     )
     .await
     .expect("delete");
-    let undelete = FilesystemOperation::Undelete {
+    let restore_deleted = FilesystemOperation::RestoreDeleted {
         inode_id: recover.inode_id,
         deletion_seq: deletion.committed_seq,
-        destination: loonfs_types::options::UndeleteDestination::Path(
+        destination: loonfs_types::options::RestoreDeletedDestination::Path(
             AbsolutePath::parse("/team/recovered").expect("path"),
         ),
     };
@@ -657,8 +657,12 @@ async fn moves_are_authorized_as_the_equivalent_grant() {
             move_path("/admin-source/file", "/admin-target/file"),
             None,
         ),
-        ("editor", undelete.clone(), Some(ErrorCode::Forbidden)),
-        ("prn_root", undelete, None),
+        (
+            "editor",
+            restore_deleted.clone(),
+            Some(ErrorCode::Forbidden),
+        ),
+        ("prn_root", restore_deleted, None),
         ("editor", move_path("/team/loss", "/secret/loss"), None),
     ] {
         let result = commit_as(
@@ -1369,7 +1373,7 @@ async fn the_feed_and_content_refs_need_an_administrator_or_no_subject() {
             .expect("feed authorized");
         assert!(!engine
             .list_changes_after(
-                loonfs_types::ChangeFeedPosition::after(ChangeSeq(0)),
+                loonfs_types::ChangeFeedPosition::after(CommitSeq(0)),
                 read_page::<()>(100).limit,
                 loonfs_types::options::CommitSplitting::Whole,
                 &context
@@ -1733,7 +1737,7 @@ async fn revision_restores_hide_an_unreadable_parent_kind() {
 }
 
 #[tokio::test]
-async fn undelete_authorizes_state_and_destination_before_errors() {
+async fn a_restore_of_a_deleted_item_authorizes_state_and_destination_before_errors() {
     let (_temp_dir, store, namespace_id, context, _) = read_fixture().await;
     let hidden_directory = resolve_path(&store, &namespace_id, "/team/secret")
         .await
@@ -1772,14 +1776,14 @@ async fn undelete_authorizes_state_and_destination_before_errors() {
             &namespace_id,
             &context,
             subject("stranger", &["stranger"]),
-            FilesystemOperation::Undelete {
+            FilesystemOperation::RestoreDeleted {
                 inode_id,
                 deletion_seq,
-                destination: loonfs_types::options::UndeleteDestination::Recorded,
+                destination: loonfs_types::options::RestoreDeletedDestination::Recorded,
             },
         )
         .await
-        .expect_err("unreadable undelete target");
+        .expect_err("unreadable restore target");
         assert_eq!(error.code(), ErrorCode::InodeNotFound, "{inode_id}");
     }
 
@@ -1789,16 +1793,16 @@ async fn undelete_authorizes_state_and_destination_before_errors() {
             &namespace_id,
             &context,
             subject("team", &["team"]),
-            FilesystemOperation::Undelete {
+            FilesystemOperation::RestoreDeleted {
                 inode_id: visible_file.inode_id,
                 deletion_seq: visible_deletion.committed_seq,
-                destination: loonfs_types::options::UndeleteDestination::Path(
+                destination: loonfs_types::options::RestoreDeletedDestination::Path(
                     AbsolutePath::parse(destination_path).expect("path"),
                 ),
             },
         )
         .await
-        .expect_err("unreadable undelete destination");
+        .expect_err("unreadable restore destination");
         assert_eq!(error.code(), ErrorCode::PathNotFound, "{destination_path}");
     }
 }
@@ -1875,10 +1879,10 @@ async fn inode_forms_require_the_rights_of_their_path_forms() {
         grants: grants("viewer", &[Read, Write]),
         expected_access_revision_no: None,
     };
-    let undelete_under = |parent_inode_id, name: &str| FilesystemOperation::Undelete {
+    let restore_deleted_under = |parent_inode_id, name: &str| FilesystemOperation::RestoreDeleted {
         inode_id: kept.inode_id,
         deletion_seq,
-        destination: loonfs_types::options::UndeleteDestination::Name {
+        destination: loonfs_types::options::RestoreDeletedDestination::Name {
             parent_inode_id,
             display_name: DisplayName::parse(name).expect("name"),
         },
@@ -1898,15 +1902,19 @@ async fn inode_forms_require_the_rights_of_their_path_forms() {
         ("viewer", share, Some(ErrorCode::Forbidden)),
         (
             "uploader",
-            undelete_under(inbox.inode_id, "kept"),
+            restore_deleted_under(inbox.inode_id, "kept"),
             Some(ErrorCode::InodeNotFound),
         ),
         (
             "team",
-            undelete_under(inbox.inode_id, "kept"),
+            restore_deleted_under(inbox.inode_id, "kept"),
             Some(ErrorCode::InodeNotFound),
         ),
-        ("team", undelete_under(team.inode_id, "restored"), None),
+        (
+            "team",
+            restore_deleted_under(team.inode_id, "restored"),
+            None,
+        ),
     ] {
         let result = commit_as(
             &store,

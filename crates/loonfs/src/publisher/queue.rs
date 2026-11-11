@@ -6,7 +6,7 @@ use super::admission::{AdmissionPermit, AdmittedWaiter, PublicationAdmission};
 use super::{NamespacePublisher, NamespacePublisherState};
 use crate::publish::CommitCandidate;
 use crate::trace::phase_event;
-use crate::{ChangeSeq, CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, Result};
+use crate::{CommitSeq, CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, Result};
 use loonfs_core::commit::CommitFingerprint;
 use loonfs_core::control::LoadedManifest;
 use loonfs_core::limits::MAX_CONTENTION_ATTEMPTS;
@@ -28,7 +28,7 @@ pub(super) struct PendingDelete {
 /// manifest that the floor was planned from, and the callers that wait for
 /// it.
 pub(super) struct PendingRetentionAdvance {
-    pub(super) target: ChangeSeq,
+    pub(super) target: CommitSeq,
     pub(super) planned: LoadedManifest,
     pub(super) waiters: Vec<AdmittedWaiter<Result<FloorObjectReport>>>,
 }
@@ -396,7 +396,7 @@ impl NamespacePublisher {
     pub(super) async fn submit_retention_advance(
         &self,
         planned: LoadedManifest,
-        target: ChangeSeq,
+        target: CommitSeq,
     ) -> Option<Result<FloorObjectReport>> {
         let (sender, receiver) = oneshot::channel();
         {

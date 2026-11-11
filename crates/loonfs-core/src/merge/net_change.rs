@@ -10,7 +10,7 @@ use crate::heap_bytes::HeapBytes;
 use crate::metadata::MetadataView;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::MAX_WAL_OBJECT_BYTES;
-use loonfs_types::{ChangeSeq, ContentLayout, ContentRef, InodeId, NamespaceId};
+use loonfs_types::{CommitSeq, ContentLayout, ContentRef, InodeId, NamespaceId};
 use std::collections::BTreeSet;
 use std::mem::size_of;
 
@@ -114,7 +114,7 @@ pub(super) async fn inode_change<S: ObjectStore + ?Sized>(
 /// before the page, unless the first page crossed the allowance.
 pub(super) async fn touched_inodes<S: ObjectStore + ?Sized>(
     view: MetadataView<'_, '_, S>,
-    source_after_seq: ChangeSeq,
+    source_after_seq: CommitSeq,
     memory: &PlanningMemory,
 ) -> Result<BTreeSet<InodeId>> {
     let mut touched = BTreeSet::new();

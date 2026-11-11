@@ -1,6 +1,6 @@
 //! Snapshot and checkpoint shapes for the v0 HTTP API.
 
-use crate::{ChangeSeq, ManifestNo, NamespaceId, PinId};
+use crate::{CommitSeq, ManifestNo, NamespaceId, PinId};
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
 
@@ -72,7 +72,7 @@ pub struct Checkpoint {
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub expires_at_ms: Option<u64>,
     /// The namespace sequence that the checkpoint captured.
-    pub captured_seq: ChangeSeq,
+    pub captured_seq: CommitSeq,
     /// The manifest that the checkpoint pins.
     pub manifest_no: ManifestNo,
 }
@@ -88,7 +88,7 @@ pub struct Snapshot {
     /// The snapshot's label.
     pub name: String,
     /// The namespace sequence that the snapshot captured.
-    pub captured_seq: ChangeSeq,
+    pub captured_seq: CommitSeq,
     /// The time the snapshot record was created, in Unix milliseconds.
     pub created_at_ms: u64,
     /// The time the snapshot expires, in Unix milliseconds. A snapshot without it doesn't expire.
@@ -161,7 +161,7 @@ mod tests {
             },
             created_at_ms: 1_752_623_000_000,
             expires_at_ms: Some(1_752_626_600_000),
-            captured_seq: ChangeSeq(12),
+            captured_seq: CommitSeq(12),
             manifest_no: ManifestNo(9),
         };
         let checkpoint_json = serde_json::json!({
@@ -202,7 +202,7 @@ mod tests {
             },
             created_at_ms: 1_752_623_000_000,
             expires_at_ms: None,
-            captured_seq: ChangeSeq(3),
+            captured_seq: CommitSeq(3),
             manifest_no: ManifestNo(3),
         })
         .expect("serialize checkpoint");

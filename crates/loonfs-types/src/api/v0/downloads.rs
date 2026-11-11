@@ -1,6 +1,6 @@
 //! Download requests and responses for direct object-store reads in the v0 HTTP API.
 
-use super::ObjectTransferAccess;
+use super::ObjectTransfer;
 use crate::options::ReadConsistency;
 use crate::{AbsolutePath, ContentRef, InodeId, NamespaceId, PinId, RevisionNo};
 use serde::{Deserialize, Serialize};
@@ -34,8 +34,8 @@ pub struct CreateDownloadRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub max_staleness_ms: Option<u64>,
-    /// The first byte that the grant reads. The grant covers the revision's bytes from
-    /// `start_offset` up to `size_bytes`, so a client that resumes a download asks for a new grant
+    /// The first byte that the download reads. The download covers the revision's bytes from
+    /// `start_offset` up to `size_bytes`, so a client that resumes a download asks for a new download
     /// that starts after the bytes it already has. The offset must be less than the revision's
     /// size. For a revision of zero bytes, it must be 0.
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -64,7 +64,7 @@ pub struct CreateDownloadByInodeRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub max_staleness_ms: Option<u64>,
-    /// The first byte that the grant reads. It defaults to 0 and must be less than the file's size.
+    /// The first byte that the download reads. It defaults to 0 and must be less than the file's size.
     /// For a file of zero bytes, it must be 0.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub start_offset: u64,
@@ -87,7 +87,7 @@ pub struct CreateRevisionDownloadByInodeRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub max_staleness_ms: Option<u64>,
-    /// The first byte that the grant reads. It defaults to 0 and must be less than the revision's
+    /// The first byte that the download reads. It defaults to 0 and must be less than the revision's
     /// size. For a revision of zero bytes, it must be 0.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub start_offset: u64,
@@ -106,7 +106,7 @@ pub struct CreateDownloadResponse {
     /// The absolute path, built from the stored display names.
     #[serde(deserialize_with = "crate::path::deserialize_derived_path")]
     pub path: AbsolutePath,
-    /// The revision that the capability reads, as resolved from the request.
+    /// The revision that the download reads, as resolved from the request.
     pub revision_no: RevisionNo,
     /// The identity, byte length, and checksum of the revision's bytes.
     pub content_ref: ContentRef,
@@ -114,7 +114,7 @@ pub struct CreateDownloadResponse {
     pub ranges: Vec<DownloadRange>,
 }
 
-/// A short-lived capability to read one revision of an inode.
+/// The signed object ranges for one revision of an inode.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct CreateDownloadByInodeResponse {
@@ -139,8 +139,8 @@ pub struct DownloadRange {
     pub start_offset: u64,
     /// The number of bytes in the run.
     pub length: u64,
-    /// A short-lived read capability for exactly this range's bytes.
-    pub access: ObjectTransferAccess,
+    /// A short-lived presigned URL that reads exactly this range's bytes.
+    pub transfer: ObjectTransfer,
 }
 
 #[cfg(test)]
@@ -150,7 +150,7 @@ mod tests {
         CreateDownloadResponse, CreateRevisionDownloadByInodeRequest, ReadConsistency,
     };
     use crate::{AbsolutePath, ContentId, ContentRef, NamespaceId, PinId, RevisionNo};
-    use crate::{DownloadRange, ObjectTransferAccess};
+    use crate::{DownloadRange, ObjectTransfer};
     use std::collections::BTreeMap;
 
     fn absolute_path() -> AbsolutePath {
@@ -261,7 +261,7 @@ mod tests {
             ranges: vec![DownloadRange {
                 start_offset: 0,
                 length: 5,
-                access: ObjectTransferAccess::PresignedUrl {
+                transfer: ObjectTransfer::PresignedUrl {
                     method: "GET".to_owned(),
                     url: "https://bucket.example/object?X-Amz-Signature=abc".to_owned(),
                     headers: BTreeMap::new(),
@@ -280,7 +280,7 @@ mod tests {
                 "ranges": [{
                     "start_offset": 0,
                     "length": 5,
-                    "access": {
+                    "transfer": {
                         "kind": "presigned_url",
                         "method": "GET",
                         "url": "https://bucket.example/object?X-Amz-Signature=abc",
@@ -302,7 +302,7 @@ mod tests {
             ranges: vec![DownloadRange {
                 start_offset: 0,
                 length: 5,
-                access: ObjectTransferAccess::PresignedUrl {
+                transfer: ObjectTransfer::PresignedUrl {
                     method: "GET".to_owned(),
                     url: "https://bucket.example/object?X-Amz-Signature=abc".to_owned(),
                     headers: BTreeMap::new(),
@@ -320,7 +320,7 @@ mod tests {
                 "ranges": [{
                     "start_offset": 0,
                     "length": 5,
-                    "access": {
+                    "transfer": {
                         "kind": "presigned_url",
                         "method": "GET",
                         "url": "https://bucket.example/object?X-Amz-Signature=abc",

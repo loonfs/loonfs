@@ -16,7 +16,7 @@ use axum::response::Response;
 use axum::Json;
 use loonfs::publish::{CommitCandidate, CommitIntent, ContentPreparationError};
 use loonfs::{
-    AbsolutePath, ChangeSeq, DiffOptions, ErrorCode, ListChangesOptions, ListFileRevisionsOptions,
+    AbsolutePath, CommitSeq, DiffOptions, ErrorCode, ListChangesOptions, ListFileRevisionsOptions,
     ListOptions, ListTrashOptions, PinId, ReadConsistency, ReadFileStreamOptions, StatOptions,
 };
 use loonfs_types::options::CommitSplitting;
@@ -198,7 +198,7 @@ pub(super) struct ChangesQuery {
     /// The sequence after which to return committed changes. With `event_index`, the commit at
     /// this sequence that the page resumes.
     #[cfg_attr(feature = "openapi", param(required = true))]
-    after_seq: Option<ChangeSeq>,
+    after_seq: Option<CommitSeq>,
     /// Whether a page can end inside a commit that alone exceeds the page's budget. The default is
     /// `false`, which returns every commit whole.
     #[cfg_attr(feature = "openapi", param(default = false))]
@@ -236,15 +236,15 @@ pub(super) struct DiffQuery {
     /// The sequence that the diff starts after. Each entry compares an inode's state at this
     /// sequence with its state at `to_seq`. It can't be below the namespace's retention floor.
     #[cfg_attr(feature = "openapi", param(required = true))]
-    from_seq: Option<ChangeSeq>,
+    from_seq: Option<CommitSeq>,
     /// The sequence that the diff ends at, inclusive. The default is the head that the request
     /// reads. A later page passes the `to_seq` that the first page returned.
-    to_seq: Option<ChangeSeq>,
+    to_seq: Option<CommitSeq>,
     /// The absolute path of the directory whose subtree the diff reports. The default is the root.
     #[cfg_attr(feature = "openapi", param(value_type = Option<String>))]
     path: Option<AbsolutePath>,
     /// The `next_after_seq` that the previous page returned. The default is `from_seq`.
-    after_seq: Option<ChangeSeq>,
+    after_seq: Option<CommitSeq>,
     /// Whether a page can end inside a commit that alone touches more inodes than one page
     /// examines. The default is `false`, which reads every commit whole.
     #[cfg_attr(feature = "openapi", param(default = false))]
@@ -442,7 +442,7 @@ pub(super) async fn get_file_content(
         path = "/v0/namespaces/{namespace_id}/filesystem/trash",
         tag = "filesystem",
         summary = "List recoverable deletions",
-        description = "Returns the namespace's recoverable deletions, oldest first. A deletion leaves the list when it's undeleted, or when the namespace's retention floor reaches its `deletion_seq`. Each entry includes the inode ID and deletion sequence that an undelete needs, and the directory binding that the delete removed.",
+        description = "Returns the namespace's recoverable deletions, oldest first. A deletion leaves the list when it's restored, or when the namespace's retention floor reaches its `deletion_seq`. Each entry includes the inode ID and deletion sequence that a restore needs, and the directory binding that the delete removed.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             LivePageQuery

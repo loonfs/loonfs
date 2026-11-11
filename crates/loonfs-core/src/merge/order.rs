@@ -72,7 +72,7 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
                     BindingChange::Create {
                         parent_inode_id, ..
                     }
-                    | BindingChange::Undelete {
+                    | BindingChange::RestoreDeleted {
                         parent_inode_id, ..
                     },
                 ) => starts.push(*parent_inode_id),
@@ -132,7 +132,7 @@ struct Order<'p, 'v, S: ObjectStore + ?Sized> {
     /// Each inode's edge as the operations so far leave it, starting from
     /// the merged-into namespace's edges.
     edges: HashMap<InodeId, Edge>,
-    /// The inodes that the merge creates or undeletes and hasn't yet.
+    /// The inodes that the merge creates or restores and hasn't yet.
     pending_creates: HashSet<InodeId>,
     /// The inodes that the merge moves and hasn't yet moved to their place,
     /// with the index of each one's plan.
@@ -176,7 +176,7 @@ impl<'p, 'v, S: ObjectStore + ?Sized> Order<'p, 'v, S> {
         let mut deleted = HashSet::new();
         for (index, plan) in plans.iter().enumerate() {
             match &plan.binding {
-                Some(BindingChange::Create { .. } | BindingChange::Undelete { .. }) => {
+                Some(BindingChange::Create { .. } | BindingChange::RestoreDeleted { .. }) => {
                     pending_creates.insert(plan.inode_id);
                 }
                 Some(BindingChange::Move { .. }) => {
@@ -320,7 +320,7 @@ impl<'p, 'v, S: ObjectStore + ?Sized> Order<'p, 'v, S> {
                 | BindingChange::Move {
                     parent_inode_id, ..
                 }
-                | BindingChange::Undelete {
+                | BindingChange::RestoreDeleted {
                     parent_inode_id, ..
                 },
             ) => {
@@ -521,7 +521,7 @@ impl<'p, 'v, S: ObjectStore + ?Sized> Order<'p, 'v, S> {
                     .insert(inode_id, (*parent_inode_id, display_name.clone()));
                 self.pending_creates.remove(&inode_id);
             }
-            BindingChange::Undelete {
+            BindingChange::RestoreDeleted {
                 parent_inode_id,
                 display_name,
                 ..

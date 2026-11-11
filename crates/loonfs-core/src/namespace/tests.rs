@@ -55,7 +55,7 @@ fn an_acl_namespace_begins_with_the_root_grants_as_its_root_access_row() {
     use super::bootstrap::bootstrap_metadata_state;
     use crate::metadata::AccessRevisionRecord;
     use loonfs_types::{
-        AccessGrants, AccessRevisionNo, AccessRights, ActorId, ChangeSeq, NamespaceAccess,
+        AccessGrants, AccessRevisionNo, AccessRights, ActorId, CommitSeq, NamespaceAccess,
         PrincipalId, PrincipalScope, ROOT_INODE_ID,
     };
 
@@ -76,7 +76,7 @@ fn an_acl_namespace_begins_with_the_root_grants_as_its_root_access_row() {
         &[AccessRevisionRecord {
             inode_id: ROOT_INODE_ID,
             access_revision_no: AccessRevisionNo(0),
-            committed_seq: ChangeSeq(0),
+            committed_seq: CommitSeq(0),
             commit_id: loonfs_types::format::control::genesis_commit_id(),
             delta_index: 0,
             committed_by: ActorId::loonfs(),

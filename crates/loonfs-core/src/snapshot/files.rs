@@ -10,7 +10,7 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{lookup_keys, MetadataRow, MetadataRowFamily};
 use loonfs_types::format::segment_blocks::string_prefix_upper_bound;
 use loonfs_types::{
-    ChangeSeq, ContentRef, InodeId, InodeKind, PageRequest, PagedResponse, PinId, RevisionNo,
+    CommitSeq, ContentRef, InodeId, InodeKind, PageRequest, PagedResponse, PinId, RevisionNo,
 };
 
 /// Minimum number of inode rows scanned at once.
@@ -32,7 +32,7 @@ pub struct SnapshotFile {
     /// The file revision at the snapshot's captured sequence.
     pub revision_no: RevisionNo,
     /// The sequence of the commit that published the revision.
-    pub committed_seq: ChangeSeq,
+    pub committed_seq: CommitSeq,
     /// The revision's content reference.
     pub content_ref: ContentRef,
     /// The file size in bytes.
@@ -51,7 +51,7 @@ pub struct ListSnapshotFilesOptions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotFilesPage {
     /// The sequence captured by the snapshot.
-    pub captured_seq: ChangeSeq,
+    pub captured_seq: CommitSeq,
     /// Files in ascending inode-id order.
     pub files: Vec<SnapshotFile>,
     /// Resume position when more files remain.

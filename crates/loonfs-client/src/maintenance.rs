@@ -9,9 +9,9 @@ use loonfs_types::{
     headers, ActorId, AdvanceRetentionRequest, AdvanceRetentionResponse, Checkpoint, GcRequest,
     GcResponse, ListCheckpointsResponse, MetadataMaintenanceRequest, MetadataMaintenanceResponse,
     NamespaceDiagnostics, NamespaceId, PageRequest, Pager, PinId, PoolGcResponse, PoolId,
-    PrincipalId, RecoverAdministratorRequest, RecoverAdministratorResponse, RunMaintenanceRequest,
-    RunMaintenanceResponse, RunPoolMaintenanceRequest, RunPoolMaintenanceResponse,
-    SetRetentionWindowRequest, SetRetentionWindowResponse,
+    PrincipalId, RecoverAdministratorRequest, RecoverAdministratorResponse,
+    RunMaintenanceJobRequest, RunMaintenanceJobResponse, RunPoolMaintenanceJobRequest,
+    RunPoolMaintenanceJobResponse, SetRetentionWindowRequest, SetRetentionWindowResponse,
 };
 use loonfs_types::{GrepIndex, StoreProbeRequest, StoreProbeResponse};
 use std::num::NonZeroU64;
@@ -94,25 +94,25 @@ impl Client {
     /// An administrator recovery needs an actor, so recover an administrator
     /// with [`Self::recover_administrator`] instead. Retrying this request
     /// starts a distinct attempt.
-    pub async fn run_maintenance(
+    pub async fn run_maintenance_job(
         &self,
         namespace_id: &NamespaceId,
-        request: &RunMaintenanceRequest,
-    ) -> Result<RunMaintenanceResponse> {
+        request: &RunMaintenanceJobRequest,
+    ) -> Result<RunMaintenanceJobResponse> {
         self.run_maintenance_as(namespace_id, request, None).await
     }
 
     async fn run_maintenance_as(
         &self,
         namespace_id: &NamespaceId,
-        request: &RunMaintenanceRequest,
+        request: &RunMaintenanceJobRequest,
         actor: Option<&ActorId>,
-    ) -> Result<RunMaintenanceResponse> {
+    ) -> Result<RunMaintenanceJobResponse> {
         let url = format!(
-            "{}/v0/maintenance/namespaces/{namespace_id}/runs",
+            "{}/v0/maintenance/namespaces/{namespace_id}/jobs",
             self.base_url
         );
-        let mut wire_request = self.request(operations::RUN_MAINTENANCE, &url);
+        let mut wire_request = self.request(operations::RUN_MAINTENANCE_JOB, &url);
         if let Some(actor) = actor {
             wire_request = wire_request.header(headers::ACTOR, actor.as_str());
         }
@@ -147,12 +147,12 @@ impl Client {
         options: &MetadataMaintenanceRequest,
     ) -> Result<MetadataMaintenanceResponse> {
         let response = self
-            .run_maintenance(
+            .run_maintenance_job(
                 namespace_id,
-                &RunMaintenanceRequest::Metadata(options.clone()),
+                &RunMaintenanceJobRequest::Metadata(options.clone()),
             )
             .await?;
-        job_response!(response, RunMaintenanceResponse::Metadata)
+        job_response!(response, RunMaintenanceJobResponse::Metadata)
     }
 
     /// Runs one garbage collection of a namespace with the server's
@@ -161,12 +161,12 @@ impl Client {
     /// See [`Self::gc_with_options`].
     pub async fn gc(&self, namespace_id: &NamespaceId) -> Result<GcResponse> {
         let response = self
-            .run_maintenance(
+            .run_maintenance_job(
                 namespace_id,
-                &RunMaintenanceRequest::Gc(GcRequest::default()),
+                &RunMaintenanceJobRequest::Gc(GcRequest::default()),
             )
             .await?;
-        job_response!(response, RunMaintenanceResponse::Gc)
+        job_response!(response, RunMaintenanceJobResponse::Gc)
     }
 
     /// Runs one garbage collection of a namespace with the grace
@@ -179,14 +179,14 @@ impl Client {
         options: &GcOptions,
     ) -> Result<GcResponse> {
         let response = self
-            .run_maintenance(
+            .run_maintenance_job(
                 namespace_id,
-                &RunMaintenanceRequest::Gc(GcRequest {
+                &RunMaintenanceJobRequest::Gc(GcRequest {
                     grace_window_ms: Some(options.grace_window_ms),
                 }),
             )
             .await?;
-        job_response!(response, RunMaintenanceResponse::Gc)
+        job_response!(response, RunMaintenanceJobResponse::Gc)
     }
 
     /// Runs one garbage collection of a pool with the server's default grace
@@ -195,12 +195,12 @@ impl Client {
     /// See [`Self::gc_pool_with_options`].
     pub async fn gc_pool(&self, pool_id: &PoolId) -> Result<PoolGcResponse> {
         let response = self
-            .run_pool_maintenance(
+            .run_pool_maintenance_job(
                 pool_id,
-                &RunPoolMaintenanceRequest::Gc(GcRequest::default()),
+                &RunPoolMaintenanceJobRequest::Gc(GcRequest::default()),
             )
             .await?;
-        job_response!(response, RunPoolMaintenanceResponse::Gc)
+        job_response!(response, RunPoolMaintenanceJobResponse::Gc)
     }
 
     /// Runs one garbage collection of a pool with the grace window that
@@ -214,24 +214,24 @@ impl Client {
         options: &GcOptions,
     ) -> Result<PoolGcResponse> {
         let response = self
-            .run_pool_maintenance(
+            .run_pool_maintenance_job(
                 pool_id,
-                &RunPoolMaintenanceRequest::Gc(GcRequest {
+                &RunPoolMaintenanceJobRequest::Gc(GcRequest {
                     grace_window_ms: Some(options.grace_window_ms),
                 }),
             )
             .await?;
-        job_response!(response, RunPoolMaintenanceResponse::Gc)
+        job_response!(response, RunPoolMaintenanceJobResponse::Gc)
     }
 
-    async fn run_pool_maintenance(
+    async fn run_pool_maintenance_job(
         &self,
         pool_id: &PoolId,
-        request: &RunPoolMaintenanceRequest,
-    ) -> Result<RunPoolMaintenanceResponse> {
-        let url = format!("{}/v0/maintenance/pools/{pool_id}/runs", self.base_url);
+        request: &RunPoolMaintenanceJobRequest,
+    ) -> Result<RunPoolMaintenanceJobResponse> {
+        let url = format!("{}/v0/maintenance/pools/{pool_id}/jobs", self.base_url);
         self.send_json(
-            self.request(operations::RUN_POOL_MAINTENANCE, &url)
+            self.request(operations::RUN_POOL_MAINTENANCE_JOB, &url)
                 .json(request)?,
         )
         .await
@@ -262,12 +262,12 @@ impl Client {
         options: &AdvanceRetentionRequest,
     ) -> Result<AdvanceRetentionResponse> {
         let response = self
-            .run_maintenance(
+            .run_maintenance_job(
                 namespace_id,
-                &RunMaintenanceRequest::Retention(options.clone()),
+                &RunMaintenanceJobRequest::Retention(options.clone()),
             )
             .await?;
-        job_response!(response, RunMaintenanceResponse::Retention)
+        job_response!(response, RunMaintenanceJobResponse::Retention)
     }
 
     /// Sets the namespace's retention window, or clears it when
@@ -281,14 +281,14 @@ impl Client {
         retention_window_ms: Option<NonZeroU64>,
     ) -> Result<SetRetentionWindowResponse> {
         let response = self
-            .run_maintenance(
+            .run_maintenance_job(
                 namespace_id,
-                &RunMaintenanceRequest::RetentionWindow(SetRetentionWindowRequest {
+                &RunMaintenanceJobRequest::RetentionWindow(SetRetentionWindowRequest {
                     retention_window_ms,
                 }),
             )
             .await?;
-        job_response!(response, RunMaintenanceResponse::RetentionWindow)
+        job_response!(response, RunMaintenanceJobResponse::RetentionWindow)
     }
 
     /// Grants `admin` on the root to `principal_id`, through a commit that
@@ -304,13 +304,13 @@ impl Client {
         let response = self
             .run_maintenance_as(
                 namespace_id,
-                &RunMaintenanceRequest::RecoverAdministrator(RecoverAdministratorRequest {
+                &RunMaintenanceJobRequest::RecoverAdministrator(RecoverAdministratorRequest {
                     principal_id: principal_id.clone(),
                 }),
                 Some(actor),
             )
             .await?;
-        job_response!(response, RunMaintenanceResponse::RecoverAdministrator)
+        job_response!(response, RunMaintenanceJobResponse::RecoverAdministrator)
     }
 
     /// Proves the server's backing store honours the object-store contract

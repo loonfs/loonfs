@@ -5,7 +5,7 @@
 //! values out of the seeded stream, and the two sequences this test compares would differ.
 
 use loonfs_types::{
-    install_entropy, installed_entropy, ChangeSeq, ContentId, InodeId, MetadataSegmentId,
+    install_entropy, installed_entropy, CommitSeq, ContentId, InodeId, MetadataSegmentId,
     SeededEntropy,
 };
 use std::num::NonZeroU32;
@@ -19,7 +19,7 @@ fn draw_ids() -> Vec<String> {
             [
                 ContentId::generate().to_string(),
                 MetadataSegmentId::generate().to_string(),
-                InodeId::generate(ChangeSeq(1), NonZeroU32::MIN).to_string(),
+                InodeId::generate(CommitSeq(1), NonZeroU32::MIN).to_string(),
             ]
         })
         .collect()

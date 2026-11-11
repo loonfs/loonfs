@@ -8,11 +8,11 @@ use crate::{
 };
 use loonfs_types::options::{
     AccessState, AppendFileOptions, AttributeChanges, CommitOptions, CopyOptions,
-    CreateDirectoryOptions, DeleteOptions, MoveOptions, PutFileOptions, UndeleteOptions,
+    CreateDirectoryOptions, DeleteOptions, MoveOptions, PutFileOptions, RestoreDeletedOptions,
     UpdateAccessOptions, UpdateAttributesOptions,
 };
 use loonfs_types::{
-    headers, ActorId, ChangeSeq, CommitRequest, ContentRef, FileContent, FilesystemOperation,
+    headers, ActorId, CommitRequest, CommitSeq, ContentRef, FileContent, FilesystemOperation,
     InodeId, NamespaceId, RevisionNo,
 };
 use loonfs_types::{Commit, ContentToken};
@@ -562,38 +562,38 @@ impl Client {
 
     /// Restores a deleted file or subtree under the parent and name its
     /// deletion recorded.
-    pub async fn undelete(
+    pub async fn restore_deleted(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
-        deletion_seq: ChangeSeq,
+        deletion_seq: CommitSeq,
         actor: &ActorId,
     ) -> Result<Commit> {
-        self.undelete_with_options(
+        self.restore_deleted_with_options(
             namespace_id,
             inode_id,
             deletion_seq,
             actor,
-            &UndeleteOptions::default(),
+            &RestoreDeletedOptions::default(),
         )
         .await
     }
 
     /// Restores a deleted file or subtree where `options` says.
-    pub async fn undelete_with_options(
+    pub async fn restore_deleted_with_options(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
-        deletion_seq: ChangeSeq,
+        deletion_seq: CommitSeq,
         actor: &ActorId,
-        options: &UndeleteOptions,
+        options: &RestoreDeletedOptions,
     ) -> Result<Commit> {
         self.commit(
             namespace_id,
             actor,
             &CommitRequest::with_operations(
                 &options.commit,
-                vec![FilesystemOperation::undelete(
+                vec![FilesystemOperation::restore_deleted(
                     inode_id,
                     deletion_seq,
                     &options.destination,

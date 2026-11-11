@@ -6,7 +6,7 @@ use loonfs_server::JobMode;
 use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval};
 use loonfs_test_support::ids::namespace_id;
 use loonfs_types::{
-    ChangeSeq, DeleteSnapshotResponse, ErrorResponse, ListSnapshotsResponse, NamespaceId, Snapshot,
+    CommitSeq, DeleteSnapshotResponse, ErrorResponse, ListSnapshotsResponse, NamespaceId, Snapshot,
 };
 use serde::de::DeserializeOwned;
 use tempfile::tempdir;
@@ -131,7 +131,7 @@ async fn http_snapshots_are_listed_extended_and_deleted_idempotently() {
     let after_create = loonfs_core::time::current_time_ms();
     assert_eq!(created.namespace_id, namespace);
     assert_eq!(created.name, "report");
-    assert_eq!(created.captured_seq, ChangeSeq(0));
+    assert_eq!(created.captured_seq, CommitSeq(0));
     assert!(created.created_at_ms >= before_create);
     assert!(created.created_at_ms <= after_create);
     let expires_at_ms = created
@@ -379,7 +379,7 @@ async fn snapshot_lifecycle_round_trips_through_the_client() {
         .expect("create snapshot");
     assert_eq!(created.namespace_id, namespace);
     assert_eq!(created.name, "first");
-    assert_eq!(created.captured_seq, ChangeSeq(0));
+    assert_eq!(created.captured_seq, CommitSeq(0));
 
     let mut pager = harness.client.list_snapshots(&namespace);
     assert_eq!(

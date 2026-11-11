@@ -1,7 +1,7 @@
 //! Maintenance job requests and responses for the v0 HTTP API.
 
 use super::{GcRequest, GcResponse, PoolGcResponse};
-use crate::{AccessRevisionNo, ChangeSeq, CommitId, NamespaceId, PrincipalId};
+use crate::{AccessRevisionNo, CommitId, CommitSeq, NamespaceId, PrincipalId};
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
 
@@ -18,7 +18,7 @@ pub struct AdvanceRetentionRequest {
     /// advances to the head instead. This field can't be combined with `cutoff_at_ms`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub to_seq: Option<ChangeSeq>,
+    pub to_seq: Option<CommitSeq>,
     /// A Unix time in milliseconds. The floor advances to the last commit made at or before this
     /// time. LoonFS reads commits upward from the floor, and the first commit made after this time
     /// ends the advance. This field can't be combined with `to_seq`.
@@ -36,7 +36,7 @@ pub struct AdvanceRetentionResponse {
     /// The retention floor that the advance reached, which is the minimum sequence for incremental
     /// replay. It's below the target when LoonFS reads a commit that's less than one hour old
     /// before it reaches the target.
-    pub retention_floor_seq: ChangeSeq,
+    pub retention_floor_seq: CommitSeq,
 }
 
 /// A request to set the namespace's retention window, or to clear it when the request doesn't
@@ -73,7 +73,7 @@ pub struct SetRetentionWindowResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum RunMaintenanceRequest {
+pub enum RunMaintenanceJobRequest {
     /// A job that folds the WAL tail and compacts metadata until nothing is due, or until the job
     /// reaches its work limit.
     Metadata(MetadataMaintenanceRequest),
@@ -95,7 +95,7 @@ pub enum RunMaintenanceRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum RunPoolMaintenanceRequest {
+pub enum RunPoolMaintenanceJobRequest {
     /// A garbage collection job for the pool's aged, unreferenced content objects, upload records,
     /// and temporary objects.
     Gc(GcRequest),
@@ -107,7 +107,7 @@ pub enum RunPoolMaintenanceRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum RunPoolMaintenanceResponse {
+pub enum RunPoolMaintenanceJobResponse {
     /// The counts and deadlines from one garbage collection call on the pool.
     Gc(PoolGcResponse),
     /// A job kind from a newer server. This variant doesn't include the job's own fields.
@@ -136,7 +136,7 @@ pub struct RecoverAdministratorResponse {
     /// The ID of the recovery commit.
     pub commit_id: CommitId,
     /// The sequence of the recovery commit.
-    pub committed_seq: ChangeSeq,
+    pub committed_seq: CommitSeq,
     /// The root's access revision after the recovery.
     pub access_revision_no: AccessRevisionNo,
 }
@@ -162,7 +162,7 @@ pub struct MetadataMaintenanceRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum RunMaintenanceResponse {
+pub enum RunMaintenanceJobResponse {
     /// Whether metadata maintenance is caught up, and the compaction units that the job published.
     Metadata(MetadataMaintenanceResponse),
     /// The counts and deadlines from one garbage collection call.
@@ -186,18 +186,18 @@ pub enum RunMaintenanceResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct MetadataMaintenanceResponse {
-    /// The namespace that this run maintained.
+    /// The namespace that this job maintained.
     pub namespace_id: NamespaceId,
-    /// Whether work is still due when the run returns.
+    /// Whether work is still due when the job returns.
     pub outcome: MetadataMaintenanceOutcome,
-    /// The compaction units that this run published. A unit compacts one family group's window.
+    /// The compaction units that this job published. A unit compacts one family group's window.
     pub compaction_units: u64,
-    /// The work that this run skipped at a limit, by reason. Empty when the run skipped nothing.
+    /// The work that this job skipped at a limit, by reason. Empty when the job skipped nothing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped: Vec<MetadataSkippedWork>,
 }
 
-/// A part of a metadata maintenance run that the run skipped.
+/// A part of a metadata maintenance job that the job skipped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
@@ -217,7 +217,7 @@ pub enum MetadataSkippedWork {
 pub enum MetadataMaintenanceOutcome {
     /// Nothing is due now, and nothing can become due without a new commit.
     CaughtUp,
-    /// Work is still due, or the run couldn't tell. Another run continues the work.
+    /// Work is still due, or the job couldn't tell. Another job continues the work.
     Due,
     /// An outcome from a newer server.
     #[serde(other)]
@@ -228,10 +228,10 @@ pub enum MetadataMaintenanceOutcome {
 mod tests {
     use super::*;
 
-    /// Checks that a `metadata` run reports its outcome, compaction units, and skipped work as
-    /// flat fields next to the job kind, and leaves out `skipped` when the run skipped nothing.
+    /// Checks that a `metadata` job reports its outcome, compaction units, and skipped work as
+    /// flat fields next to the job kind, and leaves out `skipped` when the job skipped nothing.
     #[test]
-    fn a_metadata_run_reports_its_outcome_and_compaction_units() {
+    fn a_metadata_job_reports_its_outcome_and_compaction_units() {
         let response = MetadataMaintenanceResponse {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
             outcome: MetadataMaintenanceOutcome::Due,
@@ -239,7 +239,7 @@ mod tests {
             skipped: Vec::new(),
         };
         assert_eq!(
-            serde_json::to_value(RunMaintenanceResponse::Metadata(response.clone()))
+            serde_json::to_value(RunMaintenanceJobResponse::Metadata(response.clone()))
                 .expect("serialize metadata maintenance response"),
             serde_json::json!({
                 "kind": "metadata",
@@ -252,16 +252,16 @@ mod tests {
             skipped: vec![MetadataSkippedWork::ExpiredRowRemovalWalkLimit],
             ..response
         };
-        let json = serde_json::to_value(RunMaintenanceResponse::Metadata(skipped.clone()))
-            .expect("serialize a run that skipped work");
+        let json = serde_json::to_value(RunMaintenanceJobResponse::Metadata(skipped.clone()))
+            .expect("serialize a job that skipped work");
         assert_eq!(
             json["skipped"],
             serde_json::json!(["expired_row_removal_walk_limit"])
         );
         assert_eq!(
-            serde_json::from_value::<RunMaintenanceResponse>(json)
-                .expect("decode a run that skipped work"),
-            RunMaintenanceResponse::Metadata(skipped)
+            serde_json::from_value::<RunMaintenanceJobResponse>(json)
+                .expect("decode a job that skipped work"),
+            RunMaintenanceJobResponse::Metadata(skipped)
         );
         assert_eq!(
             serde_json::to_value(MetadataMaintenanceOutcome::CaughtUp)
@@ -274,7 +274,7 @@ mod tests {
     /// newer server as `Unknown`.
     #[test]
     fn a_metadata_outcome_from_a_newer_server_decodes_as_unknown() {
-        let response: RunMaintenanceResponse = serde_json::from_value(serde_json::json!({
+        let response: RunMaintenanceJobResponse = serde_json::from_value(serde_json::json!({
             "kind": "metadata",
             "namespace_id": "demo",
             "outcome": "throttled",
@@ -282,7 +282,7 @@ mod tests {
             "skipped": ["expired_row_removal_walk_limit", "a_newer_limit"]
         }))
         .expect("a newer outcome decodes");
-        let RunMaintenanceResponse::Metadata(metadata) = response else {
+        let RunMaintenanceJobResponse::Metadata(metadata) = response else {
             panic!("a metadata response decodes as metadata");
         };
         assert_eq!(metadata.outcome, MetadataMaintenanceOutcome::Unknown);
@@ -297,17 +297,17 @@ mod tests {
     }
 
     #[test]
-    fn run_maintenance_requests_are_strict_and_round_trip() {
+    fn run_maintenance_job_requests_are_strict_and_round_trip() {
         let cases = [
             (
                 serde_json::json!({"kind": "metadata"}),
-                Some(RunMaintenanceRequest::Metadata(
+                Some(RunMaintenanceJobRequest::Metadata(
                     MetadataMaintenanceRequest::default(),
                 )),
             ),
             (
                 serde_json::json!({"kind": "metadata", "max_wal_tail_objects": 4}),
-                Some(RunMaintenanceRequest::Metadata(
+                Some(RunMaintenanceJobRequest::Metadata(
                     MetadataMaintenanceRequest {
                         max_wal_tail_objects: NonZeroU64::new(4),
                     },
@@ -316,46 +316,50 @@ mod tests {
             (serde_json::json!({"kind": "metadata_compaction"}), None),
             (
                 serde_json::json!({"kind": "gc"}),
-                Some(RunMaintenanceRequest::Gc(GcRequest::default())),
+                Some(RunMaintenanceJobRequest::Gc(GcRequest::default())),
             ),
             (
                 serde_json::json!({
                     "kind": "gc",
                     "grace_window_ms": 600_000
                 }),
-                Some(RunMaintenanceRequest::Gc(GcRequest {
+                Some(RunMaintenanceJobRequest::Gc(GcRequest {
                     grace_window_ms: Some(600_000),
                 })),
             ),
             (
                 serde_json::json!({"kind": "retention"}),
-                Some(RunMaintenanceRequest::Retention(
+                Some(RunMaintenanceJobRequest::Retention(
                     AdvanceRetentionRequest::default(),
                 )),
             ),
             (
                 serde_json::json!({"kind": "retention", "to_seq": 12}),
-                Some(RunMaintenanceRequest::Retention(AdvanceRetentionRequest {
-                    to_seq: Some(ChangeSeq(12)),
-                    cutoff_at_ms: None,
-                })),
+                Some(RunMaintenanceJobRequest::Retention(
+                    AdvanceRetentionRequest {
+                        to_seq: Some(CommitSeq(12)),
+                        cutoff_at_ms: None,
+                    },
+                )),
             ),
             (
                 serde_json::json!({"kind": "retention", "cutoff_at_ms": 1_752_624_000_000u64}),
-                Some(RunMaintenanceRequest::Retention(AdvanceRetentionRequest {
-                    to_seq: None,
-                    cutoff_at_ms: Some(1_752_624_000_000),
-                })),
+                Some(RunMaintenanceJobRequest::Retention(
+                    AdvanceRetentionRequest {
+                        to_seq: None,
+                        cutoff_at_ms: Some(1_752_624_000_000),
+                    },
+                )),
             ),
             (
                 serde_json::json!({"kind": "retention_window"}),
-                Some(RunMaintenanceRequest::RetentionWindow(
+                Some(RunMaintenanceJobRequest::RetentionWindow(
                     SetRetentionWindowRequest::default(),
                 )),
             ),
             (
                 serde_json::json!({"kind": "retention_window", "retention_window_ms": 86_400_000}),
-                Some(RunMaintenanceRequest::RetentionWindow(
+                Some(RunMaintenanceJobRequest::RetentionWindow(
                     SetRetentionWindowRequest {
                         retention_window_ms: NonZeroU64::new(86_400_000),
                     },
@@ -376,7 +380,7 @@ mod tests {
         ];
 
         for (body, expected) in cases {
-            let decoded = serde_json::from_value::<RunMaintenanceRequest>(body.clone());
+            let decoded = serde_json::from_value::<RunMaintenanceJobRequest>(body.clone());
             match expected {
                 Some(expected) => {
                     let decoded = decoded.expect("valid maintenance request should decode");
@@ -395,13 +399,13 @@ mod tests {
     }
 
     #[test]
-    fn run_pool_maintenance_requests_accept_only_gc() {
-        let decoded: RunPoolMaintenanceRequest =
+    fn run_pool_maintenance_job_requests_accept_only_gc() {
+        let decoded: RunPoolMaintenanceJobRequest =
             serde_json::from_value(serde_json::json!({"kind": "gc", "grace_window_ms": 600_000}))
                 .expect("a pool gc request decodes");
         assert_eq!(
             decoded,
-            RunPoolMaintenanceRequest::Gc(GcRequest {
+            RunPoolMaintenanceJobRequest::Gc(GcRequest {
                 grace_window_ms: Some(600_000),
             })
         );
@@ -409,12 +413,12 @@ mod tests {
             serde_json::json!({"kind": "metadata"}),
             serde_json::json!({"kind": "gc", "bogus": 1}),
         ] {
-            serde_json::from_value::<RunPoolMaintenanceRequest>(body.clone())
+            serde_json::from_value::<RunPoolMaintenanceJobRequest>(body.clone())
                 .expect_err(&format!("invalid pool maintenance request decoded: {body}"));
         }
-        let newer: RunPoolMaintenanceResponse =
+        let newer: RunPoolMaintenanceJobResponse =
             serde_json::from_value(serde_json::json!({"kind": "compaction", "units": 2}))
                 .expect("a newer job kind decodes");
-        assert_eq!(newer, RunPoolMaintenanceResponse::Unknown);
+        assert_eq!(newer, RunPoolMaintenanceJobResponse::Unknown);
     }
 }

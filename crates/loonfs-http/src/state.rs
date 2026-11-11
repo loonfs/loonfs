@@ -6,7 +6,7 @@ use crate::{HttpMetrics, RequestLimit, UsageRecorder};
 use futures::future::{BoxFuture, Shared};
 use futures::FutureExt as _;
 use loonfs::{
-    ChangeSeq, CloseNamespaceReport, LoonFs, Maintenance, Namespace, NamespaceSessionStatus,
+    CloseNamespaceReport, CommitSeq, LoonFs, Maintenance, Namespace, NamespaceSessionStatus,
     SharedObjectStore, Writable,
 };
 use loonfs_grep::{GrepService, GrepWorker};
@@ -377,7 +377,7 @@ impl<S: HostState> Namespaces<S> {
     pub async fn close_if_idle(
         &self,
         namespace_id: &NamespaceId,
-        expected_seq: Option<ChangeSeq>,
+        expected_seq: Option<CommitSeq>,
         idle_after_ms: u64,
         is_quiet: impl FnOnce(&HeldNamespace<S>) -> bool,
     ) -> loonfs::Result<Option<CloseNamespaceReport>> {

@@ -18,7 +18,7 @@ use loonfs_types::format::control::WriterBlock;
 pub use loonfs_types::MergeBound;
 use loonfs_types::{ActiveWriter, CommittedReceipt, MergeConflict};
 use loonfs_types::{
-    BindingVersion, ChangeSeq, CommitId, ErrorDetails, InodeId, InodeKind, ManifestNo, NamespaceId,
+    BindingVersion, CommitId, CommitSeq, ErrorDetails, InodeId, InodeKind, ManifestNo, NamespaceId,
     PathError, PoolId, PrincipalScope, RevisionNo, UploadId, WriterEpoch,
 };
 use thiserror::Error;
@@ -98,7 +98,7 @@ pub enum CoreError {
         max_bytes: usize,
         /// The split hint: a fork sequence such that a merge of the fork's
         /// commits through it fits, or `None` when no shorter range fits.
-        split_at_seq: Option<ChangeSeq>,
+        split_at_seq: Option<CommitSeq>,
     },
     #[error("an append carries {size_bytes} bytes; one append carries at most {max_bytes}")]
     AppendTooLarge { size_bytes: u64, max_bytes: u64 },
@@ -172,8 +172,8 @@ pub enum CoreError {
     )]
     MergeRangeConflict {
         source_namespace_id: NamespaceId,
-        expected_after_seq: ChangeSeq,
-        actual_after_seq: ChangeSeq,
+        expected_after_seq: CommitSeq,
+        actual_after_seq: CommitSeq,
     },
     /// A fork's change conflicts with the namespace being merged into, under
     /// the conflict rule. `conflict` is the conflicting inode with the
@@ -268,7 +268,7 @@ pub enum CoreError {
     )]
     RebootstrapRequired {
         below: HistoryPosition,
-        retention_floor_seq: ChangeSeq,
+        retention_floor_seq: CommitSeq,
     },
     /// A diff's `from_seq`, `to_seq`, or `after_seq` is out of order with the
     /// others or with the head. `param` identifies the parameter.
@@ -333,8 +333,8 @@ pub enum CoreError {
     /// choose whether to retry. Both errors use the `stale_head` code.
     #[error("expected head sequence {expected}, found {actual}")]
     StaleHeadPrecondition {
-        expected: ChangeSeq,
-        actual: ChangeSeq,
+        expected: CommitSeq,
+        actual: CommitSeq,
     },
     /// A read or a publication on a manifest that a newer manifest replaced
     /// found a metadata segment missing. Garbage collection keeps the
@@ -772,20 +772,20 @@ impl CoreError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HistoryPosition {
     /// The `after_seq` cursor of a change feed read.
-    FeedCursor { after_seq: ChangeSeq },
+    FeedCursor { after_seq: CommitSeq },
     /// The `from_seq` of a diff.
-    DiffStart { from_seq: ChangeSeq },
+    DiffStart { from_seq: CommitSeq },
     /// The sequence of a read view.
-    ReadSeq { read_seq: ChangeSeq },
+    ReadSeq { read_seq: CommitSeq },
     /// A merge's fork point, below the floor of the namespace being merged
     /// into, so a base compaction might have removed the fork's previous
     /// merge from the merge index.
-    ForkPoint { fork_point_seq: ChangeSeq },
+    ForkPoint { fork_point_seq: CommitSeq },
     /// The start of a merge's range, below the fork's own floor, so the
     /// fork's change over the range can't be computed.
     RangeStart {
         source_namespace_id: NamespaceId,
-        source_after_seq: ChangeSeq,
+        source_after_seq: CommitSeq,
     },
 }
 
@@ -928,7 +928,7 @@ mod tests {
     use crate::control_object::ControlObjectLoadError;
     use crate::storage::content_admission::ContentTokenError;
     use loonfs_objectstore::ObjectStoreError;
-    use loonfs_types::{ChangeSeq, CommitId, InodeId, NamespaceId, RevisionNo, WriterEpoch};
+    use loonfs_types::{CommitId, CommitSeq, InodeId, NamespaceId, RevisionNo, WriterEpoch};
     use std::assert_matches;
 
     #[test]
@@ -1036,7 +1036,7 @@ mod tests {
         // commit id was committed and what was committed there, which is what a retry
         // reads back and proves itself against.
         let receipt = CommittedReceipt {
-            committed_seq: ChangeSeq(9),
+            committed_seq: CommitSeq(9),
             committed_fingerprint: loonfs_test_support::ids::commit_fingerprint("abc"),
         };
         let reuse = CoreError::CommitIdReuseConflict {
@@ -1095,8 +1095,8 @@ mod tests {
         // A refused `expected_head_seq` carries both sequences, so a caller
         // that still means to delete knows what to retry against.
         let precondition = CoreError::StaleHeadPrecondition {
-            expected: ChangeSeq(41),
-            actual: ChangeSeq(45),
+            expected: CommitSeq(41),
+            actual: CommitSeq(45),
         };
         assert_eq!(precondition.code(), ErrorCode::StaleHead);
         assert_eq!(
@@ -1104,8 +1104,8 @@ mod tests {
             "expected head sequence 41, found 45"
         );
         let details = precondition.details().expect("head-sequence details");
-        assert_eq!(details.expected_head_seq, Some(ChangeSeq(41)));
-        assert_eq!(details.actual_head_seq, Some(ChangeSeq(45)));
+        assert_eq!(details.expected_head_seq, Some(CommitSeq(41)));
+        assert_eq!(details.actual_head_seq, Some(CommitSeq(45)));
 
         // Errors without machine-usable identity stay detail-free.
         assert!(CoreError::NamespaceCorrupt("boom".to_owned())

@@ -12,7 +12,7 @@ fn rebase_fork(name: &str) -> NamespaceId {
 
 /// Commits ordinary commits until `main`'s head reaches the fork point.
 async fn reach_fork_point(store: &LocalFsStore, main: &NamespaceId, writer: &WriterAt) {
-    let mut head = ChangeSeq(0);
+    let mut head = CommitSeq(0);
     while head < FORK_POINT {
         let name = format!("before-{}", head.0);
         let candidate = CommitCandidate::new(create_dir_request(&name, &name));
@@ -67,7 +67,7 @@ async fn a_rebase_fork_records_where_the_forks_next_merge_starts() {
     let merged = fork_for_rebase(&store, &main, &writer, &rebase_fork("merged"))
         .await
         .expect("a rebase fork after the first merge");
-    for (created, resume_after_seq) in [(&unmerged, FORK_POINT), (&merged, ChangeSeq(7))] {
+    for (created, resume_after_seq) in [(&unmerged, FORK_POINT), (&merged, CommitSeq(7))] {
         assert_eq!(
             created
                 .fork_basis

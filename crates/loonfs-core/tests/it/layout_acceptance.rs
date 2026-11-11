@@ -20,7 +20,7 @@ use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_test_support::stores::{KeyPredicate, OperationSelector, RecordingStore};
 use loonfs_types::AbsolutePath;
 use loonfs_types::CompleteUploadBody;
-use loonfs_types::{ChangeSeq, NamespaceId};
+use loonfs_types::{CommitSeq, NamespaceId};
 use tempfile::tempdir;
 
 async fn put_file<S: ObjectStore + ?Sized>(
@@ -154,7 +154,7 @@ async fn reads_commits_and_change_feed_never_list() {
     assert_eq!(bytes.bytes, b"hello\n");
     let changes = engine
         .list_changes_after(
-            loonfs_types::ChangeFeedPosition::after(ChangeSeq(0)),
+            loonfs_types::ChangeFeedPosition::after(CommitSeq(0)),
             loonfs_test_support::ids::page_limit(1024),
             loonfs_types::options::CommitSplitting::Whole,
             &ctx,

@@ -4,7 +4,7 @@ use crate::object_store::Result;
 use crate::ByteRange;
 use async_trait::async_trait;
 use loonfs_types::Checksum;
-use loonfs_types::ObjectTransferAccess;
+use loonfs_types::ObjectTransfer;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -99,7 +99,7 @@ pub struct PresignedUrl {
     pub expires_at_ms: u64,
 }
 
-impl From<PresignedUrl> for ObjectTransferAccess {
+impl From<PresignedUrl> for ObjectTransfer {
     fn from(signed: PresignedUrl) -> Self {
         Self::PresignedUrl {
             method: signed.method,
@@ -127,7 +127,7 @@ pub trait DirectPutIssuer: Send + Sync + std::fmt::Debug {
     /// always checks the actual stored size.
     fn max_content_bytes(&self) -> u64;
 
-    /// Issues a create-only write capability for the requested object key.
+    /// Issues a create-only presigned URL for the requested object key.
     ///
     /// Issuance fails for invalid keys, invalid expiry policy, unusable signing
     /// time, or malformed provider configuration.
@@ -138,16 +138,16 @@ pub trait DirectPutIssuer: Send + Sync + std::fmt::Debug {
     ) -> Result<PresignedUrl>;
 }
 
-/// Issues read capabilities for content objects a client fetches straight
+/// Issues presigned URLs for content objects a client fetches straight
 /// from the provider.
 #[async_trait]
 pub trait DirectGetIssuer: Send + Sync + std::fmt::Debug {
-    /// Issues a read capability for exactly `request.range` of one content
+    /// Issues a presigned URL that reads exactly `request.range` of one content
     /// object.
     ///
     /// Implementations sign the `Range` header and return it in the
-    /// capability's headers. An object can be longer than a reference that
-    /// names it, so a capability without the range would read bytes
+    /// presigned URL's headers. An object can be longer than a reference that
+    /// names it, so a presigned URL without the range would read bytes
     /// appended after the reference.
     ///
     /// Issuance fails for invalid keys, invalid expiry policy, unusable
@@ -162,7 +162,7 @@ pub trait DirectGetIssuer: Send + Sync + std::fmt::Debug {
 /// Issues write permissions for an open multipart upload.
 #[async_trait]
 pub trait DirectMultipartIssuer: Send + Sync + std::fmt::Debug {
-    /// Issues a write capability for one part of an open multipart upload.
+    /// Issues a presigned URL that writes one part of an open multipart upload.
     ///
     /// Multipart parts are replaceable so clients can retry them. The signed
     /// request includes the checksum that the provider must enforce.

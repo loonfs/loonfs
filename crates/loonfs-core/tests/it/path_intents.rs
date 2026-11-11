@@ -13,8 +13,8 @@ use loonfs_test_support::ids::{commit_id, namespace_id, page_limit};
 use loonfs_test_support::stores::OperationSelector;
 use loonfs_types::{
     format::wal::{decode_wal_object_envelope_zstd, WalDelta},
-    AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior,
-    EntryInodeKind, FilesystemChange, InodeId, ListPageCursor, NameKey, NamespaceId, Page,
+    AbsolutePath, CommitId, CommitSeq, DeleteDirectoryBehavior, DestinationBehavior,
+    EntryInodeKind, FilesystemEvent, InodeId, ListPageCursor, NameKey, NamespaceId, Page,
     PageRequest, PathEntry, RevisionNo,
 };
 use std::assert_matches;
@@ -849,7 +849,7 @@ async fn revision_history_and_change_feed_name_the_same_supplied_commit() {
         .iter()
         .find(|revision| revision.committed_seq == response.committed_seq)
         .expect("committed revision");
-    let changes = list_changes_after(&store, &namespace_id, ChangeSeq(0))
+    let changes = list_changes_after(&store, &namespace_id, CommitSeq(0))
         .await
         .expect("read change feed");
     let change = changes
@@ -1084,11 +1084,11 @@ async fn path_intents_in_one_batch_see_tentative_state_and_continue_the_seq_ladd
 
     assert_eq!(
         responses[0].as_ref().expect("put").committed_seq,
-        ChangeSeq(1)
+        CommitSeq(1)
     );
     assert_eq!(
         responses[1].as_ref().expect("move").committed_seq,
-        ChangeSeq(2)
+        CommitSeq(2)
     );
     let moved_bytes = read_file_bytes(&store, &namespace_id, "/docs/b.txt")
         .await
@@ -1118,7 +1118,7 @@ async fn path_intents_in_one_batch_see_tentative_state_and_continue_the_seq_ladd
     )
     .await
     .expect("copy path");
-    assert_eq!(copied.committed_seq, ChangeSeq(3));
+    assert_eq!(copied.committed_seq, CommitSeq(3));
 
     let deleted = delete_path_non_recursive(
         &store,
@@ -1129,7 +1129,7 @@ async fn path_intents_in_one_batch_see_tentative_state_and_continue_the_seq_ladd
     )
     .await
     .expect("delete path");
-    assert_eq!(deleted.committed_seq, ChangeSeq(4));
+    assert_eq!(deleted.committed_seq, CommitSeq(4));
 
     let copied_bytes = read_file_bytes(&store, &namespace_id, "/docs/c.txt")
         .await
@@ -1261,7 +1261,7 @@ async fn create_directory_path_creates_directory_without_auto_parents() {
     )
     .await
     .expect("create dir");
-    assert_eq!(created.committed_seq, ChangeSeq(1));
+    assert_eq!(created.committed_seq, CommitSeq(1));
     let docs = resolve_path(&store, &namespace_id("demo"), "/docs")
         .await
         .expect("resolve docs");
@@ -1304,13 +1304,13 @@ async fn path_move_writes_unbind_and_old_binding_stops_resolving() {
         )
         .await
         .expect("move file");
-    let move_count = list_changes_after(&store, &namespace_id("demo"), ChangeSeq(0))
+    let move_count = list_changes_after(&store, &namespace_id("demo"), CommitSeq(0))
         .await
         .expect("change feed")
         .changes
         .iter()
         .flat_map(|change| &change.events)
-        .filter(|event| matches!(event, FilesystemChange::Moved { .. }))
+        .filter(|event| matches!(event, FilesystemEvent::Moved { .. }))
         .count();
     assert_eq!(move_count, 1);
     assert_eq!(
@@ -2564,11 +2564,11 @@ async fn listing_matching_stats<S: ObjectStore + ?Sized>(
 }
 
 /// Checks that a listing reports each file's current revision after a write,
-/// a move, a write after the move, a delete, and an undelete, that a fold
+/// a move, a write after the move, a delete, and a restore, that a fold
 /// leaves every listing unchanged, and that a listing of the folded tree
 /// reads no segment of the `revisions` family.
 #[tokio::test]
-async fn listed_revisions_follow_moves_writes_and_undeletes_across_a_fold() {
+async fn listed_revisions_follow_moves_writes_and_restores_across_a_fold() {
     let temp_dir = tempdir().expect("tempdir");
     let store = loonfs_test_support::stores::RecordingStore::metadata_segments(
         LocalFsStore::new(temp_dir.path()).expect("store"),
@@ -2619,15 +2619,15 @@ async fn listed_revisions_follow_moves_writes_and_undeletes_across_a_fold() {
         &store,
         &namespace_id,
         CommitId::generate(),
-        FilesystemOperation::Undelete {
+        FilesystemOperation::RestoreDeleted {
             inode_id: moved[0].inode_id,
             deletion_seq: deletion.committed_seq,
-            destination: loonfs_types::options::UndeleteDestination::Recorded,
+            destination: loonfs_types::options::RestoreDeletedDestination::Recorded,
         },
         &context,
     )
     .await
-    .expect("undelete file");
+    .expect("restore file");
     let unfolded = listing_matching_stats(&store, &namespace_id, "/b").await;
     assert_eq!(
         unfolded

@@ -1,6 +1,6 @@
 //! How one step of a merge session ended.
 
-use loonfs_types::{ChangeSeq, CommitId, ErrorResponse, NamespaceId};
+use loonfs_types::{CommitId, CommitSeq, ErrorResponse, NamespaceId};
 use serde::Serialize;
 
 /// How one step of a merge session ended.
@@ -17,10 +17,10 @@ pub enum MergeSessionOutcome {
         /// The merge's commit ID.
         commit_id: CommitId,
         /// The sequence that the merge committed at.
-        committed_seq: ChangeSeq,
+        committed_seq: CommitSeq,
         /// The fork sequence that the merge applied the fork's commits
         /// through.
-        through_seq: ChangeSeq,
+        through_seq: CommitSeq,
     },
     /// A merge or a replay commit was too large, and the next step sends it
     /// through `split_at_seq`.
@@ -28,7 +28,7 @@ pub enum MergeSessionOutcome {
         /// The `merge_too_large` error.
         error: ErrorResponse,
         /// The split hint that the next request goes through.
-        split_at_seq: ChangeSeq,
+        split_at_seq: CommitSeq,
     },
     /// A merge conflicted, and the next step rebases the fork into
     /// `new_fork_id`.
@@ -45,7 +45,7 @@ pub enum MergeSessionOutcome {
         new_fork_id: NamespaceId,
         /// The fork sequence that the replay commit replayed the fork's
         /// commits through.
-        through_seq: ChangeSeq,
+        through_seq: CommitSeq,
         /// The changes that the replay commit left out.
         conflict_count: usize,
     },
@@ -65,7 +65,7 @@ pub enum MergeSessionOutcome {
         /// The new fork, which is now the current fork.
         fork_id: NamespaceId,
         /// The new fork's head, which the session merges it through.
-        through_seq: ChangeSeq,
+        through_seq: CommitSeq,
     },
     /// A merge or a rebase failed with a transient error, and the next step
     /// sends the same request again.

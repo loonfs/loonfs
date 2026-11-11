@@ -2,7 +2,7 @@
 
 use super::DirectoryBinding;
 use crate::{
-    AbsolutePath, ActorId, Attributes, AttributesRevisionNo, BindingVersion, ChangeSeq, CommitId,
+    AbsolutePath, ActorId, Attributes, AttributesRevisionNo, BindingVersion, CommitId, CommitSeq,
     ContentRef, DisplayName, InodeId, InodeKind, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
@@ -33,7 +33,7 @@ pub struct PathEntry {
     #[serde(flatten)]
     pub kind: PathEntryKind,
     /// The namespace head sequence that this response was read at.
-    pub head_seq: ChangeSeq,
+    pub head_seq: CommitSeq,
     /// The parent directory's inode. It's absent for the root.
     #[serde(
         default,
@@ -227,7 +227,7 @@ pub struct ListPathEntriesResponse {
     /// The absolute path of the listed directory.
     pub path: AbsolutePath,
     /// The namespace head sequence that this listing was read at.
-    pub head_seq: ChangeSeq,
+    pub head_seq: CommitSeq,
     /// The directory entries, in canonical name key order.
     pub entries: Vec<PathEntry>,
     /// The cursor for the next page, if more entries remain.
@@ -247,7 +247,7 @@ pub struct ListInodeChildrenResponse {
     #[serde(with = "crate::inode_id::public")]
     pub parent_inode_id: InodeId,
     /// The namespace head sequence that this listing was read at.
-    pub head_seq: ChangeSeq,
+    pub head_seq: CommitSeq,
     /// The directory entries, in canonical name key order.
     pub entries: Vec<PathEntry>,
     /// The cursor for the next page, if more entries remain.
@@ -267,7 +267,7 @@ pub struct TrashEntry {
     #[cfg_attr(feature = "openapi", schema(value_type = InodeKind))]
     pub inode_kind: EntryInodeKind,
     /// The commit sequence that identifies this deletion.
-    pub deletion_seq: ChangeSeq,
+    pub deletion_seq: CommitSeq,
     /// The time of the deletion, in Unix milliseconds.
     pub deleted_at_ms: u64,
     /// The actor responsible for the deletion.
@@ -283,7 +283,7 @@ pub struct ListTrashResponse {
     /// The namespace that was read.
     pub namespace_id: NamespaceId,
     /// The head sequence that this page was evaluated at.
-    pub head_seq: ChangeSeq,
+    pub head_seq: CommitSeq,
     /// The recoverable deletions, oldest first.
     pub entries: Vec<TrashEntry>,
     /// The cursor for the next page. It's present when another page follows.
@@ -302,7 +302,7 @@ pub struct FileRevision {
     /// The revision number within the file inode.
     pub revision_no: RevisionNo,
     /// The namespace sequence of the commit that created this revision.
-    pub committed_seq: ChangeSeq,
+    pub committed_seq: CommitSeq,
     /// The ID of the commit that created this revision.
     pub commit_id: CommitId,
     /// The time the revision was committed, in Unix milliseconds. Commit order comes from
@@ -324,7 +324,7 @@ pub struct ListFileRevisionsResponse {
     #[serde(with = "crate::inode_id::public")]
     pub inode_id: InodeId,
     /// The namespace head sequence that the read used.
-    pub head_seq: ChangeSeq,
+    pub head_seq: CommitSeq,
     /// The retained revisions, in order.
     pub revisions: Vec<FileRevision>,
     /// An opaque cursor for the next page, if more revisions are available.
@@ -359,7 +359,7 @@ mod tests {
             created_by: ActorId::loonfs(),
             created_at_ms: 1_752_624_000_000,
             kind: PathEntryKind::Directory {},
-            head_seq: ChangeSeq(3),
+            head_seq: CommitSeq(3),
             parent_inode_id,
             display_name: display_name.map(|name| DisplayName::parse(name).expect("display name")),
             binding_version: parent_inode_id.map(|_| binding_version()),
@@ -389,7 +389,7 @@ mod tests {
         let response = ListPathEntriesResponse {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
             path: AbsolutePath::parse("/").expect("absolute path"),
-            head_seq: ChangeSeq(3),
+            head_seq: CommitSeq(3),
             entries: vec![named],
             next_cursor: None,
         };
@@ -621,7 +621,7 @@ mod tests {
         let trash = TrashEntry {
             inode_id: InodeId(42),
             inode_kind: EntryInodeKind::File,
-            deletion_seq: ChangeSeq(417),
+            deletion_seq: CommitSeq(417),
             deleted_at_ms: 1,
             deleted_by: ActorId::loonfs(),
             deleted_binding: DirectoryBinding {
@@ -648,11 +648,11 @@ mod tests {
     }
 
     #[test]
-    fn trash_handle_copies_directly_into_an_undelete_operation() {
+    fn trash_handle_copies_directly_into_a_restore_operation() {
         let trash = TrashEntry {
             inode_id: InodeId(42),
             inode_kind: EntryInodeKind::File,
-            deletion_seq: ChangeSeq(417),
+            deletion_seq: CommitSeq(417),
             deleted_at_ms: 1_752_625_000_000,
             deleted_by: ActorId::loonfs(),
             deleted_binding: DirectoryBinding {
@@ -669,7 +669,7 @@ mod tests {
         assert_eq!(trash_json["deletion_seq"], serde_json::json!(417));
 
         let operation_json = serde_json::json!({
-            "kind": "undelete",
+            "kind": "restore_deleted",
             "inode_id": trash_json["inode_id"].clone(),
             "deletion_seq": trash_json["deletion_seq"].clone()
         });
@@ -677,10 +677,10 @@ mod tests {
             serde_json::from_value(operation_json).expect("decode copied trash handle");
         assert_matches!(
             operation,
-            crate::FilesystemOperation::Undelete {
+            crate::FilesystemOperation::RestoreDeleted {
                 inode_id: InodeId(42),
-                deletion_seq: ChangeSeq(417),
-                destination: crate::options::UndeleteDestination::Recorded,
+                deletion_seq: CommitSeq(417),
+                destination: crate::options::RestoreDeletedDestination::Recorded,
             }
         );
     }
@@ -695,7 +695,7 @@ mod tests {
         let revision = FileRevision {
             inode_id: InodeId(2),
             revision_no: RevisionNo(3),
-            committed_seq: ChangeSeq(7),
+            committed_seq: CommitSeq(7),
             commit_id: CommitId::parse("c_revision_owner").expect("commit id"),
             committed_at_ms: 1_752_624_000_000,
             committed_by: crate::ActorId::loonfs(),

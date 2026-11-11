@@ -11,7 +11,7 @@ use crate::{GrepError, Result};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::ExtensionSegmentRef;
 use loonfs_types::format::segment_blocks::{SegmentFilter, SegmentFilterBuilder};
-use loonfs_types::{u64_from_usize, ChangeSeq, ErrorCode, InodeId, RevisionNo, RunNo};
+use loonfs_types::{u64_from_usize, CommitSeq, ErrorCode, InodeId, RevisionNo, RunNo};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Bytes of the revision filter's payload in one filter row, half of a data
@@ -235,7 +235,7 @@ pub(super) async fn re_reference_check_fails<S: ObjectStore + ?Sized>(
 /// indexing work left to bring it back.
 async fn values_since(
     reads: &NamespaceReads,
-    filter_seq: ChangeSeq,
+    filter_seq: CommitSeq,
 ) -> Result<BTreeSet<ContentValue>> {
     let mut values = BTreeSet::new();
     let mut after_seq = filter_seq;

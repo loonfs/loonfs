@@ -21,7 +21,7 @@ use futures::{stream, StreamExt, TryFutureExt, TryStreamExt};
 use loonfs::{CoreError, SnapshotFilesPageCursor};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{ExtensionRunRef, ExtensionSegmentRef};
-use loonfs_types::{ChangeSeq, ContentRef, InodeId, PinId, RevisionNo, MAX_PAGE_LIMIT};
+use loonfs_types::{CommitSeq, ContentRef, InodeId, PinId, RevisionNo, MAX_PAGE_LIMIT};
 use std::collections::{BTreeMap, BTreeSet};
 
 impl<S: ObjectStore + Clone> GrepSteps<'_, S> {
@@ -224,7 +224,7 @@ impl IncrementalCursor {
 
     fn stop_at(
         &mut self,
-        change_seq: ChangeSeq,
+        change_seq: CommitSeq,
         event_index: usize,
         event_count: usize,
         after_event: bool,
@@ -249,7 +249,7 @@ impl IncrementalCursor {
         Ok(())
     }
 
-    fn finish_change(&mut self, change_seq: ChangeSeq) {
+    fn finish_change(&mut self, change_seq: CommitSeq) {
         self.resume = ChangeFeedResume::new(change_seq, 0);
     }
 }
@@ -268,11 +268,11 @@ struct IndexingStats {
 enum CollectedProgress {
     Backfill {
         pin_id: PinId,
-        captured_seq: ChangeSeq,
+        captured_seq: CommitSeq,
         next_cursor: Option<InodeId>,
     },
     Incremental {
-        built_through_seq: ChangeSeq,
+        built_through_seq: CommitSeq,
         next_event_index: u32,
     },
 }
@@ -291,7 +291,7 @@ enum CollectedProgress {
 async fn plan_backfill_unit(
     reads: &NamespaceReads,
     pin_id: &PinId,
-    captured_seq: ChangeSeq,
+    captured_seq: CommitSeq,
     cursor: Option<InodeId>,
     policy: GramIndexBuildPolicy,
 ) -> Result<PlannedIndexUnit> {
@@ -438,7 +438,7 @@ async fn plan_incremental_unit(
 struct PendingRevisionContent {
     inode_id: InodeId,
     revision_no: RevisionNo,
-    committed_seq: ChangeSeq,
+    committed_seq: CommitSeq,
     content_ref: ContentRef,
 }
 

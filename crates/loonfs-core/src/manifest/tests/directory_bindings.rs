@@ -662,7 +662,7 @@ async fn a_parent_binding_cycle_is_namespace_corruption_for_visibility_and_curre
         builder.push_inode(crate::metadata::InodeRecord {
             inode_id,
             inode_kind: InodeKind::Directory,
-            committed_seq: ChangeSeq(1),
+            committed_seq: CommitSeq(1),
             commit_id: commit_id.clone(),
             committed_by: loonfs_types::ActorId::loonfs(),
             committed_at_ms: 1_000,
@@ -685,13 +685,13 @@ async fn a_parent_binding_cycle_is_namespace_corruption_for_visibility_and_curre
             child_kind: InodeKind::Directory,
             child_created_by: loonfs_types::ActorId::loonfs(),
             child_created_at_ms: 1_000,
-            committed_seq: ChangeSeq(1),
+            committed_seq: CommitSeq(1),
             delta_index: 0,
             commit_id: crate::test_support::binding_commit_id(),
             committed_by: loonfs_types::ActorId::loonfs(),
             committed_at_ms: 0,
             bind_position: loonfs_types::format::manifest::DeltaPosition {
-                seq: ChangeSeq(1),
+                seq: CommitSeq(1),
                 delta_index: 0,
             },
         });
@@ -704,14 +704,14 @@ async fn a_parent_binding_cycle_is_namespace_corruption_for_visibility_and_curre
         &store,
         &namespace_id,
         ManifestNo(1),
-        ChangeSeq(1),
+        CommitSeq(1),
         flatten_manifest_segments(segments),
     )
     .await;
     let verified = load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest)
         .await
         .expect("load manifest segments");
-    let view = crate::metadata::MetadataView::over_manifest_segments(&verified, ChangeSeq(1));
+    let view = crate::metadata::MetadataView::over_manifest_segments(&verified, CommitSeq(1));
 
     let covered = view
         .covering_subtree_tombstone(InodeId(2))

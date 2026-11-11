@@ -3,7 +3,7 @@
 use super::{
     held_ids, idle_fold_after_ms, scheduler_config, seed_writer, with_held, SchedulerServer,
 };
-use loonfs::{ChangeSeq, SharedObjectStore};
+use loonfs::{CommitSeq, SharedObjectStore};
 use loonfs_grep::entry::GrepIndexStatus;
 use loonfs_grep::GrepWorkerConfig;
 use loonfs_http::WriterSessions as _;
@@ -139,7 +139,7 @@ async fn enabling_an_empty_namespace_holds_it_and_session_steps_build_without_a_
                 .active_watermark()
                 .expect("active")
                 .built_through_seq(),
-            ChangeSeq(0)
+            CommitSeq(0)
         );
     }
     assert_eq!(held.last_published_seq(), None);
@@ -309,7 +309,7 @@ async fn session_steps_finish_a_backfill_without_a_local_commit_before_closing()
             .active_watermark()
             .expect("active")
             .built_through_seq(),
-        ChangeSeq(u64::try_from(files).expect("count"))
+        CommitSeq(u64::try_from(files).expect("count"))
     );
     assert!(
         !server

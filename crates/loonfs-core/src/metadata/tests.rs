@@ -12,7 +12,7 @@ use loonfs_types::ContentId;
 use loonfs_types::ROOT_INODE_ID;
 use loonfs_types::{
     AbsolutePath, AccessGrants, AccessRevisionNo, ActorId, AttributeKey, AttributeValue,
-    Attributes, AttributesRevisionNo, ChangeSeq, CommitId, ContentRef, InodeId, InodeKind, NameKey,
+    Attributes, AttributesRevisionNo, CommitId, CommitSeq, ContentRef, InodeId, InodeKind, NameKey,
     RevisionNo,
 };
 use std::assert_matches;
@@ -40,7 +40,7 @@ fn deleted_binding(parent_inode_id: InodeId, display_name: &str) -> DeletedBindi
 #[test]
 fn commit_rows_reject_inline_content_and_decode_without_it() {
     let record = WalCommitPayload {
-        committed_seq: ChangeSeq(9),
+        committed_seq: CommitSeq(9),
         commit_id: commit_id(9),
         committed_by: actor(),
         semantic_commit_fingerprint: loonfs_test_support::ids::commit_fingerprint("commit-row"),
@@ -88,7 +88,7 @@ fn every_provenance_row_copies_the_wal_payload_commit_id() {
             name_key: loonfs_types::NameKey::parse("file.txt").expect("name key"),
             display_name: loonfs_types::DisplayName::parse("file.txt").expect("display name"),
             bind_position: loonfs_types::format::manifest::DeltaPosition {
-                seq: loonfs_types::ChangeSeq(1),
+                seq: loonfs_types::CommitSeq(1),
                 delta_index: 0,
             },
             child_created_by: loonfs_types::ActorId::loonfs(),
@@ -130,7 +130,7 @@ fn every_provenance_row_copies_the_wal_payload_commit_id() {
     })
     .collect();
     let payload = WalCommitPayload {
-        committed_seq: ChangeSeq(9),
+        committed_seq: CommitSeq(9),
         commit_id: owning_commit_id.clone(),
         committed_by: actor(),
         semantic_commit_fingerprint: loonfs_test_support::ids::commit_fingerprint("test"),
@@ -153,7 +153,7 @@ fn every_provenance_row_copies_the_wal_payload_commit_id() {
         [AccessRevisionRecord {
             inode_id: InodeId(7),
             access_revision_no: AccessRevisionNo(1),
-            committed_seq: ChangeSeq(9),
+            committed_seq: CommitSeq(9),
             ..
         }]
     );
@@ -162,7 +162,7 @@ fn every_provenance_row_copies_the_wal_payload_commit_id() {
 #[test]
 fn bind_direntry_replay_uses_persisted_name_key() {
     let applied = MetadataState::default().apply_committed_wal_deltas(
-        ChangeSeq(1),
+        CommitSeq(1),
         &commit_id(1),
         &actor(),
         4_200,
@@ -197,7 +197,7 @@ fn child_lookup_uses_persisted_name_key_without_recanonicalizing() {
             InodeRecord {
                 inode_id: ROOT_INODE_ID,
                 inode_kind: InodeKind::Directory,
-                committed_seq: ChangeSeq(1),
+                committed_seq: CommitSeq(1),
                 commit_id: commit_id(1),
                 committed_by: actor(),
                 committed_at_ms: 4_200,
@@ -205,7 +205,7 @@ fn child_lookup_uses_persisted_name_key_without_recanonicalizing() {
             InodeRecord {
                 inode_id: InodeId(2),
                 inode_kind: InodeKind::File,
-                committed_seq: ChangeSeq(1),
+                committed_seq: CommitSeq(1),
                 commit_id: commit_id(1),
                 committed_by: actor(),
                 committed_at_ms: 4_200,
@@ -223,13 +223,13 @@ fn child_lookup_uses_persisted_name_key_without_recanonicalizing() {
             child_kind: loonfs_types::InodeKind::File,
             child_created_by: actor(),
             child_created_at_ms: 4_200,
-            committed_seq: ChangeSeq(1),
+            committed_seq: CommitSeq(1),
             delta_index: 0,
             commit_id: crate::test_support::binding_commit_id(),
             committed_by: loonfs_types::ActorId::loonfs(),
             committed_at_ms: 0,
             bind_position: loonfs_types::format::manifest::DeltaPosition {
-                seq: ChangeSeq(1),
+                seq: CommitSeq(1),
                 delta_index: 0,
             },
         }],
@@ -243,10 +243,10 @@ fn child_lookup_uses_persisted_name_key_without_recanonicalizing() {
     );
 
     assert!(metadata_state
-        .visible_child(ROOT_INODE_ID, &name_key("persisted-key"), ChangeSeq(1))
+        .visible_child(ROOT_INODE_ID, &name_key("persisted-key"), CommitSeq(1))
         .is_some());
     assert!(metadata_state
-        .visible_child(ROOT_INODE_ID, &name_key("Report.TXT"), ChangeSeq(1))
+        .visible_child(ROOT_INODE_ID, &name_key("Report.TXT"), CommitSeq(1))
         .is_none());
 }
 
@@ -257,7 +257,7 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
             InodeRecord {
                 inode_id: ROOT_INODE_ID,
                 inode_kind: InodeKind::Directory,
-                committed_seq: ChangeSeq(0),
+                committed_seq: CommitSeq(0),
                 commit_id: commit_id(0),
                 committed_by: actor(),
                 committed_at_ms: 4_200,
@@ -265,7 +265,7 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
             InodeRecord {
                 inode_id: InodeId(2),
                 inode_kind: InodeKind::Directory,
-                committed_seq: ChangeSeq(1),
+                committed_seq: CommitSeq(1),
                 commit_id: commit_id(1),
                 committed_by: actor(),
                 committed_at_ms: 4_200,
@@ -273,7 +273,7 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
             InodeRecord {
                 inode_id: InodeId(3),
                 inode_kind: InodeKind::File,
-                committed_seq: ChangeSeq(2),
+                committed_seq: CommitSeq(2),
                 commit_id: commit_id(2),
                 committed_by: actor(),
                 committed_at_ms: 4_200,
@@ -292,13 +292,13 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
                 child_kind: loonfs_types::InodeKind::Directory,
                 child_created_by: actor(),
                 child_created_at_ms: 4_200,
-                committed_seq: ChangeSeq(1),
+                committed_seq: CommitSeq(1),
                 delta_index: 0,
                 commit_id: crate::test_support::binding_commit_id(),
                 committed_by: loonfs_types::ActorId::loonfs(),
                 committed_at_ms: 0,
                 bind_position: loonfs_types::format::manifest::DeltaPosition {
-                    seq: ChangeSeq(1),
+                    seq: CommitSeq(1),
                     delta_index: 0,
                 },
             },
@@ -314,13 +314,13 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
                 child_kind: loonfs_types::InodeKind::File,
                 child_created_by: actor(),
                 child_created_at_ms: 4_200,
-                committed_seq: ChangeSeq(2),
+                committed_seq: CommitSeq(2),
                 delta_index: 0,
                 commit_id: crate::test_support::binding_commit_id(),
                 committed_by: loonfs_types::ActorId::loonfs(),
                 committed_at_ms: 0,
                 bind_position: loonfs_types::format::manifest::DeltaPosition {
-                    seq: ChangeSeq(2),
+                    seq: CommitSeq(2),
                     delta_index: 0,
                 },
             },
@@ -334,7 +334,7 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
         Vec::new(),
     );
 
-    assert_eq!(metadata_state.indexed_seq(), ChangeSeq(2));
+    assert_eq!(metadata_state.indexed_seq(), CommitSeq(2));
     assert!(metadata_state
         .inode_at_seq(InodeId(2), metadata_state.indexed_seq())
         .is_some());
@@ -358,7 +358,7 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
     );
 
     let metadata_state = metadata_state.apply_committed_wal_deltas(
-        ChangeSeq(3),
+        CommitSeq(3),
         &commit_id(3),
         &actor(),
         4_200,
@@ -372,7 +372,7 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
             child_created_by: actor(),
             child_created_at_ms: 4_200,
             target: loonfs_types::format::manifest::DeltaPosition {
-                seq: ChangeSeq(1),
+                seq: CommitSeq(1),
                 delta_index: 0,
             },
         }],
@@ -389,7 +389,7 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
         .is_none());
 
     let metadata_state = metadata_state.apply_committed_wal_deltas(
-        ChangeSeq(4),
+        CommitSeq(4),
         &commit_id(4),
         &actor(),
         4_200,
@@ -425,7 +425,7 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
     );
 
     let metadata_state = metadata_state.apply_committed_wal_deltas(
-        ChangeSeq(5),
+        CommitSeq(5),
         &commit_id(5),
         &actor(),
         4_200,
@@ -459,7 +459,7 @@ fn stale_binding_is_not_active_after_newer_bind_claims_same_name() {
             InodeRecord {
                 inode_id: ROOT_INODE_ID,
                 inode_kind: InodeKind::Directory,
-                committed_seq: ChangeSeq(0),
+                committed_seq: CommitSeq(0),
                 commit_id: commit_id(0),
                 committed_by: actor(),
                 committed_at_ms: 4_200,
@@ -467,7 +467,7 @@ fn stale_binding_is_not_active_after_newer_bind_claims_same_name() {
             InodeRecord {
                 inode_id: InodeId(2),
                 inode_kind: InodeKind::File,
-                committed_seq: ChangeSeq(1),
+                committed_seq: CommitSeq(1),
                 commit_id: commit_id(1),
                 committed_by: actor(),
                 committed_at_ms: 4_200,
@@ -475,7 +475,7 @@ fn stale_binding_is_not_active_after_newer_bind_claims_same_name() {
             InodeRecord {
                 inode_id: InodeId(3),
                 inode_kind: InodeKind::File,
-                committed_seq: ChangeSeq(2),
+                committed_seq: CommitSeq(2),
                 commit_id: commit_id(2),
                 committed_by: actor(),
                 committed_at_ms: 4_200,
@@ -494,13 +494,13 @@ fn stale_binding_is_not_active_after_newer_bind_claims_same_name() {
                 child_kind: loonfs_types::InodeKind::File,
                 child_created_by: actor(),
                 child_created_at_ms: 4_200,
-                committed_seq: ChangeSeq(1),
+                committed_seq: CommitSeq(1),
                 delta_index: 0,
                 commit_id: crate::test_support::binding_commit_id(),
                 committed_by: loonfs_types::ActorId::loonfs(),
                 committed_at_ms: 0,
                 bind_position: loonfs_types::format::manifest::DeltaPosition {
-                    seq: ChangeSeq(1),
+                    seq: CommitSeq(1),
                     delta_index: 0,
                 },
             },
@@ -511,13 +511,13 @@ fn stale_binding_is_not_active_after_newer_bind_claims_same_name() {
                 child_kind: loonfs_types::InodeKind::File,
                 child_created_by: actor(),
                 child_created_at_ms: 4_200,
-                committed_seq: ChangeSeq(2),
+                committed_seq: CommitSeq(2),
                 delta_index: 0,
                 commit_id: crate::test_support::binding_commit_id(),
                 committed_by: loonfs_types::ActorId::loonfs(),
                 committed_at_ms: 0,
                 bind_position: loonfs_types::format::manifest::DeltaPosition {
-                    seq: ChangeSeq(2),
+                    seq: CommitSeq(2),
                     delta_index: 0,
                 },
                 state: loonfs_types::format::manifest::DirentryBindingState::Unbound,
@@ -534,13 +534,13 @@ fn stale_binding_is_not_active_after_newer_bind_claims_same_name() {
                 child_kind: loonfs_types::InodeKind::File,
                 child_created_by: actor(),
                 child_created_at_ms: 4_200,
-                committed_seq: ChangeSeq(2),
+                committed_seq: CommitSeq(2),
                 delta_index: 1,
                 commit_id: crate::test_support::binding_commit_id(),
                 committed_by: loonfs_types::ActorId::loonfs(),
                 committed_at_ms: 0,
                 bind_position: loonfs_types::format::manifest::DeltaPosition {
-                    seq: ChangeSeq(2),
+                    seq: CommitSeq(2),
                     delta_index: 1,
                 },
             },
@@ -577,7 +577,7 @@ fn resolve_visible_path_folds_names_and_uses_stored_display_name() {
             InodeRecord {
                 inode_id: ROOT_INODE_ID,
                 inode_kind: InodeKind::Directory,
-                committed_seq: ChangeSeq(1),
+                committed_seq: CommitSeq(1),
                 commit_id: commit_id(1),
                 committed_by: actor(),
                 committed_at_ms: 4_200,
@@ -585,7 +585,7 @@ fn resolve_visible_path_folds_names_and_uses_stored_display_name() {
             InodeRecord {
                 inode_id: InodeId(2),
                 inode_kind: InodeKind::File,
-                committed_seq: ChangeSeq(1),
+                committed_seq: CommitSeq(1),
                 commit_id: commit_id(1),
                 committed_by: actor(),
                 committed_at_ms: 4_200,
@@ -603,13 +603,13 @@ fn resolve_visible_path_folds_names_and_uses_stored_display_name() {
             child_kind: loonfs_types::InodeKind::File,
             child_created_by: actor(),
             child_created_at_ms: 4_200,
-            committed_seq: ChangeSeq(1),
+            committed_seq: CommitSeq(1),
             delta_index: 0,
             commit_id: crate::test_support::binding_commit_id(),
             committed_by: loonfs_types::ActorId::loonfs(),
             committed_at_ms: 0,
             bind_position: loonfs_types::format::manifest::DeltaPosition {
-                seq: ChangeSeq(1),
+                seq: CommitSeq(1),
                 delta_index: 0,
             },
         }],
@@ -625,7 +625,7 @@ fn resolve_visible_path_folds_names_and_uses_stored_display_name() {
     let resolved = metadata_state
         .resolve_visible_path(
             &AbsolutePath::parse("/REPORT.txt").expect("path"),
-            ChangeSeq(1),
+            CommitSeq(1),
         )
         .expect("resolve path");
 
@@ -645,15 +645,15 @@ fn find_commit_receipt_returns_latest_matching_receipt() {
         vec![
             CommitReceiptRecord {
                 commit_id: commit_id.clone(),
-                committed_seq: ChangeSeq(1),
+                committed_seq: CommitSeq(1),
             },
             CommitReceiptRecord {
                 commit_id: CommitId::parse("other-commit").expect("valid commit id"),
-                committed_seq: ChangeSeq(3),
+                committed_seq: CommitSeq(3),
             },
             CommitReceiptRecord {
                 commit_id: commit_id.clone(),
-                committed_seq: ChangeSeq(2),
+                committed_seq: CommitSeq(2),
             },
         ],
         Vec::new(),
@@ -665,7 +665,7 @@ fn find_commit_receipt_returns_latest_matching_receipt() {
     let receipt = metadata_state
         .find_commit_receipt(&commit_id)
         .expect("receipt");
-    assert_eq!(receipt.committed_seq, ChangeSeq(2));
+    assert_eq!(receipt.committed_seq, CommitSeq(2));
 }
 
 #[test]
@@ -685,7 +685,7 @@ fn metadata_builder_tracks_the_highest_row_sequence() {
     builder.push_inode(InodeRecord {
         inode_id: InodeId(7),
         inode_kind: InodeKind::File,
-        committed_seq: ChangeSeq(1),
+        committed_seq: CommitSeq(1),
         commit_id: commit_id(1),
         committed_by: actor(),
         committed_at_ms: 4_200,
@@ -693,7 +693,7 @@ fn metadata_builder_tracks_the_highest_row_sequence() {
     builder.push_revision(RevisionRecord {
         inode_id: InodeId(7),
         revision_no: RevisionNo(1),
-        committed_seq: ChangeSeq(2),
+        committed_seq: CommitSeq(2),
         commit_id: commit_id(2),
         committed_at_ms: 4_200,
         committed_by: actor(),
@@ -703,7 +703,7 @@ fn metadata_builder_tracks_the_highest_row_sequence() {
     builder.push_revision(RevisionRecord {
         inode_id: InodeId(7),
         revision_no: RevisionNo(2),
-        committed_seq: ChangeSeq(3),
+        committed_seq: CommitSeq(3),
         commit_id: commit_id(3),
         committed_at_ms: 4_200,
         committed_by: actor(),
@@ -712,12 +712,12 @@ fn metadata_builder_tracks_the_highest_row_sequence() {
     });
     builder.push_commit_receipt(CommitReceiptRecord {
         commit_id: CommitId::parse("indexed-commit").expect("valid commit id"),
-        committed_seq: ChangeSeq(3),
+        committed_seq: CommitSeq(3),
     });
     let metadata_state = builder.build();
 
     assert_eq!(metadata_state.row_count(), 4);
-    assert_eq!(metadata_state.indexed_seq(), ChangeSeq(3));
+    assert_eq!(metadata_state.indexed_seq(), CommitSeq(3));
 }
 
 fn attribute_map(entries: &[(&str, &str)]) -> Attributes {
@@ -753,7 +753,7 @@ fn append_attributes(
 fn attribute_deltas_replay_in_delta_order_and_a_clear_keeps_its_row() {
     let mut metadata_state = MetadataState::default();
     metadata_state.apply_committed_wal_deltas_mut(
-        ChangeSeq(4),
+        CommitSeq(4),
         &commit_id(4),
         &actor(),
         4_200,
@@ -777,8 +777,8 @@ fn attribute_deltas_replay_in_delta_order_and_a_clear_keeps_its_row() {
         .last()
         .expect("attribute rows");
     assert!(cleared.attributes.is_empty());
-    assert_eq!(cleared.committed_seq, ChangeSeq(4));
-    assert_eq!(metadata_state.indexed_seq(), ChangeSeq(4));
+    assert_eq!(cleared.committed_seq, CommitSeq(4));
+    assert_eq!(metadata_state.indexed_seq(), CommitSeq(4));
 }
 
 #[tokio::test]
@@ -787,7 +787,7 @@ async fn attribute_reads_answer_at_the_sequence_they_ask_for() {
     let manifest = VerifiedMetadataSegments::initial(&store);
     let mut state = MetadataState::default();
     state.apply_committed_wal_deltas_mut(
-        ChangeSeq(2),
+        CommitSeq(2),
         &commit_id(2),
         &actor(),
         4_200,
@@ -799,7 +799,7 @@ async fn attribute_reads_answer_at_the_sequence_they_ask_for() {
         )],
     );
     state.apply_committed_wal_deltas_mut(
-        ChangeSeq(5),
+        CommitSeq(5),
         &commit_id(5),
         &actor(),
         4_200,
@@ -818,7 +818,7 @@ async fn attribute_reads_answer_at_the_sequence_they_ask_for() {
         (2, 1, Some("ada")),
         (1, 0, None),
     ] {
-        let view = MetadataView::in_memory(&manifest, &base, None, ChangeSeq(visible_seq));
+        let view = MetadataView::in_memory(&manifest, &base, None, CommitSeq(visible_seq));
         let projection = view.attributes(InodeId(7)).await.expect("read attributes");
         assert_eq!(
             projection.attributes_revision_no,
@@ -835,7 +835,7 @@ async fn attribute_reads_answer_at_the_sequence_they_ask_for() {
     }
 
     // An inode that never had attributes is at the concrete empty state.
-    let view = MetadataView::in_memory(&manifest, &base, None, ChangeSeq(5));
+    let view = MetadataView::in_memory(&manifest, &base, None, CommitSeq(5));
     let projection = view.attributes(InodeId(8)).await.expect("read attributes");
     assert_eq!(
         (projection.attributes_revision_no, projection.attributes),
@@ -846,7 +846,7 @@ async fn attribute_reads_answer_at_the_sequence_they_ask_for() {
 #[test]
 fn attribute_row_accounting_counts_key_and_value_bytes() {
     let small = MetadataState::default().apply_committed_wal_deltas(
-        ChangeSeq(1),
+        CommitSeq(1),
         &commit_id(1),
         &actor(),
         4_200,
@@ -859,7 +859,7 @@ fn attribute_row_accounting_counts_key_and_value_bytes() {
     );
     let large_value = "v".repeat(4_096);
     let large = MetadataState::default().apply_committed_wal_deltas(
-        ChangeSeq(1),
+        CommitSeq(1),
         &commit_id(1),
         &actor(),
         4_200,
@@ -890,7 +890,7 @@ fn attribute_row_accounting_counts_key_and_value_bytes() {
 fn churned_binding_state() -> MetadataState {
     let mut state = MetadataState::default();
     state.apply_committed_wal_deltas_mut(
-        ChangeSeq(0),
+        CommitSeq(0),
         &commit_id(0),
         &actor(),
         4_200,
@@ -901,7 +901,7 @@ fn churned_binding_state() -> MetadataState {
         }],
     );
     state.apply_committed_wal_deltas_mut(
-        ChangeSeq(1),
+        CommitSeq(1),
         &commit_id(1),
         &actor(),
         4_200,
@@ -943,7 +943,7 @@ fn churned_binding_state() -> MetadataState {
         ],
     );
     state.apply_committed_wal_deltas_mut(
-        ChangeSeq(2),
+        CommitSeq(2),
         &commit_id(2),
         &actor(),
         4_200,
@@ -959,7 +959,7 @@ fn churned_binding_state() -> MetadataState {
                 child_created_by: actor(),
                 child_created_at_ms: 4_200,
                 target: loonfs_types::format::manifest::DeltaPosition {
-                    seq: ChangeSeq(1),
+                    seq: CommitSeq(1),
                     delta_index: 1,
                 },
             },
@@ -986,14 +986,14 @@ fn churned_binding_state() -> MetadataState {
                 child_created_by: actor(),
                 child_created_at_ms: 4_200,
                 target: loonfs_types::format::manifest::DeltaPosition {
-                    seq: ChangeSeq(1),
+                    seq: CommitSeq(1),
                     delta_index: 3,
                 },
             },
         ],
     );
     state.apply_committed_wal_deltas_mut(
-        ChangeSeq(3),
+        CommitSeq(3),
         &commit_id(3),
         &actor(),
         4_200,
@@ -1041,14 +1041,14 @@ fn churned_binding_state_rebuilt() -> MetadataState {
 fn bound_child_at_head_sees_latest_bind_including_dead_bindings() {
     let state = churned_binding_state();
     let head = state.indexed_seq();
-    assert_eq!(head, ChangeSeq(3));
+    assert_eq!(head, CommitSeq(3));
 
     // The latest bind at the contested name is child 3.
     let head_bind = state
         .bound_child_at_seq(ROOT_INODE_ID, &name_key("contested"), head)
         .expect("bind at head");
     assert_eq!(head_bind.child_inode_id, InodeId(3));
-    assert_eq!(head_bind.committed_seq, ChangeSeq(3));
+    assert_eq!(head_bind.committed_seq, CommitSeq(3));
 
     // The deleted name still answers with its dead binding: the bind is
     // unbound but tombstone-ancestry walks must see it.
@@ -1067,10 +1067,10 @@ fn bound_child_below_indexed_seq_still_scans_history() {
     let state = churned_binding_state();
 
     let historical = state
-        .bound_child_at_seq(ROOT_INODE_ID, &name_key("contested"), ChangeSeq(2))
+        .bound_child_at_seq(ROOT_INODE_ID, &name_key("contested"), CommitSeq(2))
         .expect("historical bind");
     assert_eq!(historical.child_inode_id, InodeId(2));
-    assert_eq!(historical.committed_seq, ChangeSeq(2));
+    assert_eq!(historical.committed_seq, CommitSeq(2));
     assert!(!historical.is_bound());
 }
 
@@ -1081,8 +1081,8 @@ fn incremental_and_rebuilt_indexes_agree_on_latest_binds() {
 
     for name_key_value in ["contested", "renamed-away", "deleted", "never-bound"] {
         assert_eq!(
-            rebuilt.bound_child_at_seq(ROOT_INODE_ID, &name_key(name_key_value), ChangeSeq(3)),
-            incremental.bound_child_at_seq(ROOT_INODE_ID, &name_key(name_key_value), ChangeSeq(3),),
+            rebuilt.bound_child_at_seq(ROOT_INODE_ID, &name_key(name_key_value), CommitSeq(3)),
+            incremental.bound_child_at_seq(ROOT_INODE_ID, &name_key(name_key_value), CommitSeq(3),),
             "latest bind for `{name_key_value}` diverges between construction paths"
         );
     }
@@ -1091,7 +1091,7 @@ fn incremental_and_rebuilt_indexes_agree_on_latest_binds() {
 #[test]
 fn queries_above_indexed_seq_match_at_head_results() {
     let state = churned_binding_state();
-    let beyond_head = ChangeSeq(state.indexed_seq().0 + 1);
+    let beyond_head = CommitSeq(state.indexed_seq().0 + 1);
 
     assert_eq!(
         state.bound_child_at_seq(ROOT_INODE_ID, &name_key("contested"), beyond_head),
@@ -1124,7 +1124,7 @@ async fn view_binding_lookups_match_a_row_scan_at_every_seq() {
     let tail = churned_binding_state();
     let mut overlay = MetadataState::default();
     overlay.apply_committed_wal_deltas_mut(
-        ChangeSeq(4),
+        CommitSeq(4),
         &commit_id(4),
         &actor(),
         4_200,
@@ -1154,7 +1154,7 @@ async fn view_binding_lookups_match_a_row_scan_at_every_seq() {
     }
     let base = crate::wal::ProjectedWalTail::from_rows(tail);
 
-    for seq in (0..=4).map(ChangeSeq) {
+    for seq in (0..=4).map(CommitSeq) {
         let view = MetadataView::in_memory(&manifest, &base, Some(&overlay), seq);
         for name in ["contested", "renamed-away", "deleted", "never-bound"] {
             assert_eq!(
@@ -1187,7 +1187,7 @@ fn has_visible_children_sees_through_unbinds() {
             InodeRecord {
                 inode_id: dir,
                 inode_kind: InodeKind::Directory,
-                committed_seq: ChangeSeq(1),
+                committed_seq: CommitSeq(1),
                 commit_id: commit_id(1),
                 committed_by: actor(),
                 committed_at_ms: 4_200,
@@ -1195,7 +1195,7 @@ fn has_visible_children_sees_through_unbinds() {
             InodeRecord {
                 inode_id: InodeId(2),
                 inode_kind: InodeKind::File,
-                committed_seq: ChangeSeq(2),
+                committed_seq: CommitSeq(2),
                 commit_id: commit_id(2),
                 committed_by: actor(),
                 committed_at_ms: 4_200,
@@ -1213,13 +1213,13 @@ fn has_visible_children_sees_through_unbinds() {
             child_kind: loonfs_types::InodeKind::File,
             child_created_by: actor(),
             child_created_at_ms: 4_200,
-            committed_seq: ChangeSeq(2),
+            committed_seq: CommitSeq(2),
             delta_index: 0,
             commit_id: crate::test_support::binding_commit_id(),
             committed_by: loonfs_types::ActorId::loonfs(),
             committed_at_ms: 0,
             bind_position: loonfs_types::format::manifest::DeltaPosition {
-                seq: ChangeSeq(2),
+                seq: CommitSeq(2),
                 delta_index: 0,
             },
         }],
@@ -1232,7 +1232,7 @@ fn has_visible_children_sees_through_unbinds() {
         Vec::new(),
     );
     let base = crate::wal::ProjectedWalTail::from_rows(state.clone());
-    let view = MetadataView::in_memory(&manifest, &base, None, ChangeSeq(2));
+    let view = MetadataView::in_memory(&manifest, &base, None, CommitSeq(2));
     assert!(
         visibility::resolve_in_memory_read(view.has_visible_children(dir))
             .expect("probe bound child")
@@ -1254,13 +1254,13 @@ fn has_visible_children_sees_through_unbinds() {
                 child_kind: loonfs_types::InodeKind::File,
                 child_created_by: actor(),
                 child_created_at_ms: 4_200,
-                committed_seq: ChangeSeq(3),
+                committed_seq: CommitSeq(3),
                 delta_index: 0,
                 commit_id: crate::test_support::binding_commit_id(),
                 committed_by: loonfs_types::ActorId::loonfs(),
                 committed_at_ms: 0,
                 bind_position: loonfs_types::format::manifest::DeltaPosition {
-                    seq: ChangeSeq(3),
+                    seq: CommitSeq(3),
                     delta_index: 0,
                 },
                 state: loonfs_types::format::manifest::DirentryBindingState::Unbound,
@@ -1276,7 +1276,7 @@ fn has_visible_children_sees_through_unbinds() {
         Vec::new(),
     );
     let emptied = crate::wal::ProjectedWalTail::from_rows(emptied);
-    let view = MetadataView::in_memory(&manifest, &emptied, None, ChangeSeq(3));
+    let view = MetadataView::in_memory(&manifest, &emptied, None, CommitSeq(3));
     assert!(
         !visibility::resolve_in_memory_read(view.has_visible_children(dir))
             .expect("probe emptied directory")

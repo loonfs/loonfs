@@ -17,7 +17,7 @@ use loonfs_grep::{
     NamespaceReads, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES, DEFAULT_GREP_PUBLISH_INTERVAL_MS,
 };
 use loonfs_types::GrepIndex;
-use loonfs_types::{AbsolutePath, ChangeSeq, GrepRequest, GrepResponse, NamespaceId, PageRequest};
+use loonfs_types::{AbsolutePath, CommitSeq, GrepRequest, GrepResponse, NamespaceId, PageRequest};
 use std::sync::Arc;
 
 pub(crate) struct GrepHost {
@@ -140,7 +140,7 @@ impl GrepHost {
     pub(crate) async fn catch_up_grep_index(
         &self,
         namespace_id: &NamespaceId,
-        captured_seq: ChangeSeq,
+        captured_seq: CommitSeq,
     ) -> Result<GrepIndexStatus, GrepError> {
         let mut steps = self
             .worker
@@ -334,7 +334,7 @@ pub(crate) async fn fold_wal_and_advance_retention(
     store: &SharedObjectStore,
     maintenance: &Maintenance,
     namespace_id: &NamespaceId,
-) -> ChangeSeq {
+) -> CommitSeq {
     maintenance
         .maintain_metadata_with_options(
             namespace_id,

@@ -12,7 +12,7 @@ use crate::golden_formats::{
 };
 use loonfs_grep::entry::{GrepEntry, GrepEntryError, GrepIndexStatus, GrepReorganizeState};
 use loonfs_types::format::manifest::ExtensionEntry;
-use loonfs_types::{ChangeSeq, RunNo};
+use loonfs_types::{CommitSeq, RunNo};
 use std::assert_matches;
 
 /// Decodes a fixture after `edit` changed its JSON.
@@ -93,8 +93,8 @@ fn the_decoder_rejects_other_versions_without_fallback() {
 #[test]
 fn the_constructor_rejects_a_reorganization_whose_segments_the_entry_does_not_list() {
     let status = GrepIndexStatus::Active {
-        captured_seq: ChangeSeq(0),
-        built_through_seq: ChangeSeq(7),
+        captured_seq: CommitSeq(0),
+        built_through_seq: CommitSeq(7),
         next_event_index: 0,
     };
     let reorganize = GrepReorganizeState {

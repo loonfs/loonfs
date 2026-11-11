@@ -14,7 +14,7 @@ use crate::namespace::state::NamespaceReadState;
 use futures::{stream, StreamExt};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::{decode_wal_object_envelope_zstd, WalObjectEnvelope};
-use loonfs_types::{ChangeSeq, NamespaceId, WalNo, WriterEpoch};
+use loonfs_types::{CommitSeq, NamespaceId, WalNo, WriterEpoch};
 use std::sync::Arc;
 
 // Missing and malformed objects still need their numbered key in caller diagnostics.
@@ -108,7 +108,7 @@ pub(crate) async fn wal_object_exists<S: ObjectStore + ?Sized>(
 pub(super) struct WalWalk<'a> {
     namespace_id: &'a NamespaceId,
     wal_no: WalNo,
-    seq: ChangeSeq,
+    seq: CommitSeq,
     epoch: WriterEpoch,
     epoch_bound: WriterEpoch,
 }
@@ -118,7 +118,7 @@ impl<'a> WalWalk<'a> {
     pub(super) fn after(
         namespace_id: &'a NamespaceId,
         wal_no: WalNo,
-        seq: ChangeSeq,
+        seq: CommitSeq,
         epoch_bound: WriterEpoch,
     ) -> Self {
         Self {
@@ -130,7 +130,7 @@ impl<'a> WalWalk<'a> {
         }
     }
 
-    pub(super) fn seq(&self) -> ChangeSeq {
+    pub(super) fn seq(&self) -> CommitSeq {
         self.seq
     }
 

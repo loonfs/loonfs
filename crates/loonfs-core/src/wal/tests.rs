@@ -18,7 +18,7 @@ use loonfs_test_support::stores::{
 use loonfs_types::format::wal::{decode_wal_object_envelope_zstd, encode_wal_object_envelope_zstd};
 use loonfs_types::options::AttributeInclusion;
 use loonfs_types::{
-    AbsolutePath, ChangeSeq, CommitId, ErrorCode, ManifestNo, NamespaceId, WalNo, WriterEpoch,
+    AbsolutePath, CommitId, CommitSeq, ErrorCode, ManifestNo, NamespaceId, WalNo, WriterEpoch,
     WriterId,
 };
 use std::assert_matches;
@@ -55,7 +55,7 @@ async fn readers_reject_invalid_numbers_epochs_and_sequences() {
             0 => payload.wal_no = WalNo(1),
             1 => payload.writer_epoch = WriterEpoch(0),
             2 => payload.writer_epoch = WriterEpoch(3),
-            _ => payload.head_seq = ChangeSeq(1),
+            _ => payload.head_seq = CommitSeq(1),
         }
         let bytes = encode_wal_object_envelope_zstd(payload)
             .expect("encode")
@@ -118,7 +118,7 @@ async fn a_cold_anchor_reads_each_wal_object_once() {
         &anchor,
     )
     .expect("replay discovery");
-    assert_eq!(anchor.read_state.seq, ChangeSeq(9));
+    assert_eq!(anchor.read_state.seq, CommitSeq(9));
     assert_eq!(anchor.read_state.wal_no, WalNo(12));
     assert!(tail
         .find_commit_receipt(&CommitId::parse("data-8").expect("commit"))
@@ -182,7 +182,7 @@ async fn fences_fold_and_are_reclaimed_at_the_folded_boundary() {
         .load_current_manifest()
         .await
         .expect("manifest");
-    assert_eq!(current.payload().head_seq, ChangeSeq(0));
+    assert_eq!(current.payload().head_seq, CommitSeq(0));
     assert_eq!(current.payload().folded_wal_no, WalNo(1));
     let options = crate::gc::GcOptions {
         grace_window_ms: crate::limits::GC_MIN_GRACE_WINDOW_MS,
@@ -247,7 +247,7 @@ async fn a_same_sequence_writer_acquisition_does_not_cover_a_fence_fold() {
         .load_current_manifest()
         .await
         .expect("manifest");
-    assert_eq!(current.payload().head_seq, ChangeSeq(0));
+    assert_eq!(current.payload().head_seq, CommitSeq(0));
     assert_eq!(current.payload().folded_wal_no, WalNo(2));
 }
 
@@ -441,7 +441,7 @@ async fn a_number_collision_returns_after_one_attempt_and_a_retry_commits_the_ne
         blocked.release();
         result
     });
-    assert_eq!(winner.expect("winner").committed_seq, ChangeSeq(2));
+    assert_eq!(winner.expect("winner").committed_seq, CommitSeq(2));
     assert_eq!(loser.expect_err("collision").code(), ErrorCode::StaleHead);
     assert_eq!(store.counts().create_if_absent_puts, 2);
     assert_eq!(
@@ -449,7 +449,7 @@ async fn a_number_collision_returns_after_one_attempt_and_a_retry_commits_the_ne
             .await
             .expect("retry")
             .committed_seq,
-        ChangeSeq(3)
+        CommitSeq(3)
     );
     assert_eq!(store.counts().create_if_absent_puts, 3);
     assert_eq!(store.counts().compare_and_swaps, 0);
@@ -517,7 +517,7 @@ async fn a_stale_writer_collides_with_the_fence_and_writes_nothing_else() {
             .await
             .expect("new writer")
             .committed_seq,
-        ChangeSeq(2)
+        CommitSeq(2)
     );
 }
 
@@ -581,7 +581,7 @@ async fn a_bounded_tail_load_overlaps_reads_and_matches_sequential_replay() {
             .await
             .expect("publish");
     }
-    let mut walk = WalWalk::after(&namespace_id, WalNo(0), ChangeSeq(0), WriterEpoch(1));
+    let mut walk = WalWalk::after(&namespace_id, WalNo(0), CommitSeq(0), WriterEpoch(1));
     let mut sequential = Vec::new();
     for number in 1..=20 {
         let loaded = load_wal_object(&store, &namespace_id, WalNo(number)).await;
@@ -600,8 +600,8 @@ async fn a_bounded_tail_load_overlaps_reads_and_matches_sequential_replay() {
         &watched,
         super::WalTailLoadRequest {
             namespace_id: &namespace_id,
-            base_seq: ChangeSeq(0),
-            head_seq: ChangeSeq(19),
+            base_seq: CommitSeq(0),
+            head_seq: CommitSeq(19),
             base_wal_no: WalNo(0),
             tip_wal_no: WalNo(20),
             writer_epoch: WriterEpoch(1),
@@ -646,8 +646,8 @@ async fn a_bounded_tail_load_names_the_missing_wal_object() {
         &store,
         super::WalTailLoadRequest {
             namespace_id: &namespace_id,
-            base_seq: ChangeSeq(0),
-            head_seq: ChangeSeq(3),
+            base_seq: CommitSeq(0),
+            head_seq: CommitSeq(3),
             base_wal_no: WalNo(0),
             tip_wal_no: WalNo(4),
             writer_epoch: WriterEpoch(1),
@@ -733,7 +733,7 @@ async fn a_fold_and_collection_during_tip_discovery_cannot_reuse_a_wal_number() 
         published
             .expect("replanned from folded state")
             .committed_seq,
-        ChangeSeq(2)
+        CommitSeq(2)
     );
     assert!(store
         .head(&wal_object(&namespace_id, &WalNo(1)))
@@ -837,7 +837,7 @@ async fn a_confirmation_after_a_collected_floor_object_never_writes_the_emptied_
     let namespace = crate::test_support::namespace_store(store.inner(), &namespace_id);
     let planned = namespace.load_current_manifest().await.expect("planned");
     namespace
-        .publish_floor_object(&planned, ChangeSeq(1))
+        .publish_floor_object(&planned, CommitSeq(1))
         .await
         .expect("another process creates a floor object");
 
@@ -935,7 +935,7 @@ async fn a_warm_probe_reports_a_broken_chain_at_its_own_epoch_as_corruption() {
         .wal_no
         .successor()
         .expect("next WAL number");
-    broken.head_seq = ChangeSeq(5);
+    broken.head_seq = CommitSeq(5);
     store
         .put_if_absent(
             &wal_object(&namespace_id, &broken.wal_no),
@@ -1295,7 +1295,7 @@ async fn a_writer_resuming_after_its_fence_was_collected_does_not_acknowledge_it
         .await
         .expect("current view");
     let access = crate::authorize::ReadAccess::live(crate::authorize::Authorizer::Unrestricted);
-    assert_eq!(view.head().seq, ChangeSeq(2));
+    assert_eq!(view.head().seq, CommitSeq(2));
     view.resolve_path("/takeover", AttributeInclusion::Omit, &access)
         .await
         .expect("live commit");

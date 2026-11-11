@@ -7,10 +7,10 @@ use loonfs_merge::{
     MAX_NEW_FORKS,
 };
 use loonfs_types::{
-    ChangeSeq, DeleteNamespaceResponse, DeleteSnapshotResponse, GrepIndex, ListChangesResponse,
+    CommitSeq, DeleteNamespaceResponse, DeleteSnapshotResponse, GrepIndex, ListChangesResponse,
     ListCheckpointsResponse, ListSnapshotsResponse, MetadataMaintenanceOutcome,
-    MetadataSkippedWork, NamespaceMetadata, RunMaintenanceResponse, RunPoolMaintenanceResponse,
-    Snapshot, StoreProbeResponse,
+    MetadataSkippedWork, NamespaceMetadata, RunMaintenanceJobResponse,
+    RunPoolMaintenanceJobResponse, Snapshot, StoreProbeResponse,
 };
 use loonfs_types::{MergeConflict, MergeConflictKind};
 
@@ -144,11 +144,11 @@ pub(super) fn human_checkpoints_listed(response: &ListCheckpointsResponse) -> St
 
 pub(super) fn human_maintenance_ran(ran: &MaintenanceRan) -> String {
     match &ran.response {
-        RunMaintenanceResponse::RecoverAdministrator(recovery) => format!(
+        RunMaintenanceJobResponse::RecoverAdministrator(recovery) => format!(
             "administrator recovery for {}: access revision {} at seq {}",
             recovery.namespace_id, recovery.access_revision_no, recovery.committed_seq,
         ),
-        RunMaintenanceResponse::Metadata(metadata) => {
+        RunMaintenanceJobResponse::Metadata(metadata) => {
             let mut lines = vec![format!(
                 "metadata maintenance for {}: {} ({} compaction units published)",
                 metadata.namespace_id,
@@ -170,10 +170,10 @@ pub(super) fn human_maintenance_ran(ran: &MaintenanceRan) -> String {
             }));
             lines.join("\n")
         }
-        RunMaintenanceResponse::Gc(gc) => {
+        RunMaintenanceJobResponse::Gc(gc) => {
             format!("gc for {}: {}", gc.namespace_id, gc_summary(gc))
         }
-        RunMaintenanceResponse::Retention(retention) => {
+        RunMaintenanceJobResponse::Retention(retention) => {
             let state = if ran
                 .retention_floor_before
                 .is_some_and(|before| retention.retention_floor_seq > before)
@@ -187,7 +187,7 @@ pub(super) fn human_maintenance_ran(ran: &MaintenanceRan) -> String {
                 retention.namespace_id, retention.retention_floor_seq.0
             )
         }
-        RunMaintenanceResponse::RetentionWindow(window) => match window.retention_window_ms {
+        RunMaintenanceJobResponse::RetentionWindow(window) => match window.retention_window_ms {
             Some(window_ms) => format!(
                 "retention window for {}: {window_ms} ms",
                 window.namespace_id
@@ -197,16 +197,16 @@ pub(super) fn human_maintenance_ran(ran: &MaintenanceRan) -> String {
                 window.namespace_id
             ),
         },
-        RunMaintenanceResponse::Unknown => "maintenance job unknown to this CLI".to_owned(),
+        RunMaintenanceJobResponse::Unknown => "maintenance job unknown to this CLI".to_owned(),
     }
 }
 
-pub(super) fn human_pool_maintenance_ran(response: &RunPoolMaintenanceResponse) -> String {
+pub(super) fn human_pool_maintenance_ran(response: &RunPoolMaintenanceJobResponse) -> String {
     match response {
-        RunPoolMaintenanceResponse::Gc(gc) => {
+        RunPoolMaintenanceJobResponse::Gc(gc) => {
             format!("gc for {}: {}", gc.pool_id, pool_gc_summary(gc))
         }
-        RunPoolMaintenanceResponse::Unknown => "maintenance job unknown to this CLI".to_owned(),
+        RunPoolMaintenanceJobResponse::Unknown => "maintenance job unknown to this CLI".to_owned(),
     }
 }
 
@@ -235,7 +235,7 @@ pub(super) fn human_changes(response: &ListChangesResponse) -> String {
 
 pub(super) fn human_grep_index_enabled(
     response: &GrepIndex,
-    waited_for_seq: Option<ChangeSeq>,
+    waited_for_seq: Option<CommitSeq>,
     steps: u64,
     budget_exhausted: bool,
 ) -> String {

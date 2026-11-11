@@ -8,7 +8,7 @@ use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval
 use loonfs_test_support::ids::{namespace_id, page_limit};
 use loonfs_types::ListChangesResponse;
 use loonfs_types::{
-    ChangeSeq, ErrorCode, ErrorResponse, ListPathEntriesResponse, PathEntry, RevisionNo, Snapshot,
+    CommitSeq, ErrorCode, ErrorResponse, ListPathEntriesResponse, PathEntry, RevisionNo, Snapshot,
 };
 use serde::de::DeserializeOwned;
 use std::collections::BTreeSet;
@@ -173,7 +173,7 @@ fn content_url(
 fn changes_url(
     server_url: &str,
     namespace: &str,
-    after_seq: ChangeSeq,
+    after_seq: CommitSeq,
     limit: &str,
     snapshot_id: Option<&str>,
 ) -> String {
@@ -508,7 +508,7 @@ async fn snapshot_change_feed_stops_at_the_captured_sequence() {
         .await
         .expect("write after snapshot");
 
-    let mut after_seq = ChangeSeq(0);
+    let mut after_seq = CommitSeq(0);
     let mut seen = Vec::new();
     loop {
         let page: ListChangesResponse = get_json(&changes_url(
@@ -535,7 +535,7 @@ async fn snapshot_change_feed_stops_at_the_captured_sequence() {
     assert_eq!(
         seen,
         (1..=snapshot.captured_seq.0)
-            .map(ChangeSeq)
+            .map(CommitSeq)
             .collect::<Vec<_>>()
     );
 
@@ -551,7 +551,7 @@ async fn snapshot_change_feed_stops_at_the_captured_sequence() {
     assert_eq!(empty.head_seq, snapshot.captured_seq);
     assert_eq!(empty.next_after_seq, None);
 
-    let above = ChangeSeq(snapshot.captured_seq.0 + 1);
+    let above = CommitSeq(snapshot.captured_seq.0 + 1);
     let (status, error) = get_json::<ListChangesResponse>(&changes_url(
         &harness.server_url,
         namespace.as_str(),
@@ -630,7 +630,7 @@ async fn snapshot_reads_enforce_lease_identity_and_revision_rules() {
             changes_url(
                 &harness.server_url,
                 namespace.as_str(),
-                ChangeSeq(0),
+                CommitSeq(0),
                 "2",
                 Some(deleted_id),
             ),
@@ -646,13 +646,13 @@ async fn snapshot_reads_enforce_lease_identity_and_revision_rules() {
         assert_eq!(error.0, 404, "route {name}");
         assert_eq!(error.1.code, "snapshot_not_found", "route {name}");
     }
-    // This deployment can't presign, and a download grant checks that
+    // This deployment can't presign, and a download request checks that
     // capability before it reads anything.
     let error = post_json::<serde_json::Value>(
         &download_url(&harness.server_url, namespace.as_str()),
         serde_json::json!({"path": "/keep.txt", "snapshot_id": deleted_id}),
     )
-    .expect_err("a download grant needs a presigning deployment");
+    .expect_err("a download needs a presigning deployment");
     assert_eq!(error.0, 501);
     assert_eq!(error.1.code, "not_supported");
     let inode_id = harness
@@ -690,7 +690,7 @@ async fn snapshot_reads_enforce_lease_identity_and_revision_rules() {
                 )
                 .await
                 .map(|_| ())
-                .expect_err("a download grant needs a presigning deployment"),
+                .expect_err("a download needs a presigning deployment"),
             loonfs_types::ErrorCode::NotSupported,
         ),
     ] {

@@ -15,7 +15,7 @@ use crate::storage::tail_content::{cut_layout, materialize_content_layout, Conte
 use crate::wal::{inline_content_refs, ProjectedContent, ProjectedWalTail};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::{WalCommitPayload, WalDelta, WalInlineContent};
-use loonfs_types::{next_public_ordinal, ChangeSeq, ContentRef, InodeId};
+use loonfs_types::{next_public_ordinal, CommitSeq, ContentRef, InodeId};
 use std::collections::BTreeSet;
 use std::num::NonZeroU32;
 
@@ -153,7 +153,7 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
         let head = &self.head;
         let request = candidate.intent();
         let committed_seq = next_public_ordinal(head.seq.0)
-            .map(ChangeSeq)
+            .map(CommitSeq)
             .ok_or_else(|| {
                 CoreError::NamespaceCorrupt(format!(
                     "the namespace head is at sequence {}, the largest sequence number, so no \

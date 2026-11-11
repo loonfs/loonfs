@@ -19,7 +19,7 @@ use futures::{stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::NamespaceManifestPayload;
-use loonfs_types::{ChangeSeq, SetRetentionWindowResponse};
+use loonfs_types::{CommitSeq, SetRetentionWindowResponse};
 use std::collections::BTreeSet;
 use std::num::NonZeroU64;
 use std::sync::Arc;
@@ -38,7 +38,7 @@ pub enum RetentionTarget {
     #[default]
     Head,
     /// This sequence.
-    Seq(ChangeSeq),
+    Seq(CommitSeq),
     /// The last commit committed at or before `cutoff_at_ms`.
     ///
     /// Commit times come from writers' clocks and need not increase with
@@ -93,9 +93,9 @@ pub(crate) async fn verify_manifest_segments_exist<S: ObjectStore + ?Sized>(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetentionPlan {
     /// The floor stays at this sequence, the view's floor.
-    Stays(ChangeSeq),
+    Stays(CommitSeq),
     /// The floor moves up to this sequence.
-    Moves(ChangeSeq),
+    Moves(CommitSeq),
 }
 
 /// What one floor object publication did: the retention floor of the view
@@ -108,10 +108,10 @@ pub enum RetentionPlan {
 pub struct FloorObjectReport {
     /// The view's retention floor: the floor that this call created a floor
     /// object for, or a higher floor that the call found.
-    pub retention_floor_seq: ChangeSeq,
+    pub retention_floor_seq: CommitSeq,
     /// The retention floor of the manifest that the view replays its WAL tail
     /// above.
-    pub manifest_retention_floor_seq: ChangeSeq,
+    pub manifest_retention_floor_seq: CommitSeq,
 }
 
 impl<S: ObjectStore> NamespaceStore<S> {
@@ -132,7 +132,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     pub async fn plan_retention_floor(
         &self,
         current: &LoadedManifest,
-        retention_floor_seq: ChangeSeq,
+        retention_floor_seq: CommitSeq,
         target: RetentionTarget,
     ) -> Result<RetentionPlan> {
         let now_ms = self.start_clock().request_at_ms();
@@ -191,7 +191,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     pub async fn publish_floor_object(
         &self,
         planned: &LoadedManifest,
-        target: ChangeSeq,
+        target: CommitSeq,
     ) -> Result<FloorObjectReport> {
         verify_manifest_segments_exist(&self.store, planned.payload()).await?;
         self.publish_floor_object_at_tip(target).await
@@ -202,7 +202,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// the caller has checked the planned manifest's segments.
     pub(crate) async fn publish_floor_object_at_tip(
         &self,
-        target: ChangeSeq,
+        target: CommitSeq,
     ) -> Result<FloorObjectReport> {
         let mut last_error = None;
         for _attempt in 0..MAX_CONTENTION_ATTEMPTS {
@@ -286,9 +286,9 @@ async fn last_commit_at_or_before<S: ObjectStore + ?Sized>(
     store: &S,
     segment_cache: &MetadataSegmentCache,
     current: &LoadedManifest,
-    through: ChangeSeq,
+    through: CommitSeq,
     cutoff_at_ms: u64,
-) -> Result<ChangeSeq> {
+) -> Result<CommitSeq> {
     let basis = metadata_basis_from_manifest(store, Some(segment_cache), current);
     let mut last = current.retention_floor_seq();
     // One commit per scan: a commit row can be large, and the memo keeps the

@@ -8,7 +8,7 @@ use loonfs::test_support::maintenance_past_the_grace_window;
 use loonfs_client::{ClientError, MergeForkOptions, NamespacePath};
 use loonfs_test_support::ids::namespace_id;
 use loonfs_types::{
-    ActorId, ChangeSeq, Commit, CommitId, ErrorDetails, MergeConflictKind, NamespaceId,
+    ActorId, Commit, CommitId, CommitSeq, ErrorDetails, MergeConflictKind, NamespaceId,
     NamespaceRebasedFrom, NextMergeRangeOutcome, NextMergeRangeResponse, RebaseForkResponse,
     FEATURE_MERGES,
 };
@@ -114,7 +114,7 @@ impl Family {
     }
 
     /// Returns the sequence of `main` that the fork was made at.
-    async fn fork_point(&self) -> ChangeSeq {
+    async fn fork_point(&self) -> CommitSeq {
         self.harness
             .client
             .get_namespace(&self.fork)
@@ -122,12 +122,12 @@ impl Family {
             .expect("the fork")
             .fork_basis
             .expect("a fork has a basis")
-            .source_head_seq
+            .fork_point_seq
     }
 
     /// Folds `namespace` and advances its retention floor to the folded
     /// head, and returns the floor.
-    async fn advance_floor(&self, namespace: &NamespaceId) -> ChangeSeq {
+    async fn advance_floor(&self, namespace: &NamespaceId) -> CommitSeq {
         let maintenance = maintenance_past_the_grace_window(self.harness.store.clone()).await;
         maintenance.fold_wal(namespace).await.expect("fold");
         maintenance
@@ -449,7 +449,7 @@ async fn a_merge_past_the_fork_head_names_the_through_seq_field() {
             &family.fork,
             &actor(),
             &MergeForkOptions {
-                through_seq: Some(ChangeSeq(1_000)),
+                through_seq: Some(CommitSeq(1_000)),
                 ..MergeForkOptions::default()
             },
         )

@@ -19,7 +19,7 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::MergeRecord;
 use loonfs_types::options::DiffOptions;
 use loonfs_types::{
-    AbsolutePath, AccessRight, ChangeSeq, ContentLayout, ContentRef, DisplayName, InodeId,
+    AbsolutePath, AccessRight, CommitSeq, ContentLayout, ContentRef, DisplayName, InodeId,
     InodeKind, MergeConflict, MergeConflictKind, MergeConflictVersion, NameKey, MAX_PATH_DEPTH,
     ROOT_INODE_ID,
 };
@@ -63,14 +63,14 @@ pub(super) struct Classifier<'v, S: ObjectStore + ?Sized> {
     /// whose change the merge applies.
     pub(super) fork_authorizer: Authorizer<'v>,
     pub(super) record: &'v MergeRecord,
-    pub(super) fork_point_seq: ChangeSeq,
+    pub(super) fork_point_seq: CommitSeq,
     /// The memory that the plan uses, which the running size bound checks
     /// against the merge allowance with the planned bytes.
     pub(super) memory: Arc<PlanningMemory>,
     /// The sequences above the fork point whose commits the check of a row's
     /// provenance read, and whether each commit is a merge from this fork.
     /// It grows with the rows that the merge replaces.
-    pub(super) own_seqs: HashMap<ChangeSeq, bool>,
+    pub(super) own_seqs: HashMap<CommitSeq, bool>,
     pub(super) plans: Vec<InodePlan>,
     /// The layout of each content reference that the plans write, from the
     /// fork's view after the fork's fold.
@@ -164,8 +164,8 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
             // A deletion that an earlier merge of this fork made, and that
             // the fork has since undone, is undone by this merge too, while
             // the deletion is recoverable here. Any other deletion conflicts.
-            let deletion_seq = self.undeletion(inode_id).await?;
-            if deletion_seq.is_none() && !self.hidden_by_undeleted_ancestor(inode_id, edge).await? {
+            let deletion_seq = self.restored_deletion(inode_id).await?;
+            if deletion_seq.is_none() && !self.hidden_by_restored_ancestor(inode_id, edge).await? {
                 self.conflict(inode_id, MergeConflictKind::Visibility, ours, None)
                     .await?;
                 return Ok(());
@@ -196,7 +196,7 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
     /// [`Self::is_own`]), which an earlier merge of the fork made, that's
     /// still recoverable there, and that the fork undid, so the inode is
     /// visible in the fork.
-    async fn undeletion(&mut self, inode_id: InodeId) -> Result<Option<ChangeSeq>> {
+    async fn restored_deletion(&mut self, inode_id: InodeId) -> Result<Option<CommitSeq>> {
         let Some(deletion) = self.theirs.view().recoverable_deletion(inode_id).await? else {
             return Ok(None);
         };
@@ -213,10 +213,10 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
 
     /// Returns whether `inode_id` is hidden in the merged-into namespace
     /// only by deletions of its ancestors that the merge undoes (see
-    /// [`Self::undeletion`]), and keeps there the parent and the name that
+    /// [`Self::restored_deletion`]), and keeps there the parent and the name that
     /// `edge` gives it in the fork. Undoing those deletions shows the inode
     /// again without a change of its own.
-    async fn hidden_by_undeleted_ancestor(
+    async fn hidden_by_restored_ancestor(
         &mut self,
         inode_id: InodeId,
         edge: &Edge,
@@ -230,18 +230,18 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
         {
             return Ok(false);
         }
-        let mut undeleted = false;
+        let mut restored = false;
         let mut ancestor = binding.parent_inode_id;
         // A binding cycle would be corrupt, and the bound ends the walk.
         for _ in 0..=MAX_PATH_DEPTH {
             if view.hiding_subtree_tombstone(ancestor).await?.is_some() {
-                if self.undeletion(ancestor).await?.is_none() {
+                if self.restored_deletion(ancestor).await?.is_none() {
                     return Ok(false);
                 }
-                undeleted = true;
+                restored = true;
             }
             if ancestor == ROOT_INODE_ID {
-                return Ok(undeleted);
+                return Ok(restored);
             }
             let Some(binding) = view.current_parent_binding_for_child(ancestor).await? else {
                 return Ok(false);
@@ -381,7 +381,7 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
     /// the fork's own when it was committed at or below the fork point, or by
     /// a merge from this fork. A replay commit reads the commit at or below
     /// the new fork's fork point through the pin.
-    pub(super) async fn is_own(&mut self, seq: ChangeSeq) -> Result<bool> {
+    pub(super) async fn is_own(&mut self, seq: CommitSeq) -> Result<bool> {
         if seq <= self.fork_point_seq {
             return Ok(true);
         }

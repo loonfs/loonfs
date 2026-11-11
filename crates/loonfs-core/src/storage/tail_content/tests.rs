@@ -8,7 +8,7 @@ use loonfs_test_support::stores::{
     RecordedOperation, RecordingStore,
 };
 use loonfs_types::format::wal::{WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent};
-use loonfs_types::{ChangeSeq, CommitId, ContentId, ContentRef, InodeId, NamespaceId, RevisionNo};
+use loonfs_types::{CommitId, CommitSeq, ContentId, ContentRef, InodeId, NamespaceId, RevisionNo};
 use std::assert_matches;
 
 /// The head of the namespace whose tail these tests write, a namespace that
@@ -36,7 +36,7 @@ impl LayoutLookup for Layout {
 
 fn piece_commit(reference: &ContentRef, offset: u64, bytes: Vec<u8>, seq: u64) -> WalCommitPayload {
     WalCommitPayload {
-        committed_seq: ChangeSeq(seq),
+        committed_seq: CommitSeq(seq),
         commit_id: CommitId::parse(format!("c_{seq:032x}")).expect("commit id"),
         committed_by: loonfs_test_support::test_actor(),
         semantic_commit_fingerprint: loonfs_test_support::ids::commit_fingerprint("test"),
@@ -52,7 +52,7 @@ fn piece_commit(reference: &ContentRef, offset: u64, bytes: Vec<u8>, seq: u64) -
                 name_key: loonfs_types::NameKey::parse("file.txt").expect("name key"),
                 display_name: loonfs_types::DisplayName::parse("file.txt").expect("display name"),
                 bind_position: loonfs_types::format::manifest::DeltaPosition {
-                    seq: loonfs_types::ChangeSeq(1),
+                    seq: loonfs_types::CommitSeq(1),
                     delta_index: 0,
                 },
                 child_created_by: loonfs_types::ActorId::loonfs(),
@@ -108,7 +108,7 @@ async fn fixture<S: ObjectStore>(
     }
     let layout = Layout(ContentLayoutRecord {
         content_id: content_id.clone(),
-        committed_seq: ChangeSeq(1),
+        committed_seq: CommitSeq(1),
         size_bytes: offset,
         layout: ContentLayout {
             creator_namespace_id: HEAD.namespace_id.clone(),

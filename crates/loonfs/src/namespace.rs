@@ -4,7 +4,7 @@
 use crate::publisher::{NamespaceSession, NamespaceSessionStatus};
 use crate::runtime_core::RuntimeCore;
 use crate::trace::{self, operation_span};
-use crate::{ChangeSeq, LoonFs, Mode, NamespaceId, ReadOnly, Result, Writable};
+use crate::{CommitSeq, LoonFs, Mode, NamespaceId, ReadOnly, Result, Writable};
 use loonfs_core::NamespaceWriterEngine;
 use loonfs_types::Subject;
 use std::fmt;
@@ -148,7 +148,7 @@ impl Namespace<Writable> {
     ///
     /// Reads memory only. A commit from another session or another process does
     /// not change it.
-    pub fn last_published_seq(&self) -> Option<ChangeSeq> {
+    pub fn last_published_seq(&self) -> Option<CommitSeq> {
         self.session().last_published_seq()
     }
 

@@ -9,7 +9,7 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::RecordingStore;
 use loonfs_types::{
     AccessGrants, AccessRight, AccessRights, AttributeKey, AttributeValue, Commit, CommitId,
-    EffectiveLimit, EntryInodeKind, FilesystemChange, NamespaceAccess, PrincipalId, PrincipalScope,
+    EffectiveLimit, EntryInodeKind, FilesystemEvent, NamespaceAccess, PrincipalId, PrincipalScope,
     PrincipalSet, Subject, SubjectId,
 };
 use std::assert_matches;
@@ -112,9 +112,9 @@ impl History {
     /// Reads one page against the namespace's current head.
     async fn page(
         &self,
-        from_seq: ChangeSeq,
-        to_seq: Option<ChangeSeq>,
-        after_seq: Option<ChangeSeq>,
+        from_seq: CommitSeq,
+        to_seq: Option<CommitSeq>,
+        after_seq: Option<CommitSeq>,
         limit: u32,
     ) -> Result<DiffPage> {
         let namespace = namespace_store(&self.store, &self.namespace_id);
@@ -133,7 +133,7 @@ impl History {
 
     /// Reads every page of the diff from `from_seq` to the head under
     /// `path`, `limit` commits at a time, and returns their entries.
-    async fn diff(&self, from_seq: ChangeSeq, path: &str, limit: u32) -> Vec<DiffEntry> {
+    async fn diff(&self, from_seq: CommitSeq, path: &str, limit: u32) -> Vec<DiffEntry> {
         let namespace = namespace_store(&self.store, &self.namespace_id);
         let view = namespace
             .load_current_metadata_view()
@@ -217,7 +217,7 @@ async fn a_one_commit_file_creation_yields_one_entry() {
     );
     assert_eq!(entry.inode_kind, EntryInodeKind::File);
     assert_eq!(entry.revision_no, Some(RevisionNo(1)));
-    let Some(FilesystemChange::FileCreated {
+    let Some(FilesystemEvent::FileCreated {
         inode_id,
         binding_version,
         ..
@@ -434,7 +434,7 @@ async fn a_floor_advance_between_two_pages_fails_the_later_page() {
 }
 
 #[tokio::test]
-async fn an_undeleted_directory_is_one_entry_and_its_children_are_not() {
+async fn a_restored_directory_is_one_entry_and_its_children_are_not() {
     let history = History::unrestricted().await;
     history.write("/dir/x.txt").await;
     history.write("/dir/y.txt").await;
@@ -442,10 +442,10 @@ async fn an_undeleted_directory_is_one_entry_and_its_children_are_not() {
     let deletion = history.delete("/dir").await;
     history.fold().await;
     history
-        .commit(FilesystemOperation::Undelete {
+        .commit(FilesystemOperation::RestoreDeleted {
             inode_id: directory,
             deletion_seq: deletion.committed_seq,
-            destination: loonfs_types::options::UndeleteDestination::Recorded,
+            destination: loonfs_types::options::RestoreDeletedDestination::Recorded,
         })
         .await;
 
@@ -455,7 +455,7 @@ async fn an_undeleted_directory_is_one_entry_and_its_children_are_not() {
     assert_eq!(entries[0].inode_kind, EntryInodeKind::Directory);
     assert_eq!(
         summary(&entries[0]),
-        (DiffEntryKind::Undeleted, Some("/dir"), None)
+        (DiffEntryKind::Restored, Some("/dir"), None)
     );
 }
 
@@ -506,9 +506,9 @@ async fn a_move_of_a_directory_above_the_path_is_an_entry() {
 }
 
 /// Checks that a diff of a path below a directory reports the directory's
-/// deletion, and its undelete in place.
+/// deletion, and its restore in place.
 #[tokio::test]
-async fn a_deletion_or_undelete_of_a_directory_above_the_path_is_an_entry() {
+async fn a_deletion_or_restore_of_a_directory_above_the_path_is_an_entry() {
     let history = History::unrestricted().await;
     let written = history.write("/a/b/file.txt").await.committed_seq;
     let directory = history.inode_id("/a").await;
@@ -519,16 +519,16 @@ async fn a_deletion_or_undelete_of_a_directory_above_the_path_is_an_entry() {
     assert_eq!(deleted[0].inode_id, directory);
 
     history
-        .commit(FilesystemOperation::Undelete {
+        .commit(FilesystemOperation::RestoreDeleted {
             inode_id: directory,
             deletion_seq: deletion.committed_seq,
-            destination: loonfs_types::options::UndeleteDestination::Recorded,
+            destination: loonfs_types::options::RestoreDeletedDestination::Recorded,
         })
         .await;
-    let undeleted = history.diff(deletion.committed_seq, "/a/b", 1000).await;
-    let summaries: Vec<_> = undeleted.iter().map(summary).collect();
-    assert_eq!(summaries, [(DiffEntryKind::Undeleted, Some("/a"), None)]);
-    assert_eq!(undeleted[0].inode_id, directory);
+    let restored = history.diff(deletion.committed_seq, "/a/b", 1000).await;
+    let summaries: Vec<_> = restored.iter().map(summary).collect();
+    assert_eq!(summaries, [(DiffEntryKind::Restored, Some("/a"), None)]);
+    assert_eq!(restored[0].inode_id, directory);
 }
 
 /// Checks that a directory created above the path isn't an entry, because
@@ -761,9 +761,9 @@ async fn a_range_out_of_bounds_is_rejected_and_an_empty_range_is_an_empty_page()
         assert_eq!(page.next_after_seq, None);
     }
     for (from_seq, to_seq, after_seq, param) in [
-        (first, Some(ChangeSeq(head.0 + 1)), None, "to_seq"),
+        (first, Some(CommitSeq(head.0 + 1)), None, "to_seq"),
         (head, Some(first), None, "from_seq"),
-        (ChangeSeq(head.0 + 1), None, None, "from_seq"),
+        (CommitSeq(head.0 + 1), None, None, "from_seq"),
         (head, None, Some(first), "after_seq"),
         (first, Some(first), Some(head), "after_seq"),
     ] {
@@ -784,7 +784,7 @@ async fn a_range_out_of_bounds_is_rejected_and_an_empty_range_is_an_empty_page()
 /// `max_touches` as the page's bound, and returns the pages.
 async fn diff_pages(
     history: &History,
-    from_seq: ChangeSeq,
+    from_seq: CommitSeq,
     mut options: DiffOptions,
     max_touches: usize,
 ) -> Vec<DiffResponse> {
@@ -925,7 +925,7 @@ async fn a_diff_refuses_an_event_index_without_split_commits_or_at_from_seq() {
 /// A history of 211 commits to `/log.txt`, in three folds, so the commits
 /// are in more than one metadata segment. Returns the history and the
 /// sequence of the file's creation.
-async fn history_of_appends_in_segments() -> (History, ChangeSeq) {
+async fn history_of_appends_in_segments() -> (History, CommitSeq) {
     let history = History::unrestricted().await;
     let from_seq = history.write("/log.txt").await.committed_seq;
     for _ in 0..3 {
@@ -950,7 +950,7 @@ enum ScanPage {
 async fn segment_gets(
     history: &History,
     page: ScanPage,
-    from_seq: ChangeSeq,
+    from_seq: CommitSeq,
     limit: u32,
 ) -> BTreeMap<String, usize> {
     let store = RecordingStore::metadata_segments(

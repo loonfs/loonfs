@@ -100,8 +100,8 @@ pub use loonfs_core::{
 };
 pub use loonfs_types::{
     AbsolutePath, ActorId, AdvanceRetentionResponse, AttributeKey, AttributeValue, Attributes,
-    AttributesProjection, AttributesRevisionNo, BindingVersion, CapabilityDocument, ChangeSeq,
-    Checkpoint, CheckpointOwner, ChecksumAlgorithm, CommitId, CommitPrecondition, ContentId,
+    AttributesProjection, AttributesRevisionNo, BindingVersion, CapabilityDocument, Checkpoint,
+    CheckpointOwner, ChecksumAlgorithm, CommitId, CommitPrecondition, CommitSeq, ContentId,
     ContentRef, ContentRefKind, DeleteDirectoryBehavior, DeleteNamespaceResponse,
     DeleteSnapshotResponse, DeletedCheckpointsByOwner, DeletedObjectCounts, DestinationBehavior,
     DirectoryPageCursor, DisplayName, EffectiveLimit, EntryInodeKind, FileRevision,
@@ -117,8 +117,8 @@ pub use loonfs_types::{
 };
 pub use loonfs_types::{
     Commit, CompleteUploadBody, CreateUploadBody, DiffEntry, DiffEntryKind, DiffResponse,
-    FilesystemChange, ListChangesResponse, MergeConflict, MergeConflictKind, MergeConflictRevision,
-    MergeConflictVersion, NextMergeRangeOutcome, NextMergeRangeResponse, ObjectTransferAccess,
+    FilesystemEvent, ListChangesResponse, MergeConflict, MergeConflictKind, MergeConflictRevision,
+    MergeConflictVersion, NextMergeRangeOutcome, NextMergeRangeResponse, ObjectTransfer,
     RebaseForkResponse, UploadContentClaim, UploadMode, UploadSession, UploadSessionStatus,
 };
 
@@ -240,8 +240,8 @@ pub use options::{
     DirectMultipartUploadOptions, DownloadOptions, ForkNamespaceOptions, ListChangesOptions,
     ListFileRevisionsOptions, ListOptions, ListTrashOptions, MaintainMetadataOptions,
     MergeForkOptions, MoveOptions, PutFileOptions, ReadAt, ReadConsistency, ReadFileOptions,
-    ReadFileStreamOptions, ReadRange, StatOptions, UndeleteDestination, UndeleteOptions,
-    UpdateAccessByInodeOptions, UpdateAccessOptions, UpdateAttributesByInodeOptions,
+    ReadFileStreamOptions, ReadRange, RestoreDeletedDestination, RestoreDeletedOptions,
+    StatOptions, UpdateAccessByInodeOptions, UpdateAccessOptions, UpdateAttributesByInodeOptions,
     UpdateAttributesOptions,
 };
 pub use pagers::{

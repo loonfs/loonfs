@@ -8,7 +8,7 @@ use crate::{
     MergeSessionStatus, PendingCommit, Resolver, Result,
 };
 use loonfs_types::{
-    generated_id, ChangeSeq, ErrorResponse, MergeConflict, NamespaceId, NextMergeRangeOutcome,
+    generated_id, CommitSeq, ErrorResponse, MergeConflict, NamespaceId, NextMergeRangeOutcome,
 };
 
 /// The most new forks that one session's rebases create.
@@ -26,7 +26,7 @@ pub const MAX_NEW_FORKS: usize = 8;
 pub struct MergeSessionOptions {
     /// The fork sequence to merge the original fork through, or `None` for
     /// the fork's head when the session starts.
-    pub through_seq: Option<ChangeSeq>,
+    pub through_seq: Option<CommitSeq>,
 }
 
 /// One fork's merge session, which merges the fork through a [`Mechanics`]
@@ -141,7 +141,7 @@ impl<M: Mechanics, R: Resolver> MergeSession<M, R> {
     async fn merge(
         &self,
         fork_id: &NamespaceId,
-        through_seq: ChangeSeq,
+        through_seq: CommitSeq,
         merge: &PendingCommit,
     ) -> Result<Transition> {
         let answer = self
@@ -207,7 +207,7 @@ impl<M: Mechanics, R: Resolver> MergeSession<M, R> {
     async fn rebase(
         &self,
         fork_id: &NamespaceId,
-        through_seq: ChangeSeq,
+        through_seq: CommitSeq,
         new_fork_id: &NamespaceId,
         replay: &PendingCommit,
         reports: &[ConflictReport],
@@ -268,7 +268,7 @@ impl<M: Mechanics, R: Resolver> MergeSession<M, R> {
     fn replace_new_fork(
         &self,
         fork_id: &NamespaceId,
-        through_seq: ChangeSeq,
+        through_seq: CommitSeq,
         new_fork_id: &NamespaceId,
     ) -> Transition {
         let Some(replacement_id) = self.new_fork_id() else {
@@ -384,7 +384,7 @@ fn next_request(
 /// doesn't know.
 pub(crate) fn status_after_range(
     fork_id: &NamespaceId,
-    through_seq: ChangeSeq,
+    through_seq: CommitSeq,
     outcome: &NextMergeRangeOutcome,
     reports: &[ConflictReport],
 ) -> MergeSessionStatus {
@@ -423,7 +423,7 @@ pub(crate) fn status_after_range(
 /// committed with `conflicts`: the rest of the range, or the resolver.
 fn replayed(
     fork_id: &NamespaceId,
-    through_seq: ChangeSeq,
+    through_seq: CommitSeq,
     new_fork_id: &NamespaceId,
     replay: &PendingCommit,
     reports: &[ConflictReport],

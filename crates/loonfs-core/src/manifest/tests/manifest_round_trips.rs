@@ -290,7 +290,7 @@ async fn manifest_round_trip_supports_empty_namespace() {
         .expect("record exists")
         .state;
     assert!(PinId::parse(record.pin_id.as_str()).is_ok());
-    assert_eq!(record.head_seq, ChangeSeq(0));
+    assert_eq!(record.head_seq, CommitSeq(0));
     assert_eq!(record.pin_id.manifest_no(), ManifestNo(1));
     assert!(metadata_states_equivalent(
         &materialization.metadata_state,
@@ -452,7 +452,7 @@ async fn manifest_materialization_uses_written_segments() {
         .await
         .expect("materialization");
     let manifest_head = head_from_manifest(&current.head, &materialized.manifest);
-    assert_eq!(manifest_head.seq, ChangeSeq(1));
+    assert_eq!(manifest_head.seq, CommitSeq(1));
     assert!(metadata_states_equivalent(
         &materialized.metadata_state,
         &current.metadata_state
@@ -559,7 +559,7 @@ async fn manifest_delta_run_materialization_matches_checkpoint_projection() {
             .expect("load chained manifest");
     assert_eq!(
         latest_materialized.manifest.payload().base_seq(),
-        ChangeSeq(0),
+        CommitSeq(0),
         "always-append checkpoints keep the first published base"
     );
     let chained_delta_runs = super::delta_runs(&latest_materialized.manifest);

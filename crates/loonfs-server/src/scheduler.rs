@@ -6,7 +6,7 @@ use crate::scheduler::metrics::SchedulerMetrics;
 use crate::scheduler::retries::CallFailure;
 use futures::{FutureExt as _, StreamExt as _};
 use loonfs::metrics::MetricsRecorder;
-use loonfs::{ChangeSeq, Maintenance, MaintenanceCancellation, NamespaceId, SharedObjectStore};
+use loonfs::{CommitSeq, Maintenance, MaintenanceCancellation, NamespaceId, SharedObjectStore};
 use loonfs_grep::{GramIndexBuildPolicy, GrepWorker};
 use loonfs_http::{panic_message, HeldNamespace, HostState, Namespaces};
 use loonfs_objectstore::layout::{list_namespace_ids, list_pool_ids, MAX_NAMESPACE_IDS_PER_PAGE};
@@ -41,8 +41,8 @@ const MAX_STEP_BACKOFF_MS: u64 = 60 * 60 * 1000;
 /// last indexed and collected, what the last metadata step reported about
 /// the tail, and the retry state of each step that the scheduler retries.
 pub(crate) struct SchedulerState {
-    indexed_seq: Option<ChangeSeq>,
-    collected_seq: Option<ChangeSeq>,
+    indexed_seq: Option<CommitSeq>,
+    collected_seq: Option<CommitSeq>,
     collected_at_ms: u64,
     /// When the tail's idle fold comes due, on the scheduler's monotonic
     /// timer, as the last metadata step that succeeded reported it (see
@@ -52,7 +52,7 @@ pub(crate) struct SchedulerState {
     /// step started, whether or not that step succeeded, and `None` before
     /// the first step. A commit since then can leave work in the tail that
     /// no step has dated.
-    last_step_seq: Option<ChangeSeq>,
+    last_step_seq: Option<CommitSeq>,
     metadata_retry: StepRetry,
     index_retry: StepRetry,
     gc_retry: StepRetry,
@@ -79,7 +79,7 @@ impl SchedulerState {
     /// Whether garbage collection is due for a session at `seq`: the seq
     /// moved since the last collection, and at least `interval_ms` passed
     /// since that collection.
-    fn collection_pending(&self, seq: Option<ChangeSeq>, now_ms: u64, interval_ms: u64) -> bool {
+    fn collection_pending(&self, seq: Option<CommitSeq>, now_ms: u64, interval_ms: u64) -> bool {
         seq != self.collected_seq && now_ms.saturating_sub(self.collected_at_ms) >= interval_ms
     }
 }
@@ -87,7 +87,7 @@ impl SchedulerState {
 /// Whether the grep index has work for a session at `seq`: the index is
 /// marked dirty, or the scheduler last brought the index up to date at
 /// another seq.
-fn index_pending(held: &HeldNamespace<SchedulerState>, seq: Option<ChangeSeq>) -> bool {
+fn index_pending(held: &HeldNamespace<SchedulerState>, seq: Option<CommitSeq>) -> bool {
     held.index_dirty || held.host_state.indexed_seq != seq
 }
 

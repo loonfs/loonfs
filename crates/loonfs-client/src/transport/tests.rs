@@ -7,9 +7,9 @@ use crate::{scripted_transport, ClientConfig};
 use crate::{CommitOptions, CreateDirectoryOptions, DeleteNamespaceOptions};
 use futures::FutureExt as _;
 use loonfs_test_support::clock::ManualClock;
-use loonfs_types::ChangeSeq;
 use loonfs_types::Commit;
 use loonfs_types::CommitId;
+use loonfs_types::CommitSeq;
 use loonfs_types::CompleteUploadBody;
 use loonfs_types::ContentId;
 use loonfs_types::ContentRef;
@@ -17,7 +17,7 @@ use loonfs_types::CreateUploadBody;
 use loonfs_types::DeleteSnapshotResponse;
 use loonfs_types::NamespaceDiagnostics;
 use loonfs_types::NamespaceMetadata;
-use loonfs_types::ObjectTransferAccess;
+use loonfs_types::ObjectTransfer;
 use loonfs_types::PinId;
 use loonfs_types::UploadId;
 use loonfs_types::UploadSession;
@@ -735,7 +735,7 @@ async fn retry_policy_lifecycle_mutations_are_single_attempt() {
             .delete_namespace_with_options(
                 &namespace_id,
                 &DeleteNamespaceOptions {
-                    expected_head_seq: Some(ChangeSeq(7)),
+                    expected_head_seq: Some(CommitSeq(7)),
                 },
             )
             .await,
@@ -783,8 +783,8 @@ async fn retry_policy_matches_snapshot_and_maintenance_operation_classes() {
         created_by: loonfs_test_support::test_actor(),
         fork_basis: None,
         namespace_id: namespace_id.clone(),
-        head_seq: ChangeSeq(3),
-        retention_floor_seq: ChangeSeq(1),
+        head_seq: CommitSeq(3),
+        retention_floor_seq: CommitSeq(1),
         current_manifest_no: None,
         wal_tail_objects: 2,
         live_snapshots: 3,
@@ -809,7 +809,7 @@ async fn retry_policy_commit_id_filesystem_mutation_retries() {
     let response = Commit {
         namespace_id: namespace_id.clone(),
         commit_id: commit_id.clone(),
-        committed_seq: ChangeSeq(1),
+        committed_seq: CommitSeq(1),
         committed_by: loonfs_test_support::test_actor(),
         committed_at_ms: 1_752_624_000_000,
         message: None,
@@ -850,8 +850,8 @@ async fn retry_policy_read_retries() {
         fork_basis: None,
         pool_id: loonfs_test_support::ids::numbered_pool_id(1),
         namespace_id: namespace_id.clone(),
-        head_seq: ChangeSeq(0),
-        retention_floor_seq: ChangeSeq(0),
+        head_seq: CommitSeq(0),
+        retention_floor_seq: CommitSeq(0),
         retention_window_ms: None,
     };
     let transport = crate::scripted_transport::failure_then_success(
@@ -892,7 +892,7 @@ async fn retry_policy_upload_begins_are_single_attempt() {
 async fn retry_policy_presigned_upload_is_single_attempt() {
     let transport = crate::scripted_transport::failure_then_success(Vec::new());
     let client = retry_policy_client(&transport);
-    let access = ObjectTransferAccess::PresignedUrl {
+    let access = ObjectTransfer::PresignedUrl {
         method: "PUT".to_owned(),
         url: "http://example.invalid/upload".to_owned(),
         headers: std::collections::BTreeMap::new(),
@@ -917,7 +917,7 @@ async fn retry_policy_proxied_upload_content_retries() {
             expires_at_ms: 1000,
             checksum_algorithm: loonfs_types::ChecksumAlgorithm::Crc64nvme,
             part_size_bytes: None,
-            access: None,
+            transfer: None,
             content_ref: Some(test_content_ref(b"content")),
         },
     };

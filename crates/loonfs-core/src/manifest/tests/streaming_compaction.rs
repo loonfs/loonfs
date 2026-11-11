@@ -726,7 +726,7 @@ async fn a_compaction_that_drops_nothing_fails_the_oracle() {
 
     let spec = compaction_spec_for_group(&store, &namespace_id, group)
         .await
-        .with_frozen_floor_seq(ChangeSeq(0));
+        .with_frozen_floor_seq(CommitSeq(0));
     let input_keys = input_keys_now(&store, &namespace_id, &spec).await;
     let Ok(result) = run_compaction(
         &store,
@@ -798,7 +798,7 @@ async fn compaction_keeps_retained_revisions_and_their_layouts() {
         ),
     )
     .engine()
-    .advance_retention_floor(RetentionTarget::Seq(ChangeSeq(deletion_seq.0 - 1)))
+    .advance_retention_floor(RetentionTarget::Seq(CommitSeq(deletion_seq.0 - 1)))
     .await
     .expect("advance the floor to the last revision");
     // Above the floor: two more revisions of the file that stays.
@@ -1169,13 +1169,13 @@ async fn install_synthetic_bindings_base(
                 child_kind: loonfs_types::InodeKind::File,
                 child_created_by: loonfs_types::ActorId::loonfs(),
                 child_created_at_ms: 4_200,
-                committed_seq: ChangeSeq(1),
+                committed_seq: CommitSeq(1),
                 delta_index: delta,
                 commit_id: crate::test_support::binding_commit_id(),
                 committed_by: loonfs_types::ActorId::loonfs(),
                 committed_at_ms: 0,
                 bind_position: loonfs_types::format::manifest::DeltaPosition {
-                    seq: ChangeSeq(1),
+                    seq: CommitSeq(1),
                     delta_index: delta,
                 },
             },
@@ -1188,13 +1188,13 @@ async fn install_synthetic_bindings_base(
                 child_kind: loonfs_types::InodeKind::File,
                 child_created_by: loonfs_types::ActorId::loonfs(),
                 child_created_at_ms: 4_200,
-                committed_seq: ChangeSeq(2),
+                committed_seq: CommitSeq(2),
                 delta_index: delta,
                 commit_id: crate::test_support::binding_commit_id(),
                 committed_by: loonfs_types::ActorId::loonfs(),
                 committed_at_ms: 0,
                 bind_position: loonfs_types::format::manifest::DeltaPosition {
-                    seq: ChangeSeq(2),
+                    seq: CommitSeq(2),
                     delta_index: delta,
                 },
                 state: loonfs_types::format::manifest::DirentryBindingState::Unbound,
@@ -1547,7 +1547,7 @@ async fn large_compaction_inputs(
             rows.push(MetadataRow::AttributesRevision(AttributesRevisionRecord {
                 inode_id: InodeId(u128::from(index * 3 + run + 1)),
                 attributes_revision_no: AttributesRevisionNo(1),
-                committed_seq: ChangeSeq(run + 1),
+                committed_seq: CommitSeq(run + 1),
                 commit_id: CommitId::parse(format!("c_{run}")).expect("commit id"),
                 delta_index: 0,
                 committed_by: loonfs_types::ActorId::loonfs(),
@@ -1579,7 +1579,7 @@ async fn large_compaction_inputs(
         .expect("input segments");
         runs.push(MetadataRunManifest {
             run_no: RunNo(run + 1),
-            run_seq: ChangeSeq(run + 1),
+            run_seq: CommitSeq(run + 1),
             tier: if run == 0 {
                 RunTier::Base
             } else {
@@ -1638,9 +1638,9 @@ async fn a_compaction_reads_byte_sized_spans_concurrently_within_its_configured_
         // A delta compaction: these attribute rows have no inodes or bindings,
         // so a base compaction's kept inode filter would remove every one.
         plan::CompactionPlacement::Delta {
-            output_seq: ChangeSeq(3),
+            output_seq: CommitSeq(3),
         },
-        ChangeSeq(0),
+        CommitSeq(0),
     );
     let Ok(result) = run_metadata_compaction(
         &segments,
@@ -1693,7 +1693,7 @@ async fn a_compaction_reads_byte_sized_spans_concurrently_within_its_configured_
         .map(|_| {
             MetadataSegmentRowIterator::metadata(
                 ApiMetadataRowFamily::Attributes,
-                ChangeSeq(3),
+                CommitSeq(3),
                 vec![descriptor.clone()],
             )
         })
@@ -3225,7 +3225,7 @@ async fn layout_compactions_prune_absent_chains_only_at_the_base_even_past_the_f
     state.push_revision(RevisionRecord {
         inode_id: InodeId(2),
         revision_no: RevisionNo(1),
-        committed_seq: ChangeSeq(1),
+        committed_seq: CommitSeq(1),
         commit_id: CommitId::parse("first").expect("commit"),
         committed_at_ms: 0,
         committed_by: loonfs_types::ActorId::loonfs(),
@@ -3233,9 +3233,9 @@ async fn layout_compactions_prune_absent_chains_only_at_the_base_even_past_the_f
         content_ref: reference.clone(),
     });
     for (content_id, size_bytes, committed_seq) in [
-        (reference.content_id.clone(), 8, ChangeSeq(1)),
-        (reference.content_id.clone(), 4, ChangeSeq(2)),
-        (absent.clone(), 4, ChangeSeq(1)),
+        (reference.content_id.clone(), 8, CommitSeq(1)),
+        (reference.content_id.clone(), 4, CommitSeq(2)),
+        (absent.clone(), 4, CommitSeq(1)),
     ] {
         state.push_content_layout(ContentLayoutRecord {
             content_id: content_id.clone(),
@@ -3255,7 +3255,7 @@ async fn layout_compactions_prune_absent_chains_only_at_the_base_even_past_the_f
     let state = state.build();
     let mut head =
         NamespaceReadState::initial(namespace_id.clone(), 0, loonfs_types::ActorId::loonfs());
-    head.seq = ChangeSeq(2);
+    head.seq = CommitSeq(2);
     let policy = MetadataRunPolicy::default();
     let manifest = build_namespace_manifest_from_metadata_state(
         &store,

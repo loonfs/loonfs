@@ -6,7 +6,7 @@
     "path": "/download.txt",
     "commit_id": "conf-download-001",
     "actor_id": "conformance-download",
-    "content_utf8": "download grant corpus payload\n"
+    "content_utf8": "download range corpus payload\n"
   },
   "expected": {
     "size_bytes": 30,

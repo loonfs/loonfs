@@ -96,7 +96,7 @@ def stream_client(fixture, direct, body, asynchronous=False, range_body=None):
                     {
                         "start_offset": 0,
                         "length": fixture["size_bytes"],
-                        "access": access,
+                        "transfer": access,
                     }
                 ],
             }
@@ -105,7 +105,7 @@ def stream_client(fixture, direct, body, asynchronous=False, range_body=None):
                     {
                         "start_offset": part["start_offset"],
                         "length": part["length"],
-                        "access": {
+                        "transfer": {
                             **access,
                             "url": f"http://objects.test/object/{index}",
                             "headers": {"range": part["range"]},

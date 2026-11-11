@@ -43,7 +43,7 @@ A process that has the namespace's writer session creates the floor object as on
 
 The retention floor of a [read view](../specs/glossary.md#read-view), or of a [writer position](../specs/glossary.md#writer-position), is the highest of the manifest's `retention_floor_seq` and the `retention_floor_seq` of every floor object in the view's unfolded WAL tail. When LoonFS replays a floor object, it raises the view's floor to the floor object's `retention_floor_seq` if that value is higher than the current floor. For example, if the manifest's floor is 5 and the tail contains a floor object at WAL number 31 with floor 20, the view's floor is 20. A floor object whose `retention_floor_seq` is above its own `head_seq` is invalid.
 
-Every rule that reads the floor of a view reads this value: restore validation (an undelete, and a restore of a file revision), the trash listing's scan start, the change feed's lower bound, the merge floor rule, and the reads that return `rebootstrap_required`.
+Every rule that reads the floor of a view reads this value: restore validation (a restore of a deleted item, and a restore of a file revision), the trash listing's scan start, the change feed's lower bound, the merge floor rule, and the reads that return `rebootstrap_required`.
 
 Why does the floor take effect in a view before a manifest records the new floor? Restore validation has to use the new floor from the floor object's WAL number onward. With one definition of a view's floor, the trash listing, the change feed, and restore validation all use the same floor, so a restore refuses every deletion that the trash listing leaves out.
 
@@ -112,11 +112,11 @@ The second case applies to a writer of any epoch, so the argument needs no separ
 
 ### Examples
 
-In the first example, the advance is in the session's own queue. Suppose the floor is 5, a writer session has written WAL objects through 30, and its queue contains an undelete of a deletion at sequence 10, then an advance to 20, then a second undelete of the same deletion. The session commits the first undelete in WAL object 31 and creates the floor object at 32. The session validates the second undelete against floor 20, so the second undelete returns `not_deleted`. The next fold publishes floor 20, and the deletion's latest event in that manifest is `revoke`, so a base compaction keeps the restored item's rows.
+In the first example, the advance is in the session's own queue. Suppose the floor is 5, a writer session has written WAL objects through 30, and its queue contains a restore of a deletion at sequence 10, then an advance to 20, then a second restore of the same deletion. The session commits the first restore in WAL object 31 and creates the floor object at 32. The session validates the second restore against floor 20, so the second restore returns `not_deleted`. The next fold publishes floor 20, and the deletion's latest event in that manifest is `revoke`, so a base compaction keeps the restored item's rows.
 
-In the second example, another process advances the floor. A server with no session for the namespace discovers tip 30 and creates the floor object at 31 with floor 20. A writer session in another process then tries to commit an undelete of the deletion at sequence 10 at WAL number 31. The session's put collides, so the session runs discovery, replays the floor object, and validates the undelete against floor 20. The undelete returns `not_deleted`, and the session keeps its writer epoch.
+In the second example, another process advances the floor. A server with no session for the namespace discovers tip 30 and creates the floor object at 31 with floor 20. A writer session in another process then tries to commit a restore of the deletion at sequence 10 at WAL number 31. The session's put collides, so the session runs discovery, replays the floor object, and validates the restore against floor 20. The restore returns `not_deleted`, and the session keeps its writer epoch.
 
-In the third example, the same race goes the other way, and the writer's undelete is written at 31 first. The advancing process's put at 31 collides, so the process runs discovery, finds tip 31, and creates the floor object at 32. Any fold that covers 32 also covers 31, so the manifest that records floor 20 also contains the undelete's `revoke` event.
+In the third example, the same race goes the other way, and the writer's restore is written at 31 first. The advancing process's put at 31 collides, so the process runs discovery, finds tip 31, and creates the floor object at 32. Any fold that covers 32 also covers 31, so the manifest that records floor 20 also contains the restore's `revoke` event.
 
 ## Costs
 

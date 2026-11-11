@@ -292,9 +292,9 @@ func completedUploadStatus(response *loonfs.UploadSession) (*loonfs.UploadSessio
 	return response.Completed, nil
 }
 
-func sendPresignedWithClient(ctx context.Context, client core.HTTPClient, access *loonfs.ObjectTransferAccess, expectedMethod string, body io.Reader, contentLength int64) (*http.Response, error) {
+func sendPresignedWithClient(ctx context.Context, client core.HTTPClient, access *loonfs.ObjectTransfer, expectedMethod string, body io.Reader, contentLength int64) (*http.Response, error) {
 	if access == nil || access.PresignedURL == nil {
-		return nil, fmt.Errorf("unsupported object transfer access")
+		return nil, fmt.Errorf("unsupported object transfer")
 	}
 	presigned := access.PresignedURL
 	if presigned.Method != expectedMethod {
@@ -302,7 +302,7 @@ func sendPresignedWithClient(ctx context.Context, client core.HTTPClient, access
 		if expectedMethod == http.MethodGet {
 			operation = "download"
 		}
-		return nil, fmt.Errorf("%s grant must use %s", operation, expectedMethod)
+		return nil, fmt.Errorf("%s presigned URL must use %s", operation, expectedMethod)
 	}
 	request, err := http.NewRequestWithContext(ctx, expectedMethod, presigned.URL, body)
 	if err != nil {

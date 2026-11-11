@@ -42,7 +42,7 @@ impl LoadedManifest {
         crate::manifest::publish::manifest_ref_for(&self.envelope)
     }
 
-    pub fn retention_floor_seq(&self) -> loonfs_types::ChangeSeq {
+    pub fn retention_floor_seq(&self) -> loonfs_types::CommitSeq {
         self.payload().retention_floor_seq
     }
 

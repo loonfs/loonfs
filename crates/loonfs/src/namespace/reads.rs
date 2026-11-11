@@ -11,7 +11,7 @@ use crate::read_view::{validate_view_directory_cursor, ReadSource, ReadView};
 use crate::runtime_core::classify_read_result;
 use crate::trace::{self, operation_span};
 use crate::{
-    ChangeSeq, Consistency, ContentRef, CoreError, DiffOptions, DiffResponse, DownloadOptions,
+    CommitSeq, Consistency, ContentRef, CoreError, DiffOptions, DiffResponse, DownloadOptions,
     Error, FileBytes, FileContentStream, ListChangesOptions, ListChangesResponse, ListOptions,
     ListPathEntriesResponse, ListTrashOptions, Namespace, PathEntry, PinId, ReadAt,
     ReadFileOptions, ReadFileStreamOptions, Result, RevisionNo, SharedObjectStore, StatOptions,
@@ -400,7 +400,7 @@ impl<M: crate::Mode> Namespace<M> {
     }
 
     /// Lists the namespace's recoverable deletions, oldest deletion first.
-    /// A deletion stays listed until it's undeleted, or until the retention
+    /// A deletion stays listed until it's restored, or until the retention
     /// floor reaches it and it expires.
     pub fn list_trash(&self) -> TrashPager {
         self.list_trash_with_options(&ListTrashOptions::default())
@@ -452,7 +452,7 @@ impl<M: crate::Mode> Namespace<M> {
     }
 
     /// Lists the ordered change feed after `after_seq`.
-    pub fn list_changes(&self, after_seq: ChangeSeq) -> ChangesPager {
+    pub fn list_changes(&self, after_seq: CommitSeq) -> ChangesPager {
         self.list_changes_with_options(after_seq, &ListChangesOptions::default())
     }
 
@@ -465,7 +465,7 @@ impl<M: crate::Mode> Namespace<M> {
     /// [`Consistency::Strong`].
     pub fn list_changes_with_options(
         &self,
-        after_seq: ChangeSeq,
+        after_seq: CommitSeq,
         options: &ListChangesOptions,
     ) -> ChangesPager {
         let start = ChangeFeedPosition {
@@ -514,7 +514,7 @@ impl<M: crate::Mode> Namespace<M> {
 
     /// Returns the first page of the diff of the whole namespace from
     /// `from_seq` to the head that the page reads.
-    pub async fn diff(&self, from_seq: ChangeSeq) -> Result<DiffResponse> {
+    pub async fn diff(&self, from_seq: CommitSeq) -> Result<DiffResponse> {
         self.diff_with_options(from_seq, &DiffOptions::default())
             .await
     }
@@ -532,7 +532,7 @@ impl<M: crate::Mode> Namespace<M> {
     /// page reads the page again with [`Consistency::Strong`].
     pub async fn diff_with_options(
         &self,
-        from_seq: ChangeSeq,
+        from_seq: CommitSeq,
         options: &DiffOptions,
     ) -> Result<DiffResponse> {
         trace::in_operation(

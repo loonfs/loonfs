@@ -84,8 +84,8 @@ pub(crate) const DELETE_NAMESPACE: Operation = Operation::once(Method::DELETE);
 pub(crate) const GET_NAMESPACE_DIAGNOSTICS: Operation = Operation::retry(Method::GET);
 pub(crate) const LIST_CHECKPOINTS: Operation = Operation::retry(Method::GET);
 pub(crate) const GET_CHECKPOINT: Operation = Operation::retry(Method::GET);
-pub(crate) const RUN_MAINTENANCE: Operation = Operation::once(Method::POST);
-pub(crate) const RUN_POOL_MAINTENANCE: Operation = Operation::once(Method::POST);
+pub(crate) const RUN_MAINTENANCE_JOB: Operation = Operation::once(Method::POST);
+pub(crate) const RUN_POOL_MAINTENANCE_JOB: Operation = Operation::once(Method::POST);
 pub(crate) const PROBE_STORE: Operation = Operation::once(Method::POST);
 pub(crate) const GREP: Operation = Operation::retry(Method::GET);
 pub(crate) const GET_GREP_INDEX: Operation = Operation::retry(Method::GET);
@@ -145,8 +145,8 @@ mod tests {
         ("get_namespace_diagnostics", GET_NAMESPACE_DIAGNOSTICS),
         ("list_checkpoints", LIST_CHECKPOINTS),
         ("get_checkpoint", GET_CHECKPOINT),
-        ("run_maintenance", RUN_MAINTENANCE),
-        ("run_pool_maintenance", RUN_POOL_MAINTENANCE),
+        ("run_maintenance_job", RUN_MAINTENANCE_JOB),
+        ("run_pool_maintenance_job", RUN_POOL_MAINTENANCE_JOB),
         ("probe_store", PROBE_STORE),
         ("grep", GREP),
         ("get_grep_index", GET_GREP_INDEX),

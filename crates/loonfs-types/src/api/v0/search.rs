@@ -1,6 +1,6 @@
 //! Content search requests and responses for the v0 HTTP API.
 
-use crate::{AbsolutePath, ChangeSeq, InodeId, NamespaceId, PinId, RevisionNo};
+use crate::{AbsolutePath, CommitSeq, InodeId, NamespaceId, PinId, RevisionNo};
 use serde::{Deserialize, Serialize};
 use xxhash_rust::xxh64::xxh64;
 
@@ -92,10 +92,10 @@ pub struct GrepResponse {
     pub namespace_id: NamespaceId,
     /// The sequence that the server read the namespace at for this page. A first page reads at
     /// the namespace's head, and a later page reads at the first page's `head_seq`.
-    pub head_seq: ChangeSeq,
+    pub head_seq: CommitSeq,
     /// The last sequence that the index covers. The server searched the commits at or below this
     /// sequence through the index.
-    pub built_through_seq: ChangeSeq,
+    pub built_through_seq: CommitSeq,
     /// Whether the server scanned every revision after `built_through_seq`.
     pub tail_scanned: bool,
     /// The matches, ordered by the content value of each file's revision (its content ID and
@@ -125,7 +125,7 @@ pub enum GrepIndexStatus {
     /// An index that is running its initial scan of a pinned checkpoint and can't be searched yet.
     Backfilling {
         /// The namespace sequence that completes the backfill when the index reaches it.
-        captured_seq: ChangeSeq,
+        captured_seq: CommitSeq,
         /// The inode that the scan resumes after. It's absent before the first page.
         #[serde(
             default,
@@ -140,7 +140,7 @@ pub enum GrepIndexStatus {
     /// An index that follows the change feed and can be searched through its watermark.
     Active {
         /// The sequence of the commit at the index cursor.
-        built_through_seq: ChangeSeq,
+        built_through_seq: CommitSeq,
         /// The offset of the next change event within `built_through_seq`. It's zero when the whole
         /// commit is indexed.
         next_event_index: u32,
@@ -156,7 +156,7 @@ impl GrepIndexStatus {
     /// A watermark inside a commit (`next_event_index` above zero) has that
     /// commit only partly indexed, so it counts as reached only for earlier
     /// sequences.
-    pub fn is_built_through(&self, target_seq: ChangeSeq) -> bool {
+    pub fn is_built_through(&self, target_seq: CommitSeq) -> bool {
         match self {
             Self::Disabled | Self::Backfilling { .. } | Self::Unknown => false,
             Self::Active {
@@ -215,7 +215,7 @@ mod tests {
     #[test]
     fn lifecycle_statuses_never_share_a_sequence_field() {
         let backfilling = GrepIndexStatus::Backfilling {
-            captured_seq: ChangeSeq(9),
+            captured_seq: CommitSeq(9),
             cursor_inode_id: Some(InodeId(4)),
             checkpoint_id: PinId::parse("pin_00000000000000000001-0000000000000009")
                 .expect("checkpoint id"),
@@ -233,7 +233,7 @@ mod tests {
 
         assert_eq!(
             serde_json::to_value(GrepIndexStatus::Active {
-                built_through_seq: ChangeSeq(9),
+                built_through_seq: CommitSeq(9),
                 next_event_index: 0,
             })
             .expect("serialize active"),
@@ -250,28 +250,28 @@ mod tests {
     #[test]
     fn only_an_active_index_has_built_through_a_sequence() {
         let backfilling = GrepIndexStatus::Backfilling {
-            captured_seq: ChangeSeq(9),
+            captured_seq: CommitSeq(9),
             cursor_inode_id: None,
             checkpoint_id: PinId::parse("pin_00000000000000000001-0000000000000009")
                 .expect("checkpoint id"),
         };
         assert!(
-            !backfilling.is_built_through(ChangeSeq(0)),
+            !backfilling.is_built_through(CommitSeq(0)),
             "a backfill has indexed nothing until it turns active"
         );
-        assert!(!GrepIndexStatus::Disabled.is_built_through(ChangeSeq(0)));
+        assert!(!GrepIndexStatus::Disabled.is_built_through(CommitSeq(0)));
 
         let active = |built_through_seq, next_event_index| GrepIndexStatus::Active {
             built_through_seq,
             next_event_index,
         };
-        assert!(active(ChangeSeq(9), 0).is_built_through(ChangeSeq(9)));
-        assert!(active(ChangeSeq(9), 0).is_built_through(ChangeSeq(8)));
-        assert!(!active(ChangeSeq(9), 0).is_built_through(ChangeSeq(10)));
+        assert!(active(CommitSeq(9), 0).is_built_through(CommitSeq(9)));
+        assert!(active(CommitSeq(9), 0).is_built_through(CommitSeq(8)));
+        assert!(!active(CommitSeq(9), 0).is_built_through(CommitSeq(10)));
         // A watermark inside a commit leaves the rest of that commit
         // unindexed, so only earlier sequences count as reached.
-        assert!(!active(ChangeSeq(9), 3).is_built_through(ChangeSeq(9)));
-        assert!(active(ChangeSeq(9), 3).is_built_through(ChangeSeq(8)));
+        assert!(!active(CommitSeq(9), 3).is_built_through(CommitSeq(9)));
+        assert!(active(CommitSeq(9), 3).is_built_through(CommitSeq(8)));
     }
 
     #[test]
@@ -284,7 +284,7 @@ mod tests {
         }))
         .expect("a newer status decodes");
         assert_eq!(index.status, GrepIndexStatus::Unknown);
-        assert!(!index.status.is_built_through(ChangeSeq(0)));
+        assert!(!index.status.is_built_through(CommitSeq(0)));
     }
 
     #[test]
@@ -293,7 +293,7 @@ mod tests {
             serde_json::to_value(GrepIndex {
                 namespace_id: NamespaceId::parse("demo").expect("namespace id"),
                 status: GrepIndexStatus::Active {
-                    built_through_seq: ChangeSeq(12),
+                    built_through_seq: CommitSeq(12),
                     next_event_index: 0,
                 },
                 reorganize_pending: false,
@@ -312,7 +312,7 @@ mod tests {
             serde_json::to_value(GrepIndex {
                 namespace_id: NamespaceId::parse("demo").expect("namespace id"),
                 status: GrepIndexStatus::Backfilling {
-                    captured_seq: ChangeSeq(12),
+                    captured_seq: CommitSeq(12),
                     cursor_inode_id: Some(InodeId(4)),
                     checkpoint_id: PinId::parse("pin_00000000000000000001-0000000000000009")
                         .expect("checkpoint id"),
