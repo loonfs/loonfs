@@ -103,6 +103,49 @@ async fn collect_at<S: ObjectStore>(
         .await
 }
 
+/// Which upload outcome a blocked put-if-absent creates.
+#[derive(Debug, Clone, Copy)]
+enum BlockedOutcome {
+    Completed,
+    Aborted,
+}
+
+impl BlockedOutcome {
+    fn matches(self, bytes: &[u8]) -> bool {
+        let Ok(envelope) =
+            decode_control_object::<UploadOutcomePayload>(bytes, ControlObjectKind::UploadOutcome)
+        else {
+            return false;
+        };
+        match (self, &envelope.payload().outcome) {
+            (Self::Completed, UploadOutcome::Completed { .. })
+            | (Self::Aborted, UploadOutcome::Aborted { .. }) => true,
+            (Self::Completed, UploadOutcome::Aborted { .. })
+            | (Self::Aborted, UploadOutcome::Completed { .. }) => false,
+        }
+    }
+}
+
+/// Blocks the next put that would create an upload outcome record of `target`.
+fn blocking_outcome_store(
+    inner: LocalFsStore,
+    target: BlockedOutcome,
+) -> BlockingStore<LocalFsStore> {
+    let store =
+        BlockingStore::matching(
+            inner,
+            move |operation: &OperationContext<'_>| match operation.kind() {
+                OperationKind::Put {
+                    bytes,
+                    mode: PutMode::CreateIfAbsent,
+                } => target.matches(bytes),
+                _ => false,
+            },
+        );
+    store.block_next();
+    store
+}
+
 /// A collection that stops between deleting a session's two records leaves the
 /// outcome record without its session record. The next collection deletes that
 /// outcome and keeps the committed content. If the outcome record were
@@ -357,4 +400,104 @@ async fn an_abort_stalled_across_a_collection_that_deleted_a_completed_session_k
         .await
         .expect("head")
         .is_none());
+}
+
+#[tokio::test]
+async fn upload_completion_wins_before_gc_abort_and_the_session_is_retained() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    let pool_id = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
+        .create()
+        .await
+        .expect("bootstrap")
+        .pool_id;
+    let (upload_id, content_ref) = stage_upload(&store, &namespace_id, &setup).await;
+    let inside = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS - 1);
+    let aged = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS + GRACE_MS + 1);
+    let content_key = loonfs_objectstore::keys::content_blob(&pool_id, &content_ref.content_id);
+    let store = blocking_outcome_store(store, BlockedOutcome::Aborted);
+    let gc_options = options();
+    let pool = crate::test_support::pool_store(&store, &pool_id);
+    let clock = aged.clock();
+    let gc = pool.gc(None, &gc_options, &clock);
+    let complete = async {
+        store.wait_until_blocked().await;
+        let result = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &inside)
+            .engine()
+            .complete_upload(
+                &crate::test_support::namespace_store(&store, &namespace_id)
+                    .load_catalog_entry()
+                    .await
+                    .expect("load the catalog"),
+                &upload_id,
+                loonfs_types::CompleteUploadBody::ServiceProxied {},
+            )
+            .await;
+        store.release();
+        result
+    };
+    let (report, completion) = tokio::join!(gc, complete);
+    completion.expect("completion wins the blocked abort CAS");
+    let report = report.expect("collection");
+    assert_eq!(report.deleted.upload_sessions, 0);
+    let session = read_upload_session(&store, &namespace_id, &upload_id)
+        .await
+        .expect("completed session retained");
+    assert_matches!(session.outcome, Some(UploadOutcome::Completed { .. }));
+    assert!(
+        store.head(&content_key).await.expect("head").is_some(),
+        "the losing abort must not clean up the winner's content"
+    );
+}
+
+#[tokio::test]
+async fn gc_abort_wins_before_completion_and_completion_reports_not_found() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    let pool_id = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
+        .create()
+        .await
+        .expect("bootstrap")
+        .pool_id;
+    let (upload_id, content_ref) = stage_upload(&store, &namespace_id, &setup).await;
+    let inside = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS - 1);
+    let aged = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS + GRACE_MS + 1);
+    let content_key = loonfs_objectstore::keys::content_blob(&pool_id, &content_ref.content_id);
+    let store = blocking_outcome_store(store, BlockedOutcome::Completed);
+    let engine =
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &inside).engine();
+    let catalog = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_catalog_entry()
+        .await
+        .expect("load the catalog");
+    let completion = engine.complete_upload(
+        &catalog,
+        &upload_id,
+        loonfs_types::CompleteUploadBody::ServiceProxied {},
+    );
+    let abort = async {
+        store.wait_until_blocked().await;
+        let report = crate::test_support::pool_store(&store, &pool_id)
+            .gc(None, &options(), &aged.clock())
+            .await;
+        store.release();
+        report
+    };
+    let (completion, report) = tokio::join!(completion, abort);
+    let error = completion.expect_err("an aborted session is logically absent");
+    assert_matches!(&error, CoreError::UploadNotFound { .. });
+    assert_eq!(error.code(), crate::error::ErrorCode::UploadNotFound);
+    report.expect("collection");
+    let session = read_upload_session(&store, &namespace_id, &upload_id)
+        .await
+        .expect("aborted session retained for a grace window");
+    assert_matches!(session.outcome, Some(UploadOutcome::Aborted { .. }));
+    assert!(
+        store.head(&content_key).await.expect("head").is_none(),
+        "the winning abort cleans up, and the losing completion does not resurrect"
+    );
 }
