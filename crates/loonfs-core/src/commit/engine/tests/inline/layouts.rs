@@ -1022,9 +1022,9 @@ async fn collection_keeps_shared_objects_that_a_restore_names_across_a_floor_adv
     // replacement. That content is collectable once a base compaction of
     // `content_layouts` drops its chain's layout row, and that compaction
     // tests the chain's content ID against a Bloom filter of the basis's
-    // revision content IDs. Content IDs are random, so in about one run in
-    // ten the filter reports a false positive, the layout row stays, and the
-    // collections keep the replacement's content.
+    // revision content IDs. Content IDs are random, so the filter can report
+    // a false positive, and then the layout row stays and the collections
+    // keep the replacement's content.
     let first = collect_aged(&store, &context).await;
     let second = collect_aged(&store, &context).await;
     assert!(
