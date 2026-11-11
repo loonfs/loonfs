@@ -460,11 +460,12 @@ async fn a_merge_reads_the_fork_at_its_folds_manifest() {
 }
 
 /// Checks that a merge's plan pins the fork's folded manifest while the
-/// merge runs, and that the merge deletes the pin once it commits.
+/// merge runs, and that the merge deletes the pin once it commits. The
+/// request's commit ID is the longest that the commit ID grammar accepts.
 #[tokio::test]
 async fn a_merge_releases_the_pin_its_plan_took_on_the_fork() {
     let family = family().await;
-    let request = family.request("merge-pin");
+    let request = family.request(&"m".repeat(128));
     let planned = family.plan(&request).await;
     let pinned = family
         .fork
