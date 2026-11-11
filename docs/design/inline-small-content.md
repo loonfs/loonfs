@@ -124,7 +124,7 @@ Cold-stat time and fold time grew with the tail. The tails in this table were ma
 | 8 MiB | about 1.0 s | about 7 s |
 | 32 MiB | about 2.6 s | about 19 s |
 
-Based on that result, the fold threshold is 2 MiB. The experiment's write-up is `analysis/inline-content-sweep-20260918.md` in the lab repository.
+The fold's byte trigger is 8 MiB of WAL bytes, and in this table an 8 MiB tail adds about 1.0 s to a cold stat. The experiment's write-up is `analysis/inline-content-sweep-20260918.md` in the lab repository.
 
 ## Alternatives considered
 

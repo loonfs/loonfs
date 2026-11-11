@@ -399,7 +399,8 @@ Other objects use generated IDs:
 - A pin ID has the form `pin_{manifest_no:020}-{16 lowercase hex}`. The number identifies the pinned manifest, and the random suffix distinguishes separate user and fork pins on the same manifest. The durable record calls it `pin_id`, the API calls it a `checkpoint_id`, and a user pin's ID is also its `snapshot_id`.
 - A content ID is `con_` followed by the 26-character lowercase Crockford base 32 spelling of a random version 4 UUID. The spelling adds two zero bits in front of the UUID's 128 bits and writes each group of 5 bits as one character of `0123456789abcdefghjkmnpqrstvwxyz`, so the first character is `0` through `7`.
 - An inode ID is `ino_` followed by the same 26-character spelling, but its 128 bits aren't a UUID. Its high 64 bits are the creating commit's sequence and the inode's create number, and its low 64 bits are random. The root directory's ID is all zero bits (`ino_00000000000000000000000000`). See [Namespaces and identity](#11-namespaces-and-identity).
-- A metadata segment ID is also generated, instead of being derived from the segment's position in publication history.
+- A metadata segment ID is `seg_` followed by the same 26-character spelling of a random version 4 UUID. It's generated, instead of being derived from the segment's position in publication history.
+- An extension segment ID (`idx_`), a pool ID (`pool_`), an upload ID (`upl_`), and a temporary object's ID (`tmp_`) are each the prefix followed by the same 26-character spelling of a random version 4 UUID.
 
 A collision at a newly generated immutable key MUST NOT overwrite the existing bytes.
 
@@ -2584,8 +2585,9 @@ Publication and garbage collection use the timing relationships below, and [C.4]
 | `RETENTION_ADVANCE_MIN_COMMIT_AGE_MS` | 3,600,000 | The minimum commit age of a retention advance. An advance doesn't move the floor past a younger commit. |
 | `UNREFERENCED_SEGMENT_GRACE_WINDOW_MS` | 86,400,000 | An unreferenced segment MUST be strictly older than this before it's deleted. |
 | `METADATA_COMPACTION_BUDGET_MS` | 85,065,000 | The longest time before a compaction starts its publication. |
-| `DIRECT_TRANSFER_URL_TTL_MS` | 900,000 | The lifetime of a presigned URL. |
+| `DIRECT_TRANSFER_URL_TTL_MS` | 900,000 | The lifetime of a presigned download URL and of a presigned URL for a whole-object upload. A presigned URL for one part of a multipart upload lasts one hour. |
 | `NAMESPACE_RETIREMENT_GRACE_WINDOW_MS` | 2,490,000 | The minimum retirement grace after the deletion call's clock. |
+| `POOL_ROOTS_READ_BUDGET_MS` | 2,310,000 | The monotonic time, from the start of a pool's collection, within which the collection reads the roots of every member of the pool, or skips the pool's content sweep. |
 
 A provider retry can be admitted before its operation deadline, wait up to 15 seconds of backoff, and then take up to 120 seconds for a payload-sized request. The object-store layer never resends a conditional write (see [Required operations](#31-required-operations)), but a conditional WAL or manifest write can still be larger than the payload threshold in its one request. So the publication allowance reserves 120 + 15 + 120 seconds, not the 30-second timeout for small requests. The allowance covers the request phase, not reading the response body. It keeps the relative-clock and scheduling assumptions, and it doesn't prove that a timed-out remote change had no effect.
 

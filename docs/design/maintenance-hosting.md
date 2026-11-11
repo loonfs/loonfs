@@ -152,8 +152,6 @@ Every core garbage collection call loads fresh roots, builds its live set in mem
 
 Each call uses one clock value for all its age and retirement checks. Pin keys identify the manifests that must be kept for that collection. Upload records keep the evidence needed for cleanup until the content and the provider state have been handled. A retirement tombstone keeps the source pin's identity, so a failed dependency release can be retried.
 
-Grep garbage collection also completes one explicit collection without a cursor. It works only on its own extension prefix, and core garbage collection doesn't collect those objects.
-
 ## Scheduling and correctness
 
 This section describes what a maintenance schedule can and can't affect.

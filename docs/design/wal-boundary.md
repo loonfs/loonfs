@@ -6,7 +6,7 @@ The WAL is also part of recovery and writer fencing. Keeping these operations to
 
 ## WAL numbers and commit sequences
 
-A WAL number identifies an object, and a commit sequence identifies a committed mutation. They're separate counters, because one WAL object can contain several commits, and a fence contains none.
+A WAL number identifies an object, and a commit sequence identifies a committed mutation. They're separate counters, because one WAL object can contain several commits, and a fence or a floor object contains none. A retention advance creates a [floor object](../specs/glossary.md#floor-object), which is a WAL object with no commits that records the new retention floor.
 
 For example, a namespace might have this log:
 
@@ -18,7 +18,7 @@ For example, a namespace might have this log:
 
 During writer acquisition, LoonFS first records the new writer epoch in a manifest, and then publishes a fence at the next available WAL number. The fence prevents a stale writer from publishing at that number. It doesn't change the filesystem, and it doesn't advance the commit sequence.
 
-These differences matter during recovery and garbage collection. A fence is still a WAL object, even though it contains no commits, so counting WAL objects isn't the same as counting committed changes.
+These differences matter during recovery and garbage collection. A fence or a floor object is still a WAL object, even though it contains no commits, so counting WAL objects isn't the same as counting committed changes.
 
 ## Module responsibilities
 
@@ -27,7 +27,7 @@ The `wal/` module handles numbered WAL keys, building WAL objects, reads, and pu
 | File | Responsibility |
 | --- | --- |
 | `frame.rs` | WAL object and tail types, including validation errors |
-| `writer.rs` | Building data and fence WAL objects, and calculating the next WAL number and the resulting head |
+| `writer.rs` | Building data, fence, and floor WAL objects, and calculating the next WAL number and the resulting head |
 | `publish.rs`, `publish_error.rs` | Conditional writes, and classifying their outcomes as successful, conflicting, or uncertain |
 | `discover.rs` | Windowed discovery that keeps the WAL tail, and incremental updates to cached views |
 | `reader.rs` | Reading consecutive WAL objects, loading bounded tails, and replaying discovered tails |
