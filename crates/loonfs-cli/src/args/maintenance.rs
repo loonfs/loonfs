@@ -14,7 +14,7 @@ pub(crate) enum MaintenanceCommand {
     ///
     /// A compaction unit can take minutes, so the command can too. It
     /// stops after 16 compaction units. A `due` outcome means that work
-    /// remains, and a later run continues it.
+    /// remains, and a later job continues it.
     Metadata(MaintenanceMetadataArgs),
     /// Fold the WAL tail whatever its length, and compact metadata until
     /// nothing is due.

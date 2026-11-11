@@ -18,7 +18,6 @@ pub(crate) use self::listing::{
 };
 pub(crate) use self::mutate::{
     commit_options, run_filesystem_mkdir, run_filesystem_restore, run_filesystem_rm,
-    run_filesystem_undelete,
 };
 pub(crate) use self::put::{put_payload, run_filesystem_append, run_filesystem_put};
 pub(crate) use self::transfer::{run_filesystem_cp, run_filesystem_mv};

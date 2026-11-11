@@ -70,7 +70,6 @@ pub(crate) async fn run(
         Command::Append(args) => fs::run_filesystem_append(invocation, args).await,
         Command::Revisions(args) => fs::run_filesystem_revisions(invocation, args).await,
         Command::Restore(args) => fs::run_filesystem_restore(invocation, args).await,
-        Command::Undelete(args) => fs::run_filesystem_undelete(invocation, args).await,
         Command::Mkdir(args) => fs::run_filesystem_mkdir(invocation, args).await,
         Command::Rm(args) => fs::run_filesystem_rm(invocation, args).await,
         Command::Mv(args) => fs::run_filesystem_mv(invocation, args).await,

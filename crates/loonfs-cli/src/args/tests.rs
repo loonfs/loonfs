@@ -82,6 +82,34 @@ fn stat_help_and_parser_show_both_exclusive_target_forms() {
 }
 
 #[test]
+fn restore_takes_either_a_revision_or_a_deleted_item() {
+    const INODE: &str = "ino_00000000000000000000000002";
+    for arguments in [
+        vec!["/doc", "--revision", "1"],
+        vec!["--inode", INODE, "--deletion-seq", "3"],
+        vec!["--inode", INODE, "--deletion-seq", "3", "--to", "/doc"],
+    ] {
+        let parsed =
+            Cli::try_parse_from(["loonfs", "restore"].into_iter().chain(arguments.clone()));
+        assert!(parsed.is_ok(), "{arguments:?}: {parsed:?}");
+    }
+    for arguments in [
+        vec![],
+        vec!["/doc"],
+        vec!["--revision", "1"],
+        vec!["--inode", INODE],
+        vec!["--deletion-seq", "3"],
+        vec!["/doc", "--inode", INODE, "--deletion-seq", "3"],
+        vec!["/doc", "--revision", "1", "--to", "/other"],
+        vec!["--revision", "1", "--inode", INODE, "--deletion-seq", "3"],
+    ] {
+        let parsed =
+            Cli::try_parse_from(["loonfs", "restore"].into_iter().chain(arguments.clone()));
+        assert!(parsed.is_err(), "{arguments:?} should be refused");
+    }
+}
+
+#[test]
 fn revision_preconditions_require_matching_inode_preconditions() {
     for arguments in [
         vec![

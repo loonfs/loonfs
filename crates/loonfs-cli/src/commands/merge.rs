@@ -23,7 +23,7 @@ pub(crate) async fn run_merge(
         &context.profile_name,
         context.target.target_identity(),
         &args.namespace_id,
-        &args.fork_id,
+        &args.source_namespace_id,
     )
     .map_err(|error| context.fail(error))?;
     let attempt = MergeAttempt {
@@ -86,7 +86,9 @@ async fn open_session(
     // Abandoning sends no merge, so it doesn't have to repeat the inputs
     // that the session's merges were sent with.
     let resumed_as = (!args.abandon).then_some((&actor_id, &attempt));
-    if let Some((recorded, state)) = record.load(&args.namespace_id, &args.fork_id, resumed_as)? {
+    if let Some((recorded, state)) =
+        record.load(&args.namespace_id, &args.source_namespace_id, resumed_as)?
+    {
         return Ok((
             recorded,
             MergeSession::resume(client, DefaultResolver, state),
@@ -95,7 +97,7 @@ async fn open_session(
     if args.abandon {
         return Err(CliError::invalid_request(format!(
             "there's no merge session of `{}` into `{}` to abandon in `{}`",
-            args.fork_id,
+            args.source_namespace_id,
             args.namespace_id,
             record.path().display()
         ))
@@ -105,7 +107,7 @@ async fn open_session(
         client,
         DefaultResolver,
         args.namespace_id.clone(),
-        args.fork_id.clone(),
+        args.source_namespace_id.clone(),
         actor_id,
         &MergeSessionOptions {
             through_seq: args.through_seq,

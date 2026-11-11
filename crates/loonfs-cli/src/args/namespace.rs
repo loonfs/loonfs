@@ -98,8 +98,8 @@ pub(crate) struct MergeArgs {
     #[arg(value_hint = ValueHint::Other)]
     pub namespace_id: NamespaceId,
     /// The fork whose commits to merge. It has to be a fork of the namespace.
-    #[arg(long = "from", value_name = "fork", value_hint = ValueHint::Other)]
-    pub fork_id: NamespaceId,
+    #[arg(long = "source", value_name = "fork", value_hint = ValueHint::Other)]
+    pub source_namespace_id: NamespaceId,
     /// Merge the fork's commits through this sequence instead of the fork's
     /// head when the session starts.
     #[arg(long = "through", value_name = "seq", value_parser = parse_change_seq)]

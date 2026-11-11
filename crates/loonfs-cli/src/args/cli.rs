@@ -5,7 +5,7 @@ use super::filesystem::{
     AccessCommand, ChangesArgs, FilesystemAnnotateArgs, FilesystemAppendArgs, FilesystemCatArgs,
     FilesystemGetArgs, FilesystemGrepArgs, FilesystemLsArgs, FilesystemMkdirArgs,
     FilesystemPutArgs, FilesystemRestoreArgs, FilesystemRevisionsArgs, FilesystemRmArgs,
-    FilesystemStatArgs, FilesystemTransferArgs, FilesystemUndeleteArgs, TrashArgs,
+    FilesystemStatArgs, FilesystemTransferArgs, TrashArgs,
 };
 use super::flags::PageLimitArgs;
 use super::maintenance::{MaintenanceCheckpointCommand, MaintenanceCommand};
@@ -28,8 +28,7 @@ Filesystem:
   grep          Search file content through the grep index
   get           Download a file or directory tree
   put           Upload a file or directory tree
-  restore       Restore a prior file revision
-  undelete      Recover a deleted file or directory
+  restore       Restore a prior file revision or a deleted item
   mkdir         Create a directory
   rm            Delete a file or directory
   mv            Move or rename a path
@@ -253,10 +252,9 @@ pub(crate) enum Command {
     Append(FilesystemAppendArgs),
     /// List a file's revision history, newest first.
     Revisions(FilesystemRevisionsArgs),
-    /// Write a prior revision's content as the file's next revision.
+    /// Write a prior revision's content as the file's next revision, or
+    /// restore a deleted file or directory.
     Restore(FilesystemRestoreArgs),
-    /// Recover a deleted file or directory at a destination path.
-    Undelete(FilesystemUndeleteArgs),
     /// Create a directory.
     Mkdir(FilesystemMkdirArgs),
     /// Delete a file or directory.
@@ -266,7 +264,7 @@ pub(crate) enum Command {
     /// Copy a file (or directory tree with -r) to another path.
     Cp(FilesystemTransferArgs),
     /// List recoverable deletions: what was deleted, when, and the exact
-    /// handle `undelete` needs.
+    /// handle `restore` needs.
     Trash(TrashArgs),
     /// List committed changes after a sequence number.
     Changes(ChangesArgs),
@@ -310,7 +308,6 @@ impl Command {
                 | Self::Append(_)
                 | Self::Revisions(_)
                 | Self::Restore(_)
-                | Self::Undelete(_)
                 | Self::Mkdir(_)
                 | Self::Rm(_)
                 | Self::Mv(_)

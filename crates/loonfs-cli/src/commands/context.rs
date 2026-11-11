@@ -356,7 +356,7 @@ pub(crate) fn render_target(namespace_id: &NamespaceId, absolute_path: &Absolute
     format!("{namespace_id}:{absolute_path}")
 }
 
-/// The flags a printed `loonfs undelete` has to spell so that pasting it into
+/// The flags a printed `loonfs restore` has to spell so that pasting it into
 /// a later shell still reaches the filesystem this command ran against.
 ///
 /// Every one of them names something the CLI would otherwise take from
@@ -425,11 +425,11 @@ impl RestoreDeletedHint {
         Self { context_flags }
     }
 
-    /// The complete `loonfs undelete` invocation that recovers one deletion.
+    /// The complete `loonfs restore` invocation that restores one deletion.
     pub(crate) fn command(&self, inode_id: InodeId, deletion_seq: CommitSeq) -> String {
         let inode_id = inode_id.to_string();
         format!(
-            "loonfs undelete --inode {inode_id} --deletion-seq {}{}",
+            "loonfs restore --inode {inode_id} --deletion-seq {}{}",
             deletion_seq.0, self.context_flags
         )
     }

@@ -475,7 +475,7 @@ pub(super) fn stdout_string(output: &Output) -> String {
 pub(super) fn hinted_recovery_command(output: &Output) -> String {
     let text = stdout_string(output);
     let hint = text
-        .split_once("recover with `")
+        .split_once("restore with `")
         .and_then(|(_, rest)| rest.split_once('`'))
         .map(|(command, _)| command.to_owned());
     assert!(
@@ -485,7 +485,7 @@ pub(super) fn hinted_recovery_command(output: &Output) -> String {
     hint.expect("checked just above")
 }
 
-/// The `RECOVER` cell of the one trash row naming `display_name`.
+/// The `RESTORE` cell of the one trash row naming `display_name`.
 pub(super) fn trash_recovery_command(output: &Output, display_name: &str) -> String {
     let table = stdout_string(output);
     let cell = table

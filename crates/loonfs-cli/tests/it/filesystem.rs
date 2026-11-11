@@ -1018,14 +1018,15 @@ fn every_mutating_command_records_its_message() {
         .as_u64()
         .expect("rm reports the committed seq");
     assert_success(&harness.run(&[
-        "undelete",
-        "/dir/moved.txt",
+        "restore",
         "--inode",
         &inode_id,
         "--deletion-seq",
         &deletion_seq.to_string(),
+        "--to",
+        "/dir/moved.txt",
         "-m",
-        "undelete message",
+        "restore deleted message",
     ]));
 
     assert_eq!(
@@ -1038,7 +1039,7 @@ fn every_mutating_command_records_its_message() {
             "second put message",
             "restore message",
             "rm message",
-            "undelete message",
+            "restore deleted message",
         ]
     );
 }
@@ -1114,27 +1115,28 @@ fn trash_lists_recoverable_deletions_with_their_handles() {
     assert!(report["deleted_at_ms"].as_u64().expect("ms") > 0);
     assert_eq!(report["deleted_by"], serde_json::json!("loonfs-cli"));
 
-    // The human table prints the exact undelete invocation.
+    // The human table prints the exact restore invocation.
     let human = harness.run(&["trash"]);
     assert_success(&human);
     let table = stdout_string(&human);
     assert!(
-        table.contains("DELETED\tDELETED_BY\tKIND\tNAME\tINODE\tSEQ\tRECOVER"),
+        table.contains("DELETED\tDELETED_BY\tKIND\tNAME\tINODE\tSEQ\tRESTORE"),
         "{table}"
     );
     assert!(table.contains("Quarterly Report.PDF"), "{table}");
-    assert!(table.contains("loonfs undelete "), "{table}");
+    assert!(table.contains("loonfs restore "), "{table}");
 
-    // Recovering through the listed handle empties that entry out of trash.
+    // Restoring through the listed handle empties that entry out of trash.
     let inode = report["inode_id"].as_str().expect("inode");
     let seq = report["deletion_seq"].as_u64().expect("seq");
     assert_success(&harness.run(&[
-        "undelete",
-        "/docs/Quarterly Report.PDF",
+        "restore",
         "--inode",
         inode,
         "--deletion-seq",
         &seq.to_string(),
+        "--to",
+        "/docs/Quarterly Report.PDF",
     ]));
     let after = harness.run(&["--json", "trash"]);
     assert_success(&after);
@@ -1569,7 +1571,7 @@ fn inode_arguments_reject_bare_numbers() {
     let harness = Harness::new();
     let outputs = [
         harness.run(&["stat", "--inode", "27"]),
-        harness.run(&["undelete", "--inode", "27", "--deletion-seq", "1"]),
+        harness.run(&["restore", "--inode", "27", "--deletion-seq", "1"]),
         harness.run(&[
             "annotate",
             "/docs",
@@ -1592,7 +1594,7 @@ fn inode_arguments_reject_bare_numbers() {
 }
 
 #[test]
-fn rm_reports_the_inode_and_undelete_recovers_it() {
+fn rm_reports_the_inode_and_restore_brings_it_back() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
     assert_success(&harness.run(&["namespace", "create", "demo"]));
@@ -1615,7 +1617,7 @@ fn rm_reports_the_inode_and_undelete_recovers_it() {
     ]));
 
     // rm reports the inode id and the deletion's sequence — together the
-    // recovery handle undelete needs.
+    // recovery handle restore needs.
     let removed = harness.run(&["--json", "rm", "/docs/report.txt"]);
     assert_success(&removed);
     let inode_id = json_data(&removed)["inode_id"]
@@ -1629,15 +1631,16 @@ fn rm_reports_the_inode_and_undelete_recovers_it() {
     assert_failure(&gone);
     assert_eq!(json_error(&gone)["code"], "path_not_found");
 
-    // Undelete brings back identity, content, and revision history.
+    // Restore brings back identity, content, and revision history.
     let recovered = harness.run(&[
         "--json",
-        "undelete",
-        "/docs/report.txt",
+        "restore",
         "--inode",
         &inode_id,
         "--deletion-seq",
         &deletion_seq.to_string(),
+        "--to",
+        "/docs/report.txt",
     ]);
     assert_success(&recovered);
     assert_eq!(json_data(&recovered)["target"], "demo:/docs/report.txt");
@@ -1654,22 +1657,23 @@ fn rm_reports_the_inode_and_undelete_recovers_it() {
         2
     );
 
-    // A recovered inode is no longer deleted; the stale handle conflicts.
+    // A restored inode is no longer deleted; the stale handle conflicts.
     let again = harness.run(&[
         "--json",
-        "undelete",
-        "/docs/report-copy.txt",
+        "restore",
         "--inode",
         &inode_id,
         "--deletion-seq",
         &deletion_seq.to_string(),
+        "--to",
+        "/docs/report-copy.txt",
     ]);
     assert_failure(&again);
     assert_eq!(json_error(&again)["code"], "not_deleted");
 }
 
 #[test]
-fn an_undelete_without_a_path_restores_in_place() {
+fn a_restore_without_a_destination_restores_in_place() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
     assert_success(&harness.run(&["namespace", "create", "demo"]));
@@ -1689,7 +1693,7 @@ fn an_undelete_without_a_path_restores_in_place() {
     // none.
     let recovery = hinted_recovery_command(&removed);
     assert!(
-        recovery.starts_with("loonfs undelete --inode "),
+        recovery.starts_with("loonfs restore --inode "),
         "{recovery}"
     );
     let trash = harness.run(&["--json", "trash"]);
@@ -1707,14 +1711,14 @@ fn an_undelete_without_a_path_restores_in_place() {
     assert_success(&harness.run(&["mv", "/docs", "/archive"]));
 
     let recovered = harness.run(&[
-        "undelete",
+        "restore",
         "--inode",
         &inode_id,
         "--deletion-seq",
         &deletion_seq.to_string(),
     ]);
     assert_success(&recovered);
-    assert!(stdout_string(&recovered).starts_with("recovered in place in `demo` @ seq "));
+    assert!(stdout_string(&recovered).starts_with("restored in place in `demo` @ seq "));
     let cat = harness.run(&["cat", "/archive/report.txt"]);
     assert_success(&cat);
     assert_eq!(cat.stdout, b"quarterly numbers");
@@ -1730,14 +1734,14 @@ fn an_undelete_without_a_path_restores_in_place() {
     let listed = harness.run(&["trash"]);
     assert_success(&listed);
     assert!(
-        trash_recovery_command(&listed, "notes.txt").starts_with("loonfs undelete --inode "),
+        trash_recovery_command(&listed, "notes.txt").starts_with("loonfs restore --inode "),
         "trash offers a pathless in-place command"
     );
 
     // A stale pathless handle answers the same code a pathed one does.
     let stale = harness.run(&[
         "--json",
-        "undelete",
+        "restore",
         "--inode",
         &inode_id,
         "--deletion-seq",
@@ -1748,10 +1752,10 @@ fn an_undelete_without_a_path_restores_in_place() {
 }
 
 #[test]
-fn remote_undelete_recovers_through_http() {
+fn a_remote_restore_brings_a_deleted_file_back_through_http() {
     let harness = Harness::new();
     let remote_server =
-        harness.start_external_server(harness.write_server_config("remote", "remote-undelete"));
+        harness.start_external_server(harness.write_server_config("remote", "remote-restore"));
     assert_success(&harness.run(&[
         "--json",
         "profile",
@@ -1786,19 +1790,20 @@ fn remote_undelete_recovers_through_http() {
     assert_eq!(
         trash_recovery_command(&listed, "wire.txt"),
         format!(
-            "loonfs undelete --inode {inode_id} \
+            "loonfs restore --inode {inode_id} \
              --deletion-seq {deletion_seq} --namespace demo"
         )
     );
 
     let recovered = harness.run(&[
         "--json",
-        "undelete",
-        "/wire.txt",
+        "restore",
         "--inode",
         &inode_id,
         "--deletion-seq",
         &deletion_seq.to_string(),
+        "--to",
+        "/wire.txt",
     ]);
     assert_success(&recovered);
     let cat = harness.run(&["cat", "/wire.txt"]);
