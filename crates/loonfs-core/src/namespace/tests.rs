@@ -275,64 +275,46 @@ async fn an_ambiguous_first_manifest_confirms_a_create_and_a_fork() {
     assert_eq!(store.remaining(), 0);
 }
 
-/// Checks that a create whose pool record put fails writes no manifest 1, and
-/// that a create whose manifest put has an unknown outcome keeps its pool
-/// record. Each leaves the hint, so a later create of the ID succeeds.
+/// Checks that a create whose pool record put has an unknown outcome sends the
+/// put again after its read-back finds no record, and that a create whose
+/// manifest put has an unknown outcome keeps its pool record and leaves the
+/// hint, so a later create of the ID succeeds.
 #[tokio::test]
-async fn a_failed_create_keeps_only_a_pool_record_that_a_manifest_might_record() {
+async fn a_lost_pool_record_put_is_sent_again_and_a_lost_manifest_put_keeps_the_pool_record() {
     let namespace_id = NamespaceId::parse("created").expect("namespace");
     let manifest_key = metadata_manifest_object(&namespace_id, &ManifestNo(1));
-    let pool_records = KeyPredicate::family(DurableObjectFamily::PoolRecord);
-    for (keys, error, writes_pool_record) in [
-        (
-            pool_records.clone(),
-            InjectedError::Transport("request lost".to_owned()),
-            false,
-        ),
-        (pool_records, InjectedError::PreconditionFailed, false),
-        (
-            KeyPredicate::exact(&manifest_key),
-            InjectedError::Transport("request lost".to_owned()),
-            true,
-        ),
+    for (keys, creates) in [
+        (KeyPredicate::family(DurableObjectFamily::PoolRecord), true),
+        (KeyPredicate::exact(&manifest_key), false),
     ] {
         let directory = tempdir().expect("directory");
         let store = FailStore::new(
             LocalFsStore::new(directory.path()).expect("store"),
             keys,
             OperationSelector::PutCreateIfAbsent,
-            error.clone(),
+            InjectedError::Transport("request lost".to_owned()),
         );
         store.fail_next(1);
-        let failed = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context())
+        let created = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context())
             .create()
-            .await
-            .expect_err("the create fails");
-        let records = pool_record_keys(store.inner()).await;
-        if writes_pool_record {
-            assert_matches!(
-                failed,
-                crate::CoreError::OutcomeUnknown { object_key, .. } if object_key == manifest_key
-            );
-            assert_eq!(records.len(), 1);
+            .await;
+        assert_eq!(pool_record_keys(store.inner()).await.len(), 1);
+        for (key, exists) in [(hint(&namespace_id), true), (manifest_key.clone(), creates)] {
+            let stored = store.inner().head(&key).await.expect("head");
+            assert_eq!(stored.is_some(), exists, "`{key}`");
+        }
+        if creates {
+            created.expect("the create sends the pool record put again");
         } else {
             assert_matches!(
-                failed,
-                crate::CoreError::Store { object_key, .. }
-                    if parse_object_key(&object_key)
-                        .is_some_and(|parsed| parsed.family() == DurableObjectFamily::PoolRecord),
-                "{error:?}"
+                created.expect_err("the create fails"),
+                crate::CoreError::OutcomeUnknown { object_key, .. } if object_key == manifest_key
             );
-            assert!(records.is_empty(), "{error:?}");
+            crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context())
+                .create()
+                .await
+                .expect("a later create of the ID succeeds");
         }
-        for (key, exists) in [(hint(&namespace_id), true), (manifest_key.clone(), false)] {
-            let stored = store.inner().head(&key).await.expect("head");
-            assert_eq!(stored.is_some(), exists, "`{key}` after {error:?}");
-        }
-        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context())
-            .create()
-            .await
-            .expect("a later create of the ID succeeds");
     }
 }
 

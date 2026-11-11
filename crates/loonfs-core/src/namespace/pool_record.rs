@@ -1,35 +1,23 @@
 //! The pool record that a namespace's create call writes before manifest 1.
 
+use crate::control_update::create_control_object_under_generated_id;
 use crate::error::{CoreError, Result};
 use crate::namespace::store::NamespaceStore;
 use bytes::Bytes;
 use loonfs_objectstore::keys::pool_record;
-use loonfs_objectstore::{ObjectStore, ObjectStoreExtension};
+use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::{encode_control_state, ControlObjectKind, PoolRecordPayload};
 
 impl<S: ObjectStore> NamespaceStore<S> {
-    /// Writes `record` with one put-if-absent request (format spec,
-    /// "Creating a namespace").
-    ///
-    /// Every failure ends the create, including a precondition failure,
-    /// which only a second write of the generated pool ID could cause.
+    /// Writes `record` under its freshly generated pool ID (format spec,
+    /// "Creating a namespace"), with
+    /// [`create_control_object_under_generated_id`].
     pub(crate) async fn write_pool_record(&self, record: &PoolRecordPayload) -> Result<()> {
         let object_key = pool_record(&record.pool_id);
         let bytes = encode_control_state(ControlObjectKind::PoolRecord, record)
             .expect("a pool record should encode");
-        if let Err(error) = self
-            .store
-            .put_if_absent(&object_key, Bytes::from(bytes))
-            .await
-        {
-            tracing::error!(
-                namespace_id = %self.namespace_id,
-                object_key = %object_key,
-                error = %error,
-                "pool record write failed"
-            );
-            return Err(CoreError::store(&object_key, &error));
-        }
+        create_control_object_under_generated_id(&self.store, &object_key, Bytes::from(bytes))
+            .await?;
         Ok(())
     }
 
