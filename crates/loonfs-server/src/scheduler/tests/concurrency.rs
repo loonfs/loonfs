@@ -1,7 +1,6 @@
 //! Concurrent steps preserve session progress and share the host's slots.
 
 use super::{scheduler_config, with_held, SchedulerServer};
-use crate::scheduler::GarbageCollection;
 use loonfs_http::WriterSessions as _;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
@@ -70,28 +69,30 @@ async fn a_sweep_and_the_session_steps_never_run_on_the_same_namespace_together(
                 if steps_first {
                     scheduler.run_due_steps().await;
                 } else {
-                    scheduler
-                        .run_sweep(GarbageCollection::Skip)
-                        .await
-                        .expect("sweep");
+                    scheduler.run_sweep().await.expect("sweep");
                 }
             }
         });
         store.wait_until_blocked().await;
         store.inner().reset();
         if steps_first {
-            assert_eq!(
-                server
-                    .scheduler
-                    .run_sweep(GarbageCollection::Skip)
-                    .await
-                    .expect("sweep"),
-                1
-            );
+            assert_eq!(server.scheduler.run_sweep().await.expect("sweep"), 1);
             let operations = store.inner().take();
-            assert_eq!(operations.len(), 1, "{operations:?}");
             assert_matches!(&operations[0], RecordedOperation::List { .. });
             assert_eq!(operations[0].key(), "namespaces/");
+            // The sweep's collection of the pool reads the namespace's roots,
+            // but the sweep runs none of the namespace's steps, so it doesn't
+            // fold the tail.
+            assert!(
+                operations.iter().all(|operation| matches!(
+                    operation,
+                    RecordedOperation::Get { .. }
+                        | RecordedOperation::GetWithMetadata { .. }
+                        | RecordedOperation::Head { .. }
+                        | RecordedOperation::List { .. }
+                )),
+                "{operations:?}"
+            );
         } else {
             server.scheduler.run_due_steps().await;
             assert!(store.inner().take().is_empty());
@@ -197,7 +198,7 @@ async fn session_steps_share_slots_with_a_parked_sweep_and_continue_when_a_slot_
         store.block_next();
         let sweep = tokio::spawn({
             let scheduler = server.scheduler.clone();
-            async move { scheduler.run_sweep(GarbageCollection::Skip).await }
+            async move { scheduler.run_sweep().await }
         });
         store.wait_until_blocked().await;
         server
