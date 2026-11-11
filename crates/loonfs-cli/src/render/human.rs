@@ -267,7 +267,7 @@ fn human_trash(listing: &TrashListing) -> String {
             "trash for {} (head seq {})",
             response.namespace_id, response.head_seq.0
         ),
-        "DELETED\tDELETED_BY\tKIND\tNAME\tINODE\tSEQ\tRECOVER".to_owned(),
+        "DELETED\tDELETED_BY\tKIND\tNAME\tINODE\tSEQ\tRESTORE".to_owned(),
     ];
     for (entry, recovery_command) in response.entries.iter().zip(&listing.recovery_commands) {
         lines.push(format!(
@@ -452,12 +452,12 @@ fn human_file_mutation(
         }
         CommandKind::FilesystemRm => match recovery_command {
             Some(recovery_command) => format!(
-                "removed {target} @ seq {committed_seq} (commit {commit_id}); recover with `{recovery_command}`"
+                "removed {target} @ seq {committed_seq} (commit {commit_id}); restore with `{recovery_command}`"
             ),
             None => format!("removed {target} @ seq {committed_seq} (commit {commit_id})"),
         },
-        CommandKind::FilesystemUndelete => {
-            format!("recovered {target} @ seq {committed_seq} (commit {commit_id})")
+        CommandKind::FilesystemRestore => {
+            format!("restored {target} @ seq {committed_seq} (commit {commit_id})")
         }
         CommandKind::FilesystemAnnotate => {
             format!("annotated {target} @ seq {committed_seq} (commit {commit_id})")
