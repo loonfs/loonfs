@@ -717,9 +717,9 @@ fn classify_key(key: &str) -> ObjectKeyKind {
         DurableObjectFamily::MetadataSegment => ObjectKeyKind::MetadataSegment,
         DurableObjectFamily::ExtensionSegment => ObjectKeyKind::ExtensionSegment,
         DurableObjectFamily::Pin => ObjectKeyKind::GcControl,
-        DurableObjectFamily::UploadSession | DurableObjectFamily::UploadOutcome => {
-            ObjectKeyKind::Metadata
-        }
+        DurableObjectFamily::UploadSession
+        | DurableObjectFamily::UploadOutcome
+        | DurableObjectFamily::PoolRecord => ObjectKeyKind::Metadata,
     }
 }
 

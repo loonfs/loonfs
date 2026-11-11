@@ -162,10 +162,13 @@ async fn an_ambiguous_manifest_read_back_must_finish_within_its_budget() {
             // A fork's first manifest is created, and any other manifest
             // is published over its predecessor.
             let outcome = if fork {
-                crate::test_support::namespace_store(&store, &payload.namespace_id)
-                    .create_manifest(payload, &deadline)
-                    .await
-                    .map(|()| None)
+                let namespace = crate::test_support::namespace_store(&store, &payload.namespace_id);
+                async {
+                    namespace.publish_first_hint().await?;
+                    namespace.publish_first_manifest(payload, &deadline).await
+                }
+                .await
+                .map(|()| None)
             } else {
                 publish_once_within(&store, encode_manifest(payload), &deadline)
                     .await

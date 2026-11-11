@@ -1271,11 +1271,11 @@ The response contains the new namespace's initial state. A new namespace starts 
 
 A fork request identifies the target namespace with `new_namespace_id`. Route placeholders such as `{ns}`, `{source_ns}`, and an implementation-internal `:namespace` are path parameter names, and each one takes the same namespace ID value. v0 doesn't accept or return a namespace `name` alias.
 
-Create and fork install the hint and then manifest 1. The conditional put of the hint determines whether the namespace ID is new (see [Namespace lifecycle and forks](format.md#9-namespace-lifecycle-and-forks)). A create or fork that loses that write to another active namespace returns `namespace_exists` (409). A create or fork into a deleted ID returns `namespace_deleted` (410). A namespace is never left partially created.
+Create and fork install the hint and then manifest 1. Between the hint and manifest 1, a plain create writes the record of the pool that it generates (`pools/{pool_id}/pool.json`), so a create of an existing namespace writes no pool record. A fork writes no pool record. The conditional put of the hint determines whether the namespace ID is new (see [Namespace lifecycle and forks](format.md#9-namespace-lifecycle-and-forks)). A create or fork that loses that write to another active namespace returns `namespace_exists` (409). A create or fork into a deleted ID returns `namespace_deleted` (410). A namespace is never left partially created.
 
 [Namespaces and identity](format.md#11-namespaces-and-identity) defines a namespace's lifetime. An application that reuses a human-readable name MUST keep its own map from names to namespace IDs, and generate a new namespace ID for each lifetime.
 
-If a creation acknowledgement is lost, a new request returns `namespace_exists`, unless the request explicitly allows an existing namespace. Within the original attempt, after an unknown transport outcome, an exact read-back of the manifest confirms a fork, because the fork's fork pin is unique. For a plain create, matching bytes don't prove which caller created the namespace, so the result is `namespace_exists`, or the existing summary if the caller allows an existing namespace.
+If a creation acknowledgement is lost, a new request returns `namespace_exists`, unless the request explicitly allows an existing namespace. Within the original attempt, after an unknown transport outcome, an exact read-back of the manifest confirms a plain create and a fork. A plain create's manifest records a pool ID that only that attempt generated, and a fork's manifest refers to the fork's unique fork pin.
 
 ### 6.1 `GET /v0/capabilities`
 

@@ -4,7 +4,7 @@
 use crate::keys::{
     namespace_prefix, CONTENT_DIRECTORY, EXTENSIONS_DIRECTORY, HINT_NAME, MANIFEST_DIRECTORY,
     MANIFEST_SUFFIX, NAMESPACES_DIRECTORY, PIN_DIRECTORY, PIN_SUFFIX, POOLS_DIRECTORY,
-    SEGMENT_DIRECTORY, SEGMENT_SUFFIX, TEMPORARY_DIRECTORY, UPLOAD_DIRECTORY,
+    POOL_RECORD_NAME, SEGMENT_DIRECTORY, SEGMENT_SUFFIX, TEMPORARY_DIRECTORY, UPLOAD_DIRECTORY,
     UPLOAD_OUTCOME_SUFFIX, UPLOAD_SESSION_SUFFIX, WAL_DIRECTORY, WAL_SUFFIX,
 };
 use crate::{ObjectStore, Result};
@@ -45,6 +45,8 @@ pub enum DurableObjectFamily {
     UploadSession,
     /// Classifies the record of how an upload session ended.
     UploadOutcome,
+    /// Classifies the record that a pool's create call writes.
+    PoolRecord,
     /// Classifies immutable whole-file content bytes.
     ContentBlob,
     /// Classifies a temporary object that an assembly writes and deletes.
@@ -60,7 +62,7 @@ pub enum KeyPrefix<'a> {
     /// metadata and extension segments that the namespace owns.
     Namespace(&'a str),
     /// The prefix of a pool (`pools/{pool_id}/`), which contains the pool's
-    /// content objects, upload records, and temporary objects.
+    /// pool record, content objects, upload records, and temporary objects.
     Pool(&'a str),
 }
 
@@ -78,10 +80,10 @@ impl<'a> ParsedObjectKey<'a> {
         self.family
     }
 
-    /// Returns the prefix that contains the key: the pool for a content
-    /// object, an upload record, or a temporary object, the owner namespace
-    /// for a metadata or extension segment, and the namespace itself for
-    /// every other family.
+    /// Returns the prefix that contains the key: the pool for a pool record,
+    /// a content object, an upload record, or a temporary object, the owner
+    /// namespace for a metadata or extension segment, and the namespace
+    /// itself for every other family.
     pub fn prefix(&self) -> KeyPrefix<'a> {
         self.prefix
     }
@@ -99,6 +101,11 @@ impl<'a> ParsedObjectKey<'a> {
 pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
     let segments: Vec<_> = key.split('/').collect();
     match segments.as_slice() {
+        [POOLS_DIRECTORY, pool_id, POOL_RECORD_NAME] => Some(parsed(
+            DurableObjectFamily::PoolRecord,
+            KeyPrefix::Pool(pool_id),
+            None,
+        )),
         [POOLS_DIRECTORY, pool_id, CONTENT_DIRECTORY, content_id]
             if content_id.len() == CONTENT_ID_BYTES =>
         {
@@ -342,8 +349,8 @@ mod tests {
     use super::{parse_object_key, DurableObjectFamily, KeyPrefix};
     use crate::keys::{
         content_blob, extension_segment, hint, metadata_manifest_object, metadata_segment,
-        metadata_segment_prefix, pin, temporary_object, upload_outcome, upload_session, wal_object,
-        wal_prefix,
+        metadata_segment_prefix, pin, pool_record, temporary_object, upload_outcome,
+        upload_session, wal_object, wal_prefix,
     };
     use loonfs_test_support::ids::numbered_pool_id;
     use loonfs_types::{
@@ -435,6 +442,12 @@ mod tests {
                 DurableObjectFamily::Pin,
                 namespace,
                 Some(pin_id.as_str()),
+            ),
+            (
+                pool_record(&pool_id),
+                DurableObjectFamily::PoolRecord,
+                pool,
+                None,
             ),
             (
                 upload_session(&pool_id, &upload_id),

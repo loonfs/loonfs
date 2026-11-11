@@ -344,7 +344,7 @@ This section describes the objects LoonFS stores for a namespace, how their keys
 
 ### 2.1 Storage layout
 
-Each namespace's objects are stored under its own prefix, except its content objects and upload records, which are stored under the prefix of the namespace's pool. A temporary object is stored under the prefix of the key that it assembles, so the temporary objects of a content assembly are under the pool's prefix ([Object keys](#a8-object-keys) lists the complete key patterns):
+Each namespace's objects are stored under its own prefix, except its content objects and upload records, which are stored under the prefix of the namespace's pool. A pool's prefix also stores the pool record, which the create call of the pool's first member writes (see [Creating a namespace](#91-creating-a-namespace)). A temporary object is stored under the prefix of the key that it assembles, so the temporary objects of a content assembly are under the pool's prefix ([Object keys](#a8-object-keys) lists the complete key patterns):
 
 ```text
 namespaces/{namespace_id}/
@@ -356,6 +356,7 @@ namespaces/{namespace_id}/
 └── extensions/{extension_name}/segments/{segment_id}.sst.zst
 
 pools/{pool_id}/
+├── pool.json
 ├── content/
 ├── uploads/{upload_id}.json
 ├── uploads/{upload_id}.outcome.json
@@ -379,6 +380,7 @@ The key layout is part of the format. Other objects MUST NOT use keys in these f
 | Extension segment | Sorted rows of an extension's state, which an extension entry in a manifest lists | A new immutable object is written. |
 | Pin | A reference that keeps one manifest for a user or a fork | Created and deleted. A user pin's expiry time can be extended by compare-and-swap. |
 | Upload session | One transfer and its completed content, until a commit uses it or cleanup removes it | A session record and an outcome record, each created once with put-if-absent. |
+| Pool record | The pool's ID, the namespace that was created with the pool, and the creation time | Created once with put-if-absent. A create call whose manifest 1 put loses to another creation deletes its own pool record. |
 | Content object (whole or span) | A range of chain bytes, along with the provider's stored checksum of the whole object | Immutable. |
 | Temporary object | Bytes that an assembly needs as a separate object | Created, then deleted. |
 
@@ -1296,11 +1298,15 @@ This section describes how namespaces are created, forked, deleted, and retired.
 
 To create a namespace, LoonFS:
 
-1. Builds the first manifest (see [Publishing a manifest](#72-publishing-a-manifest)).
-2. Writes the hint, pointing to manifest 1, with put-if-absent. A new hint means a new namespace ID, and LoonFS then writes manifest 1 with put-if-absent.
-3. If the hint already exists, reads the existing namespace state through it (see [Resolving the metadata basis](#41-resolving-the-metadata-basis)). An existing active namespace returns `namespace_exists` (or its current summary, with `allow_existing`), and a tombstone returns `namespace_deleted`. Corruption and read errors aren't absence. A hint whose manifest 1 is missing belongs to a creation that failed before it wrote manifest 1, and LoonFS then writes manifest 1 with put-if-absent. If that put is refused, it reads the state again.
+1. Builds the first manifest (see [Publishing a manifest](#72-publishing-a-manifest)). For a namespace created without a source, LoonFS generates a pool ID, and the first manifest records that pool ID.
+2. Writes the hint, pointing to manifest 1, with put-if-absent. A new hint means a new namespace ID. If the hint already exists, LoonFS reads the existing namespace state through it (see [Resolving the metadata basis](#41-resolving-the-metadata-basis)). An existing active namespace returns `namespace_exists` (or its current summary, with `allow_existing`), and a tombstone returns `namespace_deleted`. Corruption and read errors aren't absence. A hint whose manifest 1 is missing belongs to a creation that failed before it wrote manifest 1, and LoonFS then continues with the next step.
+3. For a namespace created without a source, writes the pool record (`pools/{pool_id}/pool.json`) with put-if-absent. The record's `created_at_ms` is the create call's request clock. If the put fails, or its outcome is unknown, the call ends with that error and doesn't write manifest 1. The hint stays, as after any creation that failed before it wrote manifest 1. A fork writes no pool record (see [Forking a namespace](#92-forking-a-namespace)).
+4. Writes manifest 1 with put-if-absent. If that put is refused, LoonFS reads the state again, and returns `namespace_exists` (or the current summary, with `allow_existing`) or `namespace_deleted`.
+5. For a namespace created without a source, if the manifest 1 put lost to another creation, reloads the namespace's current manifest. If that manifest records another pool, LoonFS deletes the call's own pool record. The call returns the result of step 4 in every case. If the reload or the deletion fails, the pool record stays. A manifest 1 put with an unknown outcome leaves the pool record in place.
 
 The hint decides whether the ID is new, because the hint lives as long as the namespace. Manifest 1 can't decide, because garbage collection can delete it once a newer manifest replaces it and the grace window passes (see [Reference roots](#112-reference-roots)), so a missing manifest 1 doesn't mean a missing namespace. If two processes create the same ID at the same time, the one whose hint put succeeds writes manifest 1, the other reads a hint without a manifest and writes manifest 1 too, and the one whose manifest 1 put succeeds creates the namespace. A hint written before that put doesn't mean the namespace exists, because its writer might have failed before it wrote manifest 1.
+
+Why is the pool record written between the hint and manifest 1? The record is written before manifest 1 so that every pool that a manifest records has a pool record, because no manifest can record the pool before the record's put succeeds. The record is written after the hint so that a create call for an existing namespace writes nothing (for example, a call that creates a namespace only if it doesn't exist yet). A pool ID is generated by one create call, so no other call writes that pool's record. A namespace writes under a pool's prefix only after a manifest records the pool, so if the create call fails, its pool record is the only object under the pool's prefix. A call whose manifest put has an unknown outcome keeps its pool record, because the manifest might have been written. The call takes `created_at_ms` from its request clock, and its metadata publication budget (see [Publishing a manifest](#72-publishing-a-manifest)) starts when the call reads that clock, in the same way that a fork call's budget starts before it creates its source pin (see [Forking a namespace](#92-forking-a-namespace)).
 
 ### 9.2 Forking a namespace
 
@@ -1324,11 +1330,11 @@ A losing hint put, or a losing manifest 1 put, reads the existing namespace stat
 A confirmed precondition failure is a conflict. After a put with an unknown transport outcome, the publisher reads the manifest at that number:
 
 - Another manifest there is a conflict.
-- Identical bytes confirm the attempt's own success only when the manifest refers to an object that's unique to that attempt. A fork's first manifest refers to its source pin, and a manifest that lists a metadata or extension segment that its predecessor doesn't list refers to a segment that this attempt wrote. (An [extension's](#124-extensions) publication usually lists a segment it wrote.)
-- Every other manifest (a plain create, a compactor claim, a writer acquisition, a namespace tombstone, or an extension's publication that lists no new segment) can be rebuilt byte for byte by another publisher. Identical bytes count as the current manifest, and the attempt retries from it, but an extension's publication publishes nothing more, because that manifest's entry is no longer the one that the change built on (see [Extensions](#124-extensions)).
+- Identical bytes confirm the attempt's own success only when the manifest refers to an object or an ID that's unique to that attempt. Every first manifest does. A plain create's first manifest records a pool ID that only this attempt generated, and a fork's first manifest refers to its source pin. A manifest that lists a metadata or extension segment that its predecessor doesn't list refers to a segment that this attempt wrote. (An [extension's](#124-extensions) publication usually lists a segment it wrote.)
+- Every other manifest (a compactor claim, a writer acquisition, a namespace tombstone, or an extension's publication that lists no new segment) can be rebuilt byte for byte by another publisher. Identical bytes count as the current manifest, and the attempt retries from it, but an extension's publication publishes nothing more, because that manifest's entry is no longer the one that the change built on (see [Extensions](#124-extensions)).
 - Identical bytes count only if the read-back returns within the publication budget (see [Clock and operation assumptions](#114-clock-and-operation-assumptions)). Identical bytes read back after the budget, or a number that's still missing, end the call with an unknown outcome, and a later call starts from the current state.
 
-Why don't identical bytes always prove success? Two publishers can build exactly the same manifest from the same predecessor (for example, two plain creates with the same request), so finding identical bytes doesn't show which one wrote them. Only a manifest that refers to something this attempt created, such as a new pin or a new segment, proves that the attempt succeeded.
+Why don't identical bytes always prove success? Two publishers can build exactly the same manifest from the same predecessor (for example, two compactors that claim the same manifest), so finding identical bytes doesn't show which one wrote them. Only a manifest that refers to something this attempt created, such as a generated pool ID, a new pin, or a new segment, proves that the attempt succeeded.
 
 When a fork installer gets `namespace_exists` or `namespace_deleted`, it reloads the target and deletes its source pin, unless the target's fork basis refers to that pin. It returns the original error in every case. If the reload or the deletion fails, the pin stays, and garbage collection applies the rules in [Pin cleanup](#117-pin-cleanup) to it. A matching pin ID with a different manifest reference is corruption. An unused fork pin is collected after its creation grace.
 
@@ -1929,7 +1935,7 @@ This appendix is the field and encoding reference for the protocols above. Field
 
 ### A.1 Family versions
 
-There are four kinds of control object: `hint`, `pin`, `upload_session`, and `upload_outcome`.
+There are five kinds of control object: `hint`, `pin`, `upload_session`, `upload_outcome`, and `pool_record`.
 
 | Object | Envelope kind | Encoding | Version |
 | --- | --- | --- | --- |
@@ -1940,6 +1946,7 @@ There are four kinds of control object: `hint`, `pin`, `upload_session`, and `up
 | Pin record | `pin` | Uncompressed JSON | 1 |
 | Upload session record | `upload_session` | Uncompressed JSON | 1 |
 | Upload outcome record | `upload_outcome` | Uncompressed JSON | 1 |
+| Pool record | `pool_record` | Uncompressed JSON | 1 |
 | Content object | No envelope | Immutable extent bytes | Not versioned. A layout lists the whole and span objects for a `blob_v1` chain prefix. |
 | Grep segment | No envelope | Block sections with grep rows | 2, given by the grep entry's `version` |
 
@@ -2021,6 +2028,7 @@ These tables list the durable payload fields. The protocol sections define how t
 | Pin record | `namespace_id`, `pin_id`, `head_seq`, `payload_checksum`, `created_at_ms`, `owner` |
 | Upload session record | `namespace_id`, `upload_id`, `content_id`, optional `subject_id`, `mode`, `expires_at_ms` |
 | Upload outcome record | `namespace_id`, `upload_id`, `outcome` |
+| Pool record | `pool_id`, `first_member_id`, `created_at_ms` |
 
 Namespace status is `{"kind":"active"}`, or `{"kind":"deleted"}` with a required `deleted_at_ms` (only on the deleted variant). A missing status is invalid. The genesis commit ID is `c_00000000000000000000000000000000`.
 
@@ -2030,6 +2038,8 @@ Pin owners have the fields in [Records and owners](#81-records-and-owners), and 
 - Outcome, in the outcome record: `completed` with `completed_at_ms` and `content_ref`, or `aborted` with `aborted_at_ms`.
 
 Both upload records are stored under the prefix of the pool of the namespace that created the session (see [Object keys](#a8-object-keys)), and their `namespace_id` is that namespace.
+
+A pool record is stored under the prefix of its pool, and its `pool_id` MUST match the key. Its `first_member_id` is the namespace that was created with the pool, and its `created_at_ms` is that create call's request clock (see [Creating a namespace](#91-creating-a-namespace)).
 
 A namespace manifest contains:
 
@@ -2343,7 +2353,7 @@ A range lookup uses the last keys to find candidate blocks. Readers verify each 
 
 ### A.8 Object keys
 
-These patterns define the core object families. A segment's owner can be different from the namespace that reads it. Content objects, upload records, and the temporary objects of content assemblies are stored under the prefix of the namespace's pool, whichever member wrote them.
+These patterns define the core object families. A segment's owner can be different from the namespace that reads it. Content objects, upload records, and the temporary objects of content assemblies are stored under the prefix of the namespace's pool, whichever member wrote them. The pool record is stored under the same prefix.
 
 | Family | Object key pattern |
 | --- | --- |
@@ -2355,6 +2365,7 @@ These patterns define the core object families. A segment's owner can be differe
 | Upload sessions | `pools/{pool_id}/uploads/{upload_id}.json` |
 | Upload outcomes | `pools/{pool_id}/uploads/{upload_id}.outcome.json` |
 | Hint | `namespaces/{namespace_id}/hint.json` |
+| Pool records | `pools/{pool_id}/pool.json` |
 | Content objects | `pools/{pool_id}/content/{content_id}` |
 | Content span objects | `pools/{pool_id}/content/{content_id}-{start:020}-{end:020}` |
 | Temporary objects | `pools/{pool_id}/temporary/{temporary_id}` |

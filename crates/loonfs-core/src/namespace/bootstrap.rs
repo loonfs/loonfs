@@ -5,6 +5,7 @@ use crate::error::{CoreError, Result};
 use crate::metadata::{AccessRevisionRecord, InodeRecord, MetadataState};
 use crate::options::CreateNamespaceOptions;
 use loonfs_objectstore::ObjectStore;
+use loonfs_types::format::control::PoolRecordPayload;
 use loonfs_types::format::manifest::{NamespaceAccess, NamespaceManifestPayload};
 use loonfs_types::{
     AccessRevisionNo, AccessRight, ActorId, ChangeSeq, InodeKind, NamespaceMetadata, PoolId,
@@ -15,7 +16,10 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Creates the namespace if it does not already exist.
     ///
     /// Use this before normal reads and writes for a new namespace. Returns
-    /// the namespace's status after manifest 1 is installed.
+    /// the namespace's status after manifest 1 is installed. The call writes
+    /// the pool record of a generated pool after the hint and before manifest
+    /// 1, and deletes the record again when another creation's manifest 1
+    /// wins (format spec, "Creating a namespace").
     pub async fn bootstrap_namespace(
         &self,
         actor_id: &loonfs_types::ActorId,
@@ -30,17 +34,38 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             }
         }
         let clock = self.namespace.start_clock();
+        let pool = PoolRecordPayload {
+            pool_id: PoolId::generate(),
+            first_member_id: self.namespace.namespace_id.clone(),
+            created_at_ms: clock.request_at_ms(),
+        };
         let start = NamespaceManifestPayload {
             retention_window_ms: options.retention_window_ms,
             ..NamespaceManifestPayload::initial(
-                self.namespace.namespace_id.clone(),
-                PoolId::generate(),
-                clock.request_at_ms(),
+                pool.first_member_id.clone(),
+                pool.pool_id.clone(),
+                pool.created_at_ms,
                 actor_id.clone(),
                 options.access.clone(),
             )
         };
-        match self.namespace.create_manifest(start.clone(), &clock).await {
+        let created = async {
+            self.namespace.publish_first_hint().await?;
+            self.namespace.write_pool_record(&pool).await?;
+            let published = self
+                .namespace
+                .publish_first_manifest(start.clone(), &clock)
+                .await;
+            if let Err(
+                error @ (CoreError::NamespaceExists { .. } | CoreError::NamespaceDeleted { .. }),
+            ) = &published
+            {
+                self.namespace.delete_unused_pool_record(&pool, error).await;
+            }
+            published
+        }
+        .await;
+        match created {
             Ok(()) => Ok(super::status::created_namespace(&start)),
             Err(CoreError::NamespaceExists { .. }) if options.allow_existing => {
                 self.namespace.load_metadata().await

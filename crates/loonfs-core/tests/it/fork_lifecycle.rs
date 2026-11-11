@@ -9,7 +9,7 @@ use loonfs_core::publish::FilesystemOperation;
 use loonfs_core::test_support::WriterAt;
 use loonfs_core::test_support::{compact_every_group, namespace_store, NamespaceFixture};
 use loonfs_core::{CoreError, ErrorCode};
-use loonfs_objectstore::keys::{content_blob, hint, metadata_manifest_object, pin};
+use loonfs_objectstore::keys::{content_blob, hint, metadata_manifest_object, pin, pool_record};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_objectstore::{ObjectStore, PutMode};
@@ -416,8 +416,7 @@ async fn a_created_namespace_reads_manifest_one_before_its_first_fold() {
         .expect("read back");
     assert_eq!(file.bytes, b"hello");
     let content_ref = file.entry.content_ref().expect("content reference");
-    let pool_id = loonfs_core::test_support::load_pool_id(&store, &namespace_id).await;
-    let content_key = content_blob(&pool_id, &content_ref.content_id);
+    let content_key = content_blob(&created.pool_id, &content_ref.content_id);
     let keys = namespace_keys(&store, &namespace_id).await;
     assert!(
         keys.iter().all(|key| key == &hint(&namespace_id)
@@ -675,7 +674,7 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
     assert_eq!(
         store.inner().take_get_keys(),
         vec![loonfs_objectstore::keys::content_blob(
-            &loonfs_core::test_support::load_pool_id(store.inner(), &clone_namespace_id).await,
+            &forked.pool_id,
             &inherited_ref.content_id
         )]
     );
@@ -724,9 +723,9 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
     assert_eq!(clone_write.committed_seq, ChangeSeq(2));
     // An upload in a fork is stored under the prefix of its source's pool,
     // so the fork's own prefix stores no content and no upload records.
-    let pool_id = loonfs_core::test_support::load_pool_id(&store, &source_namespace_id).await;
+    let pool_id = &forked.pool_id;
     assert!(store
-        .head(&content_blob(&pool_id, &uploaded_ref.content_id))
+        .head(&content_blob(pool_id, &uploaded_ref.content_id))
         .await
         .expect("family root content")
         .is_some());
@@ -1392,7 +1391,7 @@ async fn creation_and_fork_install_hint_and_manifest_in_order() {
     );
     let context = default_writer();
     let source = namespace_id("source");
-    NamespaceFixture::new(&store, &source, &context)
+    let created = NamespaceFixture::new(&store, &source, &context)
         .create()
         .await
         .expect("bootstrap");
@@ -1408,6 +1407,7 @@ async fn creation_and_fork_install_hint_and_manifest_in_order() {
         puts,
         vec![
             (hint(&source), PutMode::CreateIfAbsent),
+            (pool_record(&created.pool_id), PutMode::CreateIfAbsent),
             (
                 metadata_manifest_object(&source, &ManifestNo(1)),
                 PutMode::CreateIfAbsent
@@ -1472,7 +1472,8 @@ async fn creation_and_fork_install_hint_and_manifest_in_order() {
                 ErrorCode::NamespaceExists
             );
         }
-        // The hint put is refused, and nothing is deleted.
+        // The hint put is refused, and the create makes no request under
+        // `pools/` and deletes nothing.
         let counts = store.counts();
         assert_eq!(
             (
@@ -1482,6 +1483,10 @@ async fn creation_and_fork_install_hint_and_manifest_in_order() {
             ),
             (1, 0, 0)
         );
+        assert!(store
+            .take()
+            .iter()
+            .all(|operation| !operation.key().starts_with("pools/")));
     }
 }
 
@@ -1726,10 +1731,11 @@ async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_cont
     let setup = default_writer();
     let source = namespace_id("template");
     let sibling = namespace_id("sibling");
-    NamespaceFixture::new(&store, &source, &setup)
+    let pool_id = NamespaceFixture::new(&store, &source, &setup)
         .create()
         .await
-        .expect("bootstrap source namespace");
+        .expect("bootstrap source namespace")
+        .pool_id;
     let write = async |namespace_id: &NamespaceId, path, bytes, number| {
         NamespaceFixture::new(&store, namespace_id, &setup)
             .write_file_bytes_with_content_id(path, bytes, numbered_content_id(number))
@@ -1745,7 +1751,6 @@ async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_cont
         .await
         .expect("source");
     let source_ref = source_file.entry.content_ref().expect("source content");
-    let pool_id = loonfs_core::test_support::load_pool_id(&store, &source).await;
     let source_key = content_blob(&pool_id, &source_ref.content_id);
     let sibling_file = read_file_bytes(&store, &sibling, "/docs/sibling.txt")
         .await

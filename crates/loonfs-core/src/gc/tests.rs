@@ -134,14 +134,16 @@ async fn core_listed_bytes<S: ObjectStore + ?Sized>(store: &S, namespace_id: &Na
         .await
         .expect("current manifest");
     // The collection on a namespace created without a source also lists its
-    // pool's prefix.
+    // pool's prefix, except the pool record.
     if manifest.payload().fork_basis.is_some() {
         return namespace_bytes;
     }
-    let pool = loonfs_objectstore::keys::pool_prefix(&manifest.payload().pool_id);
+    let pool_id = &manifest.payload().pool_id;
+    let pool_record = loonfs_objectstore::keys::pool_record(pool_id);
     namespace_bytes
         + store
-            .list_entries_from_stream(&pool, None)
+            .list_entries_from_stream(&loonfs_objectstore::keys::pool_prefix(pool_id), None)
+            .try_filter(|entry| future::ready(entry.key != pool_record))
             .try_fold(0, |total, entry| future::ok(total + entry.size_bytes))
             .await
             .expect("list pool")
@@ -329,13 +331,13 @@ async fn deleted_namespace_keeps_its_tombstone_and_segments() {
     );
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let setup = context(1_000);
-    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
+    let pool_id = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
         .create()
         .await
-        .expect("bootstrap");
+        .expect("bootstrap")
+        .pool_id;
     let mut content_keys = publish_owned_content(&store, &namespace_id, 2).await;
     content_keys.sort();
-    let pool_id = crate::test_support::load_pool_id(&store, &namespace_id).await;
     let unreferenced_key =
         loonfs_objectstore::keys::content_blob(&pool_id, &numbered_content_id(3));
     store
@@ -573,13 +575,13 @@ async fn upload_gc_aborts_an_expired_session_then_reaps_it() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let setup = context(1_000);
-    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
+    let pool_id = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
         .create()
         .await
-        .expect("bootstrap");
+        .expect("bootstrap")
+        .pool_id;
     write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
     let (upload_id, content_ref) = stage_upload(&store, &namespace_id, &setup).await;
-    let pool_id = crate::test_support::load_pool_id(&store, &namespace_id).await;
     let session_key = loonfs_objectstore::keys::upload_session(&pool_id, &upload_id);
     let content_key = loonfs_objectstore::keys::content_blob(&pool_id, &content_ref.content_id);
 
@@ -730,12 +732,12 @@ async fn an_aborted_session_is_reclaimed_from_the_deadline_the_collection_report
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let setup = context(1_000);
-    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
+    let pool_id = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
         .create()
         .await
-        .expect("bootstrap");
+        .expect("bootstrap")
+        .pool_id;
     let (upload_id, ..) = stage_upload(&store, &namespace_id, &setup).await;
-    let pool_id = crate::test_support::load_pool_id(&store, &namespace_id).await;
     let session_key = loonfs_objectstore::keys::upload_session(&pool_id, &upload_id);
 
     // The collection that aborts the session is the only thing that knows the
@@ -820,14 +822,14 @@ async fn upload_completion_wins_before_gc_abort_and_the_session_is_retained() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let setup = context(1_000);
-    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
+    let pool_id = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
         .create()
         .await
-        .expect("bootstrap");
+        .expect("bootstrap")
+        .pool_id;
     let (upload_id, content_ref) = stage_upload(&store, &namespace_id, &setup).await;
     let inside = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS - 1);
     let aged = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS + GRACE_MS + 1);
-    let pool_id = crate::test_support::load_pool_id(&store, &namespace_id).await;
     let content_key = loonfs_objectstore::keys::content_blob(&pool_id, &content_ref.content_id);
     let store = blocking_outcome_store(store, BlockedOutcome::Aborted);
     let gc_options = options();
@@ -870,14 +872,14 @@ async fn gc_abort_wins_before_completion_and_completion_reports_not_found() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let setup = context(1_000);
-    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
+    let pool_id = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
         .create()
         .await
-        .expect("bootstrap");
+        .expect("bootstrap")
+        .pool_id;
     let (upload_id, content_ref) = stage_upload(&store, &namespace_id, &setup).await;
     let inside = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS - 1);
     let aged = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS + GRACE_MS + 1);
-    let pool_id = crate::test_support::load_pool_id(&store, &namespace_id).await;
     let content_key = loonfs_objectstore::keys::content_blob(&pool_id, &content_ref.content_id);
     let store = blocking_outcome_store(store, BlockedOutcome::Completed);
     let engine =
@@ -1108,13 +1110,13 @@ async fn content_gc_retains_completed_content_inside_its_grace() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let setup = context(1_000);
-    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
+    let pool_id = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
         .create()
         .await
-        .expect("bootstrap");
+        .expect("bootstrap")
+        .pool_id;
     let (upload_id, content_ref) =
         complete_upload_for_gc(&store, &namespace_id, b"unpublished\n", &setup).await;
-    let pool_id = crate::test_support::load_pool_id(&store, &namespace_id).await;
     let content_key = loonfs_objectstore::keys::content_blob(&pool_id, &content_ref.content_id);
 
     let inside = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_WINDOW_MS - 1);
@@ -1137,14 +1139,14 @@ async fn an_unpublished_completed_upload_loses_its_record_then_its_object() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let setup = context(1_000);
-    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
+    let pool_id = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
         .create()
         .await
-        .expect("bootstrap");
+        .expect("bootstrap")
+        .pool_id;
     write_test_file(&store, &namespace_id, "/docs/other.txt", "gc-other", &setup).await;
     let (upload_id, content_ref) =
         complete_upload_for_gc(&store, &namespace_id, b"unpublished\n", &setup).await;
-    let pool_id = crate::test_support::load_pool_id(&store, &namespace_id).await;
     let content_key = loonfs_objectstore::keys::content_blob(&pool_id, &content_ref.content_id);
 
     let past = context(
@@ -1182,10 +1184,12 @@ async fn a_revision_compacted_away_below_the_floor_loses_its_object_after_the_gr
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context(1_000))
-        .create()
-        .await
-        .expect("bootstrap");
+    let pool_id =
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context(1_000))
+            .create()
+            .await
+            .expect("bootstrap")
+            .pool_id;
     let first = put_file_content_with_id(
         &store,
         &namespace_id,
@@ -1207,7 +1211,6 @@ async fn a_revision_compacted_away_below_the_floor_loses_its_object_after_the_gr
     )
     .await;
     compact_below_the_floor(&store, &namespace_id).await;
-    let pool_id = crate::test_support::load_pool_id(&store, &namespace_id).await;
     let first_key = loonfs_objectstore::keys::content_blob(&pool_id, &first.content_id);
 
     // No root names the object any more. The manifests and segments report
@@ -1260,10 +1263,11 @@ async fn content_an_expired_deletion_hid_is_deleted_once_its_rows_are_removed() 
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let setup = context(1_000);
-    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
+    let pool_id = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
         .create()
         .await
-        .expect("bootstrap");
+        .expect("bootstrap")
+        .pool_id;
     let hidden = put_file_content_with_id(
         &store,
         &namespace_id,
@@ -1321,7 +1325,6 @@ async fn content_an_expired_deletion_hid_is_deleted_once_its_rows_are_removed() 
         .gc(None, &options(), &aged.clock())
         .await
         .expect("collection past the grace");
-    let pool_id = crate::test_support::load_pool_id(&store, &namespace_id).await;
     let content_key = |content_ref: &ContentRef| {
         loonfs_objectstore::keys::content_blob(&pool_id, &content_ref.content_id)
     };
@@ -1344,10 +1347,11 @@ async fn content_only_a_pinned_manifest_names_stays_until_the_pin_is_released() 
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let setup = context(1_000);
-    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
+    let pool_id = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
         .create()
         .await
-        .expect("bootstrap");
+        .expect("bootstrap")
+        .pool_id;
     let pinned = put_file_content_with_id(
         &store,
         &namespace_id,
@@ -1368,7 +1372,6 @@ async fn content_only_a_pinned_manifest_names_stays_until_the_pin_is_released() 
     )
     .await;
     compact_below_the_floor(&store, &namespace_id).await;
-    let pool_id = crate::test_support::load_pool_id(&store, &namespace_id).await;
     let pinned_key = loonfs_objectstore::keys::content_blob(&pool_id, &pinned.content_id);
 
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
@@ -1480,11 +1483,12 @@ async fn content_and_temporary_keys_the_layout_does_not_recognize_are_kept() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context(1_000))
-        .create()
-        .await
-        .expect("bootstrap");
-    let pool_id = crate::test_support::load_pool_id(&store, &namespace_id).await;
+    let pool_id =
+        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context(1_000))
+            .create()
+            .await
+            .expect("bootstrap")
+            .pool_id;
     let content = loonfs_objectstore::keys::content_prefix(&pool_id);
     let temporary = loonfs_objectstore::keys::temporary_prefix(&pool_id);
     let collected = [
@@ -2700,11 +2704,12 @@ async fn provider_age_reserves_the_clock_margin_before_deletion() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("clock-margin").expect("namespace");
     let inner = LocalFsStore::new(directory.path()).expect("store");
-    crate::test_support::NamespaceFixture::new(&inner, &namespace_id, &context(1_000))
-        .create()
-        .await
-        .expect("namespace");
-    let pool_id = crate::test_support::load_pool_id(&inner, &namespace_id).await;
+    let pool_id =
+        crate::test_support::NamespaceFixture::new(&inner, &namespace_id, &context(1_000))
+            .create()
+            .await
+            .expect("namespace")
+            .pool_id;
     let key =
         loonfs_objectstore::keys::content_blob(&pool_id, &loonfs_types::ContentId::generate());
     let provider_stamp = 1_000_000;
@@ -2800,10 +2805,11 @@ async fn completed_upload_waits_for_namespace_retirement_then_reclaims() {
         let store = LocalFsStore::new(directory.path()).expect("store");
         let namespace_id = NamespaceId::parse("completed-retired").expect("namespace");
         let setup = context(1_000);
-        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
+        let pool_id = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
             .create()
             .await
-            .expect("bootstrap");
+            .expect("bootstrap")
+            .pool_id;
         let (upload_id, content) =
             complete_upload_for_gc(&store, &namespace_id, b"content", &setup).await;
         crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
@@ -2822,7 +2828,6 @@ async fn completed_upload_waits_for_namespace_retirement_then_reclaims() {
             report.retained.upload_session_undecided + report.retained.upload_session_window,
             1
         );
-        let pool_id = crate::test_support::load_pool_id(&store, &namespace_id).await;
         let key = loonfs_objectstore::keys::content_blob(&pool_id, &content.content_id);
         assert!(store.head(&key).await.expect("object").is_some());
         let listed_bytes = core_listed_bytes(&store, &namespace_id).await;
