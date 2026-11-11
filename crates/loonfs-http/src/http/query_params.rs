@@ -2,8 +2,8 @@
 
 use super::error::ApiResponseError;
 use loonfs::engine::READ_REVALIDATION_BOUND_MS;
-use loonfs::{Consistency, ErrorCode, ListOptions, PinId, ReadAt, ReadConsistency};
-use loonfs_types::{decode_cursor, LimitError, ListPageCursor, OpaqueTokenError};
+use loonfs::{Consistency, ErrorCode, PinId, ReadAt, ReadConsistency};
+use loonfs_types::LimitError;
 
 // The `limit` and `max_staleness_ms` query parameters declare these bounds
 // to OpenAPI as literals, because the `IntoParams` derive takes only a
@@ -83,33 +83,6 @@ pub(super) fn effective_page_limit(
     loonfs_types::EffectiveLimit::from_requested(limit).map_err(limit_response_error)
 }
 
-/// Checks that a cursor was minted by this endpoint before any read, and
-/// returns it unchanged for the pager, which decodes it again.
-pub(super) fn checked_cursor<C: loonfs_types::PageCursor>(
-    cursor: Option<String>,
-) -> Result<Option<String>, ApiResponseError> {
-    if let Some(cursor) = cursor.as_deref() {
-        decode_cursor::<C>(cursor).map_err(page_cursor_response_error)?;
-    }
-    Ok(cursor)
-}
-
-/// Checks that a directory listing's cursor is the kind that a listing with
-/// `options` issues, and returns it unchanged for the pager.
-pub(super) fn checked_list_cursor(
-    cursor: Option<String>,
-    options: &ListOptions,
-) -> Result<Option<String>, ApiResponseError> {
-    if let Some(cursor) = cursor.as_deref() {
-        ListPageCursor::decode(cursor, options).map_err(page_cursor_response_error)?;
-    }
-    Ok(cursor)
-}
-
 fn limit_response_error(error: LimitError) -> ApiResponseError {
     ApiResponseError::new(ErrorCode::InvalidRequest, &error.to_string()).with_param("limit")
-}
-
-fn page_cursor_response_error(error: OpaqueTokenError) -> ApiResponseError {
-    ApiResponseError::new(ErrorCode::InvalidRequest, &error.to_string()).with_param("cursor")
 }

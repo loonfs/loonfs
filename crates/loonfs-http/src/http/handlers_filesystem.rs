@@ -6,10 +6,7 @@ use super::download_body::{streamed_download_response, RangeHeader};
 use super::error::ApiResponseError;
 use super::extractors::{ActorHeader, SubjectHeaders};
 use super::handlers_uploads::{content_preparation_for_puts, PutContentPreparation};
-use super::query_params::{
-    checked_cursor, checked_list_cursor, effective_page_limit, live_consistency, read_at,
-    required_query_param,
-};
+use super::query_params::{effective_page_limit, live_consistency, read_at, required_query_param};
 use super::{acquire_download_permit, AppJson, AppQuery, HttpState, NamespaceIdPath, NoQuery};
 use axum::extract::State;
 use axum::response::Response;
@@ -23,8 +20,8 @@ use loonfs_types::options::CommitSplitting;
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
 use loonfs_types::{
-    Commit, CommitRequest, DiffResponse, FileRevisionsPageCursor, FilesystemOperation,
-    ListChangesResponse, ListFileRevisionsResponse, ListTrashResponse, RevisionNo, TrashPageCursor,
+    Commit, CommitRequest, DiffResponse, FilesystemOperation, ListChangesResponse,
+    ListFileRevisionsResponse, ListTrashResponse, RevisionNo,
 };
 use std::sync::Arc;
 
@@ -312,13 +309,12 @@ pub(super) async fn list_path_entries(
         options.recursive = recursive;
     }
     let limit = effective_page_limit(query.limit)?;
-    let cursor = checked_list_cursor(query.cursor, &options)?;
     options.at = read_at(query.snapshot_id, query.consistency, query.max_staleness_ms)?;
     let listing = runtime
         .namespace(&namespace_id)
         .list_with_options(&path, &options)
         .page_limit(limit)
-        .cursor(cursor)
+        .cursor(query.cursor)
         .page()
         .await
         .map_err(|error| ApiResponseError::runtime(error).with_invalid_request_param("path"))?;
@@ -471,7 +467,7 @@ pub(super) async fn list_trash(
     let response = namespace
         .list_trash_with_options(&options)
         .page_limit(effective_page_limit(query.limit)?)
-        .cursor(checked_cursor::<TrashPageCursor>(query.cursor)?)
+        .cursor(query.cursor)
         .page()
         .await
         .map_err(ApiResponseError::runtime)?;
@@ -517,7 +513,7 @@ pub(super) async fn list_file_revisions(
     let response = namespace
         .list_file_revisions_with_options(&path, &options)
         .page_limit(effective_page_limit(query.limit)?)
-        .cursor(checked_cursor::<FileRevisionsPageCursor>(query.cursor)?)
+        .cursor(query.cursor)
         .page()
         .await
         .map_err(|error| ApiResponseError::runtime(error).with_invalid_request_param("path"))?;
