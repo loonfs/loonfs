@@ -58,11 +58,14 @@ async fn layout_manifest(
     namespace_id: &NamespaceId,
     rows: impl IntoIterator<Item = ContentLayoutRecord>,
 ) -> (NamespaceManifestPayload, BTreeSet<String>) {
+    let mut head =
+        NamespaceReadState::initial(namespace_id.clone(), 0, loonfs_test_support::test_actor());
+    head.seq = ChangeSeq(1);
     let mut state = MetadataStateBuilder::default();
     let mut keys = BTreeSet::new();
     for row in rows {
         for extent in &row.layout.extents {
-            let key = extent_object_key(namespace_id, extent);
+            let key = extent_object_key(&head.pool_id, extent);
             store
                 .put_if_absent(&key, Bytes::from_static(b"x"))
                 .await
@@ -71,9 +74,6 @@ async fn layout_manifest(
         }
         state.push_content_layout(row);
     }
-    let mut head =
-        NamespaceReadState::initial(namespace_id.clone(), 0, loonfs_test_support::test_actor());
-    head.seq = ChangeSeq(1);
     let manifest = build_namespace_manifest_from_metadata_state(
         store,
         namespace_id,
@@ -94,7 +94,11 @@ async fn layout_manifest(
     (manifest.payload().clone(), keys)
 }
 
+/// Publishes `manifest` as a namespace's first manifest, with the hint and
+/// the record of the pool that the manifest records.
 async fn publish_layout_manifest(store: &impl ObjectStore, manifest: NamespaceManifestPayload) {
+    crate::test_support::write_pool_record(store, &manifest.pool_id, &manifest.namespace_id, 0)
+        .await;
     let hint_key = hint(&manifest.namespace_id);
     let hint_bytes = encode_control_state(
         ControlObjectKind::Hint,
@@ -174,11 +178,12 @@ async fn a_collection_reads_each_extent_filter_once_and_lists_content_once() {
     let (manifest, protected) = shared_layout_manifest(&store, &namespace_id, 2_048).await;
     let reads = extent_filter_reads(&manifest);
     assert_eq!(reads.len(), 256, "eight rows in each layout segment");
+    let pool_id = manifest.pool_id.clone();
     publish_layout_manifest(&store, manifest).await;
     let mut orphans = BTreeSet::new();
     for index in 0..8 {
         let content_id = ContentId::parse(format!("con_7{index:025}")).expect("orphan id");
-        let key = content_blob(&namespace_id, &content_id);
+        let key = content_blob(&pool_id, &content_id);
         store
             .put_if_absent(&key, Bytes::from_static(b"orphan"))
             .await
@@ -193,12 +198,12 @@ async fn a_collection_reads_each_extent_filter_once_and_lists_content_once() {
         crate::cache::ObjectStoreScope::new(0),
         Arc::new(crate::cache::ReadWorkingMemory::new(64 * 1024 * 1024, None)),
     ));
-    let prefix = content_prefix(&namespace_id);
+    let prefix = content_prefix(&pool_id);
     for (round, deleted, filter_gets) in [(1, &orphans, reads.len()), (2, &BTreeSet::new(), 0)] {
         store.reset();
-        let report = crate::NamespaceStore {
+        let report = crate::PoolStore {
             segment_cache: Arc::clone(&cache),
-            ..crate::test_support::namespace_store(&store, &namespace_id)
+            ..crate::test_support::pool_store(&store, &pool_id)
         }
         .gc(None, &options(), &context(GRACE_MS + 1).clock())
         .await
@@ -275,16 +280,14 @@ async fn a_false_match_of_an_extent_filter_stays_until_no_root_lists_its_segment
     // names `con_7{index:025}`.
     let orphan = ContentId::parse("con_70000000000000000004909343").expect("orphan id");
     assert!(filter.may_contain(orphan.as_str()));
-    let orphan = content_blob(&namespace_id, &orphan);
+    let orphan = content_blob(&manifest.pool_id, &orphan);
     store
         .put_if_absent(&orphan, Bytes::from_static(b"orphan"))
         .await
         .expect("orphan");
+    let pool_id = manifest.pool_id.clone();
     publish_layout_manifest(&store, manifest).await;
-    let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &context(GRACE_MS + 1).clock())
-        .await
-        .expect("collection with the segment rooted");
+    let report = collect_pool(&store, &pool_id, &context(GRACE_MS + 1)).await;
     assert_eq!(report.deleted.content_objects, 0);
 
     // The next manifest lists only a layout segment of another chain.
@@ -294,10 +297,7 @@ async fn a_false_match_of_an_extent_filter_stays_until_no_root_lists_its_segment
     write_namespace_manifest(&store, unlisted)
         .await
         .expect("a manifest that doesn't list the first layout segment");
-    let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &context(GRACE_MS + 1).clock())
-        .await
-        .expect("collection with the segment unrooted");
+    let report = collect_pool(&store, &pool_id, &context(GRACE_MS + 1)).await;
     assert_eq!(report.deleted.content_objects, protected.len() as u64 + 1);
     assert!(store.head(&orphan).await.expect("head").is_none());
 }
@@ -354,18 +354,16 @@ async fn an_extent_of_a_superseded_layout_row_stays_until_no_root_lists_its_segm
     first.runs.push(longer_run(RunTier::Delta));
     compacted.manifest_no = ManifestNo(2);
     compacted.runs = vec![longer_run(RunTier::Base)];
+    let pool_id = first.pool_id.clone();
     publish_layout_manifest(&store, first).await;
 
     let now_ms = GRACE_MS + 1;
     let collect = async |deleted, survivors: BTreeSet<String>| {
-        let report = crate::test_support::namespace_store(&store, &namespace_id)
-            .gc(None, &options(), &context(now_ms).clock())
-            .await
-            .expect("collection");
+        let report = collect_pool(&store, &pool_id, &context(now_ms)).await;
         assert_eq!(report.deleted.content_objects, deleted);
         assert_eq!(
             store
-                .list_prefix(&content_prefix(&namespace_id))
+                .list_prefix(&content_prefix(&pool_id))
                 .await
                 .expect("survivors")
                 .into_iter()

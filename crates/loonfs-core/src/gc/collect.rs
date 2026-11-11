@@ -1,45 +1,32 @@
-//! One namespace collection call with a fixed clock and no durable progress.
+//! One collection of a namespace's own objects, with a fixed clock and no
+//! durable progress.
 
-use super::content::ContentSweep;
+use super::deletes::apply_decisions;
 use super::families::CandidateFamily;
 use super::live_set::{LiveSet, RetirementStatus};
 use super::options::validate_gc_options;
-use super::session_cache::CompletedUploadSessionCache;
 use super::sweep::Sweep;
 use super::GcOptions;
 use crate::error::{CoreError, Result};
 use crate::namespace::store::NamespaceStore;
 use crate::time::OperationClock;
-use futures::{future, stream, StreamExt, TryStreamExt};
-use loonfs_objectstore::keys::content_prefix;
+use futures::{StreamExt, TryStreamExt};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::GcResponse;
 use std::sync::atomic::AtomicU64;
 
 impl<S: ObjectStore> NamespaceStore<S> {
-    /// Collects one namespace.
+    /// Collects the namespace's manifests, WAL objects, metadata segments,
+    /// extension segments, and pins, and retires the namespace when its
+    /// tombstone is eligible.
     ///
-    /// On a family root, the collection also reads the roots of every other member
-    /// of its fork family, which it finds through fork pins, and protects the
-    /// content that any member refers to. A collection on a fork lists and sweeps no
-    /// content and no upload records, because the family root's prefix stores
-    /// them.
-    ///
-    /// The content sweep reads the extent filter of each distinct layout
-    /// segment of the rooted manifests through the segment cache, charges the
-    /// filters to that cache's read working memory, and lists the content
-    /// prefix once. The collection doesn't read the record of a completed upload
-    /// session that `session_cache` has, and it adds each completed session that
-    /// it keeps to `session_cache`.
-    pub async fn gc(
-        &self,
-        session_cache: Option<&CompletedUploadSessionCache>,
-        options: &GcOptions,
-        clock: &OperationClock,
-    ) -> Result<GcResponse> {
+    /// The collection lists nothing under its pool's prefix. The pool's own
+    /// collection collects the content objects, upload records, and temporary
+    /// objects there (see [`crate::PoolStore::gc`]).
+    pub async fn gc(&self, options: &GcOptions, clock: &OperationClock) -> Result<GcResponse> {
         validate_gc_options(options)?;
         let mut report = GcResponse::empty(self.namespace_id.clone());
-        let live = LiveSet::load(self, session_cache, options.grace_window_ms, clock).await?;
+        let live = LiveSet::load(self, options.grace_window_ms, clock).await?;
         report.reclaimable_at_ms = live
             .current_tombstone
             .as_ref()
@@ -53,17 +40,9 @@ impl<S: ObjectStore> NamespaceStore<S> {
             grace_window_ms: options.grace_window_ms,
             clock,
             live: &live,
-            session_cache,
             listed_bytes: AtomicU64::new(0),
         };
-        let content = ContentSweep::load(&sweep, &mut report).await?;
         for family in CandidateFamily::ALL {
-            if family == CandidateFamily::Content {
-                if let Some(content) = &content {
-                    content.sweep(&sweep, &mut report).await?;
-                }
-                continue;
-            }
             let prefix = family.prefix(&self.namespace_id);
             // Unboxed, rustc cannot prove the collection future `Send` through this stream.
             let decisions = self
@@ -72,34 +51,10 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 .map_err(|error| CoreError::store(&prefix, &error))
                 .and_then(|entry| sweep.candidate(family, entry))
                 .boxed();
-            self.apply_decisions(decisions, &mut report).await?;
+            apply_decisions(&self.store, decisions, &mut report).await?;
         }
-        if live.collects_family_content() {
-            // Upload sessions are swept as pairs of records, from the listing
-            // that rooted their content.
-            let decisions = stream::iter(live.uploads.iter())
-                .then(|listed| sweep.upload(listed))
-                .boxed();
-            self.apply_decisions(decisions, &mut report).await?;
-        }
-        let content_listed = self.retire_namespace(&live, &mut report).await? || content.is_some();
-        // A skipped content sweep or a retained tombstone leaves the family's
-        // content unlisted, but the content still occupies storage.
-        if !content_listed && live.collects_family_content() {
-            report.listed_bytes += self.list_content_bytes().await?;
-        }
+        self.retire_namespace(&live, &mut report).await?;
         report.listed_bytes += sweep.listed_bytes.into_inner();
         Ok(report)
-    }
-
-    /// Lists the content prefix of this namespace, a family root, and returns
-    /// the sum of the listed object sizes.
-    async fn list_content_bytes(&self) -> Result<u64> {
-        let prefix = content_prefix(&self.namespace_id);
-        self.store
-            .list_entries_from_stream(&prefix, None)
-            .map_err(|error| CoreError::store(&prefix, &error))
-            .try_fold(0, |total, entry| future::ok(total + entry.size_bytes))
-            .await
     }
 }

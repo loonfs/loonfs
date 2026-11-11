@@ -231,6 +231,7 @@ The full registry (`ErrorCode` in `loonfs-types`) lists every error code and its
 | `route_not_found` | 404 | No route matches the request path. |
 | `method_not_allowed` | 405 | The path exists, but it doesn't serve this HTTP method. |
 | `namespace_not_found` | 404 | The namespace has no installed manifest, so it doesn't exist. |
+| `pool_not_found` | 404 | The pool has no pool record, so the pool's collection deletes nothing. |
 | `namespace_deleted` | 410 | The namespace ID is deleted, and it can never be created or forked into again. Ordinary operations fail. The response's details identify the deleted namespace. |
 | `snapshot_not_found` | 404 | The snapshot ID doesn't identify a snapshot that the operation can use. Either no pin exists under it, the pin is a fork pin and the operation isn't a read, or a read, fork, or extension found the snapshot expired. The checkpoint inventory's retrieve also returns this code for an ID with no pin. Refresh state or choose another snapshot. |
 | `path_not_found` | 404 | No visible entry exists at the path. In an ACL namespace, the server also returns this code for a checked entry on which the subject has no rights. |
@@ -401,7 +402,7 @@ Why do prepared uploads have a deadline? The deadline matches the lifetime of re
 
 Why can't two namespaces share a prepared value? A commit that admits uploaded content records the committing namespace as the creator of the content's chain, and only the creator appends to a chain in place (see [Operations and WAL deltas](format.md#66-operations-and-wal-deltas)). If two namespaces committed one upload, both would append to the same chain.
 
-Why does a prepared value from the destination's fork family expire after 15 minutes? The value refers to content that a revision or layout in the source's view refers to, and garbage collection keeps every manifest of that view, and so the content, for longer than 15 minutes after the view was read, as it does for a direct download. A commit within that time finds the content in storage.
+Why does a prepared value from the destination's pool expire after 15 minutes? The value refers to content that a revision or layout in the source's view refers to, and garbage collection keeps every manifest of that view, and so the content, for longer than 15 minutes after the view was read, as it does for a direct download. A commit within that time finds the content in storage.
 
 ### 5.1 Commit identity and preconditions
 
@@ -762,6 +763,7 @@ The following table lists v0 operations, with their retry classes and representa
 | List checkpoints | `list_checkpoints` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/checkpoints?limit=100&cursor=...` |
 | Read a checkpoint | `get_checkpoint` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/checkpoints/{checkpoint_id}` (returns any pin the listing returns, and a missing ID returns `snapshot_not_found`) |
 | Run one maintenance job | `run_maintenance` | `not_idempotent` | `POST /v0/maintenance/namespaces/{ns}/runs`. The body identifies one job with `kind`. |
+| Run one maintenance job on a pool | `run_pool_maintenance` | `not_idempotent` | `POST /v0/maintenance/pools/{pool_id}/runs`. The body identifies one job with `kind`, and `gc` is the pool's one job. |
 | Probe the store contract | `probe_store` | `not_idempotent` | `POST /v0/maintenance/store/probe`. The body contains the probe options, and `{}` uses the defaults. |
 | Search file contents | `grep` | `idempotent` | `GET /v0/namespaces/{ns}/grep?pattern=needle&case_insensitive=false&path_prefix=%2Fsrc&allow_scan=false&allow_stale=false&limit=100&cursor=...`. Requires the `query.grep` feature and an active index. |
 | Read grep index status | `get_grep_index` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/grep/index` |
@@ -771,7 +773,7 @@ The following table lists v0 operations, with their retry classes and representa
 
 ### Maintenance jobs
 
-This section describes the grep index routes, and the jobs that `run_maintenance` runs.
+This section describes the grep index routes, and the jobs that `run_maintenance` and `run_pool_maintenance` run.
 
 #### Grep index
 
@@ -822,6 +824,8 @@ The response includes the same `kind`, the addressed `namespace_id`, and the job
 A job that loses a race with another process, or whose work is superseded, reports that as an outcome in its result, not as an error.
 
 A deleted namespace accepts only `gc` jobs, and other jobs return `namespace_deleted`. [Retirement](format.md#95-retirement) defines how a deleted namespace is retired.
+
+A [pool](glossary.md#pool) has its own route, `POST /v0/maintenance/pools/{pool_id}/runs`, which accepts one job, `gc`, with the optional `grace_window_ms`. A namespace's `gc` job collects the objects under the namespace's prefix, and a pool's `gc` job collects the content objects, upload records, and temporary objects under the pool's prefix (see [Garbage collection jobs](#garbage-collection-jobs)). The response includes the same `kind`, the addressed `pool_id`, and the collection result. A pool ID without a pool record returns `pool_not_found`. The pool's route has the same retry class as `run_maintenance`, and the reference server exempts it from its request deadline in the same way. For example, `POST /v0/maintenance/pools/pool_3s0drmj8em84yb4mnetqkz2j0x/runs` with the body `{"kind":"gc"}` runs one collection of that pool.
 
 A `metadata` job [folds](glossary.md#fold) the WAL tail when a fold is due, and then [compacts](glossary.md#compaction) the namespace's metadata until nothing is due. It compacts in units. A unit compacts a window of at most eight runs of one [family group](glossary.md#family-group), chosen by size tier (see [Compaction windows](format.md#102-compaction-windows)), and publishes the next manifest. If its manifest put loses to another publication, the unit tries again over the manifest that won, as long as its input runs are unchanged. The job stops early after it publishes 16 units, after three units in a row are abandoned, or when a newer runtime claims the namespace's [compactor epoch](glossary.md#compactor-epoch). A unit is abandoned when an input run changed, the elapsed-time bound was exceeded, or every publication attempt lost. An abandoned unit leaves the segments it wrote unreferenced, and a later collection can delete them. The server runs at most one fold of a namespace at a time, and at most one compaction unit of it at a time. If a fold or a unit of the namespace is already running (for example, one that the namespace's writer session started), the job waits for the running fold or unit to finish instead of doing the same work again.
 
@@ -881,36 +885,57 @@ The response includes the namespace's window after the job. It leaves out `reten
 
 #### Garbage collection jobs
 
-In a `gc` job, `grace_window_ms` overrides the grace window. A grace window below the derived minimum grace window returns `invalid_request`. Upload sessions still keep their leases, and completed content still keeps its derived completed-content grace (see [Upload-session cleanup](format.md#116-upload-session-cleanup)).
+In a `gc` job on a namespace or on a pool, `grace_window_ms` overrides the grace window. A grace window below the derived minimum grace window returns `invalid_request`. In a pool's job, upload sessions still keep their leases, and completed content still keeps its derived completed-content grace (see [Upload-session cleanup](format.md#116-upload-session-cleanup)).
+
+A namespace's job and a pool's job collect different objects:
+
+- A namespace's collection covers the namespace's manifests, WAL objects, metadata segments, extension segments, and pins. It makes no request under the pool's prefix, and it deletes no content, including when it retires the namespace. Retiring a fork deletes the fork's pin on its source (see [Retiring an eligible tombstone](format.md#118-retiring-an-eligible-tombstone)).
+- A pool's collection covers the pool's content objects, upload records, and temporary objects, with roots that it reads from every member of the [pool](glossary.md#pool).
+
+[One complete collection](format.md#111-one-complete-collection) defines both collections.
 
 A GC response contains counts for that call. Concurrent calls can overlap their deletion attempts, so these counts are operational summaries. No collection state is saved between calls.
 
 Each GC request runs one complete, stateless collection. `GcRequest` accepts `grace_window_ms`, and it has no cursor. No collection runs unless `gc` is present.
 
-Every GC call reads the current manifest and uses one clock reading for the whole call. It keeps its live set in memory, and it doesn't write any collection progress. For each object family it lists, the call reads the listing from the beginning to the end. On a [family root](glossary.md#family-root), the call protects content through the extent filters of the rooted layout segments, and it skips the content objects if it couldn't read the roots of every member of the fork family within the time that [Content roots](format.md#119-content-roots) allows. [Reference roots](format.md#112-reference-roots) defines the collection roots, and [Content roots](format.md#119-content-roots) defines the content roots. If a manifest read fails, the call fails before it lists or deletes anything.
+Every GC call uses one clock reading for the whole call. It keeps its live set in memory, and it doesn't write any collection progress. For each object family it lists, the call reads the listing from the beginning to the end.
 
-A GC response includes `next_reclamation_at_ms` when the collection finds any of these future times:
+A namespace's call reads the current manifest, lists the namespace's pins, and loads the manifests that the pins keep. If a manifest read fails, the call fails before it lists or deletes anything. [Reference roots](format.md#112-reference-roots) defines these roots.
 
-- a deleted namespace that's still inside its retirement grace,
-- a retained snapshot with a future deletion time, or
-- an upload session with a future cleanup time.
+A pool's call reads the pool record, lists the pool's upload sessions, and then reads the roots of every member of the pool. It protects content through the extent filters of the rooted layout segments, and it deletes no content objects if it couldn't read the roots of every member within the time that [Content roots](format.md#119-content-roots) allows, or couldn't read one member's roots. [Content roots](format.md#119-content-roots) defines these roots. A pool has no members when its first member is retired, or when its create call failed or lost to another create call for the same namespace ID. In the second case, the call deletes nothing while the pool record is inside its creation grace (the grace window after the record's `created_at_ms`), and after the creation grace it deletes the pool record and lists nothing else.
 
-Upload cleanup times include the lease plus grace, the abort grace, and the completed-content grace. The value is the earliest of those future times that the collection examined. Fork pins have no cleanup time, and candidates that age out by provider timestamps don't contribute a time. If the field is absent, that doesn't mean nothing remains to collect.
+A GC response includes `next_reclamation_at_ms` when the collection finds a future time at which more objects can be deleted. In a namespace's response, the time is one of these:
 
-A GC response also includes `reclaimable_at_ms` when the current manifest is deleted. It's the retirement deadline defined in [Retirement](format.md#95-retirement), and it's included even when pins still block retirement. It's absent for an active namespace.
+- the retirement deadline of a deleted namespace that's still inside its retirement grace, or
+- the deletion time of a retained snapshot.
 
-A GC response includes `listed_bytes`: the bytes of every object that the collection listed under the namespace, each object once, as the provider reported them, before the collection's deletes. The core collector lists every object family that it collects. A fork's prefix stores no content objects or upload records, so a fork's collection lists neither. The collection on the fork's [family root](glossary.md#family-root) lists the content objects and upload records of the whole fork family. When a family root's collection skips the content objects (because the collection couldn't read every member's roots), the collection lists the content prefix once to measure the content. So the value is the storage under the namespace's prefix at the time of the collection, except the hint and any extension object that isn't a segment. An application that meters storage samples the value on each collection.
+In a pool's response, the time is one of these:
 
-A GC response groups related counts:
+- an upload session's cleanup time, which is the lease plus grace, the abort grace, or the completed-content grace, or
+- the end of the pool record's creation grace, when the pool's first member has no current manifest that records the pool.
 
-- `deleted` contains `wal_objects`, `metadata_segments`, `extension_segments`, `manifests`, `upload_sessions`, `content_objects`, `retired_content_objects`, and `temporary_objects`. `extension_segments` counts the extension segments (such as the grep index's segments) that no retained manifest lists (see [Extensions](format.md#124-extensions)).
+The value is the earliest of those future times that the collection examined. Fork pins have no cleanup time, and candidates that age out by provider timestamps don't contribute a time. If the field is absent, that doesn't mean nothing remains to collect.
+
+A namespace's GC response also includes `reclaimable_at_ms` when the current manifest is deleted. It's the retirement deadline defined in [Retirement](format.md#95-retirement), and it's included even when pins still block retirement. It's absent for an active namespace.
+
+A GC response includes `listed_bytes`: the bytes of every object that the collection listed, each object once, as the provider reported them, before the collection's deletes. A namespace's collection lists the objects under the namespace's prefix, except the hint and any extension object that isn't a segment. A pool's collection lists the content objects, upload records, and temporary objects under the pool's prefix, so the value leaves out the pool record. When a pool's collection deletes no content objects because it couldn't read every member's roots, it lists the content prefix once to measure the content. An application that meters storage samples a pool's value for the pool's content, and a namespace's value for the namespace's metadata.
+
+A namespace's GC response groups related counts:
+
+- `deleted` contains `wal_objects`, `metadata_segments`, `extension_segments`, and `manifests`. `extension_segments` counts the extension segments (such as the grep index's segments) that no retained manifest lists (see [Extensions](format.md#124-extensions)).
 - `deleted_checkpoints_by_owner` contains `user` and `fork` counts for the pins deleted in the collection. `user` counts snapshots. Their sum is the total number of pins deleted.
+
+A pool's GC response has no `deleted_checkpoints_by_owner`, and its `deleted` contains these counts:
+
+- `content_objects` counts the content objects that no retained view of any member references, which the collection deleted once they were older than the grace window.
+- `upload_sessions` counts the upload sessions whose records the collection deleted.
+- `temporary_objects` counts the pool's temporary objects that the collection deleted once they were older than the grace window.
+
+A pool's response doesn't report the deletion of a pool record.
 
 Each deletion is counted once. When a fork's target namespace deletes its source pin, the deletion counts toward `fork` if the pin was present before the deletion, and repeating that deletion on an absent pin adds nothing. Every count field is present, including fields whose value is zero.
 
-`content_objects` counts the content objects that no retained view references (on a family root, the views of every member of its fork family), which the collection deleted once they were older than the grace window. `retired_content_objects` counts the keys that the collection listed under a retired family root's content prefix and successfully deleted. That prefix stores the content of the family root's whole fork family. A fork's retirement deletes no content, so `retired_content_objects` is zero for a fork. If there are no new objects, a repeated collection of that prefix makes one empty LIST request and no DELETE requests, and it reports zero. The `retired_content_objects` count contributes to maintenance progress. `temporary_objects` counts the store's temporary objects that the collection deleted once they were older than the grace window.
-
-Every core GC response also includes `retained`, which counts the candidates the collection kept, grouped by the reason each one was kept. The reasons are a closed set, so every field is always present, a zero means nothing was kept for that reason, and the fields sum to the total:
+Every core GC response also includes `retained`, which counts the candidates the collection kept, grouped by the reason each one was kept. The reasons are a closed set, so every field of the response's `retained` is always present, a zero means nothing was kept for that reason, and the fields sum to the total. A namespace's response has the first five reasons in this table, and a pool's response has the first four and the two upload session reasons:
 
 | Reason | Means |
 | --- | --- |
@@ -922,21 +947,27 @@ Every core GC response also includes `retained`, which counts the candidates the
 | `upload_session_window` | An upload session that's waiting for a window that ends at a known time. These are the same waits that `next_reclamation_at_ms` reports. |
 | `upload_session_undecided` | An upload session that's kept for a reason that doesn't end at a known time: a lost compare-and-swap, a record that disappeared during the collection, or a content cleanup failure. |
 
-Each collection counts the candidates that it examined and kept, not the objects in the namespace, so an object that two collections both examine is counted by each collection.
+Each collection counts the candidates that it examined and kept, not the objects in the namespace or the pool, so an object that two collections both examine is counted by each collection.
 
-A GC response also includes `skipped` when the collection stopped part of its work at a limit. It lists each reason once, and it's absent when the collection skipped nothing. Clients MUST tolerate other values.
+A pool's GC response also includes `skipped` when the collection stopped part of its work. It lists each reason once, and it's absent when the collection skipped nothing. Clients MUST tolerate other values.
 
 | Reason | What the collection skipped | What the operator can do |
 | --- | --- | --- |
-| `content_sweep_family_budget` | The collection deleted no content objects, because it couldn't read the roots of every member of the fork family within the time that [Content roots](format.md#119-content-roots) allows. | Run the collection again later. If the reason repeats, delete the forks that are no longer needed, so the collection has fewer members to read. |
-| `content_sweep_unreadable_member` | The collection deleted no content objects, because it couldn't read the roots of one member of the fork family. | Find the error in the server's warning log for the collection, and repair or delete the member namespace that it reports. |
+| `content_sweep_pool_budget` | The collection deleted no content objects, because it couldn't read the roots of every member of the pool within the time that [Content roots](format.md#119-content-roots) allows. | Run the collection again later. If the reason repeats, delete the forks that are no longer needed, so the collection has fewer members to read. |
+| `content_sweep_unreadable_member` | The collection deleted no content objects, because it couldn't read the roots of one member of the pool. | Find the error in the server's warning log for the collection, and repair or delete the member namespace that it reports. |
 
 [Candidate and age rules](format.md#113-candidate-and-age-rules) defines which objects are candidates for deletion, and when each one is old enough to delete.
 
-For example, a job that deletes three WAL objects and two grep segments returns this result:
+For example, a namespace's job that deletes three WAL objects and two grep segments returns this result:
 
 ```json
-{"kind":"gc","namespace_id":"demo","deleted":{"wal_objects":3,"metadata_segments":0,"extension_segments":2,"manifests":0,"upload_sessions":0,"content_objects":0,"retired_content_objects":0,"temporary_objects":0},"deleted_checkpoints_by_owner":{"user":0,"fork":0},"retained":{"referenced":12,"within_grace_window":4,"no_provider_timestamp":0,"unrecognized_key":0,"checkpoint_not_deletable":0,"upload_session_window":0,"upload_session_undecided":0},"listed_bytes":1048576}
+{"kind":"gc","namespace_id":"demo","deleted":{"wal_objects":3,"metadata_segments":0,"extension_segments":2,"manifests":0},"deleted_checkpoints_by_owner":{"user":0,"fork":0},"retained":{"referenced":12,"within_grace_window":4,"no_provider_timestamp":0,"unrecognized_key":0,"checkpoint_not_deletable":0},"listed_bytes":1048576}
+```
+
+A pool's job that deletes two content objects and the records of one upload session, and keeps one session whose completed-content grace hasn't ended, returns this result:
+
+```json
+{"kind":"gc","pool_id":"pool_3s0drmj8em84yb4mnetqkz2j0x","deleted":{"content_objects":2,"upload_sessions":1,"temporary_objects":0},"retained":{"referenced":40,"within_grace_window":3,"no_provider_timestamp":0,"unrecognized_key":0,"upload_session_window":1,"upload_session_undecided":0},"listed_bytes":73400320,"next_reclamation_at_ms":1752626600000}
 ```
 
 ### Snapshots
@@ -1005,13 +1036,13 @@ An expired snapshot stays listed until GC deletes it, after its expiry plus the 
 
 An ordinary operation that finds that its namespace was deleted returns `namespace_deleted`. Cached readers follow the rules in [Deleting a namespace](format.md#94-deleting-a-namespace). Collection is asynchronous. It has no set completion time, and it doesn't guarantee physical erasure.
 
-[Retirement](format.md#95-retirement) defines when a deleted namespace is eligible for retirement, and [Deleting a retired owner's content](format.md#118-deleting-a-retired-owners-content) defines how its content is deleted. Purging the namespace's tombstone and hint is outside the scope of this API.
+[Retirement](format.md#95-retirement) defines when a deleted namespace is eligible for retirement, and [Retiring an eligible tombstone](format.md#118-retiring-an-eligible-tombstone) defines what retirement deletes. No retirement deletes content. A deleted namespace's content is stored in its [pool](glossary.md#pool), and the pool's collection deletes that content once no member's roots refer to it. Purging the namespace's tombstone and hint is outside the scope of this API.
 
 A deleted ancestor namespace keeps every object it published while a live descendant still depends on it.
 
-In an active namespace, GC reclaims a content object once it's older than the grace window and nothing references it. A content object is referenced by:
+A pool's collection reclaims a content object once it's older than the grace window and nothing in any member of the pool references it. A content object is referenced by:
 
-- a revision in the current manifest, in a pinned manifest, or in the unfolded WAL tail, or
+- a revision in a member's current manifest, in a manifest that a member's pin keeps, or in a member's unfolded WAL tail, or
 - an upload session record, which references its own content.
 
 [Content roots](format.md#119-content-roots) defines these rules. Deleting a file or a tree doesn't reclaim anything while the deletion is recoverable, because a deleted file keeps its newest revision. A compaction that removes old revisions at or below the retention floor makes their content collectable, and so does a base compaction that removes the revisions that an expired deletion hides (see [Retention jobs](#retention-jobs)). So a deleted tree's content is reclaimed once the floor reaches the deletion.
@@ -1026,8 +1057,10 @@ Once the current manifest is deleted, LoonFS refuses commits, requests for new p
 
 The reference server's scheduler runs maintenance on two schedules:
 
-- Every maintenance interval (five seconds by default), the scheduler runs the due steps of each namespace session that the server keeps open. A collection step is due on the collection interval (one hour by default), once the session's published sequence has moved.
-- A "sweep" lists every namespace in the store, including deleted ones, and runs each listed namespace's due steps, including a collection. A sweep runs when the server starts, and then on the sweep interval (24 hours by default).
+- Every maintenance interval (five seconds by default), the scheduler runs the due steps of each namespace session that the server keeps open. A collection step is due on the collection interval (one hour by default), once the session's published sequence has moved. A session's collection step collects the namespace and not the namespace's pool.
+- A "sweep" lists every namespace in the store, including deleted ones, and runs each listed namespace's due steps, including a collection. It then lists every pool in the store and runs a collection of each pool, with the same concurrency. A sweep runs when the server starts, and then on the sweep interval (24 hours by default).
+
+So the reference server collects a pool's content objects, upload records, and temporary objects in sweeps, and not between them. A failed collection of a pool is logged, and the next sweep runs the collection again. A pool that returns `pool_not_found` when the sweep collects the pool isn't a failure, because a create call can delete its pool record after the sweep's listing found the record.
 
 The sweep also advances the retention floor of each namespace that isn't deleted, to the last commit at or before the current time minus the namespace's retention window. A namespace's window is set with `retention_window_ms` when the namespace is created, or with a `retention_window` job (see [Retention jobs](#retention-jobs)). If a create request doesn't include `retention_window_ms` and the server has a `retention_window_ms` setting, the server records that setting as the new namespace's window. The sweep uses the same advance as a `retention` job with `cutoff_at_ms`, so the cutoff rule in [Advancing the retention floor](format.md#101-advancing-the-retention-floor) applies. If the namespace's window is shorter than an hour, the sweep uses a cutoff one hour before the current time instead. The steps that the scheduler runs between sweeps don't advance the floor. If a step of a namespace is running when the sweep reaches that namespace, the step makes the sweep's advance after its own work, so the sweep doesn't wait for the step. The sweep doesn't advance the floor of a namespace without a window.
 
@@ -1035,11 +1068,11 @@ The deletions that an advance reaches expire at once, and the next base compacti
 
 A namespace that nobody writes to through this server process (including forks and deleted namespaces) waits for the next sweep. The sweep also covers objects left behind by a crashed process, and garbage that's still inside a grace window. An idle namespace costs no requests between sweeps.
 
-LoonFS doesn't schedule GC when a namespace is deleted, when an upload expires, or when a fork retires and its source has more to collect. A host that doesn't run this scheduler runs GC itself, with `POST .../runs` and the body `{"kind":"gc"}`, with `loonfs maintenance gc`, or with `Maintenance::gc`. It can use `next_reclamation_at_ms` to decide when to run GC again.
+LoonFS doesn't schedule GC when a namespace is deleted, when an upload expires, or when a fork retires and its source has more to collect. A host that doesn't run this scheduler runs GC itself on each namespace and on each pool. It collects a namespace with `POST /v0/maintenance/namespaces/{ns}/runs` and the body `{"kind":"gc"}`, with `loonfs maintenance gc`, or with `Maintenance::gc`, and it collects a pool with `POST /v0/maintenance/pools/{pool_id}/runs` and the same body, or with `Maintenance::gc_pool`. It can use `next_reclamation_at_ms` to decide when to run GC again.
 
 When the server shuts down, its scheduler doesn't start any new steps, and a compaction in a running step stops at its next block. A writer session's metadata compaction stops the same way. Shutdown waits for the folds and compactions that already started.
 
-A deployment needs to keep the provider's lifecycle rule for incomplete multipart uploads. Provider upload state can exist outside object listings, so deleting a namespace's content objects doesn't replace session abort and provider cleanup. Deleting a key also doesn't erase physical versions that bucket versioning or retention locks keep.
+A deployment needs to keep the provider's lifecycle rule for incomplete multipart uploads. Provider upload state can exist outside object listings, so deleting a pool's content objects doesn't replace session abort and provider cleanup. Deleting a key also doesn't erase physical versions that bucket versioning or retention locks keep.
 
 The `retained` counts in a GC response show what a collection kept. To find the checkpoints that block reclamation, an operator lists them with `GET /v0/maintenance/namespaces/{ns}/checkpoints`.
 
@@ -1205,9 +1238,9 @@ The session record includes the provider's upload ID. So when a session is abort
 
 ### Content references and tokens
 
-A content reference contains `kind`, `content_id`, `size_bytes`, and `checksum`. It doesn't identify a namespace. The content ID and the reading namespace's [family root](glossary.md#family-root) determine where the bytes are stored, so a reference identifies the same content in every member of a fork family (see [File contents and ownership](format.md#15-file-contents-and-ownership)). Clients send the complete reference back unchanged.
+A content reference contains `kind`, `content_id`, `size_bytes`, and `checksum`. It doesn't identify a namespace. The content ID and the reading namespace's [pool](glossary.md#pool) determine where the bytes are stored, so a reference identifies the same content in every member of that pool (see [File contents and ownership](format.md#15-file-contents-and-ownership)). Clients send the complete reference back unchanged.
 
-A server can return a short-lived `content_token` for completed content. Clients treat the token as opaque, and they can copy it directly into a commit request. A token is valid only in the namespace where the content's upload session was completed. LoonFS rejects the token in every other namespace, including another member of the same fork family. Reading a completed session returns a new token while its token-issuing window is still open, and the session's `content_ref` stays available after that.
+A server can return a short-lived `content_token` for completed content. Clients treat the token as opaque, and they can copy it directly into a commit request. A token is valid only in the namespace where the content's upload session was completed. LoonFS rejects the token in every other namespace, including another member of the same pool. Reading a completed session returns a new token while its token-issuing window is still open, and the session's `content_ref` stays available after that.
 
 ```json
 {
@@ -1256,7 +1289,7 @@ Creating a namespace uses the namespace ID directly. In v0, there are no namespa
 }
 ```
 
-The response contains the new namespace's initial state. A new namespace starts at sequence 0, with a retention floor of 0:
+The response contains the new namespace's initial state. A new namespace starts at sequence 0, with a retention floor of 0, and its `pool_id` identifies the pool that the create call generated:
 
 ```json
 {
@@ -1264,6 +1297,7 @@ The response contains the new namespace's initial state. A new namespace starts 
   "created_at_ms": 1752623000000,
   "created_by": "usr_8f3c",
   "access": {"kind":"unrestricted"},
+  "pool_id": "pool_3s0drmj8em84yb4mnetqkz2j0x",
   "head_seq": 0,
   "retention_floor_seq": 0
 }
@@ -1271,11 +1305,11 @@ The response contains the new namespace's initial state. A new namespace starts 
 
 A fork request identifies the target namespace with `new_namespace_id`. Route placeholders such as `{ns}`, `{source_ns}`, and an implementation-internal `:namespace` are path parameter names, and each one takes the same namespace ID value. v0 doesn't accept or return a namespace `name` alias.
 
-Create and fork install the hint and then manifest 1. The conditional put of the hint determines whether the namespace ID is new (see [Namespace lifecycle and forks](format.md#9-namespace-lifecycle-and-forks)). A create or fork that loses that write to another active namespace returns `namespace_exists` (409). A create or fork into a deleted ID returns `namespace_deleted` (410). A namespace is never left partially created.
+Create and fork install the hint and then manifest 1. Between the hint and manifest 1, a plain create writes the record of the pool that it generates (`pools/{pool_id}/pool.json`), so a create of an existing namespace writes no pool record. A fork writes no pool record. The conditional put of the hint determines whether the namespace ID is new (see [Namespace lifecycle and forks](format.md#9-namespace-lifecycle-and-forks)). A create or fork that loses that write to another active namespace returns `namespace_exists` (409). A create or fork into a deleted ID returns `namespace_deleted` (410). A namespace is never left partially created.
 
 [Namespaces and identity](format.md#11-namespaces-and-identity) defines a namespace's lifetime. An application that reuses a human-readable name MUST keep its own map from names to namespace IDs, and generate a new namespace ID for each lifetime.
 
-If a creation acknowledgement is lost, a new request returns `namespace_exists`, unless the request explicitly allows an existing namespace. Within the original attempt, after an unknown transport outcome, an exact read-back of the manifest confirms a fork, because the fork's fork pin is unique. For a plain create, matching bytes don't prove which caller created the namespace, so the result is `namespace_exists`, or the existing summary if the caller allows an existing namespace.
+If a creation acknowledgement is lost, a new request returns `namespace_exists`, unless the request explicitly allows an existing namespace. Within the original attempt, after an unknown transport outcome, an exact read-back of the manifest confirms a plain create and a fork. A plain create's manifest records a pool ID that only that attempt generated, and a fork's manifest refers to the fork's unique fork pin.
 
 ### 6.1 `GET /v0/capabilities`
 
@@ -1291,7 +1325,7 @@ Returns the metadata of one namespace, without listing every namespace. A missin
   "access": {"kind": "unrestricted"},
   "created_at_ms": 1752623000000,
   "created_by": "usr_8f3c",
-  "family_root_id": "demo",
+  "pool_id": "pool_3s0drmj8em84yb4mnetqkz2j0x",
   "head_seq": 418,
   "retention_floor_seq": 120
 }
@@ -1306,7 +1340,7 @@ The `NamespaceMetadata` object has exactly these fields:
 | `created_at_ms` | The time the namespace was created, in Unix milliseconds. |
 | `created_by` | The actor that created or forked the namespace, as supplied by the application. |
 | `fork_basis` | The namespace and sequence this namespace was forked from, as `source_namespace_id` and `source_head_seq`, which records the fork point (the source namespace's sequence at which the fork was taken). It also includes the fork pin that keeps the source's state at that sequence readable (`source_pin_id`) and, for a namespace that a rebase created, `rebased_from` (see [`POST /forks`](#613-post-forks)). Only a forked namespace has this field. |
-| `family_root_id` | The namespace's [family root](glossary.md#family-root), whose prefix stores the content objects and upload records of the namespace's [fork family](glossary.md#fork-family) (see [File contents and ownership](format.md#15-file-contents-and-ownership)). A namespace that wasn't created by a fork is its own family root, and a fork has the same family root as its source. |
+| `pool_id` | The namespace's [pool](glossary.md#pool), whose prefix stores the namespace's content objects and upload records (see [File contents and ownership](format.md#15-file-contents-and-ownership)). A namespace that wasn't created by a fork records a pool ID that its create call generated, and a fork has the same pool as its source. |
 | `head_seq` | The namespace's current visible sequence. |
 | `retention_floor_seq` | The namespace's retention floor. A change feed request can set `after_seq` to this sequence or any later one, and the feed returns the commits after it. |
 | `retention_window_ms` | The namespace's [retention window](glossary.md#retention-window), in milliseconds. Only a namespace with a window has this field. |
@@ -1391,7 +1425,7 @@ Deletion runs in the namespace's writer session, and it's a fenced manifest publ
 
 The checkpoint inventory and snapshot deletion are explicit exceptions, and they stay available after deletion. Deleting a fork pin's ID through the snapshot route still returns `snapshot_not_found`.
 
-Deletion itself doesn't reclaim anything. [Retirement](format.md#95-retirement) defines when a deleted namespace is eligible for retirement, [Reference roots](format.md#112-reference-roots) defines the roots that garbage collection keeps, and [Deleting a retired owner's content](format.md#118-deleting-a-retired-owners-content) defines how the namespace's content is deleted.
+Deletion itself doesn't reclaim anything. [Retirement](format.md#95-retirement) defines when a deleted namespace is eligible for retirement, [Reference roots](format.md#112-reference-roots) defines the roots that garbage collection keeps, and [Retiring an eligible tombstone](format.md#118-retiring-an-eligible-tombstone) defines what retirement deletes. The namespace's content is stored in its [pool](glossary.md#pool), and the pool's collection deletes that content once no member refers to it (see [Garbage collection jobs](#garbage-collection-jobs)).
 
 A deployment should run garbage collection repeatedly to catch late writes, and it should keep the provider's lifecycle rule for incomplete multipart uploads. Deleting an object key doesn't erase the physical versions kept by bucket versioning or retention locks.
 
@@ -1790,7 +1824,7 @@ Without a precondition, appends are applied in commit order, each to the result 
 The new revision has an ordinary content reference whose size and checksum cover the whole file. The new reference either continues the current chain or starts a new one, depending on the current revision's content ID `C` and size `S`:
 
 - When this namespace created the chain of `C` (see [File contents and ownership](format.md#15-file-contents-and-ownership)), `S` is positive, and no revision or layout refers to more than `S` bytes of `C`, the new reference keeps `C`. Its pieces start at offset `S`. Its delta omits the layout, and validation writes no content object.
-- Otherwise, the new reference uses a new content ID, whose chain this namespace creates, and the first `S` bytes of the new chain are the bytes of `C`. This happens when another revision has already extended `C` (for example, after a restore of an older revision, or after an append to a copy of the file), and when another member of the fork family created the chain of `C`, such as in a fork whose file still refers to the source's content. The new chain shares the base's objects through the layout that its delta includes. Before it admits the reference, validation writes the base's unfolded bytes as an extent of the base chain. The commit includes only the appended bytes. An append to an empty file also starts a new content ID.
+- Otherwise, the new reference uses a new content ID, whose chain this namespace creates, and the first `S` bytes of the new chain are the bytes of `C`. This happens when another revision has already extended `C` (for example, after a restore of an older revision, or after an append to a copy of the file), and when another member of the namespace's pool created the chain of `C`, such as in a fork whose file still refers to the source's content. The new chain shares the base's objects through the layout that its delta includes. Before it admits the reference, validation writes the base's unfolded bytes as an extent of the base chain. The commit includes only the appended bytes. An append to an empty file also starts a new content ID.
 
 Either way, the append's `content_changed` event in the commit response and the change feed includes `append_offset`, which is `S` (see [`GET /changes`](#611-get-changes)).
 
@@ -2631,7 +2665,7 @@ Representative response:
     "source_head_seq": 418,
     "source_pin_id": "pin_00000000000000000031-3f9c2a7d41e05b68"
   },
-  "family_root_id": "demo",
+  "pool_id": "pool_3s0drmj8em84yb4mnetqkz2j0x",
   "head_seq": 418,
   "retention_floor_seq": 418
 }
@@ -2655,7 +2689,7 @@ The snapshot has to stay unexpired, and the source namespace has to stay live, w
 
 Forking doesn't extend the snapshot, and a later deletion of the snapshot doesn't affect the fork. The fork records the `Loonfs-Actor` header as `created_by`, independently of the source's creator. Namespace creation and forking produce no change-feed event.
 
-The new namespace has the same family root as its source. It reads inherited content under the family root's prefix, and it starts its own metadata history. The fork shares the source's existing content and metadata objects instead of copying the filesystem. To create the fork, the server:
+The new namespace has the same pool as its source. It reads inherited content under the pool's prefix, and it starts its own metadata history. The fork shares the source's existing content and metadata objects instead of copying the filesystem. To create the fork, the server:
 
 1. Might first fold the source's outstanding WAL tail, if the fork captures the current head. The fold writes that tail's inline content to content objects.
 2. Creates a fork pin in the source, so the source-owned immutable metadata segments stay available for as long as the target might still read them.
@@ -2878,7 +2912,7 @@ Representative response:
       "source_pin_id": "pin_00000000000000000035-5c2e8f1a9b7d4e60",
       "rebased_from": {"source_namespace_id": "demo-branch", "resume_after_seq": 418}
     },
-    "family_root_id": "demo",
+    "pool_id": "pool_3s0drmj8em84yb4mnetqkz2j0x",
     "head_seq": 432,
     "retention_floor_seq": 431
   },
@@ -3030,7 +3064,7 @@ A conforming server MUST:
 2. Publish visible metadata only through logical commits stored in visible numbered WAL objects.
 3. Make referenced content durable no later than the commit that references it (see [File contents and ownership](format.md#15-file-contents-and-ownership)).
 4. Preserve `(namespace_id, inode_id)` as the canonical identity of an item, and preserve the namespace lifetime described in [Namespaces and identity](format.md#11-namespaces-and-identity).
-5. Resolve content through the reading namespace's family root and the reference's content ID.
+5. Resolve content through the reading namespace's pool and the reference's content ID.
 6. Implement tombstone-first delete.
 7. Serve replay from the highest-numbered verified manifest found through `hint.json`, plus the numbered WAL objects after the folded boundary, replayed as logical commits. Pins keep manifest versions for retention, stable reads, restore, and forks.
 8. Map sibling names to name keys exactly as described in [Names and paths](format.md#14-names-and-paths).

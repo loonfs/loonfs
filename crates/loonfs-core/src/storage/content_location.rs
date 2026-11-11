@@ -10,7 +10,7 @@ use futures::{stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::keys::{content_blob, content_blob_name, content_span, content_span_name};
 use loonfs_objectstore::{ByteRange, ObjectStore};
 use loonfs_types::format::manifest::ContentLayoutRecord;
-use loonfs_types::{ContentExtent, ContentId, ContentRef, ExtentObject, NamespaceId};
+use loonfs_types::{ContentExtent, ContentId, ContentRef, ExtentObject, NamespaceId, PoolId};
 
 #[async_trait::async_trait]
 pub(crate) trait LayoutLookup: Sync {
@@ -26,19 +26,17 @@ pub(crate) struct LocatedExtent {
     pub(crate) extent: ContentExtent,
 }
 
-/// Returns the key of the object that `extent` reads, under the prefix of the
-/// reading namespace's family root.
-pub(crate) fn extent_object_key(family_root_id: &NamespaceId, extent: &ContentExtent) -> String {
+/// Returns the key of the object that `extent` reads, under the prefix of
+/// `pool_id`, the reading namespace's pool.
+pub(crate) fn extent_object_key(pool_id: &PoolId, extent: &ContentExtent) -> String {
     match extent.object {
-        ExtentObject::Whole => content_blob(family_root_id, &extent.content_id),
-        ExtentObject::Span { start, end } => {
-            content_span(family_root_id, &extent.content_id, start, end)
-        }
+        ExtentObject::Whole => content_blob(pool_id, &extent.content_id),
+        ExtentObject::Span { start, end } => content_span(pool_id, &extent.content_id, start, end),
     }
 }
 
 /// Returns the name of the object that `extent` reads: its key with the
-/// family root's content prefix removed, the same under every family root.
+/// pool's content prefix removed, the same under every pool.
 pub(crate) fn extent_object_name(extent: &ContentExtent) -> String {
     match extent.object {
         ExtentObject::Whole => content_blob_name(&extent.content_id),
@@ -60,15 +58,14 @@ pub struct ContentLocation {
 impl ContentLocation {
     /// Truncates the layout at the lowest tail offset, then takes the pieces.
     /// A nonzero folded prefix without a layout is corruption. Every key is
-    /// under the prefix of `family_root_id`, the reading namespace's family
-    /// root.
+    /// under the prefix of `pool_id`, the reading namespace's pool.
     pub(crate) async fn resolve<L: LayoutLookup>(
         lookup: &L,
-        family_root_id: &NamespaceId,
+        pool_id: &PoolId,
         content: Option<&ProjectedContent>,
         content_ref: &ContentRef,
     ) -> Result<Self> {
-        let object_key = content_object_key_for_ref(family_root_id, content_ref);
+        let object_key = content_object_key_for_ref(pool_id, content_ref);
         let mut end = content_ref.size_bytes;
         let content = content.filter(|content| content.pieces[0].offset <= end);
         let mut pieces = Vec::new();
@@ -119,13 +116,13 @@ impl ContentLocation {
                 if remaining == 0 {
                     break;
                 }
-                let object_key = extent_object_key(family_root_id, &extent);
+                let object_key = extent_object_key(pool_id, &extent);
                 extent.length = extent.length.min(remaining);
                 remaining -= extent.length;
                 extents.push(LocatedExtent { object_key, extent });
             }
         } else if content_ref.size_bytes == 0 && content.is_none() {
-            return Ok(Self::whole(family_root_id, content_ref));
+            return Ok(Self::whole(pool_id, content_ref));
         }
         Ok(Self {
             object_key,
@@ -136,9 +133,9 @@ impl ContentLocation {
     }
 
     /// Returns the location of a reference whose bytes are the start of the
-    /// whole object under the prefix of `family_root_id`, such as an upload's.
-    pub(crate) fn whole(family_root_id: &NamespaceId, content_ref: &ContentRef) -> Self {
-        let object_key = content_object_key_for_ref(family_root_id, content_ref);
+    /// whole object under the prefix of `pool_id`, such as an upload's.
+    pub(crate) fn whole(pool_id: &PoolId, content_ref: &ContentRef) -> Self {
+        let object_key = content_object_key_for_ref(pool_id, content_ref);
         Self {
             extents: vec![LocatedExtent {
                 object_key: object_key.clone(),

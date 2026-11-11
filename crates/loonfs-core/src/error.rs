@@ -19,7 +19,7 @@ pub use loonfs_types::MergeBound;
 use loonfs_types::{ActiveWriter, CommittedReceipt, MergeConflict};
 use loonfs_types::{
     BindingVersion, ChangeSeq, CommitId, ErrorDetails, InodeId, InodeKind, ManifestNo, NamespaceId,
-    PathError, PrincipalScope, RevisionNo, UploadId, WriterEpoch,
+    PathError, PoolId, PrincipalScope, RevisionNo, UploadId, WriterEpoch,
 };
 use thiserror::Error;
 
@@ -223,11 +223,12 @@ pub enum CoreError {
     )]
     MetadataPublicationBudgetExceeded { elapsed_ms: u64, budget_ms: u64 },
     #[error(
-        "the garbage collection live set of namespace `{namespace_id}` needs {bytes} bytes of \
+        "the garbage collection live set of `{collected_id}` needs {bytes} bytes of \
          read working memory, above its {limit}-byte limit"
     )]
     LiveSetExceedsReadMemory {
-        namespace_id: NamespaceId,
+        /// The namespace or the pool whose collection needs the memory.
+        collected_id: String,
         bytes: usize,
         limit: usize,
     },
@@ -302,6 +303,8 @@ pub enum CoreError {
     StoreContention { object_key: String },
     #[error("namespace `{namespace_id}` does not exist")]
     NamespaceNotFound { namespace_id: NamespaceId },
+    #[error("pool `{pool_id}` has no pool record")]
+    PoolNotFound { pool_id: PoolId },
     #[error("namespace `{namespace_id}` already exists")]
     NamespaceExists { namespace_id: NamespaceId },
     #[error("namespace `{namespace_id}` is deleted")]
@@ -504,6 +507,7 @@ impl CoreError {
             | CoreError::AppendTooLarge { .. } => ErrorCode::ContentTooLarge,
             CoreError::MergeTooLarge { .. } => ErrorCode::MergeTooLarge,
             CoreError::NamespaceNotFound { .. } => ErrorCode::NamespaceNotFound,
+            CoreError::PoolNotFound { .. } => ErrorCode::PoolNotFound,
             CoreError::NamespaceExists { .. } => ErrorCode::NamespaceExists,
             CoreError::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
             CoreError::NamespaceUnrestricted { .. } => ErrorCode::NamespaceUnrestricted,
@@ -650,6 +654,7 @@ impl CoreError {
             | CoreError::OutcomeUnknown { .. }
             | CoreError::StoreContention { .. }
             | CoreError::NamespaceNotFound { .. }
+            | CoreError::PoolNotFound { .. }
             | CoreError::NamespaceExists { .. }
             | CoreError::NamespaceDeleted { .. }
             | CoreError::Forbidden { .. }
@@ -1128,19 +1133,19 @@ mod tests {
         let error = CoreError::store("namespaces/demo/metadata/segment", &invalid_range);
         assert_eq!(error.code(), ErrorCode::ServerError);
 
-        let key = "namespaces/demo/content/blob".to_owned();
+        let key = "pools/pool_00000000000000000000000001/content/blob".to_owned();
         for (occupied, message) in [
             (
                 ObjectStoreError::DifferentObject {
                     object_key: key.clone(),
                 },
-                "immutable object `namespaces/demo/content/blob` already exists with different bytes",
+                "immutable object `pools/pool_00000000000000000000000001/content/blob` already exists with different bytes",
             ),
             (
                 ObjectStoreError::StoredChecksumMissing {
                     object_key: key.clone(),
                 },
-                "immutable object `namespaces/demo/content/blob` already exists without a stored checksum",
+                "immutable object `pools/pool_00000000000000000000000001/content/blob` already exists without a stored checksum",
             ),
         ] {
             let error = CoreError::store(&key, &occupied);

@@ -4,7 +4,7 @@ This document describes how LoonFS stores a filesystem in object storage, and ho
 
 LoonFS stores everything in object storage. File bytes are stored in content objects, and every change to the directory tree is recorded in a numbered write-ahead log (WAL). LoonFS uses five object-store operations: put-if-absent, compare-and-swap on small objects, reads, listings, and deletes. It doesn't use transactions across objects, so every change to a namespace becomes durable through a single object write.
 
-Each "namespace" is one directory tree with its own history, stored under `namespaces/{namespace_id}/`.
+Each "namespace" is one directory tree with its own history, stored under `namespaces/{namespace_id}/`. A namespace's content objects are stored under the prefix of its [pool](glossary.md#pool) (`pools/{pool_id}/`), which the namespace shares with its forks.
 
 An application can use LoonFS as an embedded Rust library (`loonfs`) or through the HTTP API, which `loonfs-http` implements and `loonfs-server` runs as a standalone server. LoonFS coordinates writers through object-storage writes, so a change of writer takes about 200 ms. Because of that, most applications are better served by one long-lived writer in a server that many clients share.
 
@@ -19,7 +19,7 @@ Each namespace is stored as six main kinds of objects:
 | Hint | The number of a recent manifest, where readers start looking for the current one. |
 | Pin | A reference to one manifest that keeps it, and everything it lists, from being deleted. Snapshots and forks use pins. |
 | Metadata segment | Sorted metadata rows, in blocks that can be read independently. |
-| Content object | File bytes. Content objects are immutable, and a file's bytes can span several of them. |
+| Content object | File bytes, stored under the namespace's pool. Content objects are immutable, and a file's bytes can span several of them. |
 
 Manifests and WAL objects are numbered 1, 2, 3, and so on, with a separate counter for each. LoonFS creates every numbered object with put-if-absent, so when two processes try to write the same number, exactly one of them succeeds. Successfully writing the next WAL object commits every record in it. Writing the next manifest publishes a new set of metadata segments or a change to the namespace's state (for example, a new writer or a deletion).
 
@@ -87,7 +87,7 @@ later numbered WAL -> committed changes ---+            |
 
 A new namespace's first manifest describes only the root directory. A fork's first manifest lists the metadata runs it inherited from its source.
 
-LoonFS resolves a path by following [directory bindings](glossary.md#directory-binding-direntry) from the root. Each file revision has a content reference, which records a content ID, a size, and a checksum. The content ID and the namespace's [family root](glossary.md#family-root), which its manifest records, determine the keys of the objects that store the bytes, so a fork can read inherited content without loading its source's manifest or walking its fork ancestry. Inline content is read from the WAL until a fold writes it to a content object.
+LoonFS resolves a path by following [directory bindings](glossary.md#directory-binding-direntry) from the root. Each file revision has a content reference, which records a content ID, a size, and a checksum. The content ID and the namespace's [pool](glossary.md#pool), which its manifest records, determine the keys of the objects that store the bytes, so a fork can read inherited content without loading its source's manifest or walking its fork ancestry. Inline content is read from the WAL until a fold writes it to a content object.
 
 Directory listings use committed metadata for names and file sizes, so listing a directory doesn't download any files. Reading a file verifies its complete size and checksum. If an object needed to recover the namespace is missing or corrupt, the read fails.
 
@@ -99,7 +99,7 @@ Why fail instead of reading an older version of the files? A fallback would retu
 
 A "fork" is a new namespace that starts as a copy of another namespace at one point in its history. To create one, LoonFS writes and verifies a [pin](glossary.md#snapshot) on the source's manifest, and then writes the fork's manifest 1, which lists the source's metadata runs. The fork shares the source's content and metadata objects, so nothing is copied (and the cost of a fork doesn't depend on how much data the source stores). Forking the source's current head may first fold the source's WAL tail, which writes its inline content to content objects. After the fork, commits to one namespace appear in the other only when a [merge](glossary.md#merge) applies them.
 
-A fork and its source belong to one [fork family](glossary.md#fork-family), and every member of the family stores its content objects under the family root's prefix. So the fork reads inherited content and its own content with the same kind of key. When the fork publishes its own manifests, the inherited objects stay where they are. The source keeps its pin for the fork until the fork is deleted and retired.
+A fork joins its source's [pool](glossary.md#pool), the set of namespaces that share one set of content objects, and every member of the pool stores its content objects under the pool's prefix. So the fork reads inherited content and its own content with the same kind of key, and a merge of the fork refers to the fork's content without copying bytes. When the fork publishes its own manifests, the inherited objects stay where they are. The source keeps its pin for the fork until the fork is deleted and retired.
 
 A snapshot is a pin too. A caller creates a snapshot to keep one version of a namespace readable, and the read endpoints and forks accept its `snapshot_id`. A snapshot can have an expiry time, or none. Each create call writes a new pin with a new ID, so a snapshot's name is a label, not a key (two snapshots can have the same name). The maintenance API's checkpoint inventory lists every pin, snapshots and fork pins, so an operator can see what keeps old manifests.
 
@@ -117,10 +117,10 @@ An expired snapshot still protects its manifest until garbage collection deletes
 | Fold | Moves committed records from the WAL into new metadata segments, and publishes the next manifest. |
 | Compaction | Rewrites metadata runs into fewer runs and drops rows that are no longer needed, without changing any retained view. |
 | Retention advance | Moves the [retention floor](glossary.md#retention-floor) forward, after checking that the current manifest's segments exist. The advance writes the new floor to the WAL as a floor object, and the next fold records the floor in a manifest. Compaction can then remove history at or below the floor. |
-| Garbage collection | Deletes objects that nothing references anymore, once they're old enough. Each collection starts from a fresh list of what's still referenced. |
+| Garbage collection | Deletes objects that nothing references anymore, once they're old enough. A namespace's collection deletes the namespace's own manifests, WAL objects, segments, and pins, and a pool's collection deletes the pool's content with roots from every member. Each collection starts from a fresh list of what's still referenced. |
 
 Deleting a file records a subtree tombstone, which can be undone. Deleting a namespace publishes a final manifest with a deleted status. Neither one deletes shared content right away.
 
-A namespace is retired once a grace period has passed and no pins on the namespace remain (see [Retirement](format.md#95-retirement)). Retiring a fork deletes its pin on its source. Retiring a family root, which can happen only after every fork of it is retired, deletes the family's content (see [Deleting a retired owner's content](format.md#118-deleting-a-retired-owners-content)).
+A namespace is retired once a grace period has passed and no pins on the namespace remain (see [Retirement](format.md#95-retirement)). Retiring a fork deletes its pin on its source, and no retirement deletes content (see [Retiring an eligible tombstone](format.md#118-retiring-an-eligible-tombstone)). Once no member of a pool refers to a content object, the pool's collection deletes the object under the same age rule as any other unreferenced object (see [Content roots](format.md#119-content-roots)).
 
-Hosts decide when to run maintenance and which namespaces to maintain. The format defines what each operation can publish or delete. An extension such as grep lists its segments in its own entry of the namespace's manifest. The extension publishes each change to its entry as the namespace's next manifest, and garbage collection deletes an extension's unreferenced segments by the same age rule as metadata segments (see [Extensions](format.md#124-extensions)).
+Hosts decide when to run maintenance and which namespaces and pools to maintain. The format defines what each operation can publish or delete. An extension such as grep lists its segments in its own entry of the namespace's manifest. The extension publishes each change to its entry as the namespace's next manifest, and garbage collection deletes an extension's unreferenced segments by the same age rule as metadata segments (see [Extensions](format.md#124-extensions)).

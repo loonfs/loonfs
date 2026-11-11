@@ -189,7 +189,7 @@ async fn fences_fold_and_are_reclaimed_at_the_folded_boundary() {
     };
     let aged = context(options.grace_window_ms + 1);
     let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options, &aged.clock())
+        .gc(&options, &aged.clock())
         .await
         .expect("collect");
     assert_eq!(report.deleted.wal_objects, 1);
@@ -718,7 +718,7 @@ async fn a_fold_and_collection_during_tip_discovery_cannot_reuse_a_wal_number() 
             ..context(1_000)
         };
         crate::test_support::namespace_store(store.inner(), &namespace_id)
-            .gc(None, &options, &aged.clock())
+            .gc(&options, &aged.clock())
             .await
             .expect("collect old WAL");
         assert!(store
@@ -870,7 +870,7 @@ async fn a_confirmation_after_a_collected_floor_object_never_writes_the_emptied_
                 ..context(1_000)
             };
             namespace
-                .gc(None, &options, &aged.clock())
+                .gc(&options, &aged.clock())
                 .await
                 .expect("collect the floor object");
             assert!(store
@@ -1254,7 +1254,6 @@ async fn a_writer_resuming_after_its_fence_was_collected_does_not_acknowledge_it
             store_clock.advance_ms(options.grace_window_ms + 1);
             let report = crate::test_support::namespace_store(blocked.inner(), &namespace_id)
                 .gc(
-                    None,
                     &options,
                     &WriterAt {
                         now_ms: store_clock.now_ms(),

@@ -9,7 +9,7 @@ use crate::snapshot::record::load_pin_at_key;
 use crate::time::OperationClock;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::{ForkBasis, PinOwner, PinPayload};
-use loonfs_types::{NamespaceId, RetainedReason};
+use loonfs_types::NamespaceId;
 
 pub(super) enum PinSweep {
     DeleteFork,
@@ -106,8 +106,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
         }
         // A target whose current manifest can't be loaded, whether the store
         // failed or the manifest is invalid, is a member whose roots the
-        // family root's collection can't read. That stops only the family's content
-        // sweep (format spec, "One complete pass"), and keeping the pin
+        // pool's collection can't read. That stops only the pool's content
+        // sweep (format spec, "One complete collection"), and keeping the pin
         // protects more, never less.
         match self
             .with_namespace(target_namespace_id.clone())
@@ -161,16 +161,6 @@ impl GraceAge {
             None => Self::Unknown,
             Some(modified) if now_ms.saturating_sub(modified) < grace_window_ms => Self::Young,
             Some(_) => Self::Aged,
-        }
-    }
-
-    /// The retention reason this outcome is, for a caller reporting why a
-    /// collection kept what it kept. `None` for the outcome that retained nothing.
-    pub(crate) fn retained_reason(self) -> Option<RetainedReason> {
-        match self {
-            Self::Aged => None,
-            Self::Young => Some(RetainedReason::WithinGraceWindow),
-            Self::Unknown => Some(RetainedReason::NoProviderTimestamp),
         }
     }
 }

@@ -3,7 +3,7 @@
 
 use super::direct::validate_upload_checksum;
 use super::proxied::find_proxied_content_ref;
-use super::records::OutcomeCreation;
+use super::records::{create_upload_outcome, OutcomeCreation};
 use super::session::{
     authorize_upload_subject, ensure_session_open, ensure_session_subject, upload_mode,
 };
@@ -20,7 +20,7 @@ use loonfs_objectstore::{MultipartPart, ObjectStore};
 use loonfs_types::format::control::{UploadOutcome, UploadSessionMode, UploadSessionPayload};
 use loonfs_types::{
     ChecksumAlgorithm, CompleteUploadBody, CompletedUploadPart, ContentId, ContentRef,
-    ContentRefKind, NamespaceId, UploadContentClaim, UploadId, UploadMode, UploadSession,
+    ContentRefKind, NamespaceId, PoolId, UploadContentClaim, UploadId, UploadMode, UploadSession,
     UploadSessionStatus,
 };
 
@@ -70,23 +70,22 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             );
         }
 
-        let verified =
-            verify_completion(&self.namespace.store, catalog.family_root_id(), plan).await?;
+        let verified = verify_completion(&self.namespace.store, catalog.pool_id(), plan).await?;
         self.namespace
-            .record_completion(catalog.family_root_id(), &loaded.session, verified, &clock)
+            .record_completion(catalog.pool_id(), &loaded.session, verified, &clock)
             .await
     }
 }
 
 impl<S: ObjectStore> NamespaceStore<S> {
     /// Records a verified content reference as the session's completed outcome,
-    /// under the prefix of `family_root_id`.
+    /// under the prefix of `pool_id`.
     ///
     /// All upload modes use this transition. Completion makes the content
     /// eligible for publication and later garbage collection.
     pub(crate) async fn record_completion(
         &self,
-        family_root_id: &NamespaceId,
+        pool_id: &PoolId,
         session: &UploadSessionPayload,
         verified: ContentRef,
         clock: &OperationClock,
@@ -96,10 +95,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             completed_at_ms: now_ms,
             content_ref: verified.clone(),
         };
-        let standing = match self
-            .create_upload_outcome(family_root_id, session, &outcome)
-            .await?
-        {
+        let standing = match create_upload_outcome(&self.store, pool_id, session, &outcome).await? {
             OutcomeCreation::Created => outcome,
             OutcomeCreation::Existing(existing) => existing,
         };
@@ -352,19 +348,17 @@ fn completion_plan<'a>(
 /// server. Both use one metadata request, without downloading the object.
 async fn verify_completion<S: ObjectStore + ?Sized>(
     store: &S,
-    family_root_id: &NamespaceId,
+    pool_id: &PoolId,
     plan: CompletionPlan<'_>,
 ) -> Result<ContentRef> {
     match plan {
-        CompletionPlan::Proxied { session } => {
-            find_proxied_content_ref(store, family_root_id, session)
-                .await?
-                .ok_or_else(|| {
-                    CoreError::InvalidUploadContent("upload content has not been staged".to_owned())
-                })
-        }
+        CompletionPlan::Proxied { session } => find_proxied_content_ref(store, pool_id, session)
+            .await?
+            .ok_or_else(|| {
+                CoreError::InvalidUploadContent("upload content has not been staged".to_owned())
+            }),
         CompletionPlan::DirectPut { requested } => {
-            verify_durable_content_checksum(store, family_root_id, &requested)
+            verify_durable_content_checksum(store, pool_id, &requested)
                 .await
                 .map_err(content_failure)?;
             Ok(requested)
@@ -377,7 +371,7 @@ async fn verify_completion<S: ObjectStore + ?Sized>(
         } => {
             assemble_multipart_upload(
                 store,
-                family_root_id,
+                pool_id,
                 provider_upload_id,
                 checksum_algorithm,
                 parts,
@@ -398,19 +392,19 @@ async fn verify_completion<S: ObjectStore + ?Sized>(
 /// was lost.
 async fn assemble_multipart_upload<S: ObjectStore + ?Sized>(
     store: &S,
-    family_root_id: &NamespaceId,
+    pool_id: &PoolId,
     provider_upload_id: &str,
     checksum_algorithm: ChecksumAlgorithm,
     parts: &[CompletedUploadPart],
     expected: &ContentRef,
 ) -> Result<()> {
     let parts = multipart_parts(parts, checksum_algorithm)?;
-    let object_key = content_blob(family_root_id, &expected.content_id);
+    let object_key = content_blob(pool_id, &expected.content_id);
     store
         .complete_multipart_upload(&object_key, provider_upload_id, &parts, &expected.checksum)
         .await
         .map_err(|error| CoreError::store(&object_key, &error))?;
-    verify_durable_content_checksum(store, family_root_id, expected)
+    verify_durable_content_checksum(store, pool_id, expected)
         .await
         .map_err(content_failure)
 }

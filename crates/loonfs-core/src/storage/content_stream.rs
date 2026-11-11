@@ -304,7 +304,7 @@ impl<S> std::fmt::Debug for FileContentStream<S> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::content::tests::{family_root_id, put_content_object, test_store};
+    use super::super::content::tests::{pool_id, put_content_object, test_store};
     use super::*;
 
     use loonfs_objectstore::keys::content_blob;
@@ -378,7 +378,7 @@ mod tests {
             .expect("the test opens a range inside the content");
         FileContentStream::open_inner(
             store,
-            super::ContentLocation::whole(&family_root_id(), content_ref),
+            super::ContentLocation::whole(&pool_id(), content_ref),
             Some(test_entry()),
             content_ref.clone(),
             test_chunk_bytes(),
@@ -401,7 +401,7 @@ mod tests {
         let bytes = payload(3 * TEST_CHUNK_BYTES + 7);
         let content_ref = content_ref(&bytes);
         put_content_object(&store, &content_ref, &bytes).await;
-        let key = content_blob(&family_root_id(), &content_ref.content_id);
+        let key = content_blob(&pool_id(), &content_ref.content_id);
         let start = TEST_CHUNK_BYTES / 2;
         let end = start + TEST_CHUNK_BYTES + 10;
 

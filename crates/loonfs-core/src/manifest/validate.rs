@@ -45,25 +45,12 @@ pub(super) fn validate_manifest(
 ) -> Result<(), ManifestLoadError> {
     if payload.fork_basis.as_ref().is_some_and(|basis| {
         basis.manifest.owner_namespace_id == payload.namespace_id
-            || payload.is_family_root()
             || basis.manifest.head_seq > payload.retention_floor_seq
     }) {
         return Err(ManifestLoadError::RunManifestMismatch {
             object_key: object_key.to_owned(),
-            message: "fork provenance disagrees with namespace identity, family root, or \
-                      retention floor"
+            message: "fork provenance disagrees with namespace identity or retention floor"
                 .to_owned(),
-        });
-    }
-    // The fork call copies a fork's family root from the pinned source
-    // manifest, and checking that value here would need the source manifest.
-    if payload.fork_basis.is_none() && !payload.is_family_root() {
-        return Err(ManifestLoadError::RunManifestMismatch {
-            object_key: object_key.to_owned(),
-            message: format!(
-                "a manifest without a fork basis records `{}` as its family root instead of itself",
-                payload.family_root_id
-            ),
         });
     }
     validate_manifest_sequence_ranges(object_key, payload)?;

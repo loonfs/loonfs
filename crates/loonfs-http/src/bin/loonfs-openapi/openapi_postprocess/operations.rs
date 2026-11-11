@@ -351,6 +351,14 @@ pub(crate) const OPERATION_SDK_NAMES: &[(&str, SdkName)] = &[
         },
     ),
     (
+        "run_pool_maintenance",
+        SdkName {
+            group: &["maintenance", "pools", "runs"],
+            method: "create",
+            request: None,
+        },
+    ),
+    (
         "sign_upload_parts",
         SdkName {
             group: &["uploads"],

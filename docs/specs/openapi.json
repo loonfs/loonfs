@@ -1166,14 +1166,8 @@
         "type": "object"
       },
       "DeletedObjectCounts": {
-        "description": "The number of objects that one garbage collection pass deleted, grouped by object family.",
+        "description": "The number of objects that one garbage collection pass of a namespace deleted, grouped by\nobject family.",
         "properties": {
-          "content_objects": {
-            "description": "The content objects the pass deleted because no retained view referenced them and they were\nolder than the grace window.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
           "extension_segments": {
             "description": "The unreferenced extension segments, such as the grep index's segments, that the pass\ndeleted.",
             "format": "int64",
@@ -1192,24 +1186,6 @@
             "minimum": 0,
             "type": "integer"
           },
-          "retired_content_objects": {
-            "description": "The content objects that the pass listed under a retired namespace and deleted.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "temporary_objects": {
-            "description": "The store's temporary objects that the pass deleted because they were older than the grace\nwindow.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "upload_sessions": {
-            "description": "The upload session records that the pass deleted after their grace windows passed.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
           "wal_objects": {
             "description": "The unreferenced WAL objects that the pass deleted.",
             "format": "int64",
@@ -1221,11 +1197,7 @@
           "wal_objects",
           "metadata_segments",
           "extension_segments",
-          "manifests",
-          "upload_sessions",
-          "content_objects",
-          "retired_content_objects",
-          "temporary_objects"
+          "manifests"
         ],
         "type": "object"
       },
@@ -2792,9 +2764,9 @@
         "type": "object"
       },
       "GcSkippedWork": {
-        "description": "A part of a garbage collection pass that the pass skipped.",
+        "description": "A part of a garbage collection pass of a pool that the pass skipped.",
         "enum": [
-          "content_sweep_family_budget",
+          "content_sweep_pool_budget",
           "content_sweep_unreadable_member"
         ],
         "type": "string"
@@ -3618,10 +3590,6 @@
             "$ref": "#/components/schemas/ActorId",
             "description": "The actor that created the namespace, as the application supplied it."
           },
-          "family_root_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "The namespace whose prefix stores the content of this namespace's fork family. For a\nnamespace that wasn't created by a fork, this is the namespace itself. A fork has the same\nfamily root as its source."
-          },
           "fork_basis": {
             "$ref": "#/components/schemas/NamespaceForkBasis",
             "description": "The namespace and sequence this namespace was forked from. Only a forked namespace has this\nfield."
@@ -3633,6 +3601,10 @@
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
             "description": "The namespace ID."
+          },
+          "pool_id": {
+            "$ref": "#/components/schemas/PoolId",
+            "description": "The pool that stores the namespace's content objects and upload records. A fork has the\nsame pool as its source."
           },
           "retention_floor_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
@@ -3650,7 +3622,7 @@
           "namespace_id",
           "created_at_ms",
           "created_by",
-          "family_root_id",
+          "pool_id",
           "head_seq",
           "retention_floor_seq"
         ],
@@ -4067,6 +4039,91 @@
         "pattern": "^pin_[0-9]{20}-[0-9a-f]{16}$",
         "type": "string"
       },
+      "PoolDeletedObjectCounts": {
+        "description": "The number of objects that one garbage collection pass of a pool deleted, grouped by object\nfamily.",
+        "properties": {
+          "content_objects": {
+            "description": "The content objects the pass deleted because no member's retained view referenced them and\nthey were older than the grace window.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "temporary_objects": {
+            "description": "The temporary objects that the pass deleted because they were older than the grace window.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "upload_sessions": {
+            "description": "The upload sessions whose records the pass deleted after their grace windows passed.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "content_objects",
+          "upload_sessions",
+          "temporary_objects"
+        ],
+        "type": "object"
+      },
+      "PoolId": {
+        "description": "The ID of one pool, the set of namespaces that share one set of content objects. See\n[Pools](https://github.com/loonfs/loonfs/blob/main/docs/design/pools.md).",
+        "example": "pool_3s0drmj8em84yb4mnetqkz2j0x",
+        "pattern": "^pool_[0-7][0-9a-hjkmnp-tv-z]{25}$",
+        "type": "string"
+      },
+      "PoolRetainedCandidates": {
+        "description": "The candidates that one garbage collection pass of a pool inspected but didn't delete, counted\nby reason.",
+        "properties": {
+          "no_provider_timestamp": {
+            "description": "The unreferenced candidates that had no provider timestamp, so their age was unknown.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "referenced": {
+            "description": "The content objects that the roots of a pool member protected. A content object is\nprotected when an extent filter of a rooted layout segment matches it, and a false match\nkeeps the object until no rooted view lists that segment.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "unrecognized_key": {
+            "description": "The keys that garbage collection didn't recognize in the object families it scanned. The\npass keeps these objects.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "upload_session_undecided": {
+            "description": "The upload sessions that the pass couldn't prove safe to delete.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "upload_session_window": {
+            "description": "The upload sessions that a lease or grace window still protected.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "within_grace_window": {
+            "description": "The unreferenced candidates that were younger than the grace window, according to their\nprovider timestamps.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "referenced",
+          "within_grace_window",
+          "no_provider_timestamp",
+          "unrecognized_key",
+          "upload_session_window",
+          "upload_session_undecided"
+        ],
+        "type": "object"
+      },
       "PrincipalId": {
         "description": "A stable, opaque principal ID of 1 to 256 visible ASCII characters other than the comma.",
         "example": "prn_8f3c",
@@ -4146,7 +4203,7 @@
         "type": "object"
       },
       "RetainedCandidates": {
-        "description": "The candidates that one garbage collection pass inspected but didn't delete, counted by reason.",
+        "description": "The candidates that one garbage collection pass of a namespace inspected but didn't delete,\ncounted by reason.",
         "properties": {
           "checkpoint_not_deletable": {
             "description": "The checkpoint records that the pass couldn't delete because of their owner or their grace\nwindow.",
@@ -4161,25 +4218,13 @@
             "type": "integer"
           },
           "referenced": {
-            "description": "The candidates that a current root protected, or that manifest discovery needed. A content\nobject is protected when an extent filter of a rooted layout segment matches it, and a false\nmatch keeps the object until no rooted view lists that segment.",
+            "description": "The candidates that a current root protected, or that manifest discovery needed.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
           },
           "unrecognized_key": {
             "description": "The keys that garbage collection didn't recognize in the object families it scanned. The\npass keeps these objects.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "upload_session_undecided": {
-            "description": "The upload sessions that the pass couldn't prove safe to delete.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "upload_session_window": {
-            "description": "The upload sessions that a lease or grace window still protected.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -4196,9 +4241,7 @@
           "within_grace_window",
           "no_provider_timestamp",
           "unrecognized_key",
-          "checkpoint_not_deletable",
-          "upload_session_window",
-          "upload_session_undecided"
+          "checkpoint_not_deletable"
         ],
         "type": "object"
       },
@@ -4405,7 +4448,7 @@
             "description": "The namespace that the pass ran against."
           },
           "next_reclamation_at_ms": {
-            "description": "The earliest future retirement deadline, pin deletion time, or upload cleanup time.",
+            "description": "The earliest future retirement deadline or pin deletion time.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -4419,13 +4462,6 @@
           "retained": {
             "$ref": "#/components/schemas/RetainedCandidates",
             "description": "The candidates that the pass kept at deletion time, counted by reason."
-          },
-          "skipped": {
-            "description": "The work that this pass skipped at a limit, by reason. Empty when the pass skipped nothing.",
-            "items": {
-              "$ref": "#/components/schemas/GcSkippedWork"
-            },
-            "type": "array"
           }
         },
         "required": [
@@ -4559,6 +4595,105 @@
         },
         "required": [
           "namespace_id",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "RunPoolMaintenanceRequest": {
+        "description": "One maintenance job for one pool.",
+        "discriminator": {
+          "mapping": {
+            "gc": "#/components/schemas/RunPoolMaintenanceRequestGc"
+          },
+          "propertyName": "kind"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/RunPoolMaintenanceRequestGc"
+          }
+        ]
+      },
+      "RunPoolMaintenanceRequestGc": {
+        "description": "A garbage collection job for the pool's aged, unreferenced content objects, upload records,\nand temporary objects.",
+        "properties": {
+          "grace_window_ms": {
+            "description": "The minimum age, in milliseconds, that an object must reach before the pass can delete it.\nThe value must be at least the server's advertised safety floor. The grep index's collector\nkeeps its own age rules, so this value doesn't change them.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "kind": {
+            "enum": [
+              "gc"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      "RunPoolMaintenanceResponse": {
+        "description": "The result of one maintenance job on a pool.\n\nThe `kind` matches the request.",
+        "discriminator": {
+          "mapping": {
+            "gc": "#/components/schemas/RunPoolMaintenanceResponseGc"
+          },
+          "propertyName": "kind"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/RunPoolMaintenanceResponseGc"
+          }
+        ]
+      },
+      "RunPoolMaintenanceResponseGc": {
+        "description": "The counts and deadlines from one garbage collection call on the pool.",
+        "properties": {
+          "deleted": {
+            "$ref": "#/components/schemas/PoolDeletedObjectCounts",
+            "description": "The objects that the pass deleted, counted by object family."
+          },
+          "kind": {
+            "enum": [
+              "gc"
+            ],
+            "type": "string"
+          },
+          "listed_bytes": {
+            "description": "The bytes of every object that the pass listed under the pool, each object once, before the\npass's deletes.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "next_reclamation_at_ms": {
+            "description": "The earliest future upload cleanup time, or the end of the pool record's creation grace.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "pool_id": {
+            "$ref": "#/components/schemas/PoolId",
+            "description": "The pool that the pass ran against."
+          },
+          "retained": {
+            "$ref": "#/components/schemas/PoolRetainedCandidates",
+            "description": "The candidates that the pass kept at deletion time, counted by reason."
+          },
+          "skipped": {
+            "description": "The work that this pass skipped at a limit, by reason. Empty when the pass skipped nothing.",
+            "items": {
+              "$ref": "#/components/schemas/GcSkippedWork"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "pool_id",
+          "deleted",
+          "retained",
+          "listed_bytes",
           "kind"
         ],
         "type": "object"
@@ -5778,7 +5913,7 @@
     },
     "/v0/maintenance/namespaces/{namespace_id}/runs": {
       "post": {
-        "description": "Runs one maintenance job for the namespace. The body's `kind` selects the job, which is one of `metadata`, `gc`, `retention`, `retention_window`, or `recover_administrator`. The response includes the same `kind` and the job's result. A deleted namespace accepts only `gc`. A `metadata` job folds the WAL tail and compacts metadata until nothing is due, or until it publishes 16 compaction units. A compaction unit can take minutes, so the call can too. When the result's `outcome` is `due`, another `metadata` run continues the work. A `gc` job reads the current manifest, lists the pins, and then sweeps every object family to the end, including the segments of extensions such as the grep index. Each listing starts at the beginning, and the job doesn't keep a position to continue from. A `retention` job advances the retention floor to the folded manifest head, or to the one target that `to_seq` or `cutoff_at_ms` sets. A `retention_window` job sets the namespace's retention window to `retention_window_ms`, or clears it when the body doesn't include that field.",
+        "description": "Runs one maintenance job for the namespace. The body's `kind` selects the job, which is one of `metadata`, `gc`, `retention`, `retention_window`, or `recover_administrator`. The response includes the same `kind` and the job's result. A deleted namespace accepts only `gc`. A `metadata` job folds the WAL tail and compacts metadata until nothing is due, or until it publishes 16 compaction units. A compaction unit can take minutes, so the call can too. When the result's `outcome` is `due`, another `metadata` run continues the work. A `gc` job reads the current manifest, lists the pins, and then sweeps every object family under the namespace's prefix to the end, including the segments of extensions such as the grep index. The collection of the namespace's pool, which deletes content objects, upload records, and temporary objects, is a job of the pool. Each listing starts at the beginning, and the job doesn't keep a position to continue from. A `retention` job advances the retention floor to the folded manifest head, or to the one target that `to_seq` or `cutoff_at_ms` sets. A `retention_window` job sets the namespace's retention window to `retention_window_ms`, or clears it when the body doesn't include that field.",
         "operationId": "run_maintenance",
         "parameters": [
           {
@@ -5876,6 +6011,103 @@
         },
         "x-fern-sdk-group-name": [
           "maintenance",
+          "runs"
+        ],
+        "x-fern-sdk-method-name": "create",
+        "x-loonfs-retry": "not_idempotent"
+      }
+    },
+    "/v0/maintenance/pools/{pool_id}/runs": {
+      "post": {
+        "description": "Runs one maintenance job for the pool. The body's `kind` selects the job, which is `gc`. The response includes the same `kind` and the job's result. A `gc` job reads the pool record, lists the pool's upload sessions, reads the roots of every member of the pool, and then sweeps the pool's content objects, upload records, and temporary objects to the end. Each listing starts at the beginning, and the job doesn't keep a position to continue from.",
+        "operationId": "run_pool_maintenance",
+        "parameters": [
+          {
+            "description": "The pool ID.",
+            "in": "path",
+            "name": "pool_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunPoolMaintenanceRequest"
+              }
+            }
+          },
+          "description": "The maintenance job to run",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunPoolMaintenanceResponse"
+                }
+              }
+            },
+            "description": "Maintenance job completed"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid pool ID or options"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Pool not found"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "JSON body exceeds the 2 MiB limit"
+          },
+          "503": {
+            "$ref": "#/components/responses/UnavailableResponse"
+          }
+        },
+        "summary": "Run one maintenance job on a pool",
+        "tags": [
+          "maintenance"
+        ],
+        "x-fern-retries": {
+          "disabled": true
+        },
+        "x-fern-sdk-group-name": [
+          "maintenance",
+          "pools",
           "runs"
         ],
         "x-fern-sdk-method-name": "create",

@@ -213,7 +213,7 @@ async fn maintenance_preserves_the_logical_head() {
         .await
         .expect("advance floor");
     namespace_store(&store, &namespace_id)
-        .gc(None, &GcOptions::default(), &context.clock())
+        .gc(&GcOptions::default(), &context.clock())
         .await
         .expect("collection");
     let staged = engine.begin_upload().await.expect("second upload");

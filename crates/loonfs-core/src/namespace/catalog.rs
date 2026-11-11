@@ -1,15 +1,15 @@
-//! Verified namespace identity, access mode, and family root.
+//! Verified namespace identity, access mode, and pool.
 
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::{NamespaceAccess, NamespaceId};
+use loonfs_types::{NamespaceAccess, NamespaceId, PoolId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedNamespaceCatalogEntry {
     namespace_id: NamespaceId,
     access: NamespaceAccess,
-    family_root_id: NamespaceId,
+    pool_id: PoolId,
 }
 
 impl VerifiedNamespaceCatalogEntry {
@@ -21,7 +21,7 @@ impl VerifiedNamespaceCatalogEntry {
         Self {
             namespace_id: head.namespace_id.clone(),
             access: head.access.clone(),
-            family_root_id: head.family_root_id.clone(),
+            pool_id: head.pool_id.clone(),
         }
     }
 
@@ -29,10 +29,10 @@ impl VerifiedNamespaceCatalogEntry {
         &self.namespace_id
     }
 
-    /// Returns the namespace whose prefix stores the content of this
-    /// namespace's fork family.
-    pub fn family_root_id(&self) -> &NamespaceId {
-        &self.family_root_id
+    /// Returns the pool whose prefix stores the namespace's content objects
+    /// and upload records.
+    pub fn pool_id(&self) -> &PoolId {
+        &self.pool_id
     }
 }
 

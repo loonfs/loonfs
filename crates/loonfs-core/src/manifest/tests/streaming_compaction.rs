@@ -3190,7 +3190,7 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
         UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1,
     ] {
         crate::test_support::namespace_store(&store, &namespace)
-            .gc(None, &options, &writer_at("collector", age_ms).clock())
+            .gc(&options, &writer_at("collector", age_ms).clock())
             .await
             .expect("collect");
         for key in &orphans {

@@ -153,12 +153,12 @@ async fn session_steps_leave_a_tail_below_the_fold_triggers_until_it_is_idle() {
         .await
         .expect("publish");
     }
-    let content_prefix = loonfs_objectstore::keys::content_prefix(&namespace_id);
+    let content_objects = KeyPredicate::content_blob();
     assert!(
         store
             .take()
             .iter()
-            .all(|operation| !operation.key().starts_with(&content_prefix)),
+            .all(|operation| !content_objects.matches(operation.key())),
         "every value is written inline, so the tail has 3 MiB of inline bytes"
     );
     let tail_objects = server.wal_tail_objects(&namespace_id).await;
@@ -686,7 +686,7 @@ async fn collection_runs_hourly_only_when_the_session_moved() {
     let operations = store.take();
     assert_eq!(
         list_count(&operations),
-        9,
+        6,
         "collection lists the namespace's garbage without listing namespaces"
     );
     assert!(operations.iter().all(|op| op
@@ -706,7 +706,7 @@ async fn collection_runs_hourly_only_when_the_session_moved() {
         .await;
     assert_eq!(
         list_count(&store.take()),
-        9,
+        6,
         "the first run after the commit collects, because collection comes before the \
          index step"
     );

@@ -434,19 +434,16 @@ Maintenance
     itself.
 
   loonfs maintenance gc [--grace-window-ms <ms>]
-    Run one complete pass and print its report. Each call reads the current
-    manifest and hint, then lists every family from the beginning and
-    sweeps each family to the end.
+    Run one complete pass over the namespace and print its report. Each
+    call reads the current manifest and hint, lists the pins, then lists
+    every family under the namespace's prefix from the beginning and
+    sweeps each family to the end. The pass deletes the namespace's
+    unreferenced manifests, WAL objects, metadata segments, extension
+    segments, and pins. The namespace's content objects, upload records,
+    and temporary objects are stored in its pool, and this command doesn't
+    delete them. A server's sweep runs a collection of each pool.
     --grace-window-ms protects objects younger than the window.
     --json includes every retention reason.
-    deleted.content_objects counts the content objects that no retained
-    view references, which are deleted once they're older than the grace
-    window. Once a deleted namespace is retired, repeated GC runs delete
-    its own content, and deleted.retired_content_objects counts the listed
-    content objects that were deleted. A pass with nothing left under the
-    content prefix reports zero.
-    deleted.temporary_objects counts store temporary objects older than the
-    window.
     deleted.extension_segments counts the gram content index's segments
     that no retained manifest lists. Like metadata segments, they're
     deleted once they're more than 24 hours old, whatever the window.
@@ -781,7 +778,7 @@ Behavior notes
   LoonFS folds the namespace's WAL tail when the tail reaches the
   threshold, and compacts metadata after the fold. Everything else needs
   a one-off command: `loonfs maintenance metadata` folds an idle tail,
-  `loonfs maintenance gc` collects garbage, and
+  `loonfs maintenance gc` collects the namespace's garbage, and
   `loonfs maintenance index enable` brings the grep index up to the
   namespace head. By default, servers maintain every namespace in their
   store on a regular schedule.

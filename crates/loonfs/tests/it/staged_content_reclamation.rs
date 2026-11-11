@@ -7,14 +7,16 @@
 //! consequence: every blob one of these puts writes is eventually either
 //! referenced by metadata or reclaimed, and none of them is immortal.
 //!
-//! Garbage collection is driven through `NamespaceStore::gc` rather
-//! than `Maintenance::gc`, because the maintenance handle stamps its pass
+//! Garbage collection is driven through `PoolStore::gc` rather than
+//! `Maintenance::gc_pool`, because the maintenance handle stamps its pass
 //! from the wall clock and these deadlines are days out. The store is the
 //! same one the runtime wrote through, so the pass sees exactly what the
 //! puts left behind.
 
 use crate::common::{namespace, open_runtime_with_async, store, TestRuntime};
-use loonfs::{ContentRef, GcOptions, GcResponse, NamespaceId, PutFileOptions, SharedObjectStore};
+use loonfs::{
+    ContentRef, GcOptions, NamespaceId, PoolGcResponse, PutFileOptions, SharedObjectStore,
+};
 use loonfs_core::limits::{CONTENT_RECLAMATION_GRACE_WINDOW_MS, UPLOAD_SESSION_LEASE_MS};
 use loonfs_core::test_support::WriterAt;
 use loonfs_objectstore::layout::{upload_id_of, DurableObjectFamily};
@@ -50,10 +52,16 @@ fn gc_options() -> GcOptions {
     }
 }
 
-/// Runs one pass at a fabricated clock. The runtime stamped its sessions
-/// from the real clock, so every deadline here is measured from that.
-async fn collect(store: &SharedObjectStore, namespace_id: &NamespaceId, now_ms: u64) -> GcResponse {
-    loonfs_core::test_support::namespace_store(store.as_ref(), namespace_id)
+/// Runs one pass of the pool of `namespace_id` at a fabricated clock. The
+/// runtime stamped its sessions from the real clock, so every deadline here
+/// is measured from that.
+async fn collect(
+    store: &SharedObjectStore,
+    namespace_id: &NamespaceId,
+    now_ms: u64,
+) -> PoolGcResponse {
+    let pool_id = loonfs_core::test_support::load_pool_id(store, namespace_id).await;
+    loonfs_core::test_support::pool_store(store.as_ref(), &pool_id)
         .gc(
             None,
             &gc_options(),
@@ -68,9 +76,14 @@ async fn collect(store: &SharedObjectStore, namespace_id: &NamespaceId, now_ms: 
 }
 
 /// Returns the key of the whole object of `content_ref`, under the prefix of
-/// `family_root_id`.
-fn content_key(family_root_id: &NamespaceId, content_ref: &ContentRef) -> String {
-    loonfs_objectstore::keys::content_blob(family_root_id, &content_ref.content_id)
+/// the pool of `namespace_id`.
+async fn content_key(
+    store: &SharedObjectStore,
+    namespace_id: &NamespaceId,
+    content_ref: &ContentRef,
+) -> String {
+    let pool_id = loonfs_core::test_support::load_pool_id(store, namespace_id).await;
+    loonfs_objectstore::keys::content_blob(&pool_id, &content_ref.content_id)
 }
 
 async fn exists(store: &SharedObjectStore, key: &str) -> bool {
@@ -79,10 +92,9 @@ async fn exists(store: &SharedObjectStore, key: &str) -> bool {
 
 /// Every upload-session record the namespace still holds.
 async fn session_keys(store: &SharedObjectStore, namespace_id: &NamespaceId) -> Vec<String> {
+    let pool_id = loonfs_core::test_support::load_pool_id(store, namespace_id).await;
     store
-        .list_prefix(&loonfs_objectstore::keys::upload_session_prefix(
-            namespace_id,
-        ))
+        .list_prefix(&loonfs_objectstore::keys::upload_session_prefix(&pool_id))
         .await
         .expect("list upload sessions")
 }
@@ -112,7 +124,7 @@ async fn content_prepared_and_never_published_is_reclaimed_after_its_session() {
         .prepare_content(b"never published")
         .await
         .expect("prepare content");
-    let orphan_key = content_key(&namespace_id, prepared.content_ref());
+    let orphan_key = content_key(&store, &namespace_id, prepared.content_ref()).await;
     assert!(exists(&store, &orphan_key).await);
 
     let staged_at_ms = loonfs_core::time::current_time_ms();
@@ -168,7 +180,7 @@ async fn a_published_put_keeps_its_content_and_loses_only_the_session_record() {
         .content_ref()
         .cloned()
         .expect("a file carries a content ref");
-    let published_key = content_key(&namespace_id, &content_ref);
+    let published_key = content_key(&store, &namespace_id, &content_ref).await;
 
     let report = collect(
         &store,
@@ -227,7 +239,7 @@ async fn a_conflicting_upload_is_reclaimed_and_the_published_content_survives() 
         .content_ref()
         .cloned()
         .expect("a file carries a content ref");
-    let committed_key = content_key(&namespace_id, &committed_content_ref);
+    let committed_key = content_key(&store, &namespace_id, &committed_content_ref).await;
 
     let retry = namespace_writer
         .put_file_with_options(

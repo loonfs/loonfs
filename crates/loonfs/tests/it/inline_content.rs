@@ -107,10 +107,8 @@ async fn reader_downloads_write_tail_content_by_path_and_inode() {
         };
         assert_eq!(recording.count(OperationSelector::Put), 1);
 
-        assert_eq!(
-            object_key,
-            content_blob(&namespace_id, &content_ref.content_id)
-        );
+        let pool_id = loonfs_core::test_support::load_pool_id(&store, &namespace_id).await;
+        assert_eq!(object_key, content_blob(&pool_id, &content_ref.content_id));
         assert_eq!(
             store
                 .get(&object_key, None)
@@ -125,8 +123,8 @@ async fn reader_downloads_write_tail_content_by_path_and_inode() {
 
 /// Checks the creator rule: a fork's first append to an inherited file
 /// starts a chain that the fork creates, the fork's next append extends that
-/// chain in place, and an append by the family root to the fork's chain
-/// starts another chain, because the family root isn't its creator.
+/// chain in place, and an append by the fork's source to the fork's chain
+/// starts another chain, because the source isn't its creator.
 #[tokio::test]
 async fn an_append_in_a_fork_starts_a_chain_the_fork_creates() {
     let directory = tempfile::tempdir().expect("directory");
@@ -190,15 +188,15 @@ async fn an_append_in_a_fork_starts_a_chain_the_fork_creates() {
         fork_chain = Some(appended.clone());
     }
     let fork_chain = fork_chain.expect("the fork's chain");
-    // The fork's fold wrote the new chain's extent under the family root's
-    // prefix, and the fork's own content prefix stays empty.
+    // The fork's fold wrote the new chain's extent under the prefix of the
+    // source's pool.
+    let pool_id = loonfs_core::test_support::load_pool_id(&store, &source).await;
+    assert_eq!(
+        loonfs_core::test_support::load_pool_id(&store, &fork).await,
+        pool_id
+    );
     assert!(store
-        .list_prefix(&content_prefix(&fork))
-        .await
-        .expect("list the fork's content")
-        .is_empty());
-    assert!(store
-        .list_prefix(&content_prefix(&source))
+        .list_prefix(&content_prefix(&pool_id))
         .await
         .expect("list the family's content")
         .iter()
@@ -224,9 +222,8 @@ async fn an_append_in_a_fork_starts_a_chain_the_fork_creates() {
         b"first second"
     );
 
-    // A merge carries the fork's chain into the family root without a copy,
-    // and the family root's append starts a chain that the family root
-    // creates.
+    // A merge applies the fork's chain to the source without a copy, and the
+    // source's append starts a chain that the source creates.
     source_writer
         .merge_fork(&fork, &actor)
         .await
@@ -242,11 +239,11 @@ async fn an_append_in_a_fork_starts_a_chain_the_fork_creates() {
     source_writer
         .append_file("/log", b" fifth", &actor)
         .await
-        .expect("append in the family root");
+        .expect("append in the source");
     let file = source_writer
         .read_file("/log")
         .await
-        .expect("read the family root's file");
+        .expect("read the source's file");
     assert_eq!(file.bytes, b"first second third fourth fifth");
     let root_chain = file.entry.content_ref().expect("root's chain");
     assert_ne!(root_chain.content_id, extended.content_id);

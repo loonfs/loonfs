@@ -31,6 +31,8 @@ pub fn register(schemas: &mut BTreeMap<String, RefOr<Schema>>) {
     named.tagged::<ObjectTransferAccess>("kind", Some("unknown"));
     named.tagged::<RunMaintenanceRequest>("kind", None);
     named.tagged::<RunMaintenanceResponse>("kind", Some("unknown"));
+    named.tagged::<RunPoolMaintenanceRequest>("kind", None);
+    named.tagged::<RunPoolMaintenanceResponse>("kind", Some("unknown"));
     named.tagged::<CompleteUploadBody>("mode", None);
     named.composite::<PathEntry, PathEntryKind>("inode_kind", Some("unknown"));
     named.composite::<UploadSession, UploadSessionStatus>("status", Some("unknown"));

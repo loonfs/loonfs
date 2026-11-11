@@ -6,7 +6,7 @@ This glossary defines the terms used in the LoonFS specs, grouped by topic. The 
 
 ### Namespace
 
-A directory tree with its own history, stored under its own prefix in object storage (`namespaces/{namespace_id}/`). Each namespace has its own manifests, WAL, and retention floor, and a fork can share stored objects with the namespace it was forked from. See [Namespaces and identity](format.md#11-namespaces-and-identity).
+A directory tree with its own history, stored under its own prefix in object storage (`namespaces/{namespace_id}/`). Each namespace has its own manifests, WAL, and retention floor, and a fork can share stored objects with the namespace it was forked from. Each namespace is a member of one [pool](#pool), and the pool's prefix stores the namespace's content objects and upload records. See [Namespaces and identity](format.md#11-namespaces-and-identity).
 
 ### Manifest
 
@@ -122,11 +122,11 @@ A deleted namespace's final manifest, which records that the namespace was delet
 
 ### Content object
 
-An immutable object that stores file bytes, under the family root's prefix (`namespaces/{family_root_id}/content/`). A file's bytes can be stored in one content object or spread across several. See [File contents and ownership](format.md#15-file-contents-and-ownership).
+An immutable object that stores file bytes, under the prefix of the namespace's [pool](#pool) (`pools/{pool_id}/content/`). A file's bytes can be stored in one content object or spread across several. See [File contents and ownership](format.md#15-file-contents-and-ownership).
 
 ### Content reference
 
-The record in a file revision that identifies its bytes: a content ID, a size, and a checksum. The reader's manifest supplies the [family root](#family-root), so a reference identifies the same object in every member of a [fork family](#fork-family). A content reference identifies content, but it doesn't prove that a content object contains those bytes yet (they may still be stored in the WAL).
+The record in a file revision that identifies its bytes: a content ID, a size, and a checksum. The reader's manifest supplies the [pool](#pool), so a reference identifies the same object in every member of that pool. A content reference identifies content, but it doesn't prove that a content object contains those bytes yet (they may still be stored in the WAL).
 
 ### Chain
 
@@ -134,7 +134,7 @@ The bytes stored under one content ID. A chain grows when a file is appended to,
 
 ### Chain creator
 
-The namespace whose commit started a chain, recorded in the chain's [layout](#layout). Only the creator's commits extend the chain in place. When another member of the [fork family](#fork-family) appends to the chain, LoonFS starts a new chain that lists the first chain's extents as [shared base extents](#extent). See [Operations and WAL deltas](format.md#66-operations-and-wal-deltas).
+The namespace whose commit started a chain, recorded in the chain's [layout](#layout). Only the creator's commits extend the chain in place. When another member of the creator's [pool](#pool) appends to the chain, LoonFS starts a new chain that lists the first chain's extents as [shared base extents](#extent). See [Operations and WAL deltas](format.md#66-operations-and-wal-deltas).
 
 ### Extent
 
@@ -164,11 +164,11 @@ An object-store operation that creates one new immutable object from ranges of e
 
 ### Temporary object
 
-An object that an assembly writes for intermediate results (for example, when GCS composes more than 32 sources) and deletes when it finishes. Temporary objects are stored under `namespaces/{namespace_id}/temporary/`. Nothing references them, so garbage collection deletes any that are older than the [grace window](#grace-window) (for example, after a crash).
+An object that an assembly writes for intermediate results (for example, when GCS composes more than 32 sources) and deletes when it finishes. Every assembly writes a content object, so every temporary object is stored under the prefix of a [pool](#pool) (`pools/{pool_id}/temporary/`). Nothing references them, so the pool's [collection](#collection) deletes any that are older than the [grace window](#grace-window) (for example, after a crash).
 
 ### Upload session
 
-The stored state of one upload, kept as two records that are each written once. The session record is written when the upload starts, and it includes the content ID that's assigned to the upload, the transfer mode, and when the session expires. The outcome record is written when the upload completes or is aborted. Both records are stored under the family root's prefix, and each one records the namespace that created the session. The session's status (`open`, `completed`, or `aborted`) follows from which records exist. For example, a session record without an outcome record is an open session. Completing an upload doesn't automatically update a file in a LoonFS namespace. A file changes only when a later commit references the uploaded content. See [Upload sessions](format.md#51-upload-sessions).
+The stored state of one upload, kept as two records that are each written once. The session record is written when the upload starts, and it includes the content ID that's assigned to the upload, the transfer mode, and when the session expires. The outcome record is written when the upload completes or is aborted. Both records are stored under the prefix of the namespace's [pool](#pool), and each one records the namespace that created the session. The session's status (`open`, `completed`, or `aborted`) follows from which records exist. For example, a session record without an outcome record is an open session. Completing an upload doesn't automatically update a file in a LoonFS namespace. A file changes only when a later commit references the uploaded content. See [Upload sessions](format.md#51-upload-sessions).
 
 ### Presigned URL
 
@@ -180,7 +180,7 @@ Proof that a content reference's bytes were verified in a completed upload. A co
 
 ### Content root
 
-A reference that keeps a [fork family's](#fork-family) content objects from being deleted. A root in any member of the fork family counts. There are three kinds: the layouts in a manifest that garbage collection protects, the WAL tail, and upload session records. See [Content roots](format.md#119-content-roots).
+A reference that keeps a [pool's](#pool) content objects from being deleted. A root in any member of the pool counts, and the pool's [collection](#collection) reads the roots of every member. There are three kinds: the layouts in a manifest that garbage collection protects, the WAL tail, and upload session records. See [Content roots](format.md#119-content-roots).
 
 ## Metadata storage
 
@@ -234,7 +234,7 @@ How old a commit has to be before a retention advance can move the [retention fl
 
 ### Control object
 
-A small object used for discovery, retained views, or upload state: the hint, pins, and the session and outcome records of upload sessions. Each kind has its own update rules (for example, the hint only changes by compare-and-swap, and an upload record is never changed after it's written).
+A small object used for discovery, retained views, upload state, or a pool's creation: the hint, pins, the session and outcome records of upload sessions, and [pool records](#pool-record). Each kind has its own update rules (for example, the hint only changes by compare-and-swap, and an upload record is never changed after it's written).
 
 ## Reads and retained views
 
@@ -257,7 +257,7 @@ The maintenance API's "checkpoint" inventory lists every pin of a namespace, so 
 
 ### Fork
 
-A new namespace that starts as a copy of another namespace at one point in its history. The fork shares the source's stored objects, and the source keeps a pin for the fork until the fork is retired. The fork is a member of its source's [fork family](#fork-family), so it reads inherited content and writes new content under the family root's prefix. After the fork, commits to one namespace appear in the other only when a [merge](#merge) applies them. See [Forking a namespace](format.md#92-forking-a-namespace).
+A new namespace that starts as a copy of another namespace at one point in its history. The fork shares the source's stored objects, and the source keeps a pin for the fork until the fork is retired. The fork is a member of its source's [pool](#pool), so it reads inherited content and writes new content under the pool's prefix. After the fork, commits to one namespace appear in the other only when a [merge](#merge) applies them. See [Forking a namespace](format.md#92-forking-a-namespace).
 
 ### Source
 
@@ -267,17 +267,21 @@ The namespace that an operation reads from. For a fork, the source is the namesp
 
 The source namespace's sequence at which a fork was taken. The fork basis records it (`fork_basis.source_head_seq`), the fork's retention floor starts at it, and the fork's first merge or rebase starts from it. For example, if `sandbox` was forked from `main` at sequence 100, the fork point is 100, and the first merge of `sandbox` into `main` applies `sandbox`'s commits after 100.
 
-### Fork family
+### Pool
 
-A set of namespaces: one namespace that was created without a source (the [family root](#family-root)), and every namespace forked from it, directly or through other forks. Each namespace in the set is a "member" of the family, and a member leaves the fork family when it's retired. The members store their content objects and upload records under the family root's prefix, so a content reference identifies the same object in every member. The family root's [collection](#collection) deletes the family's unreferenced content, with roots from every member. The collection finds the members through fork pins, because each fork pins the namespace it was forked from. For example, if `sandbox` is a fork of `main`, and `trial` is a fork of `sandbox`, all three are members of `main`'s family, and their content objects are stored under `namespaces/main/content/`. See [Namespaces and identity](format.md#11-namespaces-and-identity).
+A set of namespaces that share one set of content objects, together with the key prefix that stores those objects (`pools/{pool_id}/`). A pool is identified by a generated pool ID, such as `pool_3s0drmj8em84yb4mnetqkz2j0x`. Every manifest records the namespace's pool (`pool_id`), and the value can't be changed. A namespace created without a source records a pool ID that its create call generates, and a fork records the pool of its source.
 
-### Family root
+A "member" of a pool is a namespace whose manifest records the pool, until the namespace is [retired](#namespace-retirement). The pool's "first member" is the namespace that was created with the pool, which the [pool record](#pool-record) identifies. Every other member is a fork of a member, directly or through other forks. The pool's prefix stores the content objects and upload records of every member, and the temporary objects of content assemblies, so one content reference identifies the same object in every member, and a fork or a merge shares content without copying bytes.
 
-The member of a [fork family](#fork-family) that was created without a source. Every member's manifest records the family root (`family_root_id`), and the family root's prefix stores the family's content objects and upload records. A family root is the last member of its family to be retired, because each fork pins its source. Its collections keep deleting the family's unreferenced content after the family root is deleted, until the family root itself is retired. See [File contents and ownership](format.md#15-file-contents-and-ownership) and [Retirement](format.md#95-retirement).
+A collection of the pool deletes the pool's unreferenced content objects, upload records, and temporary objects, with roots that it reads from every member. It finds the members through fork pins, because each fork pins the namespace it was forked from. A namespace's own [collection](#collection) doesn't delete content. For example, if `main` records `pool_3s0drmj8em84yb4mnetqkz2j0x`, `sandbox` is a fork of `main`, and `trial` is a fork of `sandbox`, all three are members of the pool, and `main` is its first member. A file that `sandbox` uploads is stored under `pools/pool_3s0drmj8em84yb4mnetqkz2j0x/content/`, and a revision in `main` can refer to the same object after a merge. See [Pools](../design/pools.md).
+
+### Pool record
+
+A control object that records the creation of one [pool](#pool), stored at `pools/{pool_id}/pool.json`. A create call that generates a pool writes the pool record once, with put-if-absent, after the namespace's hint and before manifest 1, so every pool that a manifest records has a pool record. The record contains the pool's ID (`pool_id`), the namespace that was created with the pool, which is the pool's first member (`first_member_id`), and the create call's request clock (`created_at_ms`). A fork joins its source's pool and writes no pool record. If the create call fails, or loses to another create call for the same namespace ID, the pool has no members, and the pool's collection deletes the pool record once the record's creation grace (the [grace window](#grace-window) after `created_at_ms`) has passed. A pool whose first member is retired keeps its pool record, so a later collection of the pool can find that the pool has no members. For example, creating `main` with the pool `pool_3s0drmj8em84yb4mnetqkz2j0x` writes `pools/pool_3s0drmj8em84yb4mnetqkz2j0x/pool.json` with `first_member_id` `main`. See [Pools and pool records](../design/pools.md#pools-and-pool-records) and [Creating a namespace](format.md#91-creating-a-namespace).
 
 ### Merge
 
-A commit that applies a fork's commits to another namespace in its [fork family](#fork-family), so that the changes made in the fork appear there as one commit. The other namespace is usually the one that the fork was forked from, and for a [rebase](#rebase), it's a new fork of that namespace. The commit's record includes a "merge record", which identifies the fork and the range of the fork's commits that the merge applied: the commits above `source_after_seq`, through `source_through_seq`. For example, if `sandbox` was forked from `main` at sequence 100 and then committed sequences 101 through 120, a merge of those commits is one commit on `main` whose merge record is `sandbox`, 100, and 120. The change feed reports the merge record with the commit, and a merge's [semantic fingerprint](#semantic-fingerprint) covers its merge record in place of its operations. Rewriting metadata runs during [compaction](#compaction) isn't called a merge. See [Merges](format.md#merges), [Commit identity and retries](format.md#65-commit-identity-and-retries), and [WAL records](format.md#a5-wal-records).
+A commit that applies a fork's commits to another namespace in its [pool](#pool), so that the changes made in the fork appear there as one commit. The other namespace is usually the one that the fork was forked from, and for a [rebase](#rebase), it's a new fork of that namespace. The commit's record includes a "merge record", which identifies the fork and the range of the fork's commits that the merge applied: the commits above `source_after_seq`, through `source_through_seq`. For example, if `sandbox` was forked from `main` at sequence 100 and then committed sequences 101 through 120, a merge of those commits is one commit on `main` whose merge record is `sandbox`, 100, and 120. The change feed reports the merge record with the commit, and a merge's [semantic fingerprint](#semantic-fingerprint) covers its merge record in place of its operations. Rewriting metadata runs during [compaction](#compaction) isn't called a merge. See [Merges](format.md#merges), [Commit identity and retries](format.md#65-commit-identity-and-retries), and [WAL records](format.md#a5-wal-records).
 
 ### Merge index
 
@@ -343,7 +347,7 @@ The role that folds a namespace's WAL, compacts its metadata, publishes an exten
 
 ### Job
 
-One maintenance API request (`POST .../runs`) and the work it does. The request body's `kind` selects the job: a `metadata` job folds the WAL tail and compacts metadata, the retention jobs (`retention` and `retention_window`) advance the retention floor and set the namespace's retention window, a `gc` job runs one [collection](#collection), and a `recover_administrator` job grants a principal `admin` on the root again. A job runs to completion and returns its report in the response. A job never creates a snapshot. See [Maintenance jobs](api.md#maintenance-jobs).
+One maintenance API request (`POST .../runs`) and the work it does. The request body's `kind` selects the job: a `metadata` job folds the WAL tail and compacts metadata, the retention jobs (`retention` and `retention_window`) advance the retention floor and set the namespace's retention window, a `gc` job runs one [collection](#collection) of the namespace, or of a [pool](#pool) on the pool's route, and a `recover_administrator` job grants a principal `admin` on the root again. A job runs to completion and returns its report in the response. A job never creates a snapshot. See [Maintenance jobs](api.md#maintenance-jobs).
 
 ### Step
 
@@ -351,7 +355,7 @@ One bounded unit of maintenance work on one namespace. A metadata step folds the
 
 ### Sweep
 
-The reference server's scheduler listing every namespace in the store, including deleted ones, and running each listed namespace's due steps, including a collection and a retention advance under the namespace's [retention window](#retention-window). A sweep runs when the server starts, and then on the sweep interval (24 hours by default). A namespace that nobody writes to through the server is maintained only by sweeps. See [Deleting, retaining, and reclaiming](api.md#deleting-retaining-and-reclaiming).
+The reference server's scheduler listing every namespace in the store, including deleted ones, and running each listed namespace's due steps, including a collection and a retention advance under the namespace's [retention window](#retention-window), and then listing every [pool](#pool) in the store and running a collection of each pool. A sweep runs when the server starts, and then on the sweep interval (24 hours by default). A namespace that nobody writes to through the server is maintained only by sweeps, and the server collects a pool's content objects, upload records, and temporary objects only in sweeps. See [Deleting, retaining, and reclaiming](api.md#deleting-retaining-and-reclaiming).
 
 ### Compare-and-swap (CAS)
 
@@ -365,7 +369,7 @@ The longest time allowed between the state a publisher planned against and the s
 
 ### Collection
 
-One garbage collection call over a namespace. A collection reads the current manifest and the other roots (everything that's still referenced), lists each object family, and deletes the unreferenced objects that are older than the [grace window](#grace-window). It's complete and stateless: it stores no progress, so after a failure the next collection starts over. On a [family root](#family-root), a collection also reads the roots of every member of the fork family and deletes the family's unreferenced content. See [One complete collection](format.md#111-one-complete-collection).
+One garbage collection call over a namespace or a [pool](#pool). A collection reads the roots (everything that's still referenced), lists each kind of object that it covers, and deletes the unreferenced objects that are older than the [grace window](#grace-window). It's complete and stateless: it stores no progress, so after a failure the next collection starts over. A namespace's collection reads the namespace's current manifest and pins, and covers the namespace's manifests, WAL objects, metadata segments, extension segments, and pins. A pool's collection reads the roots of every member of the pool, and covers the pool's content objects, upload records, and temporary objects. See [One complete collection](format.md#111-one-complete-collection).
 
 ### Grace window
 
@@ -373,7 +377,7 @@ How old an unreferenced manifest, WAL object, content object, or temporary objec
 
 ### Namespace retirement
 
-The point at which garbage collection deletes a deleted fork's pin on its source, or deletes the objects under a deleted family root's content prefix. A deleted namespace is retired once its retirement grace has passed and no pins on it remain. See [Retirement](format.md#95-retirement).
+The point at which a deleted namespace stops being a member of its [pool](#pool). A deleted namespace is retired once its retirement grace has passed and no pins on it remain. When the namespace is a fork, its collection retires it by deleting the fork's pin on its source. A namespace created without a source has no source pin, so its retirement deletes nothing, and no retirement deletes content. After the retirement, the namespace's content references don't protect the pool's content. See [Retirement](format.md#95-retirement) and [Retiring an eligible tombstone](format.md#118-retiring-an-eligible-tombstone).
 
 ## API
 

@@ -519,7 +519,7 @@ async fn merge_a_forks_file() -> (tempfile::TempDir, MergedFile) {
     let [main, fork] = ["main", "main-fork"].map(|name| NamespaceId::parse(name).expect("ns"));
     let store = RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::prefix(loonfs_objectstore::keys::content_prefix(&main)),
+        KeyPredicate::content_blob(),
     );
     let writer = context("writer");
     let main_fixture = NamespaceFixture::new(&store, &main, &writer);
@@ -586,7 +586,7 @@ async fn merge_a_forks_file() -> (tempfile::TempDir, MergedFile) {
             content: loonfs_types::FileContent::Ref(content_ref.clone()),
         }],
     );
-    let proof = PreparedContent::for_family_member(main.clone(), content_ref, layout, u64::MAX);
+    let proof = PreparedContent::for_pool_member(main.clone(), content_ref, layout, u64::MAX);
     let candidate = CommitCandidate::prepared(create, vec![proof]).with_merge(
         MergeRecord {
             source_namespace_id: fork.clone(),

@@ -4,9 +4,9 @@ use super::*;
 use loonfs_objectstore::keys::{content_blob, metadata_segment_object_key};
 use loonfs_types::format::manifest::MetadataRowFamily;
 
-/// Checks that a collection sends HEAD requests only for discovery's probe above
-/// the hinted manifest and for the anchor's check of the current manifest's
-/// successor.
+/// Checks that a namespace's collection and a pool's collection each send HEAD
+/// requests only for discovery's probe above the hinted manifest and for the
+/// anchor's check of the current manifest's successor.
 #[tokio::test]
 async fn a_collection_heads_only_the_discovery_probe_and_successor() {
     let directory = tempdir().expect("directory");
@@ -28,7 +28,8 @@ async fn a_collection_heads_only_the_discovery_probe_and_successor() {
         .expect("hint")
         .state
         .manifest_no;
-    let orphan = content_blob(&namespace_id, &numbered_content_id(3));
+    let pool_id = crate::test_support::load_pool_id(&store, &namespace_id).await;
+    let orphan = content_blob(&pool_id, &numbered_content_id(3));
     store
         .put_if_absent(&orphan, Bytes::from_static(b"orphan"))
         .await
@@ -37,20 +38,21 @@ async fn a_collection_heads_only_the_discovery_probe_and_successor() {
         MetadataMapStore::aged(store, KeyPredicate::any()),
         KeyPredicate::any(),
     );
-    let report = crate::test_support::namespace_store(&recorded, &namespace_id)
-        .gc(None, &options(), &context(GRACE_MS + 1).clock())
+    let heads = || {
+        let mut operations = recorded.snapshot();
+        loonfs_test_support::stores::sort_head_runs(&mut operations);
+        operations
+            .into_iter()
+            .filter_map(|operation| match operation {
+                loonfs_test_support::stores::RecordedOperation::Head { key } => Some(key),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    crate::test_support::namespace_store(&recorded, &namespace_id)
+        .gc(&options(), &context(GRACE_MS + 1).clock())
         .await
         .expect("collection");
-    assert_eq!(report.deleted.content_objects, 1);
-    let mut operations = recorded.snapshot();
-    loonfs_test_support::stores::sort_head_runs(&mut operations);
-    let heads: Vec<_> = operations
-        .into_iter()
-        .filter_map(|operation| match operation {
-            loonfs_test_support::stores::RecordedOperation::Head { key } => Some(key),
-            _ => None,
-        })
-        .collect();
     // The hint lags, so the probe finds the manifest after the hinted one,
     // and then probes one window above that.
     assert!(hinted < manifest.manifest().manifest_no);
@@ -59,7 +61,11 @@ async fn a_collection_heads_only_the_discovery_probe_and_successor() {
         .map(|number| metadata_manifest_object(&namespace_id, &ManifestNo(number)))
         .collect();
     expected.push(metadata_manifest_object(&namespace_id, &successor));
-    assert_eq!(heads, expected);
+    assert_eq!(heads(), expected);
+    recorded.reset();
+    let report = collect_pool(&recorded, &pool_id, &context(GRACE_MS + 1)).await;
+    assert_eq!(report.deleted.content_objects, 1);
+    assert_eq!(heads(), expected);
     let target = NamespaceId::parse("retired-no-heads").expect("target");
     let fixture =
         crate::test_support::NamespaceFixture::new(&recorded, &namespace_id, &context(1_000));
@@ -81,7 +87,7 @@ async fn a_collection_heads_only_the_discovery_probe_and_successor() {
         .expect("delete target");
     recorded.reset();
     let retired = crate::test_support::namespace_store(&recorded, &target)
-        .gc(None, &options(), &context(1_000 + retirement_ms()).clock())
+        .gc(&options(), &context(1_000 + retirement_ms()).clock())
         .await
         .expect("retire fork");
     assert_eq!(retired.deleted_checkpoints_by_owner.fork, 1);
@@ -103,8 +109,9 @@ async fn listed_times_retain_undated_content_and_delete_aged_content() {
         .create()
         .await
         .expect("namespace");
-    let undated_key = content_blob(&namespace_id, &loonfs_types::ContentId::generate());
-    let aged_key = content_blob(&namespace_id, &loonfs_types::ContentId::generate());
+    let pool_id = crate::test_support::load_pool_id(&store, &namespace_id).await;
+    let undated_key = content_blob(&pool_id, &loonfs_types::ContentId::generate());
+    let aged_key = content_blob(&pool_id, &loonfs_types::ContentId::generate());
     for key in [&undated_key, &aged_key] {
         store
             .put_if_absent(key, Bytes::from_static(b"orphan"))
@@ -114,10 +121,7 @@ async fn listed_times_retain_undated_content_and_delete_aged_content() {
     let aged = MetadataMapStore::aged(store, KeyPredicate::any());
     let undated = MetadataMapStore::without_last_modified(aged, KeyPredicate::exact(&undated_key));
     let recorded = RecordingStore::new(undated, KeyPredicate::any());
-    let report = crate::test_support::namespace_store(&recorded, &namespace_id)
-        .gc(None, &options(), &context(GRACE_MS + 1).clock())
-        .await
-        .expect("collection");
+    let report = collect_pool(&recorded, &pool_id, &context(GRACE_MS + 1)).await;
     assert_eq!(report.retained.no_provider_timestamp, 1);
     assert_eq!(report.deleted.content_objects, 1);
     let deleted: Vec<_> = recorded
@@ -148,7 +152,7 @@ fn layout_segments(manifest: &crate::namespace::control::LoadedManifest) -> BTre
         .collect()
 }
 
-/// Checks that a pinned view on an earlier manifest adds extent filter reads
+/// Checks that a pool member's pinned view on an earlier manifest adds extent filter reads
 /// only for the layout segments that the current manifest doesn't list: a
 /// layout compaction gives the pinned manifest layout segments of its own,
 /// and a writer claim leaves the layout segments as they were.
@@ -164,10 +168,11 @@ async fn pinned_views_add_segment_reads_only_for_uncovered_layout_segments() {
             KeyPredicate::any(),
         ));
         let setup = context(1_000);
-        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
+        let pool_id = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
             .create()
             .await
-            .expect("namespace");
+            .expect("namespace")
+            .pool_id;
         for name in ["one", "two"] {
             write_test_file(
                 &store,
@@ -233,10 +238,7 @@ async fn pinned_views_add_segment_reads_only_for_uncovered_layout_segments() {
         );
         let now_ms = GRACE_MS + 1;
         let rooted = RecordingStore::metadata_segments(Arc::clone(&store));
-        crate::test_support::namespace_store(&rooted, &namespace_id)
-            .gc(None, &options(), &context(now_ms).clock())
-            .await
-            .expect("root the pinned manifest");
+        collect_pool(&rooted, &pool_id, &context(now_ms)).await;
         // Reads within one collection have no fixed order, so both lists are
         // compared sorted.
         let mut rooted_reads = rooted.take_get_keys();
@@ -246,10 +248,7 @@ async fn pinned_views_add_segment_reads_only_for_uncovered_layout_segments() {
             .await
             .expect("release the pin");
         let current_only = RecordingStore::metadata_segments(Arc::clone(&store));
-        crate::test_support::namespace_store(&current_only, &namespace_id)
-            .gc(None, &options(), &context(now_ms).clock())
-            .await
-            .expect("current only");
+        collect_pool(&current_only, &pool_id, &context(now_ms)).await;
         let mut current_reads = current_only.take_get_keys();
         current_reads.sort();
         if own_runs {
@@ -266,7 +265,7 @@ async fn pinned_views_add_segment_reads_only_for_uncovered_layout_segments() {
     }
 }
 
-/// Checks that a collection reads the extent filter of each layout segment once,
+/// Checks that a pool's collection reads the extent filter of each layout segment once,
 /// when every pinned view adds one delta run over a base that the current
 /// manifest no longer lists, and that it loads those pinned manifests with
 /// more than one read and at most `STORE_READS_IN_FLIGHT` reads in flight.
@@ -283,10 +282,11 @@ async fn a_collection_reads_each_extent_filter_once_however_many_pinned_views_li
     ));
     let setup_store = store.inner().inner();
     let setup = context(1_000);
-    crate::test_support::NamespaceFixture::new(setup_store, &namespace_id, &setup)
+    let pool_id = crate::test_support::NamespaceFixture::new(setup_store, &namespace_id, &setup)
         .create()
         .await
-        .expect("namespace");
+        .expect("namespace")
+        .pool_id;
     let mut segments = BTreeSet::new();
     let mut base = BTreeSet::new();
     for index in 0..=DELTA_RUNS {
@@ -343,10 +343,7 @@ async fn a_collection_reads_each_extent_filter_once_however_many_pinned_views_li
     segments.extend(layout_segments(&current));
     // A pin keeps each fold's manifest, so every manifest is a root.
     let now_ms = now_after_newest_object(setup_store, &namespace_id, 1).await;
-    crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options(), &context(now_ms).clock())
-        .await
-        .expect("collection");
+    collect_pool(&store, &pool_id, &context(now_ms)).await;
 
     // Each extent filter read is one GET. A read per view would read the
     // base's filter once for each of the eight views that list it.

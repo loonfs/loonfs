@@ -138,7 +138,6 @@ pub(super) async fn compact_and_collect_replaced_segments<S: ObjectStore>(
         .expect("test store provides a timestamp");
     let collection = crate::test_support::namespace_store(store, namespace_id)
         .gc(
-            None,
             &options,
             &writer_at(
                 "collector",

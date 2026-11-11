@@ -23,7 +23,7 @@ use loonfs_types::format::control::{
     encode_control_state, ControlObjectKind, UploadOutcome, UploadOutcomePayload,
     UploadSessionPayload,
 };
-use loonfs_types::{NamespaceId, UploadId};
+use loonfs_types::{PoolId, UploadId};
 
 /// An upload session's record, together with its outcome if the session ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,24 +35,23 @@ pub(crate) struct UploadSessionState {
 
 impl<S: ObjectStore> NamespaceStore<S> {
     /// Loads the records of an upload session that the namespace `catalog`
-    /// describes created, from its family root's prefix.
+    /// describes created, from its pool's prefix.
     ///
     /// The outcome record is read before the session record. Garbage collection
     /// deletes the session record first, so if the session record is still
     /// there after the outcome was found missing, the session was open when the
     /// outcome was read, and not deleted. A missing session record returns
     /// `UploadNotFound`, whatever the outcome read found, and so does a session
-    /// that another member of the fork family created, because the session's
+    /// that another member of the pool created, because the session's
     /// key doesn't identify the member.
     pub(crate) async fn load_upload_session_state(
         &self,
         catalog: &VerifiedNamespaceCatalogEntry,
         upload_id: &UploadId,
     ) -> Result<UploadSessionState> {
-        let family_root_id = catalog.family_root_id();
-        let outcome = self.load_upload_outcome(family_root_id, upload_id).await?;
-        let session = self
-            .load_upload_session_record(family_root_id, upload_id)
+        let pool_id = catalog.pool_id();
+        let outcome = load_upload_outcome(&self.store, pool_id, upload_id).await?;
+        let session = load_upload_session_record(&self.store, pool_id, upload_id)
             .await?
             .filter(|session| session.namespace_id == *catalog.namespace_id())
             .ok_or_else(|| CoreError::UploadNotFound {
@@ -66,165 +65,155 @@ impl<S: ObjectStore> NamespaceStore<S> {
             outcome: outcome.map(|record| record.outcome),
         })
     }
+}
 
-    /// Loads the record that started an upload session, from the prefix of
-    /// `family_root_id`, or `None` if it's gone. The record identifies the
-    /// member of the fork family that created the session.
-    pub(crate) async fn load_upload_session_record(
-        &self,
-        family_root_id: &NamespaceId,
-        upload_id: &UploadId,
-    ) -> Result<Option<UploadSessionPayload>> {
-        let loaded = load_control_object(
-            &self.store,
-            upload_session(family_root_id, upload_id),
-            ControlObjectKind::UploadSession,
-            |object_key, session: &UploadSessionPayload| {
-                expect_identity_field(
-                    object_key,
-                    "upload id",
-                    upload_id.as_str(),
-                    session.upload_id.as_str(),
-                )
-            },
-        )
-        .await;
-        present(loaded).map(|loaded| loaded.map(|loaded| loaded.state))
-    }
+/// Loads the record that started an upload session, from the prefix of
+/// `pool_id`, or `None` if it's gone. The record identifies the
+/// member of the pool that created the session.
+pub(crate) async fn load_upload_session_record<S: ObjectStore + ?Sized>(
+    store: &S,
+    pool_id: &PoolId,
+    upload_id: &UploadId,
+) -> Result<Option<UploadSessionPayload>> {
+    let loaded = load_control_object(
+        store,
+        upload_session(pool_id, upload_id),
+        ControlObjectKind::UploadSession,
+        |object_key, session: &UploadSessionPayload| {
+            expect_identity_field(
+                object_key,
+                "upload id",
+                upload_id.as_str(),
+                session.upload_id.as_str(),
+            )
+        },
+    )
+    .await;
+    present(loaded).map(|loaded| loaded.map(|loaded| loaded.state))
+}
 
-    /// Loads the record of how an upload session ended, from the prefix of
-    /// `family_root_id`, or `None` if it has no outcome record.
-    pub(crate) async fn load_upload_outcome(
-        &self,
-        family_root_id: &NamespaceId,
-        upload_id: &UploadId,
-    ) -> Result<Option<UploadOutcomePayload>> {
-        let loaded = load_control_object(
-            &self.store,
-            upload_outcome(family_root_id, upload_id),
-            ControlObjectKind::UploadOutcome,
-            |object_key, record: &UploadOutcomePayload| {
-                expect_identity_field(
-                    object_key,
-                    "upload id",
-                    upload_id.as_str(),
-                    record.upload_id.as_str(),
-                )
-            },
-        )
-        .await;
-        present(loaded).map(|loaded| loaded.map(|loaded| loaded.state))
-    }
+/// Loads the record of how an upload session ended, from the prefix of
+/// `pool_id`, or `None` if it has no outcome record.
+pub(crate) async fn load_upload_outcome<S: ObjectStore + ?Sized>(
+    store: &S,
+    pool_id: &PoolId,
+    upload_id: &UploadId,
+) -> Result<Option<UploadOutcomePayload>> {
+    let loaded = load_control_object(
+        store,
+        upload_outcome(pool_id, upload_id),
+        ControlObjectKind::UploadOutcome,
+        |object_key, record: &UploadOutcomePayload| {
+            expect_identity_field(
+                object_key,
+                "upload id",
+                upload_id.as_str(),
+                record.upload_id.as_str(),
+            )
+        },
+    )
+    .await;
+    present(loaded).map(|loaded| loaded.map(|loaded| loaded.state))
+}
 
-    /// Records how an upload session ended, under the prefix of
-    /// `family_root_id`, then confirms that the session record still exists.
-    ///
-    /// The outcome record is created with put-if-absent, so a completion, a
-    /// client's abort, and garbage collection's abort of an expired session race
-    /// on one create, and the session ends exactly once. After a put whose result
-    /// is unknown, or that fails its precondition, this function reads the record
-    /// back. An equal outcome is this call's own write, and a different one is
-    /// returned as [`OutcomeCreation::Existing`].
-    ///
-    /// An outcome record counts only while its session record exists, so after
-    /// the put this function sends a HEAD request for the session record, and
-    /// returns `UploadNotFound` if it's gone. The caller returns a token or
-    /// deletes content only after this check passes. Without the check, a
-    /// completion or abort that read the session as open, and then stalled while
-    /// garbage collection deleted the ended session's records, would create a
-    /// new outcome for a session that no longer exists. A completion would then
-    /// issue a token for content that the earlier abort deleted, and an abort
-    /// would delete content that a commit might reference. The check finds the
-    /// session record gone in exactly those cases, because the outcome key is
-    /// free again only after [`delete_upload_session_records`] has deleted the
-    /// session record.
-    pub(crate) async fn create_upload_outcome(
-        &self,
-        family_root_id: &NamespaceId,
-        session: &UploadSessionPayload,
-        outcome: &UploadOutcome,
-    ) -> Result<OutcomeCreation> {
-        let upload_id = &session.upload_id;
-        let object_key = upload_outcome(family_root_id, upload_id);
-        let record = UploadOutcomePayload {
-            namespace_id: session.namespace_id.clone(),
-            upload_id: upload_id.clone(),
-            outcome: outcome.clone(),
+/// Records how an upload session ended, under the prefix of
+/// `pool_id`, then confirms that the session record still exists.
+///
+/// The outcome record is created with put-if-absent, so a completion, a
+/// client's abort, and garbage collection's abort of an expired session race
+/// on one create, and the session ends exactly once. After a put whose result
+/// is unknown, or that fails its precondition, this function reads the record
+/// back. An equal outcome is this call's own write, and a different one is
+/// returned as [`OutcomeCreation::Existing`].
+///
+/// An outcome record counts only while its session record exists, so after
+/// the put this function sends a HEAD request for the session record, and
+/// returns `UploadNotFound` if it's gone. The caller returns a token or
+/// deletes content only after this check passes. Without the check, a
+/// completion or abort that read the session as open, and then stalled while
+/// garbage collection deleted the ended session's records, would create a
+/// new outcome for a session that no longer exists. A completion would then
+/// issue a token for content that the earlier abort deleted, and an abort
+/// would delete content that a commit might reference. The check finds the
+/// session record gone in exactly those cases, because the outcome key is
+/// free again only after a deletion in the order of
+/// [`upload_session_record_keys`] has deleted the
+/// session record.
+pub(crate) async fn create_upload_outcome<S: ObjectStore + ?Sized>(
+    store: &S,
+    pool_id: &PoolId,
+    session: &UploadSessionPayload,
+    outcome: &UploadOutcome,
+) -> Result<OutcomeCreation> {
+    let upload_id = &session.upload_id;
+    let object_key = upload_outcome(pool_id, upload_id);
+    let record = UploadOutcomePayload {
+        namespace_id: session.namespace_id.clone(),
+        upload_id: upload_id.clone(),
+        outcome: outcome.clone(),
+    };
+    let encoded = Bytes::from(
+        encode_control_state(ControlObjectKind::UploadOutcome, &record)
+            .expect("an upload outcome record should encode"),
+    );
+    let creation = retry_while_contended(|| async {
+        let error = match store.put_if_absent(&object_key, encoded.clone()).await {
+            Ok(_) => return Ok(CasOutcome::Settled(OutcomeCreation::Created)),
+            Err(
+                error @ (ObjectStoreError::PreconditionFailed { .. }
+                | ObjectStoreError::Transport { .. }),
+            ) => error,
+            Err(error) => return Err(CoreError::store(&object_key, &error)),
         };
-        let encoded = Bytes::from(
-            encode_control_state(ControlObjectKind::UploadOutcome, &record)
-                .expect("an upload outcome record should encode"),
-        );
-        let creation = retry_while_contended(|| async {
-            let error = match self.store.put_if_absent(&object_key, encoded.clone()).await {
-                Ok(_) => return Ok(CasOutcome::Settled(OutcomeCreation::Created)),
-                Err(
-                    error @ (ObjectStoreError::PreconditionFailed { .. }
-                    | ObjectStoreError::Transport { .. }),
-                ) => error,
-                Err(error) => return Err(CoreError::store(&object_key, &error)),
-            };
-            match self.load_upload_outcome(family_root_id, upload_id).await? {
-                Some(stored) if stored == record => {
-                    Ok(CasOutcome::Settled(OutcomeCreation::Created))
-                }
-                Some(stored) => {
-                    ensure_outcome_matches_session(session, &stored)?;
-                    Ok(CasOutcome::Settled(OutcomeCreation::Existing(
-                        stored.outcome,
-                    )))
-                }
-                // An earlier attempt's put can still be applied after this read,
-                // so a write whose result is unknown is sent again.
-                None if matches!(error, ObjectStoreError::Transport { .. }) => {
-                    Ok(CasOutcome::Contended(CoreError::store(&object_key, &error)))
-                }
-                // The key was occupied and is empty now, which happens only when
-                // garbage collection deleted the ended session's records.
-                None => Err(CoreError::UploadNotFound {
-                    upload_id: upload_id.clone(),
-                }),
+        match load_upload_outcome(store, pool_id, upload_id).await? {
+            Some(stored) if stored == record => Ok(CasOutcome::Settled(OutcomeCreation::Created)),
+            Some(stored) => {
+                ensure_outcome_matches_session(session, &stored)?;
+                Ok(CasOutcome::Settled(OutcomeCreation::Existing(
+                    stored.outcome,
+                )))
             }
-        })
-        .await??;
-        let session_key = upload_session(family_root_id, upload_id);
-        match self.store.head(&session_key).await {
-            Ok(Some(_)) => Ok(creation),
-            Ok(None) => Err(CoreError::UploadNotFound {
+            // An earlier attempt's put can still be applied after this read,
+            // so a write whose result is unknown is sent again.
+            None if matches!(error, ObjectStoreError::Transport { .. }) => {
+                Ok(CasOutcome::Contended(CoreError::store(&object_key, &error)))
+            }
+            // The key was occupied and is empty now, which happens only when
+            // garbage collection deleted the ended session's records.
+            None => Err(CoreError::UploadNotFound {
                 upload_id: upload_id.clone(),
             }),
-            Err(error) => Err(CoreError::store(&session_key, &error)),
         }
+    })
+    .await??;
+    let session_key = upload_session(pool_id, upload_id);
+    match store.head(&session_key).await {
+        Ok(Some(_)) => Ok(creation),
+        Ok(None) => Err(CoreError::UploadNotFound {
+            upload_id: upload_id.clone(),
+        }),
+        Err(error) => Err(CoreError::store(&session_key, &error)),
     }
+}
 
-    /// Deletes an ended upload session's records from the prefix of
-    /// `family_root_id`, the session record first.
-    ///
-    /// An outcome record counts only while its session record exists, so the
-    /// session record goes first. If this call stops between the two deletes,
-    /// the outcome record is left without its session record, and a later collection
-    /// deletes it without acting on the session's content. The other order would
-    /// be unsafe: a session record left without its outcome reads as an open
-    /// session, and once its lease had passed, garbage collection would abort it
-    /// and delete its content, which a commit might reference. This order is
-    /// also what lets [`create_upload_outcome`] detect a session that was
-    /// deleted while the caller stalled.
-    pub(crate) async fn delete_upload_session_records(
-        &self,
-        family_root_id: &NamespaceId,
-        upload_id: &UploadId,
-    ) -> Result<()> {
-        for object_key in [
-            upload_session(family_root_id, upload_id),
-            upload_outcome(family_root_id, upload_id),
-        ] {
-            self.store
-                .delete(&object_key)
-                .await
-                .map_err(|error| CoreError::store(&object_key, &error))?;
-        }
-        Ok(())
-    }
+/// Returns the keys of an ended upload session's records under the prefix of
+/// `pool_id`, in the order that a deletion of the records follows: the
+/// session record first.
+///
+/// An outcome record counts only while its session record exists, so the
+/// session record goes first. If a deletion stops between the two keys, the
+/// outcome record is left without its session record, and a later collection
+/// deletes it without acting on the session's content. The other order would
+/// be unsafe: a session record left without its outcome reads as an open
+/// session, and once its lease had passed, garbage collection would abort it
+/// and delete its content, which a commit might reference. This order is
+/// also what lets [`create_upload_outcome`] detect a session that was
+/// deleted while the caller stalled.
+pub(crate) fn upload_session_record_keys(pool_id: &PoolId, upload_id: &UploadId) -> [String; 2] {
+    [
+        upload_session(pool_id, upload_id),
+        upload_outcome(pool_id, upload_id),
+    ]
 }
 
 fn present<T>(
@@ -338,7 +327,6 @@ mod tests {
                 completed_at_ms: 1_500,
                 content_ref,
             };
-            write_upload_records(&store, &namespace_id, &session, Some(outcome.clone())).await;
             let catalog = VerifiedNamespaceCatalogEntry::from_head(
                 &crate::namespace::state::NamespaceReadState::initial(
                     namespace_id.clone(),
@@ -346,6 +334,7 @@ mod tests {
                     loonfs_test_support::test_actor(),
                 ),
             );
+            write_upload_records(&store, catalog.pool_id(), &session, Some(outcome.clone())).await;
             let loaded = crate::test_support::namespace_store(&store, &namespace_id)
                 .load_upload_session_state(&catalog, &session.upload_id)
                 .await;

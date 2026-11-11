@@ -117,6 +117,7 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
     ) -> Self {
         let payload = loonfs_types::format::manifest::NamespaceManifestPayload::initial(
             loonfs_types::NamespaceId::parse("runs").expect("a static namespace id should parse"),
+            loonfs_types::PoolId::generate(),
             0,
             loonfs_types::ActorId::parse("runs").expect("a static actor id should parse"),
             loonfs_types::NamespaceAccess::Unrestricted {},

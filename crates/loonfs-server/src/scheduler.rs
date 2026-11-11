@@ -1,5 +1,5 @@
 //! The maintenance scheduler: the due steps of each open session, and the
-//! sweeps that list every namespace in the store.
+//! sweeps that list every namespace and every pool in the store.
 
 use crate::scheduler::calls::Claim;
 use crate::scheduler::metrics::SchedulerMetrics;
@@ -9,7 +9,7 @@ use loonfs::metrics::MetricsRecorder;
 use loonfs::{ChangeSeq, Maintenance, MaintenanceCancellation, NamespaceId, SharedObjectStore};
 use loonfs_grep::{GramIndexBuildPolicy, GrepWorker};
 use loonfs_http::{panic_message, HeldNamespace, HostState, Namespaces};
-use loonfs_objectstore::layout::{list_namespace_ids, MAX_NAMESPACE_IDS_PER_PAGE};
+use loonfs_objectstore::layout::{list_namespace_ids, list_pool_ids, MAX_NAMESPACE_IDS_PER_PAGE};
 use loonfs_objectstore::ObjectStoreError;
 use loonfs_types::{EffectiveLimit, MonotonicTimer};
 use std::collections::HashMap;
@@ -278,26 +278,34 @@ impl Scheduler {
 
     /// Runs one sweep: the steps of every namespace that the store lists.
     /// With [`GarbageCollection::Collect`], each namespace also gets a
-    /// collection. Each namespace's retention floor is advanced under its
-    /// retention window.
+    /// collection, and then every pool that the store lists gets a collection.
+    /// Each namespace's retention floor is advanced under its retention window.
     ///
     /// Returns how many namespaces the sweep listed, or the listing failure
-    /// that ended it once the namespaces it had started returned. A failed
-    /// call on one namespace does not fail the sweep. After the [`Scheduler`]
-    /// is stopped, no namespace starts its steps, and a running compaction
-    /// unit stops at its next block.
+    /// that ended it once the namespaces or pools it had started returned. A
+    /// failed call on one namespace or pool does not fail the sweep. After the
+    /// [`Scheduler`] is stopped, no namespace starts its steps, no pool starts
+    /// its collection, and a running compaction unit stops at its next block.
     pub async fn run_sweep(&self, garbage: GarbageCollection) -> Result<usize, ObjectStoreError> {
         let inner = &self.inner;
         let started_at_ms = inner.timer.monotonic_now_ms();
         let collect_garbage = garbage == GarbageCollection::Collect;
-        let listed = self.sweep_every_namespace(garbage).await;
+        let swept = async {
+            let namespaces = self.sweep_every_namespace(garbage).await?;
+            let pools = match garbage {
+                GarbageCollection::Collect => self.collect_every_pool().await?,
+                GarbageCollection::Skip => 0,
+            };
+            Ok((namespaces, pools))
+        }
+        .await;
         let elapsed_ms = inner.timer.monotonic_now_ms().saturating_sub(started_at_ms);
         inner
             .metrics
             .sweep_seconds
             .record(Duration::from_millis(elapsed_ms).as_secs_f64());
-        match &listed {
-            Ok(namespaces) => {
+        match &swept {
+            Ok((namespaces, pools)) => {
                 inner.metrics.sweeps_ok.increment(1);
                 inner
                     .metrics
@@ -305,6 +313,7 @@ impl Scheduler {
                     .set(i64::try_from(*namespaces).unwrap_or(i64::MAX));
                 tracing::info!(
                     namespaces,
+                    pools,
                     collect_garbage,
                     elapsed_ms,
                     "maintenance sweep finished"
@@ -316,11 +325,51 @@ impl Scheduler {
                     error = %error,
                     collect_garbage,
                     elapsed_ms,
-                    "namespace listing failed; the next sweep lists again"
+                    "namespace or pool listing failed; the next sweep lists again"
                 );
             }
         }
-        listed
+        swept.map(|(namespaces, _)| namespaces)
+    }
+
+    /// Collects every pool that the store lists, with the concurrency of the
+    /// namespace sweep, and returns how many pools it listed, or the listing
+    /// failure that ended it once the collections it had started returned.
+    async fn collect_every_pool(&self) -> Result<usize, ObjectStoreError> {
+        let inner = &self.inner;
+        // Boxed for the same reason as the namespace listing.
+        let pages = futures::stream::try_unfold(Some(None), move |start_after| async move {
+            let Some(start_after) = start_after else {
+                return Ok(None);
+            };
+            let page = list_pool_ids(&*inner.store, start_after.as_ref(), inner.page_limit).await?;
+            Ok(Some((page.pool_ids, page.next_cursor.map(Some))))
+        })
+        .boxed();
+        let mut listed = 0;
+        let mut listing = Ok(());
+        pages
+            .filter_map(|page| {
+                let pool_ids = match page {
+                    Ok(pool_ids) => {
+                        listed += pool_ids.len();
+                        Some(futures::stream::iter(pool_ids))
+                    }
+                    Err(error) => {
+                        listing = Err(error);
+                        None
+                    }
+                };
+                futures::future::ready(pool_ids)
+            })
+            .flatten()
+            .take_until(inner.stop.cancelled())
+            .for_each_concurrent(inner.config.max_concurrent_maintenance.get(), |pool_id| {
+                // Boxed for the same reason as a namespace's steps.
+                async move { self.gc_pool(&pool_id).await }.boxed()
+            })
+            .await;
+        listing.map(|()| listed)
     }
 
     async fn sweep_every_namespace(

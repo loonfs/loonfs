@@ -205,7 +205,7 @@ fn remote_doctor_checks_transport_auth_health_and_capabilities() {
             "head_seq": 0,
             "created_at_ms": 1000,
             "created_by": "loonfs-cli",
-            "family_root_id": "demo",
+            "pool_id": "pool_3s0drmj8em84yb4mnetqkz2j0x",
             "wal_tail_objects": 0,
             "retention_floor_seq": 0
         }),

@@ -1276,9 +1276,10 @@ async fn planned_appends_to_a_crc_base_match_the_model() {
         size_bytes: 6,
         checksum: Checksum::crc64nvme(b"direct"),
     };
+    let pool_id = loonfs_core::test_support::load_pool_id(&store, &namespace_id).await;
     store
         .put(
-            &loonfs_objectstore::keys::content_blob(&namespace_id, &upload.content_id),
+            &loonfs_objectstore::keys::content_blob(&pool_id, &upload.content_id),
             bytes::Bytes::from_static(b"direct"),
             loonfs_objectstore::PutMode::CreateIfAbsent,
         )

@@ -11,7 +11,7 @@ use crate::storage::content_admission::PreparedContent;
 use crate::storage::content_location::ContentLocation;
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::{ObjectStore, ObjectStoreErrorKind};
-use loonfs_types::{Checksum, ContentRef, ErrorCode, NamespaceId};
+use loonfs_types::{Checksum, ContentRef, ErrorCode, PoolId};
 use thiserror::Error;
 
 /// Confirms that LoonFS durably stored the content described by this
@@ -86,10 +86,10 @@ impl DurableContentValidationError {
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) async fn validate_durable_content_reference<S: ObjectStore + ?Sized>(
     store: &S,
-    family_root_id: &NamespaceId,
+    pool_id: &PoolId,
     content_ref: &ContentRef,
 ) -> std::result::Result<(), DurableContentValidationError> {
-    ContentLocation::whole(family_root_id, content_ref)
+    ContentLocation::whole(pool_id, content_ref)
         .read_bytes(store, None, content_ref)
         .await
         .map(drop)
@@ -119,7 +119,7 @@ pub async fn prepare_existing_content_ref<S: ObjectStore + ?Sized>(
     catalog: &VerifiedNamespaceCatalogEntry,
     content_ref: ContentRef,
 ) -> std::result::Result<PreparedContent, DurableContentValidationError> {
-    validate_durable_content_reference(store, catalog.family_root_id(), &content_ref).await?;
+    validate_durable_content_reference(store, catalog.pool_id(), &content_ref).await?;
     Ok(PreparedContent::for_durable_content_write(
         catalog.namespace_id().clone(),
         content_ref,
@@ -128,10 +128,10 @@ pub async fn prepare_existing_content_ref<S: ObjectStore + ?Sized>(
 
 pub(crate) async fn verify_durable_content_checksum<S: ObjectStore + ?Sized>(
     store: &S,
-    family_root_id: &NamespaceId,
+    pool_id: &PoolId,
     content_ref: &ContentRef,
 ) -> std::result::Result<(), DurableContentValidationError> {
-    let object_key = content_object_key_for_ref(family_root_id, content_ref);
+    let object_key = content_object_key_for_ref(pool_id, content_ref);
     let stored = match store.head(&object_key).await {
         Ok(Some(stored)) => stored,
         Ok(None) => return Err(DurableContentValidationError::MissingContentObject { object_key }),
@@ -168,12 +168,9 @@ pub(crate) async fn verify_durable_content_checksum<S: ObjectStore + ?Sized>(
 }
 
 /// Returns the key of the whole object of the reference's chain, under the
-/// prefix of the reading namespace's family root.
-pub(crate) fn content_object_key_for_ref(
-    family_root_id: &NamespaceId,
-    content_ref: &ContentRef,
-) -> String {
-    content_blob(family_root_id, &content_ref.content_id)
+/// prefix of `pool_id`, the reading namespace's pool.
+pub(crate) fn content_object_key_for_ref(pool_id: &PoolId, content_ref: &ContentRef) -> String {
+    content_blob(pool_id, &content_ref.content_id)
 }
 
 /// Checks fetched bytes against everything the reference claims about them.
@@ -224,20 +221,20 @@ pub(crate) mod tests {
     use loonfs_objectstore::ObjectStoreExtension;
     use loonfs_test_support::ids::content_ref;
     use loonfs_test_support::stores::{KeyPredicate, OperationSelector, RecordingStore};
-    use loonfs_types::{Checksum, ContentId, ContentRef, ContentRefKind, NamespaceId};
+    use loonfs_types::{Checksum, ContentId, ContentRef, ContentRefKind, PoolId};
     use std::assert_matches;
     use tempfile::tempdir;
 
-    /// The family root under whose prefix these tests store content.
-    pub(crate) fn family_root_id() -> NamespaceId {
-        NamespaceId::parse("demo").expect("namespace id")
+    /// The pool under whose prefix these tests store content.
+    pub(crate) fn pool_id() -> PoolId {
+        loonfs_test_support::ids::numbered_pool_id(1)
     }
 
     async fn get_durable_content_bytes<S: ObjectStore + ?Sized>(
         store: &S,
         content_ref: &ContentRef,
     ) -> std::result::Result<Vec<u8>, DurableContentValidationError> {
-        ContentLocation::whole(&family_root_id(), content_ref)
+        ContentLocation::whole(&pool_id(), content_ref)
             .read_bytes(store, None, content_ref)
             .await
     }
@@ -251,7 +248,7 @@ pub(crate) mod tests {
         put_content_object(&store, &content_ref, bytes).await;
 
         store.reset();
-        validate_durable_content_reference(&store, &family_root_id(), &content_ref)
+        validate_durable_content_reference(&store, &pool_id(), &content_ref)
             .await
             .expect("validate content ref");
         assert_eq!(store.count(OperationSelector::Read), 1);
@@ -275,7 +272,7 @@ pub(crate) mod tests {
         let (_temp_dir, store) = test_store();
         let content_ref = content_ref(b"missing");
 
-        let err = validate_durable_content_reference(&store, &family_root_id(), &content_ref)
+        let err = validate_durable_content_reference(&store, &pool_id(), &content_ref)
             .await
             .expect_err("missing object");
         assert_matches!(
@@ -291,7 +288,7 @@ pub(crate) mod tests {
         put_content_object(&store, &content_ref, b"abc").await;
         content_ref.size_bytes += 1;
 
-        let err = validate_durable_content_reference(&store, &family_root_id(), &content_ref)
+        let err = validate_durable_content_reference(&store, &pool_id(), &content_ref)
             .await
             .expect_err("size mismatch");
         assert_matches!(
@@ -313,7 +310,7 @@ pub(crate) mod tests {
         );
         put_content_object(&store, &planted, b"mismatch").await;
 
-        let err = validate_durable_content_reference(&store, &family_root_id(), &expected)
+        let err = validate_durable_content_reference(&store, &pool_id(), &expected)
             .await
             .expect_err("checksum mismatch");
         assert_matches!(
@@ -364,7 +361,7 @@ pub(crate) mod tests {
         put_content_object(&store, &content_ref, bytes).await;
 
         store.reset();
-        verify_durable_content_checksum(&store, &family_root_id(), &content_ref)
+        verify_durable_content_checksum(&store, &pool_id(), &content_ref)
             .await
             .expect("verify content ref");
         assert_eq!(
@@ -380,7 +377,7 @@ pub(crate) mod tests {
         let bytes = b"abc";
         let content_ref = content_ref(bytes);
 
-        let err = verify_durable_content_checksum(&store, &family_root_id(), &content_ref)
+        let err = verify_durable_content_checksum(&store, &pool_id(), &content_ref)
             .await
             .expect_err("missing object");
         assert_matches!(
@@ -392,7 +389,7 @@ pub(crate) mod tests {
         let mut wrong_size = content_ref.clone();
         wrong_size.size_bytes += 1;
         assert_matches!(
-            verify_durable_content_checksum(&store, &family_root_id(), &wrong_size)
+            verify_durable_content_checksum(&store, &pool_id(), &wrong_size)
                 .await
                 .expect_err("size mismatch"),
             DurableContentValidationError::ContentLengthMismatch { .. }
@@ -404,7 +401,7 @@ pub(crate) mod tests {
         let mut wrong_checksum = content_ref.clone();
         wrong_checksum.checksum = Checksum::crc64nvme(b"other bytes");
         assert_matches!(
-            verify_durable_content_checksum(&store, &family_root_id(), &wrong_checksum)
+            verify_durable_content_checksum(&store, &pool_id(), &wrong_checksum)
                 .await
                 .expect_err("checksum mismatch"),
             DurableContentValidationError::ContentChecksumMismatch { .. }
@@ -422,7 +419,7 @@ pub(crate) mod tests {
         content_ref: &ContentRef,
         bytes: &[u8],
     ) {
-        let key = content_blob(&family_root_id(), &content_ref.content_id);
+        let key = content_blob(&pool_id(), &content_ref.content_id);
         store
             .put_if_absent(&key, Bytes::copy_from_slice(bytes))
             .await

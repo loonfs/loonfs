@@ -13,12 +13,13 @@ use loonfs_core::cache::{
 use loonfs_core::time::Observation;
 use loonfs_core::{
     BudgetPermit, MetadataRunPolicy, NamespaceReaderEngine, NamespaceStore, NamespaceWriterEngine,
+    PoolStore,
 };
 use loonfs_objectstore::ConfiguredObjectStoreKind;
 use loonfs_types::{
-    u64_from_usize, CapabilityDocument, MonotonicTimer, Subject, WriterId, API_GROUP_FILESYSTEM_V0,
-    API_GROUP_MAINTENANCE_V0, FEATURE_CHANGES_SPLIT_COMMITS, FEATURE_MERGES,
-    LIMIT_ACCESS_MAX_PRINCIPALS_PER_REQUEST, LIMIT_COMMIT_MAX_CONTENT_TOKENS,
+    u64_from_usize, CapabilityDocument, MonotonicTimer, PoolId, Subject, WriterId,
+    API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0, FEATURE_CHANGES_SPLIT_COMMITS,
+    FEATURE_MERGES, LIMIT_ACCESS_MAX_PRINCIPALS_PER_REQUEST, LIMIT_COMMIT_MAX_CONTENT_TOKENS,
     LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS, LIMIT_COMMIT_MAX_MESSAGE_BYTES,
     LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_COMMIT_MAX_PRECONDITIONS, LIMIT_GC_MIN_GRACE_WINDOW_MS,
     MAX_SUBJECT_PRINCIPALS, PROTOCOL_VERSION,
@@ -352,6 +353,22 @@ impl RuntimeCore {
         NamespaceStore::new(
             Arc::clone(&self.inner.store),
             namespace_id.clone(),
+            self.metadata_segment_cache(),
+            Arc::clone(&self.inner.head_and_wal_tail_cache),
+            Arc::clone(&self.inner.object_cache),
+            Arc::clone(&self.inner.wall_clock),
+            Arc::clone(&self.inner.timer),
+            self.inner.execution_budget.content_writes(),
+            self.inner.run_policy,
+        )
+    }
+
+    /// Returns `pool_id`'s components: this core's store, caches, clocks,
+    /// content write permits, and run policy.
+    pub(crate) fn pool_store(&self, pool_id: &PoolId) -> PoolStore<SharedObjectStore> {
+        PoolStore::new(
+            Arc::clone(&self.inner.store),
+            pool_id.clone(),
             self.metadata_segment_cache(),
             Arc::clone(&self.inner.head_and_wal_tail_cache),
             Arc::clone(&self.inner.object_cache),

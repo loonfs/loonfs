@@ -974,7 +974,7 @@ mod tests {
     /// Checks rule 1 of the WAL records: a layout of a chain with pieces in
     /// the commit records the WAL object's namespace as its creator, and a
     /// layout of a chain without pieces, such as a copy's, can record any
-    /// member of the fork family.
+    /// member of the pool.
     #[test]
     fn a_layout_of_a_chain_with_pieces_records_the_wal_namespace_as_its_creator() {
         let with_creator = |payload: &mut WalObjectPayload, creator: &str| {

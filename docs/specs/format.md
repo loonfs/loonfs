@@ -57,7 +57,7 @@ An inode ID is a 128-bit number. The public API writes it as `ino_` followed by 
 
 A "fork" is a new namespace that starts from a retained view of another namespace. It starts with the same files and shares their stored objects, and later commits only change the fork. [Namespace lifecycle and forks](#9-namespace-lifecycle-and-forks) describes how the shared objects are kept.
 
-A "fork family" is a set of namespaces: one namespace that was created without a source, and every namespace forked from it, directly or through other forks. Each namespace in a fork family is a "member" of the family, and a member leaves the fork family when it's retired. The namespace that was created without a source is the family's "family root". Every manifest records the namespace's family root (`family_root_id`). A plain create records the namespace itself, and a fork copies its source's value. The value can't change after creation. The family root's prefix stores the content objects and upload records of every member (see [File contents and ownership](#15-file-contents-and-ownership)).
+A "pool" is a set of namespaces that share one set of content objects, together with the key prefix (`pools/{pool_id}/`) that stores those objects and the upload records of every namespace in the pool (see [File contents and ownership](#15-file-contents-and-ownership)). Every manifest records the namespace's pool (`pool_id`). A plain create records a pool ID that the create call generates, such as `pool_3s0drmj8em84yb4mnetqkz2j0x`, and a fork copies its source's value. The value can't change after creation. A "member" of a pool is a namespace whose manifest records the pool, until the namespace is [retired](#95-retirement). The pool's "first member" is the namespace that was created with the pool, and the pool's record identifies it (see [Creating a namespace](#91-creating-a-namespace)). So a pool's members are its first member and every namespace forked from a member, directly or through other forks.
 
 Every namespace's root directory has the inode ID whose 128 bits are all zero (`ino_00000000000000000000000000`), and a new namespace starts at sequence 0. Every other inode ID has two 64-bit words. The high word is the low 32 bits of the sequence of the commit that creates the inode (`committed_seq`), followed by the inode's "create number" within that commit. The create number is 1 for the first inode that the commit creates, 2 for the second, and so on, and it counts files and directories alike, including the parent directories that a commit creates for a path. The low word is random. For example, `ino_000000r0000013kje0d47gc8kw` is the ID of the second inode that commit 12 creates, and its high word is `0x0000000c00000002`. The high word orders IDs, and the low word identifies them. Create numbers start at 1, so no generated ID is all zero bits. The sequence field wraps after 2^32 commits, which changes the order of later IDs but doesn't make any of them invalid, and no rule in LoonFS depends on the order of two IDs. A [merge](glossary.md#merge) creates each inode under the ID that the inode has in the fork, so in the namespace that receives the merge, that inode's high word comes from the fork's commit, and the random low word keeps it apart from every ID that the namespace generates. Renaming a file doesn't change its inode ID, but deleting a file and creating another one at the same path creates a new inode with a new ID.
 
@@ -156,17 +156,17 @@ A content reference contains:
 - the size of the prefix it refers to, and
 - a checksum of that prefix.
 
-A reference contains no bucket address, object-store path, or namespace. The content ID and the reading namespace's [family root](glossary.md#family-root) determine where the bytes are stored, so one reference identifies the same object in every member of a [fork family](glossary.md#fork-family).
+A reference contains no bucket address, object-store path, or namespace. The content ID and the reading namespace's [pool](glossary.md#pool) determine where the bytes are stored, so one reference identifies the same object in every [member](glossary.md#pool) of a pool.
 
 A "chain" is the bytes stored under one content ID. A chain grows when a file is appended to, and each reference refers to a prefix of the chain, so two references with the same content ID can refer to different lengths of one chain. For example, a log file's first revision might refer to the first 100 bytes of a chain, and after two appends, revisions 2 and 3 might refer to the first 200 and the first 210 bytes of the same chain.
 
 Content objects are immutable, so the bytes appended to a chain are written to new content objects, and a chain's bytes can be spread across several of them. A "layout" lists those objects, in chain order, as "extents". Each extent records the object's content ID, the object, the offset in that object, and the length. A revision's WAL delta includes the extents its bytes need, except for bytes that are still stored as WAL pieces and bytes that are already covered by the chain's earlier revisions. Copies and restores include layouts that cover their references, and validation writes any pending pieces those layouts need to content objects.
 
-A chain's "whole object" is stored at the chain's own key, under the family root's prefix. Every other object of the chain is a "span object", and its key adds the start and end chain offsets of the range it stores:
+A chain's "whole object" is stored at the chain's own key, under the prefix of the reading namespace's pool. Every other object of the chain is a "span object", and its key adds the start and end chain offsets of the range it stores:
 
 ```text
-namespaces/{family_root_id}/content/{content_id}
-namespaces/{family_root_id}/content/{content_id}-{start:020}-{end:020}
+pools/{pool_id}/content/{content_id}
+pools/{pool_id}/content/{content_id}-{start:020}-{end:020}
 ```
 
 The whole object sorts before its spans, so all the objects of one chain are next to each other in a listing.
@@ -180,15 +180,17 @@ File content is durable no later than the commit that references it. File conten
 
 Garbage collection deletes a WAL object only after a manifest covers it, and the fold that published that manifest has already written the WAL object's pieces as extents. So a WAL object is never deleted while some of its pieces exist only in the WAL. This is also why a reference identifies content but doesn't prove that a content object contains its bytes yet. [Content verification](#45-content-verification) defines where a reader finds the bytes.
 
-Every member of a fork family writes its new content under the family root's prefix: the object of each upload, the objects that a fold writes for inline pieces, and the extents of new chains. So a fork reads inherited content with the same keys as its source, and a reference that one member commits identifies the same bytes in every other member. Content is never copied between the members of a fork family.
+Every member of a pool writes its new content under the pool's prefix: the object of each upload, the objects that a fold writes for inline pieces, and the extents of new chains. So a fork reads inherited content with the same keys as its source, and a reference that one member commits identifies the same bytes in every other member. Content is never copied between the members of a pool.
 
-A chain's "creator" is the namespace whose commit started the chain, and only the creator extends the chain in place. The chain's layout records the creator next to its extents (see [Metadata rows and row keys](#a6-metadata-rows-and-row-keys)). An append by any other member of the fork family starts a new chain that shares the first chain's extents (see [Operations and WAL deltas](#66-operations-and-wal-deltas)).
+A chain's "creator" is the namespace whose commit started the chain, and only the creator extends the chain in place. The chain's layout records the creator next to its extents (see [Metadata rows and row keys](#a6-metadata-rows-and-row-keys)). An append by any other member of the pool starts a new chain that shares the first chain's extents (see [Operations and WAL deltas](#66-operations-and-wal-deltas)).
 
-Reading inherited content doesn't require the source's manifest. A fork's manifest records the family root, so the fork derives every content key on its own, and the fork keeps reading the exact objects in its pinned basis after its source namespace is deleted.
+Reading inherited content doesn't require the source's manifest. A fork's manifest records the pool, so the fork derives every content key on its own, and the fork keeps reading the exact objects in its pinned basis after its source namespace is deleted.
 
 Two separate uploads of identical bytes create two objects, because LoonFS doesn't deduplicate content across uploads. A retry within one upload session reuses that session's content ID, so retries don't depend on finding another upload with identical bytes.
 
-Why does every member of a fork family write content under one prefix? The members of a fork family are the namespaces that can share a content object: a fork inherits its source's references, a merge carries a fork's references into its source, and no operation carries a reference into another fork family. With one prefix, a reference identifies the same object in every member, a member's retirement never deletes an object that another member reads, and one collection sees every root of every object it can delete (see [Content roots](#119-content-roots)). With a prefix for each namespace, a reference from one member into another member's prefix would need a pin in that direction for as long as the reference exists.
+Why does every member of a pool write content under one prefix? The members of a pool are the namespaces that can share a content object: a fork inherits its source's references, a merge adds a fork's references to its source, and no operation adds a reference to another pool's content. With one prefix, a reference identifies the same object in every member, and one collection sees every root of every object that the collection can delete (see [Content roots](#119-content-roots)). With a prefix for each namespace, a reference from one member into another member's prefix would need a pin in that direction for as long as the reference exists.
+
+Why is a pool's prefix separate from every namespace's prefix? If one member's prefix stored the content of every member, that member would have to be retired last because of other members' data, and its collections would have to keep running after it's deleted. With a prefix for the pool, no namespace's prefix stores another namespace's content, and no namespace's collection or retirement deletes content.
 
 ### 1.6 File and subtree deletion
 
@@ -344,7 +346,7 @@ This section describes the objects LoonFS stores for a namespace, how their keys
 
 ### 2.1 Storage layout
 
-Each namespace's objects are stored under its own prefix, except that a fork's content objects and upload records are stored under its family root's prefix, and a temporary object is stored under the prefix of the key that it assembles ([Object keys](#a8-object-keys) lists the complete key patterns):
+Each namespace's objects are stored under its own prefix, except its content objects and upload records, which are stored under the prefix of the namespace's [pool](glossary.md#pool). A pool's prefix also stores the pool record, which the create call of the pool's first member writes (see [Creating a namespace](#91-creating-a-namespace)), and the temporary objects of assemblies. Every assembly writes a content object, so every temporary object is stored under a pool's prefix ([Object keys](#a8-object-keys) lists the complete key patterns):
 
 ```text
 namespaces/{namespace_id}/
@@ -353,14 +355,17 @@ namespaces/{namespace_id}/
 ├── wal/{wal_no:020}.wal.zst
 ├── segments/{segment_id}.sst.zst
 ├── pins/{pin_id}.json
+└── extensions/{extension_name}/segments/{segment_id}.sst.zst
+
+pools/{pool_id}/
+├── pool.json
+├── content/
 ├── uploads/{upload_id}.json
 ├── uploads/{upload_id}.outcome.json
-├── content/
-├── temporary/{temporary_id}
-└── extensions/{extension_name}/segments/{segment_id}.sst.zst
+└── temporary/{temporary_id}
 ```
 
-Content objects and upload records are stored under the family root's prefix (see [File contents and ownership](#15-file-contents-and-ownership)), so a fork's `content/` and `uploads/` prefixes are empty. Metadata segments stay with the namespace that wrote them. A segment that a fork inherited stays under its owner's prefix, and its descriptor records the owner (`owner_namespace_id`), so readers never substitute the reading namespace into the key. Every newly written segment, including compaction output, is stored under the writing namespace's `segments/` prefix. An [extension's](#124-extensions) segments follow the same rule under the writing namespace's `extensions/{extension_name}/segments/` prefix.
+Every member of a pool stores its content objects and upload records under the pool's prefix (see [File contents and ownership](#15-file-contents-and-ownership)). Metadata segments stay with the namespace that wrote them. A segment that a fork inherited stays under its owner's prefix, and its descriptor records the owner (`owner_namespace_id`), so readers never substitute the reading namespace into the key. Every newly written segment, including compaction output, is stored under the writing namespace's `segments/` prefix. An [extension's](#124-extensions) segments follow the same rule under the writing namespace's `extensions/{extension_name}/segments/` prefix.
 
 On providers that build a new object by composing whole objects (such as GCS), an assembly writes temporary objects for the parts it can't compose directly: a range of a source object, new bytes, or an intermediate result. The assembly deletes them when it finishes (see [Immutable writes and retries](#32-immutable-writes-and-retries)).
 
@@ -377,6 +382,7 @@ The key layout is part of the format. Other objects MUST NOT use keys in these f
 | Extension segment | Sorted rows of an extension's state, which an extension entry in a manifest lists | A new immutable object is written. |
 | Pin | A reference that keeps one manifest for a user or a fork | Created and deleted. A user pin's expiry time can be extended by compare-and-swap. |
 | Upload session | One transfer and its completed content, until a commit uses it or cleanup removes it | A session record and an outcome record, each created once with put-if-absent. |
+| Pool record | The pool's ID, the namespace that was created with the pool, and the creation time | Created once with put-if-absent. A create call whose manifest 1 put loses to another creation deletes its own pool record, and the pool's collection deletes the record of a failed create after its creation grace. |
 | Content object (whole or span) | A range of chain bytes, along with the provider's stored checksum of the whole object | Immutable. |
 | Temporary object | Bytes that an assembly needs as a separate object | Created, then deleted. |
 
@@ -711,7 +717,7 @@ This section describes upload sessions, the ways bytes can be transferred, and t
 
 ### 5.1 Upload sessions
 
-Every uploaded content object is tied to an upload session before a commit can reference it. The content ID is allocated when the session is created, before any file bytes are read, and the content object is stored under the prefix of the namespace's [family root](glossary.md#family-root) (see [File contents and ownership](#15-file-contents-and-ownership)). The session's records are stored under the same prefix, and each one records the namespace that created the session.
+Every uploaded content object is tied to an upload session before a commit can reference it. The content ID is allocated when the session is created, before any file bytes are read, and the content object is stored under the prefix of the namespace's [pool](glossary.md#pool) (see [File contents and ownership](#15-file-contents-and-ownership)). The session's records are stored under the same prefix, and each one records the namespace that created the session.
 
 An upload session is stored as two records. LoonFS creates each record once, with put-if-absent, and never changes it:
 
@@ -1004,7 +1010,7 @@ For example, suppose request A creates `/reports`, and request B also tries to c
 
 Every WAL commit and every `commit` row stores a semantic fingerprint (`semantic_commit_fingerprint`) of the logical request: the `namespace_id`, the `actor_id`, the optional `subject_id`, the ordered operations with their inline preconditions, the request-level preconditions, and the optional message. It doesn't include publication details, such as the writer epoch and the timestamp. [Semantic commit fingerprints](#appendix-b-semantic-commit-fingerprints) specifies the exact canonical bytes.
 
-A "merge" is a commit that applies a fork's commits to another namespace in the fork's [fork family](glossary.md#fork-family). That namespace is either the one that the fork was forked from, or a new fork of that namespace that a [rebase](glossary.md#rebase) created. A merge's commit record includes a merge record that identifies the fork and the range of the fork's commits that it applied (see [WAL records](#a5-wal-records)). LoonFS plans a merge's operations itself, from that fork and range, so a merge's fingerprint covers its merge record in place of its operations and preconditions. A retry of a merge with the same commit ID and merge record (and the same actor, subject, and message) is a replay, even if LoonFS planned different operations for it, and a request that reuses the commit ID for a different range returns `commit_id_reuse_conflict`. Leaving the operations out also means that a change in how LoonFS plans a merge doesn't change the merge's identity. [Merge commits](#b5-merge-commits) specifies the canonical bytes.
+A "merge" is a commit that applies a fork's commits to another namespace in the fork's [pool](glossary.md#pool). That namespace is either the one that the fork was forked from, or a new fork of that namespace that a [rebase](glossary.md#rebase) created. A merge's commit record includes a merge record that identifies the fork and the range of the fork's commits that it applied (see [WAL records](#a5-wal-records)). LoonFS plans a merge's operations itself, from that fork and range, so a merge's fingerprint covers its merge record in place of its operations and preconditions. A retry of a merge with the same commit ID and merge record (and the same actor, subject, and message) is a replay, even if LoonFS planned different operations for it, and a request that reuses the commit ID for a different range returns `commit_id_reuse_conflict`. Leaving the operations out also means that a change in how LoonFS plans a merge doesn't change the merge's identity. [Merge commits](#b5-merge-commits) specifies the canonical bytes.
 
 The manifest's runs also store each retained commit's record in the `commits` family, keyed by sequence. A commit receipt stores only `commit_id` and `committed_seq`. When a request reuses a commit ID, the writer reads the commit row at the receipt's sequence and compares that row's fingerprint with the request's fingerprint. A replay rebuilds its response from that row. The `commits` and `commit_receipts` families are one family group and follow the same retention rule, so a commit row is kept for as long as its receipt. The `merges` family is in the same group, so a merge's index row is kept for as long as its commit row.
 
@@ -1068,7 +1074,7 @@ Each delta has a `delta_index`, and its wrapper has a `semantic_operation_index`
 
 Why does an append's delta record its offset, when the append's piece already starts at that offset? A fold writes each commit to a `commit` row without its pieces, and the change feed reads folded commits from those rows. A reader also can't use a piece at offset 0 to tell an append to an empty file from a put of inline content. So the delta records the offset, and the feed reports the same event before and after a fold.
 
-Why does only a chain's creator extend the chain in place? Every member of a fork family writes under the same prefix. If two members appended to one chain from the same length, both folds would write a span object at the same key with different bytes, and the chain's layout rows would describe one content ID as two different byte sequences. With one creator for each chain, a content ID stays one sequence of bytes, and every layout of a chain is a prefix of its longest layout. A new chain costs a content ID and a layout row, and no copy of bytes, because it shares the first chain's extents.
+Why does only a chain's creator extend the chain in place? Every member of a pool writes under the same prefix. If two members appended to one chain from the same length, both folds would write a span object at the same key with different bytes, and the chain's layout rows would describe one content ID as two different byte sequences. With one creator for each chain, a content ID stays one sequence of bytes, and every layout of a chain is a prefix of its longest layout. A new chain costs a content ID and a layout row, and no copy of bytes, because it shares the first chain's extents.
 
 ### 6.7 Change feed
 
@@ -1112,7 +1118,7 @@ The first manifest of a namespace has these values:
 | Writer block | None | None |
 | Writer epoch, compactor epoch, folded WAL number, activity counters | 0 | 0 |
 | Fork basis | None | The pinned source manifest and the source pin's ID |
-| Family root | The namespace itself | From the pinned source manifest |
+| Pool | A pool ID that the create call generates | From the pinned source manifest |
 | Runs | None | The source's runs |
 | Folded head sequence and retention floor | 0 | The pinned source sequence |
 | Base sequence | 0 | Derived from the inherited runs |
@@ -1123,7 +1129,7 @@ A fold works in these steps:
 
 1. Start from a verified manifest and a discovered WAL tip. (A fold call discovers both, and a writer's own fold takes them from its retained view.)
 2. Check every chain's pieces in the tail (see below).
-3. Write each chain's new extent to a content object under the family root's prefix (see below).
+3. Write each chain's new extent to a content object under the pool's prefix (see below).
 4. Write new metadata segments for the WAL objects after `folded_wal_no`, including the new layout rows. A fence or a [floor object](glossary.md#floor-object) is folded even when the sequence doesn't change, and an ordinary fold writes a run at the folded head when it folds new state. A tail of fences and floor objects with no commits is folded into a manifest with no new run.
 5. Publish the next manifest, with `folded_wal_no` set to the tip it captured, using put-if-absent at the predecessor's `manifest_no + 1`. The manifest's `retention_floor_seq` is the higher of the predecessor's floor and the floors of the floor objects that the fold covers.
 
@@ -1160,7 +1166,7 @@ Folds, validation (when it writes pending pieces to content objects), direct-dow
 
 Every successor manifest MUST:
 
-- keep the namespace's identity, including its access mode and family root,
+- keep the namespace's identity, including its access mode and pool,
 - not lower the folded head sequence, the writer or compactor epoch, the folded WAL number, the retention floor, the next run number, or the cumulative activity counters, and
 - keep the activity counters exactly the same, if it's at the same folded head.
 
@@ -1294,11 +1300,15 @@ This section describes how namespaces are created, forked, deleted, and retired.
 
 To create a namespace, LoonFS:
 
-1. Builds the first manifest (see [Publishing a manifest](#72-publishing-a-manifest)).
-2. Writes the hint, pointing to manifest 1, with put-if-absent. A new hint means a new namespace ID, and LoonFS then writes manifest 1 with put-if-absent.
-3. If the hint already exists, reads the existing namespace state through it (see [Resolving the metadata basis](#41-resolving-the-metadata-basis)). An existing active namespace returns `namespace_exists` (or its current summary, with `allow_existing`), and a tombstone returns `namespace_deleted`. Corruption and read errors aren't absence. A hint whose manifest 1 is missing belongs to a creation that failed before it wrote manifest 1, and LoonFS then writes manifest 1 with put-if-absent. If that put is refused, it reads the state again.
+1. Builds the first manifest (see [Publishing a manifest](#72-publishing-a-manifest)). For a namespace created without a source, LoonFS generates a pool ID, and the first manifest records that pool ID.
+2. Writes the hint, pointing to manifest 1, with put-if-absent. A new hint means a new namespace ID. If the hint already exists, LoonFS reads the existing namespace state through it (see [Resolving the metadata basis](#41-resolving-the-metadata-basis)). An existing active namespace returns `namespace_exists` (or its current summary, with `allow_existing`), and a tombstone returns `namespace_deleted`. Corruption and read errors aren't absence. A hint whose manifest 1 is missing belongs to a creation that failed before it wrote manifest 1, and LoonFS then continues with the next step.
+3. For a namespace created without a source, writes the pool record (`pools/{pool_id}/pool.json`) with put-if-absent. The record's `created_at_ms` is the create call's request clock. If the put fails, or its outcome is unknown, the call ends with that error and doesn't write manifest 1. The hint stays, as after any creation that failed before it wrote manifest 1. A fork writes no pool record (see [Forking a namespace](#92-forking-a-namespace)).
+4. Writes manifest 1 with put-if-absent. If that put is refused, LoonFS reads the state again, and returns `namespace_exists` (or the current summary, with `allow_existing`) or `namespace_deleted`.
+5. For a namespace created without a source, if the manifest 1 put lost to another creation, reloads the namespace's current manifest. If that manifest records another pool, LoonFS deletes the call's own pool record. The call returns the result of step 4 in every case. If the reload or the deletion fails, the pool record stays. A manifest 1 put with an unknown outcome leaves the pool record in place.
 
 The hint decides whether the ID is new, because the hint lives as long as the namespace. Manifest 1 can't decide, because garbage collection can delete it once a newer manifest replaces it and the grace window passes (see [Reference roots](#112-reference-roots)), so a missing manifest 1 doesn't mean a missing namespace. If two processes create the same ID at the same time, the one whose hint put succeeds writes manifest 1, the other reads a hint without a manifest and writes manifest 1 too, and the one whose manifest 1 put succeeds creates the namespace. A hint written before that put doesn't mean the namespace exists, because its writer might have failed before it wrote manifest 1.
+
+Why is the pool record written between the hint and manifest 1? The record is written before manifest 1 so that every pool that a manifest records has a pool record, because no manifest can record the pool before the record's put succeeds. The record is written after the hint so that a create call for an existing namespace writes nothing (for example, a call that creates a namespace only if it doesn't exist yet). A pool ID is generated by one create call, so no other call writes that pool's record. A namespace writes under a pool's prefix only after a manifest records the pool, so if the create call fails, its pool record is the only object under the pool's prefix. A call whose manifest put has an unknown outcome keeps its pool record, because the manifest might have been written. The call takes `created_at_ms` from its request clock, and its metadata publication budget (see [Publishing a manifest](#72-publishing-a-manifest)) starts when the call reads that clock, in the same way that a fork call's budget starts before it creates its source pin (see [Forking a namespace](#92-forking-a-namespace)).
 
 ### 9.2 Forking a namespace
 
@@ -1306,7 +1316,7 @@ A fork starts its own history from the source's retained metadata. To create one
 
 1. Creates a verified source pin whose owner is the target namespace, either from the source's head or from an unexpired user pin (see [Creating and verifying a pin](#82-creating-and-verifying-a-pin)). The fork reads nothing of the target first: the put of the target's hint in step 4 decides whether the target exists (see [Conflicting and unknown installations](#93-conflicting-and-unknown-installations)).
 2. Loads and verifies the pinned manifest.
-3. Copies the pinned manifest's run references, folded head sequence, next run number, access configuration, family root, retention window, and [extension](#124-extensions) entries. The inherited runs determine the same base sequence. The fork's retention floor is the pinned manifest's folded head sequence (see [Advancing the retention floor](#101-advancing-the-retention-floor)). Every segment keeps its owner. The fork basis is set to the pinned manifest reference and the source pin's ID. The fork basis of a fork that a [rebase](glossary.md#rebase) creates also records `rebased_from`, as described below.
+3. Copies the pinned manifest's run references, folded head sequence, next run number, access configuration, pool, retention window, and [extension](#124-extensions) entries. The inherited runs determine the same base sequence. The fork's retention floor is the pinned manifest's folded head sequence (see [Advancing the retention floor](#101-advancing-the-retention-floor)). Every segment keeps its owner. The fork basis is set to the pinned manifest reference and the source pin's ID. The fork basis of a fork that a [rebase](glossary.md#rebase) creates also records `rebased_from`, as described below.
 4. Builds the rest of the first manifest's fields (see [Publishing a manifest](#72-publishing-a-manifest)) and installs it (see [Creating a namespace](#91-creating-a-namespace)).
 
 The fork copies no file bytes or metadata segments. Its first commit is one sequence above its initial head. The fork can itself be forked right away, because its manifest already lists its inherited runs.
@@ -1322,11 +1332,11 @@ A losing hint put, or a losing manifest 1 put, reads the existing namespace stat
 A confirmed precondition failure is a conflict. After a put with an unknown transport outcome, the publisher reads the manifest at that number:
 
 - Another manifest there is a conflict.
-- Identical bytes confirm the attempt's own success only when the manifest refers to an object that's unique to that attempt. A fork's first manifest refers to its source pin, and a manifest that lists a metadata or extension segment that its predecessor doesn't list refers to a segment that this attempt wrote. (An [extension's](#124-extensions) publication usually lists a segment it wrote.)
-- Every other manifest (a plain create, a compactor claim, a writer acquisition, a namespace tombstone, or an extension's publication that lists no new segment) can be rebuilt byte for byte by another publisher. Identical bytes count as the current manifest, and the attempt retries from it, but an extension's publication publishes nothing more, because that manifest's entry is no longer the one that the change built on (see [Extensions](#124-extensions)).
+- Identical bytes confirm the attempt's own success only when the manifest refers to an object or an ID that's unique to that attempt. Every first manifest does. A plain create's first manifest records a pool ID that only this attempt generated, and a fork's first manifest refers to its source pin. A manifest that lists a metadata or extension segment that its predecessor doesn't list refers to a segment that this attempt wrote. (An [extension's](#124-extensions) publication usually lists a segment it wrote.)
+- Every other manifest (a compactor claim, a writer acquisition, a namespace tombstone, or an extension's publication that lists no new segment) can be rebuilt byte for byte by another publisher. Identical bytes count as the current manifest, and the attempt retries from it, but an extension's publication publishes nothing more, because that manifest's entry is no longer the one that the change built on (see [Extensions](#124-extensions)).
 - Identical bytes count only if the read-back returns within the publication budget (see [Clock and operation assumptions](#114-clock-and-operation-assumptions)). Identical bytes read back after the budget, or a number that's still missing, end the call with an unknown outcome, and a later call starts from the current state.
 
-Why don't identical bytes always prove success? Two publishers can build exactly the same manifest from the same predecessor (for example, two plain creates with the same request), so finding identical bytes doesn't show which one wrote them. Only a manifest that refers to something this attempt created, such as a new pin or a new segment, proves that the attempt succeeded.
+Why don't identical bytes always prove success? Two publishers can build exactly the same manifest from the same predecessor (for example, two compactors that claim the same manifest), so finding identical bytes doesn't show which one wrote them. Only a manifest that refers to something this attempt created, such as a generated pool ID, a new pin, or a new segment, proves that the attempt succeeded.
 
 When a fork installer gets `namespace_exists` or `namespace_deleted`, it reloads the target and deletes its source pin, unless the target's fork basis refers to that pin. It returns the original error in every case. If the reload or the deletion fails, the pin stays, and garbage collection applies the rules in [Pin cleanup](#117-pin-cleanup) to it. A matching pin ID with a different manifest reference is corruption. An unused fork pin is collected after its creation grace.
 
@@ -1338,7 +1348,7 @@ An ordinary operation that finds the namespace deleted returns `namespace_delete
 
 ### 9.5 Retirement
 
-"Retirement" is the point at which garbage collection deletes a deleted fork's pin on its source, or deletes the objects under a deleted family root's content prefix. No retirement deadline is stored, and garbage collection publishes no manifest. For a namespace tombstone `T`, the deadline is derived as:
+"Retirement" is the point at which a deleted namespace stops being a member of its [pool](glossary.md#pool), and garbage collection deletes the namespace's pin on its source if the namespace is a fork. After retirement, the namespace's content references don't protect the pool's content. No retirement deadline is stored, and garbage collection publishes no manifest. For a namespace tombstone `T`, the deadline is derived as:
 
 ```text
 deadline(T) = T.deleted_at_ms
@@ -1347,15 +1357,15 @@ deadline(T) = T.deleted_at_ms
 
 A tombstone is eligible for retirement when the collection's clock reaches its retirement deadline and the complete pin listing contains no pin on the namespace. Pins deleted later in the same collection still count, and any unrecognized key under the pin prefix also blocks retirement.
 
-An eligible tombstone's source pin is deleted, and the objects under an eligible family root's content prefix are deleted (see [Deleting a retired owner's content](#118-deleting-a-retired-owners-content)). A fork stores no content under its own prefix, so its retirement deletes no content. The objects that the fork wrote stay while another member's view refers to them (see [Content roots](#119-content-roots)).
+An eligible tombstone's source pin is deleted (see [Retiring an eligible tombstone](#118-retiring-an-eligible-tombstone)). A namespace created without a source has no source pin, so its retirement deletes nothing. No retirement deletes content. The objects that a retired member wrote stay while another member's view refers to them, and after that the pool's collection deletes them under the age rules (see [Content roots](#119-content-roots)).
 
-A family root is the last member of its [fork family](glossary.md#fork-family) to be retired. Each fork pins its source, and a tombstone can't be retired while a pin is on it, so a deleted family root stays unretired until every fork of it, and every fork of those forks, is retired. Garbage collection still runs on a deleted namespace, so the family root's collections keep collecting the family's content after the family root is deleted (see [Content roots](#119-content-roots)). Once the last fork is retired, the family root can be retired, and its retirement deletes the objects under the content prefix of the whole family. No other member takes over the family's content when the family root is deleted.
+Each fork pins its source, and a tombstone can't be retired while a pin is on it, so a pool's first member is retired after every other member. Once the first member is retired, the pool has no members, and no root protects any of its content. Each later collection of the pool deletes its content objects and temporary objects under the age rule, and deletes its upload records under the rules in [Upload-session cleanup](#116-upload-session-cleanup). The pool keeps its pool record (see [Content roots](#119-content-roots)).
 
-Why doesn't another member take over the family's content when the family root is deleted? The deleted family root's collections keep running for as long as any other member exists, so nothing has to move. A takeover would need a durable record of which member collects the family's content, and a way for the members to agree on a change to that record.
+Why doesn't the first member's retirement delete the pool's content in one step? Once the pool has no members, the ordinary age rule already deletes the pool's content, upload records, and temporary objects, so a separate rule would be a second way to delete content.
 
 ### 9.6 Fork dependencies after deletion
 
-A source pin is required until its target is retired. While the target's current manifest (active or deleted) refers to the pin, garbage collection in the source keeps it (see [Pin cleanup](#117-pin-cleanup)). Retiring the target deletes the pin (see [Deleting a retired owner's content](#118-deleting-a-retired-owners-content)), even though the target's tombstone is still its current manifest and still refers to the pin. Rewriting a target's metadata doesn't copy or move inherited file bytes, because every member of a fork family finds them under the family root's prefix.
+A source pin is required until its target is retired. While the target's current manifest (active or deleted) refers to the pin, garbage collection in the source keeps it (see [Pin cleanup](#117-pin-cleanup)). Retiring the target deletes the pin (see [Retiring an eligible tombstone](#118-retiring-an-eligible-tombstone)), even though the target's tombstone is still its current manifest and still refers to the pin. Rewriting a target's metadata doesn't copy or move inherited file bytes, because every member of a pool finds them under the pool's prefix.
 
 For example, suppose B is a fork of A, and C is a fork of B. C's fork pin on B prevents B from being retired, and B's pin on A stays until B is retired. Retiring C deletes C's pin on B. B can then be retired once its deadline and pin checks pass, which deletes its pin on A.
 
@@ -1365,7 +1375,7 @@ Pins are deleted from descendants to ancestors. If deleting a source pin fails, 
 
 A rename that keeps the inode stays within one namespace. Across namespaces, a move is a copy to the destination followed by a deletion in the source, without an atomic transaction across both histories.
 
-Within a fork family, a reference identifies the same object in every member, so a fork keeps using inherited references through its source pin, and a merge carries the fork's references into its source. No operation carries a reference into another fork family: such a reference would point at an object whose garbage collection pass doesn't read the destination's roots, so the destination would need a pin on the source for as long as the reference exists. Content moves between fork families by an upload.
+Within a [pool](glossary.md#pool), a reference identifies the same object in every member, so a fork keeps using inherited references through its source pin, and a merge adds the fork's references to its source. No operation adds a reference to another pool's content. Such a reference would point at an object whose pool's collection doesn't read the destination's roots, so the destination would need a pin on the source for as long as the reference exists. Content moves between pools by an upload.
 
 A [merge](glossary.md#merge) admits its content references from the fork's own rows. The merge includes each reference with the layout that the fork's revision and layout rows record (the fork is folded before a merge, so every reference has a layout), and LoonFS admits the reference without reading its bytes. The fork wrote those rows itself, and no caller supplied the references, so there's nothing to verify. Once the merge is in the namespace's WAL tail, the namespace's own content roots keep the content (see [Content roots](#119-content-roots)). Before then, a pin protects the fork's content. While a merge or a rebase plans, LoonFS pins the fork's folded manifest with a user pin named `merge <commit_id>`, which expires `DIRECT_TRANSFER_URL_TTL_MS` (15 minutes) after the merge was prepared, and LoonFS deletes the pin after the commit.
 
@@ -1585,26 +1595,29 @@ Why does core keep a compactor epoch? A compaction of a large window publishes o
 
 This section describes how garbage collection determines which objects are still referenced, and when an unreferenced object is old enough to delete safely.
 
-Garbage collection deletes objects that no retained view needs, after the required age and publication checks. A logical deletion on its own doesn't allow file bytes to be removed. A [fork family's](glossary.md#fork-family) content stays while a retained view of any member refers to it (see [Content roots](#119-content-roots)). The family's whole content prefix is deleted only when the family root is retired, after every other member (see [Retirement](#95-retirement)).
+Garbage collection deletes objects that no retained view needs, after the required age and publication checks. A logical deletion on its own doesn't allow file bytes to be removed. A [pool's](glossary.md#pool) content stays while a retained view of any member refers to it (see [Content roots](#119-content-roots)). After that, the pool's collection deletes the content under the age rule, and no retirement deletes content (see [Retirement](#95-retirement)).
 
 An object can't be deleted as soon as nothing references it, because a publisher might be about to reference it. Garbage collection waits until an unreferenced object is older than the grace window, which is long enough for every publication planned against an older state to have finished or failed (see [Clock and operation assumptions](#114-clock-and-operation-assumptions)).
 
 ### 11.1 One complete collection
 
-A collection first establishes the roots. It:
+LoonFS runs two kinds of collection, and each one is a job of its own:
+
+- A namespace's collection deletes the namespace's unreferenced manifests, WAL objects, metadata and extension segments, and pins, and it retires the namespace when its tombstone is eligible (see [Retiring an eligible tombstone](#118-retiring-an-eligible-tombstone)). It makes no request under `pools/`.
+- A [pool's](glossary.md#pool) collection deletes the pool's unreferenced content objects, upload records, and temporary objects, with roots gathered from every member (see [Content roots](#119-content-roots)).
+
+A namespace's collection first establishes the roots. It:
 
 1. Discovers the namespace's current manifest.
-2. Lists the upload sessions of the namespace's fork family, if the namespace is a family root (see [Upload-session cleanup](#116-upload-session-cleanup)).
-3. Reads the WAL tail.
-4. Lists all pin keys.
-5. If the namespace is a family root, repeats steps 1, 3, and 4 for each other member of its fork family, in the order that the pin listings find them (see [Content roots](#119-content-roots)).
-6. Records the protected manifests and segments.
+2. Reads the WAL tail.
+3. Lists all pin keys, reads each pin record, and loads the manifests that the pins keep.
+4. Records the protected manifests and segments.
 
-If the namespace's own current manifest is invalid or unreadable, the collection stops before anything is deleted. If another member's current manifest is invalid or unreadable, only the collection of the fork family's content stops, and the rest of the collection continues (see [Content roots](#119-content-roots)). An absent namespace has nothing for core garbage collection to delete.
+If the namespace's current manifest is invalid or unreadable, the collection stops before anything is deleted. An absent namespace has nothing for core garbage collection to delete.
 
-A collection on a fork covers its manifests, WAL objects, metadata and extension segments, pins, and temporary objects. Content objects and upload records are stored under the family root's prefix, so the collection on the family root covers them for the whole fork family, with roots gathered from every member (see [Content roots](#119-content-roots)).
+A pool's collection reads the pool record, lists the pool's upload sessions, and then reads the roots of every member, starting from the pool's first member (see [Content roots](#119-content-roots)). If one member's roots can't be read, or the collection doesn't read every member's roots in time, the collection deletes no content objects, and the rest of the collection continues. Other pools are unaffected.
 
-The collection then lists each candidate family completely, from the beginning. To collect content, it reads the extent filter of each distinct layout segment of the rooted manifests and lists the content prefix once (see [Content roots](#119-content-roots)). The only exact sets of content roots are the chains of the WAL tails and the content IDs of the upload sessions, and they use read working memory together with the extent filters. The collection stores no durable progress, run, phase, reference table, or cursor. The complete pin listing that establishes the roots is separate from the later pin cleanup that determines which pins can be deleted. Session cleanup determines which session records can be deleted from the complete session listing that establishes the roots.
+Each collection then lists each of its candidate families completely, from the beginning. To collect content, a pool's collection reads the extent filter of each distinct layout segment of the members' rooted manifests and lists the pool's content prefix once (see [Content roots](#119-content-roots)). The only exact sets of content roots are the chains of the members' WAL tails and the content IDs of the upload sessions, and they use read working memory together with the extent filters. A collection stores no durable progress, run, phase, reference table, or cursor. The complete pin listing that establishes a namespace's roots is separate from the later pin cleanup that determines which pins can be deleted. Session cleanup determines which session records can be deleted from the complete session listing that establishes the pool's roots.
 
 Every age decision in a collection uses the same `now_ms`, captured when the collection starts. A later collection reads fresh roots and uses its own clock. Concurrent collectors can delete eligible objects independently, and an object that's already gone needs no more cleanup. A failed collection might have deleted some candidates already, but the next collection can safely start over.
 
@@ -1642,11 +1655,11 @@ Being unreferenced makes an object a candidate for deletion, but it doesn't make
 | Metadata or extension segment | No root lists it, and its provider age is strictly greater than 24 hours. |
 | Pin record | The owner-specific rules in [Pin cleanup](#117-pin-cleanup). |
 | Upload session | The status-specific rules in [Upload-session cleanup](#116-upload-session-cleanup). |
-| Content object under a family root's prefix | No extent filter of a layout segment in the fork family's layout views may contain its name, no tail or session root in the fork family refers to its chain (see [Content roots](#119-content-roots)), and a provider age of at least `T`. |
+| Content object under a pool's prefix | No extent filter of a layout segment in the members' layout views may contain its name, no tail or session root of the pool's members refers to its chain (see [Content roots](#119-content-roots)), and a provider age of at least `T`. |
 | Temporary object | A provider age of at least `T`. |
-| An eligible family root's content | See [Retirement](#95-retirement) and [Deleting a retired owner's content](#118-deleting-a-retired-owners-content). |
+| Pool record | The pool has no members because its create call failed, and the record's creation grace has passed (see [Content roots](#119-content-roots)). |
 
-The hint and the current manifest are never deleted. Core garbage collection keeps unrecognized keys outside an eligible family root's content prefix. For a candidate that's deleted by age, a missing provider timestamp, or one in the future, can't show that it's old enough.
+The hint and the current manifest are never deleted. Core garbage collection keeps unrecognized keys. For a candidate that's deleted by age, a missing provider timestamp, or one in the future, can't show that it's old enough.
 
 For example, suppose a collector observes hint 8 and current manifest 10. It keeps manifests 8, 9, and 10 for discovery, and it keeps the segments in manifest 10 and in any pinned manifest. A segment that only manifest 8 or 9 lists is a candidate, even if manifest 10 was published a moment ago, but it still has to be older than the segment minimum age before it's deleted.
 
@@ -1685,7 +1698,7 @@ A failed read of a required root stops garbage collection, and an uncertain read
 
 ### 11.6 Upload-session cleanup
 
-Uploads are collected through their session records. The records are stored under the family root's prefix, so the collection on the family root covers the sessions of every member, and a collection on a fork covers none. A session's namespace is the one recorded in its session record. Retirement of that namespace (see [Retirement](#95-retirement)) takes precedence over the session status rules. [Content roots](#119-content-roots) defines when a fork family's content is deleted, and [Deleting a retired owner's content](#118-deleting-a-retired-owners-content) defines how a retired family root's content is deleted.
+Uploads are collected through their session records. The records are stored under the pool's prefix, so the pool's collection covers the sessions of every member, and a namespace's collection covers none. A session's namespace is the one recorded in its session record. Retirement of that namespace (see [Retirement](#95-retirement)) takes precedence over the session status rules. The pool's collection decides a namespace's retirement from the members that its walk read (see [Content roots](#119-content-roots)). A namespace that a complete walk didn't find is retired, and a session whose namespace the collection can't decide is kept. [Content roots](#119-content-roots) defines when a pool's content is deleted.
 
 | Session and namespace | Action |
 | --- | --- |
@@ -1693,7 +1706,7 @@ Uploads are collected through their session records. The records are stored unde
 | Aborted session | Retry content and provider cleanup, and delete its records after its abort time plus `T`. |
 | Completed session in an active namespace | Keep it until the completed-content grace passes, then delete its records. Its content follows [Content roots](#119-content-roots). |
 | Session in a deleted namespace that isn't eligible for retirement | Keep it, and report a future retirement deadline, if there is one. |
-| Completed session in an eligible deleted namespace | Delete its records (no extra completion grace is required). Its content follows [Content roots](#119-content-roots), or the deletion of the retired content prefix when the namespace is the family root. |
+| Completed session in an eligible deleted namespace | Delete its records (no extra completion grace is required). Its content follows [Content roots](#119-content-roots). |
 | An outcome record without its session record | Delete it once its provider age is at least `T`. |
 
 Garbage collection deletes a session's records in order: the session record first, and then the outcome record. If a collection stops between the two deletes, the outcome record is left without its session record, and a later collection deletes it without acting on the session's content. A completion or abort that creates an outcome record after the session's records were deleted also leaves an outcome record without its session record (see [Upload sessions](#51-upload-sessions)).
@@ -1704,9 +1717,9 @@ An outcome key sorts directly after its session key (see [Object keys](#a8-objec
 
 Before completion, a session exclusively owns its random content ID, and it can't issue admission evidence. In active namespaces and eligible tombstones, cleanup first creates the aborted outcome record, and then it removes the content and any provider transfer. Cleanup keeps an aborted session's records until its abort time plus `T`. So when a streamed write that passed its final check before the abort finishes, the session's records still exist, and a later cleanup attempt can remove the object that the write created. A failed cleanup leaves the records for another attempt. Open and aborted sessions still need provider cleanup after the namespace is retired, because provider upload state can exist outside object listings.
 
-Cleanup runs in the family root's collection, so it derives every content key and provider cleanup target from the collection's own namespace ID, which is the family root, and the content ID that the session record stores.
+Cleanup runs in the pool's collection, so it derives every content key and provider cleanup target from the pool's ID and the content ID that the session record stores.
 
-A completed session is a content root while its session record exists (see [Content roots](#119-content-roots)). Once the session's records are deleted, its content stays only while another root refers to it.
+A completed session is a content root while its session record exists (see [Content roots](#119-content-roots)). A completed session's record protects its content in the collection that deletes the record, so a later collection deletes that content, once no other root refers to it.
 
 The completed-content grace covers every possible piece of admission evidence:
 
@@ -1743,49 +1756,57 @@ A fork pin is cleaned up based on its target namespace:
 | The target is absent, or its fork basis doesn't refer to this pin | Delete the pin of the abandoned installation. |
 | The target's current fork basis refers to this pin with a different manifest reference | Fail with `namespace_corrupt`. |
 
-The source finds the target's current manifest through the target's hint. It reads no target WAL objects and makes no listings. [Deleting a retired owner's content](#118-deleting-a-retired-owners-content) defines when a source pin is deleted.
+The source finds the target's current manifest through the target's hint. It reads no target WAL objects and makes no listings. [Retiring an eligible tombstone](#118-retiring-an-eligible-tombstone) defines when a source pin is deleted.
 
-The family root's collection finds each member of its [fork family](glossary.md#fork-family) through the fork pin on the member's source (see [Content roots](#119-content-roots)). That pin stays until the member is retired, so the member's content references protect content until then.
+The pool's collection finds each [member](glossary.md#pool) of the pool through the fork pin on the member's source (see [Content roots](#119-content-roots)). That pin stays until the member is retired, so the member's content references protect content until then.
 
 A candidate pin that fails verification is deleted by its creator. If that deletion fails, or the creator crashes first, garbage collection applies the pin owner's rules, including a fork pin's creation grace.
 
-### 11.8 Deleting a retired owner's content
+### 11.8 Retiring an eligible tombstone
 
-After upload-session cleanup, garbage collection retires a tombstone that's eligible for retirement (see [Retirement](#95-retirement)) in two steps:
+After it sweeps its candidate families, a namespace's collection retires a tombstone that's eligible for retirement (see [Retirement](#95-retirement)). It deletes the source pin that the tombstone's fork basis refers to, and counts the pin in `deleted_checkpoints_by_owner.fork` only if the pin was present. A namespace created without a source has no source pin, so its retirement deletes nothing.
 
-1. If the namespace is a family root, list its content prefix (see [Object keys](#a8-object-keys)), and delete every listed key, with bounded concurrency. Count the listed keys whose deletion succeeds in `deleted.retired_content_objects`. No additional age check applies. A listing or deletion failure ends the call.
-2. Delete the source pin that the tombstone's fork basis refers to, if there is one, and count it only if it was present.
-
-A family root is retired after every other member of its [fork family](glossary.md#fork-family) (see [Retirement](#95-retirement)), and a fork stores nothing under its own content prefix, so step 1 deletes the content of the whole family. Until the family root is retired, its collections delete the family's unreferenced content under [Content roots](#119-content-roots), whether the family root is active or deleted.
+No retirement deletes content. A retired namespace isn't a [member](glossary.md#pool) of its pool, so its content references don't protect the pool's content, and the pool's collection deletes the content that no other member refers to under [Content roots](#119-content-roots).
 
 [File contents and ownership](#15-file-contents-and-ownership) defines where content is stored. A deleted namespace refuses requests for presigned upload URLs and upload completion, and the retirement grace is longer than the lifetime of any issued presigned URL.
 
-Content and source-pin cleanup are idempotent. With no new objects, a later collection of the content prefix makes one empty LIST request and no DELETE requests, and it reports zero deleted objects. Retained roots follow [Reference roots](#112-reference-roots). Deleting listed content counts as maintenance progress, and no progress record or journal is stored.
+Source-pin cleanup is idempotent. A later collection that retires the same tombstone finds the pin gone, and it counts nothing. Retained roots follow [Reference roots](#112-reference-roots), and no progress record or journal is stored.
 
 ### 11.9 Content roots
 
-A fork family's content objects are stored under the family root's prefix, and any member can reference any of them, so the collection on the family root `R` protects them with roots gathered from every member. A content object under `R`'s prefix is kept while the extent filter of a layout segment in a member's layout view may contain the object's name, or a member's tail or session root refers to its chain:
+A [pool's](glossary.md#pool) content objects are stored under the pool's prefix, and any member can reference any of them, so the pool's collection protects them with roots gathered from every member. A content object under the pool's prefix is kept while the extent filter of a layout segment in a member's layout view may contain the object's name, or a member's tail or session root refers to its chain:
 
 | Root | Content it protects |
 | --- | --- |
 | A member's layout view: its current manifest (active or deleted), and every manifest that its pins keep (see [Reference roots](#112-reference-roots)) | The objects whose names the [extent filter](#extent-filter) of any of its `content_layouts` segments may contain, which include the objects of every extent in every layout row. |
 | A member's unfolded WAL tail | Every chain that an `append_file_revision` delta refers to, and every extent in the layouts of the tail's row state. |
-| An upload session record under `R`'s prefix, whatever its status | The session's `content_id`. |
+| An upload session record under the pool's prefix, whatever its status | The session's `content_id`. |
 
-Garbage collection considers every other content object under `namespaces/R/content/` for deletion once its provider age is at least `T`. It keeps an object younger than `T`, and a key that doesn't parse as a content object key. A collection on a fork lists no content, and the collection on a family root collects the fork family's content whether the family root is active or deleted (see [Retirement](#95-retirement)).
+Garbage collection considers every other content object under the pool's content prefix (`pools/{pool_id}/content/`) for deletion once its provider age is at least `T`. It keeps an object younger than `T`, and a key that doesn't parse as a content object key. A namespace's collection lists no content, and the pool's collection collects the pool's content whether its members are active or deleted (see [Retirement](#95-retirement)).
 
-The members of the fork family are `R` and every namespace forked from a member. The collection finds them by walking fork pins. `R`'s fork pins identify its first-generation forks, and a fork of a fork pins the fork it was created from, not `R`. So the collection lists the pins of each member in turn. Each fork pin in a listing adds the pin's target (`owner.target_namespace_id`) to the members, and the walk ends when a listing adds no new member. The collection lists each member's pins once, and that listing is also the member's pin listing for its reference roots (see [One complete collection](#111-one-complete-collection)).
+The pool record identifies the pool's first member (`first_member_id`). The members of the pool are the first member and every namespace forked from a member. The collection finds them by walking fork pins. The first member's fork pins identify its first-generation forks, and a fork of a fork pins the fork it was created from, not the first member. So the collection lists the pins of each member in turn. Each fork pin in a listing adds the pin's target (`owner.target_namespace_id`) to the members, and the walk ends when a listing adds no new member. The collection lists each member's pins once, and that listing also finds the manifests that the member's pins keep.
 
-A member's content references count as roots until the member is retired. A deleted member's tombstone keeps its runs, and only retirement deletes the member's source pin (see [Pin cleanup](#117-pin-cleanup)). So until the member is retired, the walk finds the member, and the collection reads the tombstone as one of the member's layout views. Retirement comes at least `NAMESPACE_RETIREMENT_GRACE_WINDOW_MS` after the deletion (see [Retirement](#95-retirement)). The collection MUST read the roots of every member within the retirement grace less the combined allowance (`NAMESPACE_RETIREMENT_GRACE_WINDOW_MS - GC_SAFETY_MARGIN_MS`, see [Clock and operation assumptions](#114-clock-and-operation-assumptions)), measured as monotonic time elapsed since the collection captured its `now_ms`. A collection that hasn't read every member's roots by then skips the fork family's content objects.
+A member's content references count as roots until the member is retired. A deleted member's tombstone keeps its runs, and only the member's own collection deletes the member's source pin, when it retires the member (see [Pin cleanup](#117-pin-cleanup)). So until the member is retired, the walk finds the member, and the collection reads the tombstone as one of the member's layout views. Retirement comes at least `NAMESPACE_RETIREMENT_GRACE_WINDOW_MS` after the deletion (see [Retirement](#95-retirement)). The collection MUST read the roots of every member within the retirement grace less the combined allowance (`POOL_ROOTS_READ_BUDGET_MS`, which is `NAMESPACE_RETIREMENT_GRACE_WINDOW_MS - GC_SAFETY_MARGIN_MS`, see [Clock and operation assumptions](#114-clock-and-operation-assumptions)), measured as monotonic time elapsed since the collection captured its `now_ms`. A collection that hasn't read every member's roots by then deletes no content objects, and it reports `content_sweep_pool_budget` as skipped work.
 
-The collection skips a fork pin whose target has no manifest (an installation that hasn't finished or that failed, as [Pin cleanup](#117-pin-cleanup) describes). When the collection finds the pin, such a target has no WAL tail or views of its own. The pin keeps the source manifest that the target reads through, and an object that the target writes after the collection starts is younger than `T` for the collection. If another member's current manifest is invalid or unreadable, only the collection of the fork family's content stops, and the rest of the collection continues. If `R`'s own current manifest is invalid or unreadable, the collection stops before anything is deleted (see [One complete collection](#111-one-complete-collection)). Other fork families are unaffected.
+The collection skips a fork pin whose target has no manifest (an installation that hasn't finished or that failed, as [Pin cleanup](#117-pin-cleanup) describes). When the collection finds the pin, such a target has no WAL tail or views of its own. The pin keeps the source manifest that the target reads through, and an object that the target writes after the collection starts is younger than `T` for the collection. If one member's roots can't be read (the first member included, and including a member whose current manifest records another pool), the collection deletes no content objects, and it reports `content_sweep_unreadable_member` as skipped work. In both cases (the time limit and an unreadable member), the collection still lists the content prefix once to measure `listed_bytes`, and the rest of the collection continues. Other pools are unaffected.
 
-To find the protected objects, the collection:
+A pool has no members in two cases:
 
-1. Reads the roots of every member in the order in [One complete collection](#111-one-complete-collection). It lists the upload sessions under `R`'s prefix before it reads any member's WAL tail, and it finds each fork in the pin listing of the member it was forked from.
-2. Lists each layout segment of the members' layout views once, however many views list it. A fork's inherited segments are its source's, so the distinct segments are `R`'s and each member's own.
-3. Reads the extent filter of each listed segment, and charges the filters to read working memory.
-4. Lists `R`'s content prefix once. It protects an object when any extent filter may contain the object's name (its key with the content prefix removed), or when a tail or session root refers to its chain.
+- **Retired first member.** The first member is eligible for retirement (its tombstone's retirement deadline has passed by the collection's clock, and its pin listing has no key). Each fork pins its source, so every other member is already retired. The first member contributes no roots, so no root protects the pool's content, and the collection deletes the pool's content objects and temporary objects under the age rule. A completed session's record protects its content in the collection that deletes the record, so a later collection deletes that content. The pool keeps its pool record, and each later collection finds no member roots and applies the same rules.
+- **Failed create.** The first member has no current manifest, or its current manifest records another pool, because the pool's create call failed or lost to another create call for the same namespace ID (see [Creating a namespace](#91-creating-a-namespace)). The pool record's "creation grace" lasts until the collection's clock reaches the record's `created_at_ms` plus `T`. Inside the creation grace, the collection deletes nothing and reports the end of the creation grace in `next_reclamation_at_ms`. After the creation grace, the collection deletes the pool record, makes no listing, and returns. The result doesn't report the deleted pool record.
+
+For example, suppose that `main` was created with `pool_3s0drmj8em84yb4mnetqkz2j0x`, `sandbox` is a fork of `main`, and `trial` is a fork of `sandbox`, and all three are deleted. `trial` is retired first, which deletes its pin on `sandbox`, and then `sandbox` is retired, which deletes its pin on `main`. Once `main` is retired, a collection of the pool finds no member roots. It deletes every content object and temporary object whose provider age is at least `T`, deletes the pool's upload records under the rules in [Upload-session cleanup](#116-upload-session-cleanup), and keeps the pool record.
+
+A pool's collection works in these steps:
+
+1. Reads the pool record. If the record is missing, the collection returns `pool_not_found` and deletes nothing.
+2. Reads the current manifest of the pool's first member. If the pool has no members because its create call failed, the collection applies the creation grace rule above and stops.
+3. Lists the pool's upload sessions, before it reads any member's WAL tail.
+4. Reads the roots of every member, and finds each fork in the pin listing of the member it was forked from.
+5. Lists each layout segment of the members' layout views once, however many views list it. A fork's inherited segments are its source's, so the distinct segments are the first member's and each other member's own.
+6. Reads the extent filter of each listed segment, and charges the filters to read working memory.
+7. Lists the pool's content prefix once. It protects an object when any extent filter may contain the object's name (its key with the content prefix removed), or when a tail or session root refers to its chain.
+8. Deletes the pool's temporary objects that are older than `T`, and applies the rules in [Upload-session cleanup](#116-upload-session-cleanup) to the pool's session records.
 
 The collection reads each segment's extent filter, and doesn't combine the segments of a view. A view's layout rows are the rows of its segments, so the extent filters of the listed segments cover every extent of every view. That includes a superseded layout row (a shorter layout of a chain that a longer row replaces), so an object that only a superseded row refers to stays until a compaction drops that row and no layout view lists the segment that contains it. A filter can also match the name of an object that no row of its segment refers to. The collection keeps that object, and a later collection reclaims it once no layout view lists the segment.
 
@@ -1799,11 +1820,17 @@ A fork's source pin keeps the pinned source manifest as one of the source's layo
 
 The collection lists upload sessions before it reads any member's WAL tail. A session record is removed only after any admission evidence it could issue has expired (see [Upload-session cleanup](#116-upload-session-cleanup)). A session that the collection doesn't list was either created after the listing or removed before it. The content of a session created later is younger than `T`, and every commit that refers to the content of a removed session succeeded before the tail was read, so the tail or a protected manifest refers to that content.
 
-Why does the collection on the family root gather every member's roots, instead of each member collecting its own content? Every member can reference every object under `R`'s prefix, so one member's roots don't show whether an object that the member doesn't reference is garbage. The family root's collection sees every root of every object it can delete.
+Why does the pool's collection gather every member's roots, instead of each member collecting its own content? Every member can reference every object under the pool's prefix, so one member's roots don't show whether an object that the member doesn't reference is garbage. The pool's collection sees every root of every object that the collection can delete.
 
-Why does the collection walk the fork pins instead of listing the members in one request? A fork pin is stored under its source's prefix, and it's the only durable record of which namespaces were forked from a member. A list of members under `R`'s prefix would be one more record that every fork installation and every retirement would have to keep in step with the pins. The walk costs one pin listing for each member, and the collection needs that listing for the member's reference roots anyway.
+Why does the collection walk the fork pins instead of listing the members in one request? A fork pin is stored under its source's prefix, and it's the only durable record of which namespaces were forked from a member. A list of members under the pool's prefix would be one more record that every fork installation and every retirement would have to keep in step with the pins. The walk costs one pin listing for each member, and the collection needs that listing to find the manifests that the member's pins keep.
 
-Why does the collection have to read every member within the retirement grace, less the combined allowance? A reference can move from one member to another while a collection runs. For example, suppose that after the collection has read `R`'s roots, a commit in `R` refers to a chain that a fork wrote, and the fork is then deleted. The collection doesn't see the reference in `R`, so it relies on the fork's views. The commit came after the collection captured `now_ms`, and the deletion came after the commit. The deletion time comes from the deleting host's clock, and the retirement check uses another collector's clock. So the fork can't be retired until the retirement grace less the combined allowance has passed since the collection captured `now_ms`. Until then, the fork's source pin keeps the fork in the walk, and its tombstone keeps the runs that refer to the chain. (A member that drops a reference without being deleted commits a change that replaces or deletes the revision after the collection started. A base compaction removes the revision's rows only once the retention floor passes that commit, and the floor passes the commit at least an hour later (the minimum commit age of a retention advance). That hour is longer than the time the collection has to read every member, so the member's current manifest still refers to the chain when the collection reads the member.)
+Why does the collection delete nothing when the pool record is missing? The pool record identifies the first member, and the collection finds every other member from the first member. Without the record, the collection can't tell a pool with no members from a pool whose members it can't find, and deleting content in the second case would lose data.
+
+Why does a pool keep its pool record after its first member is retired? A delayed abort or completion can write an outcome record after the session's records were deleted (see [Upload-session cleanup](#116-upload-session-cleanup)), and by then every other object under the pool's prefix might be deleted. A later collection deletes that outcome record under its age rule, and that collection needs the pool record to find that the pool has no members.
+
+Why does the collection wait for the creation grace before it deletes the pool record of a failed create? A create call writes the pool record before manifest 1, so inside the creation grace, the collection can't tell a failed create from a create call that's still running. The create call's metadata publication budget starts at the record's `created_at_ms`, so a create call ends inside the creation grace (see [Creating a namespace](#91-creating-a-namespace)).
+
+Why does the collection have to read every member within the retirement grace, less the combined allowance? A reference can move from one member to another while a collection runs. For example, suppose that after the collection has read the first member's roots, a commit in the first member refers to a chain that a fork wrote, and the fork is then deleted. The collection doesn't see the reference in the first member, so it relies on the fork's views. The commit came after the collection captured `now_ms`, and the deletion came after the commit. The deletion time comes from the deleting host's clock, and the retirement check uses another collector's clock. So the fork can't be retired until the retirement grace less the combined allowance has passed since the collection captured `now_ms`. Until then, the fork's source pin keeps the fork in the walk, and its tombstone keeps the runs that refer to the chain. (A member that drops a reference without being deleted commits a change that replaces or deletes the revision after the collection started. A base compaction removes the revision's rows only once the retention floor passes that commit, and the floor passes the commit at least an hour later (the minimum commit age of a retention advance). That hour is longer than the time the collection has to read every member, so the member's current manifest still refers to the chain when the collection reads the member.)
 
 ## 12. Encodings, versions, and extensions
 
@@ -1909,15 +1936,15 @@ A namespace whose names are labels rather than keys is reserved. In such a names
 
 ## 13. Alternatives considered
 
-This section describes designs that were considered for the format and the reasons they weren't used. The design notes cover narrower choices: [commit history](../design/commit-history.md#alternatives-considered), [inline small content](../design/inline-small-content.md#alternatives-considered), [directory bindings](../design/directory-bindings.md#costs-and-alternatives), [family backfill](../design/family-backfill.md#alternatives-considered), [fork family content](../design/fork-family-content.md#alternatives-considered), [merging a fork](../design/merge.md#alternatives-considered), and [grep across a fork family](../design/grep-fork-family.md#alternatives-considered).
+This section describes designs that were considered for the format and the reasons they weren't used. The design notes cover narrower choices: [commit history](../design/commit-history.md#alternatives-considered), [inline small content](../design/inline-small-content.md#alternatives-considered), [directory bindings](../design/directory-bindings.md#costs-and-alternatives), [family backfill](../design/family-backfill.md#alternatives-considered), [pools](../design/pools.md#alternatives-considered), [merging a fork](../design/merge.md#alternatives-considered), and [grep across a pool](../design/grep-across-a-pool.md#alternatives-considered).
 
 - **A writer lease.** A writer could take a lease with an expiry time instead of an epoch. A new writer would then have to wait for the old lease to expire before it could take over. With epochs and fences, a new writer can take over at any time, and correctness depends only on conditional writes (see [Writer ownership](#61-writer-ownership)).
 - **One upload session record whose status changes.** A single record could move from open to completed or aborted by compare-and-swap. But an upload would then write that record when the session starts and again when it ends, often less than a second later, and some providers allow about one write per second to one object. With two records that are each created once, completion and abort still race on one put-if-absent, and the cost is a second key for each ended session in the uploads listing (see [Upload sessions](#51-upload-sessions)).
 - **A per-namespace naming mode.** A namespace could choose at creation whether names that differ only in case are the same name. But the choice is made before anyone knows which filesystems the tree will be copied to, it can't change later, a fork inherits it, and two siblings that differ only in case can't be stored on the case-insensitive filesystems most trees end up on. One rule for every namespace avoids the choice (see [Names and paths](#14-names-and-paths)).
 - **An expire event in the writer's log.** The writer could end each deletion's recoverability with an `expire` event that it commits once the floor reaches the deletion, so that the WAL orders the expiry against every restore and a base compaction removes a deletion's rows once its latest event is `expire`. But that costs one event for every deletion, a scan loop in the writer with its own failure handling, and one commit for each 1,000 inherited deletions before a fork's first request, and a namespace that nobody writes to reclaims nothing. A [floor object](glossary.md#floor-object) in the WAL orders the advance against every restore, and the fold that covers the floor object publishes the new floor, so one object for each advance expires every deletion that the floor passed, with no event per deletion (see [Advancing the retention floor](#101-advancing-the-retention-floor) and the [retention window](../design/retention-window.md#alternatives-considered) note).
 - **A hint raised at most once per second, with one more raise when the second ends.** A runtime could pace its raises of a namespace's hint to the one write per second that some providers accept. A publication less than a second after the last raise would skip its raise, and the runtime would raise the hint once more when that second ends, to the newest manifest among the skipped raises. That keeps the hint at most a second behind, but it needs the time of each namespace's last raise, the highest manifest number among the skipped raises, and a task that sleeps until the second ends and has to be stopped at shutdown. In return, the hint lags for a shorter time on the providers that would refuse the writes in between. A hint that lags costs a reader one more round trip and doesn't change what the reader finds (see [The current manifest and WAL tip](#24-the-current-manifest-and-wal-tip)).
-- **Content stored under the namespace that writes it.** Each namespace could store its uploads and folded pieces under its own prefix, with a fork reading its source's objects through the fork pin. A reference would then identify an object in one namespace's prefix. Content that one member of a fork family wrote could be used by another member only by copying the bytes under a new content ID, or by a pin from the reader onto the writer for as long as the reference exists. With one prefix for each fork family, a reference identifies the same object in every member, and one collection sees every root (see [File contents and ownership](#15-file-contents-and-ownership)).
-- **An owner namespace on every content reference.** Each reference could record the namespace whose prefix stores its bytes. Within a fork family that namespace is always the family root, which the manifest records, so the field would repeat one value in every reference and every extent. The field would also make a reference into another fork family's prefix representable, and that family's collection doesn't read the reader's roots.
+- **Content stored under the namespace that writes it.** Each namespace could store its uploads and folded pieces under its own prefix, with a fork reading its source's objects through the fork pin. A reference would then identify an object in one namespace's prefix. Content that one member of a pool wrote could be used by another member only by copying the bytes under a new content ID, or by a pin from the reader onto the writer for as long as the reference exists. With one prefix for each pool, a reference identifies the same object in every member, and one collection sees every root (see [File contents and ownership](#15-file-contents-and-ownership)).
+- **An owner namespace on every content reference.** Each reference could record the prefix that stores its bytes. Every reference that a member reads refers to an object under the pool's prefix, which the reader's manifest records, so the field would repeat one value in every reference and every extent. The field would also make a reference into another pool's prefix representable, and that pool's collection doesn't read the reader's roots.
 - **Any member extends a chain in place.** Two members that appended to one chain from the same length would write span objects at one key with different bytes, and the chain's layout rows would describe one content ID as two byte sequences. Recording each chain's creator, and starting a new chain for every other member's append, keeps each content ID one sequence of bytes at the cost of a content ID and a layout row (see [Operations and WAL deltas](#66-operations-and-wal-deltas)).
 - **A durable record of used WAL and manifest numbers.** Recording every number that was used would remove the provider timing assumption in [Clock and operation assumptions](#114-clock-and-operation-assumptions), because a deleted number could never be mistaken for a free one. But checking the record would add a read to every commit acknowledgement and every read of the current state, and it would remove only that one assumption.
 
@@ -1927,7 +1954,7 @@ This appendix is the field and encoding reference for the protocols above. Field
 
 ### A.1 Family versions
 
-There are four kinds of control object: `hint`, `pin`, `upload_session`, and `upload_outcome`.
+There are five kinds of control object: `hint`, `pin`, `upload_session`, `upload_outcome`, and `pool_record`.
 
 | Object | Envelope kind | Encoding | Version |
 | --- | --- | --- | --- |
@@ -1938,6 +1965,7 @@ There are four kinds of control object: `hint`, `pin`, `upload_session`, and `up
 | Pin record | `pin` | Uncompressed JSON | 1 |
 | Upload session record | `upload_session` | Uncompressed JSON | 1 |
 | Upload outcome record | `upload_outcome` | Uncompressed JSON | 1 |
+| Pool record | `pool_record` | Uncompressed JSON | 1 |
 | Content object | No envelope | Immutable extent bytes | Not versioned. A layout lists the whole and span objects for a `blob_v1` chain prefix. |
 | Grep segment | No envelope | Block sections with grep rows | 2, given by the grep entry's `version` |
 
@@ -2019,6 +2047,7 @@ These tables list the durable payload fields. The protocol sections define how t
 | Pin record | `namespace_id`, `pin_id`, `head_seq`, `payload_checksum`, `created_at_ms`, `owner` |
 | Upload session record | `namespace_id`, `upload_id`, `content_id`, optional `subject_id`, `mode`, `expires_at_ms` |
 | Upload outcome record | `namespace_id`, `upload_id`, `outcome` |
+| Pool record | `pool_id`, `first_member_id`, `created_at_ms` |
 
 Namespace status is `{"kind":"active"}`, or `{"kind":"deleted"}` with a required `deleted_at_ms` (only on the deleted variant). A missing status is invalid. The genesis commit ID is `c_00000000000000000000000000000000`.
 
@@ -2027,7 +2056,9 @@ Pin owners have the fields in [Records and owners](#81-records-and-owners), and 
 - Mode, in the session record: `service_proxied` has no other fields, `direct_put` contains `checksum_algorithm`, and `direct_multipart` contains `provider_upload_id`, `part_size_bytes`, and `checksum_algorithm`.
 - Outcome, in the outcome record: `completed` with `completed_at_ms` and `content_ref`, or `aborted` with `aborted_at_ms`.
 
-Both upload records are stored under the family root's prefix (see [Object keys](#a8-object-keys)), and their `namespace_id` is the namespace that created the session.
+Both upload records are stored under the prefix of the pool of the namespace that created the session (see [Object keys](#a8-object-keys)), and their `namespace_id` is that namespace.
+
+A pool record is stored under the prefix of its pool, and its `pool_id` MUST match the key. Its `first_member_id` is the namespace that was created with the pool, and its `created_at_ms` is that create call's request clock (see [Creating a namespace](#91-creating-a-namespace)).
 
 A namespace manifest contains:
 
@@ -2039,7 +2070,7 @@ A namespace manifest contains:
 | `access` | The access mode, which can't change after creation: `{"kind":"unrestricted"}`, or `{"kind":"acl"}` with `principal_scope` and `root_grants`. |
 | `retention_window_ms?` | The retention window, a positive number of milliseconds (see [Advancing the retention floor](#101-advancing-the-retention-floor)). Without a window, a maintainer doesn't advance the namespace's floor on a schedule. Unlike the access mode, the window can change in a successor. |
 | `fork_basis?` | The source reference and pin identity, which can't change after creation. A fork that a rebase created also records `rebased_from` there: the fork whose commits the rebase replays into this namespace, and the fork sequence that the first replay commit starts after (see [Merges](#merges)). |
-| `family_root_id` | The namespace whose prefix stores the [fork family's](glossary.md#fork-family) content objects and upload records (see [File contents and ownership](#15-file-contents-and-ownership)). A plain create records the namespace itself, and a fork copies its source's value. The value can't change after creation. |
+| `pool_id` | The [pool](glossary.md#pool) whose prefix stores the namespace's content objects and upload records (see [File contents and ownership](#15-file-contents-and-ownership)). A plain create records a pool ID that the create call generates, and a fork copies its source's value. The value can't change after creation. |
 | `status` | Whether the namespace is active or deleted. |
 | `writer?` | The diagnostic writer block. |
 | `folded_wal_no` | The highest local WAL number included in the manifest's runs. |
@@ -2107,7 +2138,7 @@ Each commit contains `committed_seq`, `commit_id`, `committed_by`, `semantic_com
 
 A delta's own commit sequence is implied by its commit. An unbind target and a tombstone target are `{seq, delta_index}`, the position of the exact event that the delta removes or revokes. A bind's `revision` is the child's revision summary, `{revision_no, size_bytes, revision_committed_by, revision_committed_at_ms}`. It's present exactly when `child_kind` is `file`, and encoding and decoding refuse a file bind without it and a directory bind with it (`InvalidWalBind`). A revision delta's `parent_inode_id`, `name_key`, `display_name`, `child_created_by`, `child_created_at_ms`, and `bind_position` describe the file's current binding, which replay copies into the revision's summary row (see [Directory bindings](#13-directory-bindings)). A tombstone delta's `root_kind` is the kind of the deleted root inode, and a deleted binding is `{parent_inode_id, name_key, display_name}`. Attribute and access deltas contain the complete resulting state, including an empty map after a clear. A revision delta's `append_offset` is present only when an append produced the revision, and it's the base revision's `size_bytes`, so it's less than the delta's own `content_ref.size_bytes`.
 
-A revision delta's layout records the [creator](#15-file-contents-and-ownership) of the delta's chain. The layout of an upload or a new chain records the committing namespace. A copy or a restore includes the chain's layout from the planning view, so the layout's creator can be another member of the [fork family](glossary.md#fork-family). Replay copies the delta's layout, creator included, into the layout row that it writes from the delta (see [Metadata rows and row keys](#a6-metadata-rows-and-row-keys)).
+A revision delta's layout records the [creator](#15-file-contents-and-ownership) of the delta's chain. The layout of an upload or a new chain records the committing namespace. A copy or a restore includes the chain's layout from the planning view, so the layout's creator can be another member of the namespace's [pool](glossary.md#pool). Replay copies the delta's layout, creator included, into the layout row that it writes from the delta (see [Metadata rows and row keys](#a6-metadata-rows-and-row-keys)).
 
 A revision delta's `layout` follows these rules:
 
@@ -2327,7 +2358,7 @@ When `filter_inline` is present in the descriptor, it's the lowercase hexadecima
 
 A `content_layouts` segment has an extent filter right before its filter, and a segment of another family has none. A descriptor of a `content_layouts` segment without `extent_filter_block`, or a descriptor of another family with one, is corruption. The extent filter has the filter block's byte layout, header rules, and hashing, and its handle follows the rules of every section, so its `decoded_bytes` equals its `stored_bytes`. The manifest has no inline copy.
 
-The keys of the extent filter are the names of the content objects that the segment's rows' extents reference. A name is the extent's object key with the family root's content prefix (`namespaces/{family_root_id}/content/`) removed: `{content_id}` for a whole object and `{content_id}-{start:020}-{end:020}` for a span object (see [Object keys](#a8-object-keys)). A name doesn't depend on the family root, so a segment that a fork wrote under its own prefix and the family root's content listing agree on the names. The producer inserts the name of every extent of every row in the segment, including shared base extents. The reference producer reserves 20 bits per inserted name, with a minimum of 4,096 bits, and repeated names count as separate insertions for sizing. The minimum is larger than the filter's minimum because a collection keeps every object whose name an extent filter matches (see [Content roots](#119-content-roots)), and a 64-bit filter of three names matches about one other name in 100.
+The keys of the extent filter are the names of the content objects that the segment's rows' extents reference. A name is the extent's object key with the pool's content prefix (`pools/{pool_id}/content/`) removed: `{content_id}` for a whole object and `{content_id}-{start:020}-{end:020}` for a span object (see [Object keys](#a8-object-keys)). A name doesn't depend on the pool, so a segment that any member wrote and the listing of the pool's content prefix agree on the names. The producer inserts the name of every extent of every row in the segment, including shared base extents. The reference producer reserves 20 bits per inserted name, with a minimum of 4,096 bits, and repeated names count as separate insertions for sizing. The minimum is larger than the filter's minimum because a collection keeps every object whose name an extent filter matches (see [Content roots](#119-content-roots)), and a 64-bit filter of three names matches about one other name in 100.
 
 Garbage collection reads the extent filter (see [Content roots](#119-content-roots)), and lookups don't. A lookup's fetch of the filter and the index after it doesn't include the extent filter.
 
@@ -2341,7 +2372,7 @@ A range lookup uses the last keys to find candidate blocks. Readers verify each 
 
 ### A.8 Object keys
 
-These patterns define the core object families. A segment's owner can be different from the namespace that reads it, and content objects and upload records are stored under the family root's prefix, whichever member wrote them.
+These patterns define the core object families. A segment's owner can be different from the namespace that reads it. Content objects, upload records, and temporary objects are stored under the prefix of the namespace's pool, whichever member wrote them. The pool record is stored under the same prefix.
 
 | Family | Object key pattern |
 | --- | --- |
@@ -2350,12 +2381,13 @@ These patterns define the core object families. A segment's owner can be differe
 | Pin records | `namespaces/{namespace_id}/pins/{pin_id}.json` |
 | Metadata segments | `namespaces/{owner_namespace_id}/segments/{segment_id}.sst.zst` |
 | Extension segments | `namespaces/{owner_namespace_id}/extensions/{extension_name}/segments/{segment_id}.sst.zst` |
-| Upload sessions | `namespaces/{family_root_id}/uploads/{upload_id}.json` |
-| Upload outcomes | `namespaces/{family_root_id}/uploads/{upload_id}.outcome.json` |
+| Upload sessions | `pools/{pool_id}/uploads/{upload_id}.json` |
+| Upload outcomes | `pools/{pool_id}/uploads/{upload_id}.outcome.json` |
 | Hint | `namespaces/{namespace_id}/hint.json` |
-| Content objects | `namespaces/{family_root_id}/content/{content_id}` |
-| Content span objects | `namespaces/{family_root_id}/content/{content_id}-{start:020}-{end:020}` |
-| Temporary objects | `namespaces/{namespace_id}/temporary/{temporary_id}` |
+| Pool records | `pools/{pool_id}/pool.json` |
+| Content objects | `pools/{pool_id}/content/{content_id}` |
+| Content span objects | `pools/{pool_id}/content/{content_id}-{start:020}-{end:020}` |
+| Temporary objects | `pools/{pool_id}/temporary/{temporary_id}` |
 
 ## Appendix B. Semantic commit fingerprints
 
@@ -2698,7 +2730,7 @@ For eligible content, the tokenizer folds ASCII letters to lowercase and takes e
 
 For example, `Abcd` produces the byte grams `abc` and `bcd`, represented as `616263` and `626364`. A gram is encoded as six lowercase hexadecimal characters.
 
-A "content value" is the bytes that a content reference refers to, identified by the reference's content ID and size (see [File contents and ownership](#15-file-contents-and-ownership)). Two references with the same content ID and size refer to the same bytes in every member of a fork family. So the index records content values, not file revisions, and it reads and tokenizes a value once, however many revisions refer to the value. For example, a file copied by reference, or restored to an earlier revision, refers to a value that the index already has.
+A "content value" is the bytes that a content reference refers to, identified by the reference's content ID and size (see [File contents and ownership](#15-file-contents-and-ownership)). Two references with the same content ID and size refer to the same bytes in every member of a [pool](glossary.md#pool). So the index records content values, not file revisions, and it reads and tokenizes a value once, however many revisions refer to the value. For example, a file copied by reference, or restored to an earlier revision, refers to a value that the index already has.
 
 The index stores five row families in its segments: postings, value tables, `texts`, `content_revisions`, and the revision filters of reorganizations into the base level (see [Pruning the index](#d5-pruning-the-index)). A row is a kind-tagged CBOR object, and a row stores a content ID in its string form (`con_` followed by its 26-character body). The segments of one run (the output of one step, or of one reorganization) share a value table, and the run's postings refer to content values by their positions in that table.
 

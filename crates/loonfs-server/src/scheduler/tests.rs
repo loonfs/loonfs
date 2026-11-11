@@ -415,8 +415,19 @@ async fn a_sweep_retires_a_deleted_namespace_after_its_grace() {
         .await
         .expect("delete the namespace");
     writer.shutdown().await.expect("stop the writer");
-    let content_prefix = loonfs_objectstore::keys::content_prefix(&namespace_id);
+    let pool_id = loonfs_core::test_support::load_pool_id(&store, &namespace_id).await;
+    let content_prefix = loonfs_objectstore::keys::content_prefix(&pool_id);
     assert!(!keys_under(store.as_ref(), &content_prefix).await.is_empty());
+    // A pool that a listing finds without its pool record is skipped, as a
+    // pool whose create call deleted the record after the listing is.
+    let unrecorded = loonfs_objectstore::keys::content_blob(
+        &loonfs_types::PoolId::generate(),
+        &loonfs_types::ContentId::generate(),
+    );
+    store
+        .put_if_absent(&unrecorded, bytes::Bytes::from_static(b"content"))
+        .await
+        .expect("an object of a pool without a record");
 
     let server = SchedulerServer::start(store.clone(), &scheduler_config(None), now_ms).await;
     server
@@ -443,6 +454,19 @@ async fn a_sweep_retires_a_deleted_namespace_after_its_grace() {
         keys_under(store.as_ref(), &content_prefix).await,
         Vec::<String>::new()
     );
+    assert!(
+        server.counter(
+            "loonfs.gc.reclaimed",
+            &[("category", "deleted_content_objects")]
+        ) > 0,
+        "the sweep's collection of the pool deletes the content"
+    );
+    assert_eq!(
+        server.counter("loonfs.maintenance.sweep_failures", &[("call", "pool_gc")]),
+        0,
+        "a pool without a record is not a failed call"
+    );
+    assert!(store.head(&unrecorded).await.expect("head").is_some());
     assert_eq!(
         server.counter("loonfs.maintenance.sweep_failures", &[("call", "metadata")]),
         0,
@@ -1110,13 +1134,14 @@ enum Grep {
 
 /// Requests one idle namespace costs in a sweep: a sweep that does not
 /// collect garbage, then one that does, and how many of the latter are lists.
-/// The retention advance plans from the view, so its share includes a GET of
-/// the WAL number after the manifest and a second manifest HEAD. The docs
-/// quote these numbers.
+/// A collecting sweep includes the collection of the namespace's pool. The
+/// retention advance plans from the view, so its share includes a GET of the
+/// WAL number after the manifest and a second manifest HEAD. The docs quote
+/// these numbers.
 const IDLE_SWEEP_REQUESTS: [(Grep, usize, usize, usize); 3] = [
-    (Grep::NotMaintained, 12, 27, 9),
-    (Grep::Maintained, 16, 31, 9),
-    (Grep::Enabled, 17, 32, 9),
+    (Grep::NotMaintained, 12, 35, 10),
+    (Grep::Maintained, 16, 39, 10),
+    (Grep::Enabled, 17, 40, 10),
 ];
 
 #[tokio::test(start_paused = true)]
@@ -1174,6 +1199,12 @@ async fn an_idle_sweep_costs_one_listing_per_page_and_a_fixed_number_of_requests
             .await
             .expect("list namespaces");
 
+        let mut pool_prefixes = Vec::new();
+        for namespace_id in &names {
+            let pool_id =
+                loonfs_core::test_support::load_pool_id(base.as_ref(), namespace_id).await;
+            pool_prefixes.push(loonfs_objectstore::keys::pool_prefix(&pool_id));
+        }
         for (garbage, per_namespace, lists_per_namespace) in [
             (GarbageCollection::Skip, requests, 0),
             (
@@ -1193,11 +1224,28 @@ async fn an_idle_sweep_costs_one_listing_per_page_and_a_fixed_number_of_requests
                 })
                 .count();
             assert_eq!(listings, 2, "three namespaces at two per page");
-            for namespace_id in &names {
+            let pool_listings = operations
+                .iter()
+                .filter(|operation| {
+                    matches!(operation, RecordedOperation::List { .. })
+                        && operation.key() == "pools/"
+                })
+                .count();
+            let expected_pool_listings = match garbage {
+                GarbageCollection::Collect => 2,
+                GarbageCollection::Skip => 0,
+            };
+            assert_eq!(
+                pool_listings, expected_pool_listings,
+                "three pools at two per page"
+            );
+            for (namespace_id, pool) in names.iter().zip(&pool_prefixes) {
                 let prefix = loonfs_objectstore::keys::namespace_prefix(namespace_id);
                 let namespace_requests: Vec<_> = operations
                     .iter()
-                    .filter(|operation| operation.key().starts_with(&prefix))
+                    .filter(|operation| {
+                        operation.key().starts_with(&prefix) || operation.key().starts_with(pool)
+                    })
                     .collect();
                 let lists = namespace_requests
                     .iter()
@@ -1210,7 +1258,10 @@ async fn an_idle_sweep_costs_one_listing_per_page_and_a_fixed_number_of_requests
                      {garbage:?}"
                 );
             }
-            assert_eq!(operations.len(), listings + names.len() * per_namespace);
+            assert_eq!(
+                operations.len(),
+                listings + pool_listings + names.len() * per_namespace
+            );
         }
     }
 }

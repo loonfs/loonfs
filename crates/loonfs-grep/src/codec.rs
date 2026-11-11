@@ -94,8 +94,8 @@ pub(crate) fn extract_grams(content: &[u8]) -> BTreeSet<Gram> {
 /// reference's content ID and size.
 ///
 /// Two references with the same content ID and size refer to the same bytes in
-/// every namespace of a fork family, so an index of content values is valid
-/// in every member. Values order by content ID, then size, which is the order
+/// every member of a pool, so an index of content values is valid in every
+/// member. Values order by content ID, then size, which is the order
 /// of their row keys and of a run's value table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ContentValue {

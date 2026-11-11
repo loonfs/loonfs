@@ -434,7 +434,7 @@ fn namespace(
         "created_at_ms": 0,
         "created_by": "test-actor",
         "fork_basis": basis,
-        "family_root_id": source_namespace_id,
+        "pool_id": "pool_3s0drmj8em84yb4mnetqkz2j0x",
         "head_seq": 10,
         "retention_floor_seq": 10,
     }))
