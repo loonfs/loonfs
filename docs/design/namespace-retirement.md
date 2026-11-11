@@ -22,7 +22,7 @@ This section describes the retirement record, the collections that retire a name
 
 A "retirement record" records that a namespace ID belonged to a [namespace](../specs/glossary.md#namespace) that has been [retired](../specs/glossary.md#namespace-retirement). Its key is `retirements/{namespace_id}.json`, for example `retirements/sandbox.json`.
 
-The record is a [control object](../specs/glossary.md#control-object) of envelope kind `retirement_record`, in uncompressed JSON like a pin record or a pool record. Its payload is the namespace ID (`namespace_id`) and the ID of the namespace's [pool](../specs/glossary.md#pool) (`pool_id`), which is the pool that the namespace's manifests record. A reader checks the namespace ID against the key.
+The record is a [control object](../specs/glossary.md#control-object) of envelope kind `retirement`, in uncompressed JSON like a pin record or a pool record. Its payload is the namespace ID (`namespace_id`) and the ID of the namespace's [pool](../specs/glossary.md#pool) (`pool_id`), which is the pool that the namespace's manifests record. A reader checks the namespace ID against the key.
 
 The collection that retires the namespace writes the record once, with put-if-absent, and every collector builds the same bytes for one namespace. Nothing changes or deletes the record. The key is under neither `namespaces/` nor `pools/`, so no [sweep](../specs/glossary.md#sweep) and no [collection](../specs/glossary.md#collection) lists the record. Three requests read the record: a create or fork, after its hint step, a collection of a namespace that has no current manifest, and a pool's collection when the pool's first member has no current manifest.
 
@@ -118,7 +118,7 @@ This section lists the costs, compared with a deleted namespace that keeps its h
 These sections of the storage format change:
 
 - [Namespaces and identity](../specs/format.md#11-namespaces-and-identity) says that a namespace tombstone stays the current manifest until the namespace is retired, and that a retired ID can't be used again.
-- [Family versions](../specs/format.md#a1-family-versions), [Control and manifest payloads](../specs/format.md#a4-control-and-manifest-payloads), and [Object keys](../specs/format.md#a8-object-keys) add the `retirement_record` kind, its payload, and its key.
+- [Family versions](../specs/format.md#a1-family-versions), [Control and manifest payloads](../specs/format.md#a4-control-and-manifest-payloads), and [Object keys](../specs/format.md#a8-object-keys) add the `retirement` kind, its payload, and its key.
 - [Creating a namespace](../specs/format.md#91-creating-a-namespace) and [Forking a namespace](../specs/format.md#92-forking-a-namespace) add the read of the retirement record after the hint step.
 - [Deleting a namespace](../specs/format.md#94-deleting-a-namespace), [Retirement](../specs/format.md#95-retirement), [Fork dependencies after deletion](../specs/format.md#96-fork-dependencies-after-deletion), and [Retiring an eligible tombstone](../specs/format.md#118-retiring-an-eligible-tombstone) describe the three steps and what a retired namespace stores.
 - [One complete collection](../specs/format.md#111-one-complete-collection), [Reference roots](../specs/format.md#112-reference-roots), and [Candidate and age rules](../specs/format.md#113-candidate-and-age-rules) describe the collection of a retired namespace, which has no roots.
