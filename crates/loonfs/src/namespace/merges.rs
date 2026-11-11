@@ -194,9 +194,7 @@ impl Namespace<Writable> {
                     )
                     .await?;
                 let prepared_at_ms = self.core.now_ms();
-                let (fork, fork_pin) = self
-                    .pin_fork(source_namespace_id, request, prepared_at_ms)
-                    .await?;
+                let (fork, fork_pin) = self.pin_fork(source_namespace_id, prepared_at_ms).await?;
                 let planned = async {
                     let plan = main
                         .engine
@@ -350,10 +348,8 @@ impl Namespace<Writable> {
     pub(super) async fn pin_fork(
         &self,
         fork_id: &NamespaceId,
-        request: &MergeRequest,
         prepared_at_ms: u64,
     ) -> Result<(PinnedRead, PinId)> {
-        let name = format!("merge {}", request.commit_id);
         let expires_at_ms = Some(prepared_at_ms + DIRECT_TRANSFER_URL_TTL_MS);
         let snapshot = self
             .mode
@@ -362,8 +358,11 @@ impl Namespace<Writable> {
                 let engine = self
                     .core
                     .writer_engine(&self.mode.writer.writer_id, fork_id);
-                let name = name.clone();
-                async move { engine.create_snapshot(name, expires_at_ms, manifest).await }
+                async move {
+                    engine
+                        .create_snapshot("merge".to_owned(), expires_at_ms, manifest)
+                        .await
+                }
             })
             .await?;
         let fork = self
