@@ -122,9 +122,9 @@ A session whose writer position shows nothing due makes no store requests across
 
 A daily sweep costs one namespace listing per page, one pool listing per page, and these requests for each namespace that has nothing to fold, compact, or collect and has a pool of its own. The requests include the collection of the namespace's pool:
 
-| Sweep | Grep not maintained | Grep maintained, index not enabled | Grep index enabled |
-| --- | --- | --- | --- |
-| Collects | 25 GET or HEAD and 10 LIST | 29 GET or HEAD and 10 LIST | 30 GET or HEAD and 10 LIST |
+| Grep not maintained | Grep maintained, index not enabled | Grep index enabled |
+| --- | --- | --- |
+| 25 GET or HEAD and 10 LIST | 29 GET or HEAD and 10 LIST | 30 GET or HEAD and 10 LIST |
 
 Objects that are still inside their grace windows, work that's due, and the roots of each fork in a pool add more requests. Deleted namespaces are still listed, because their tombstone manifests are still stored.
 

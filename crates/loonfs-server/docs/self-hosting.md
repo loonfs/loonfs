@@ -660,9 +660,9 @@ A dropped step leaves the same state that a crash would, and a later sweep does 
 
 An idle namespace costs no requests between sweeps. A sweep costs one list request per page of namespaces, one list request per page of pools, and the same number of requests for each namespace. For an idle namespace (one with nothing to fold, compact, or collect, and with a pool of its own), a sweep costs these requests, including the collection of the namespace's pool:
 
-| Sweep | Grep not maintained | Grep maintained, index not enabled | Grep index enabled |
-| --- | --- | --- | --- |
-| Collects | 25 GET or HEAD and 10 LIST | 29 GET or HEAD and 10 LIST | 30 GET or HEAD and 10 LIST |
+| Grep not maintained | Grep maintained, index not enabled | Grep index enabled |
+| --- | --- | --- |
+| 25 GET or HEAD and 10 LIST | 29 GET or HEAD and 10 LIST | 30 GET or HEAD and 10 LIST |
 
 In a sweep, each object that's still inside its collection grace adds a request, and a namespace with work due adds the requests for that work. Deleted namespaces stay listed, so each one keeps this cost on every sweep. Core metadata still costs 6 requests per namespace, the retention advance adds 6, and the collections of the namespace and its pool add 23, for a total of 35. A pool with forks adds the reads of each fork's roots to its collection. For example, a server with 1,000 caught-up idle namespaces, each in its own pool, and no grep sends no requests for them between sweeps, and about 35,000 on each daily sweep, plus the namespace and pool listings.
 
