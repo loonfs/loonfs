@@ -4,9 +4,7 @@ use super::download_body::{streamed_download_response, RangeHeader};
 use super::error::ApiResponseError;
 use super::extractors::SubjectHeaders;
 use super::handlers_filesystem::LivePageQuery;
-use super::query_params::{
-    checked_cursor, checked_list_cursor, effective_page_limit, live_consistency, read_at,
-};
+use super::query_params::{effective_page_limit, live_consistency, read_at};
 use super::{acquire_download_permit, AppPath, AppQuery, HttpState, NamespaceIdPath};
 use axum::extract::State;
 use axum::response::Response;
@@ -16,9 +14,7 @@ use loonfs::{
 };
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
-use loonfs_types::{
-    FileRevisionsPageCursor, InodeId, ListFileRevisionsResponse, PinId, RevisionNo,
-};
+use loonfs_types::{InodeId, ListFileRevisionsResponse, PinId, RevisionNo};
 use std::sync::Arc;
 
 #[derive(Debug, serde::Deserialize)]
@@ -224,13 +220,12 @@ pub(super) async fn list_inode_children(
         options.recursive = recursive;
     }
     let limit = effective_page_limit(query.limit)?;
-    let cursor = checked_list_cursor(query.cursor, &options)?;
     options.at = read_at(query.snapshot_id, query.consistency, query.max_staleness_ms)?;
     let listing = runtime
         .namespace(&namespace_id)
         .list_by_inode_with_options(inode_id, &options)
         .page_limit(limit)
-        .cursor(cursor)
+        .cursor(query.cursor)
         .page()
         .await
         .map_err(ApiResponseError::runtime)?;
@@ -279,7 +274,7 @@ pub(super) async fn list_file_revisions_by_inode(
     let response = namespace
         .list_file_revisions_by_inode_with_options(inode_id, &options)
         .page_limit(effective_page_limit(query.limit)?)
-        .cursor(checked_cursor::<FileRevisionsPageCursor>(query.cursor)?)
+        .cursor(query.cursor)
         .page()
         .await
         .map_err(ApiResponseError::runtime)?;

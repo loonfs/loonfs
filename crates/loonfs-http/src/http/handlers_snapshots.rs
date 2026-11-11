@@ -4,11 +4,10 @@ use super::error::ApiResponseError;
 use super::extractors::SubjectHeaders;
 use super::handlers_filesystem::PageQuery;
 
-use super::query_params::{checked_cursor, effective_page_limit};
+use super::query_params::effective_page_limit;
 use super::{AppJson, AppPath, AppQuery, HttpState, NamespaceIdPath, NoQuery};
 use axum::extract::State;
 use axum::Json;
-use loonfs::{CheckpointPageCursor, SnapshotPageCursor};
 
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
@@ -99,11 +98,10 @@ pub(super) async fn list_snapshots(
 ) -> Result<Json<ListSnapshotsResponse>, ApiResponseError> {
     let runtime = state.runtime_for(subject);
     let namespace = runtime.namespace(&namespace_id);
-    let cursor = checked_cursor::<SnapshotPageCursor>(query.cursor)?;
     let response = namespace
         .list_snapshots()
         .page_limit(effective_page_limit(query.limit)?)
-        .cursor(cursor)
+        .cursor(query.cursor)
         .page()
         .await
         .map_err(ApiResponseError::runtime)?;
@@ -275,12 +273,11 @@ pub(super) async fn list_checkpoints(
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<PageQuery>,
 ) -> Result<Json<ListCheckpointsResponse>, ApiResponseError> {
-    let cursor = checked_cursor::<CheckpointPageCursor>(query.cursor)?;
     let response = state
         .maintenance
         .list_checkpoints(&namespace_id)
         .page_limit(effective_page_limit(query.limit)?)
-        .cursor(cursor)
+        .cursor(query.cursor)
         .page()
         .await
         .map_err(ApiResponseError::runtime)?;
