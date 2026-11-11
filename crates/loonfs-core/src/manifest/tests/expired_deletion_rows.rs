@@ -1176,22 +1176,55 @@ async fn a_false_positive_keeps_a_hidden_row_until_a_compaction_with_another_see
     let namespace_id = NamespaceId::parse("false-positive").expect("namespace id");
     let context = writer_at("writer-1", 5_000);
     let (_, a) = expire_old(&store, &namespace_id, &context).await;
+    // A filter of the nine inodes that `expire_old` leaves visible has the
+    // minimum 4,096 bits, and it matches the hidden inode in about one seed
+    // in 200,000. With these files the filter has ten bits for each inode,
+    // and it matches the hidden inode in about one seed in 120.
+    let visible = (0..400)
+        .map(|index| format!("/visible-{index}.txt"))
+        .collect::<Vec<_>>();
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+        .write_files_bytes(&visible, b"visible")
+        .await
+        .expect("write visible files");
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .fold_wal()
+        .await
+        .expect("fold");
     let hidden_row = family_rows(&store, &namespace_id, ApiMetadataRowFamily::Inodes)
         .await
         .into_iter()
         .find(|row| matches!(row, MetadataRow::Inode(record) if record.inode_id == a))
         .expect("the hidden inode's row");
-    let mut seed = RunNo(0);
-    while !seed_keeps(&store, &namespace_id, seed, &hidden_row).await {
-        assert!(seed.0 < 100_000, "some seed matches the hidden inode");
-        seed = RunNo(seed.0 + 1);
-    }
-
     let current = crate::test_support::namespace_store(&store, &namespace_id)
         .load_current_manifest()
         .await
         .expect("load the current manifest");
     let spec = whole_group_spec(&current, MetadataFamilyGroup::Inodes);
+    // The seeds' walks read one basis through a segment cache, so each walk
+    // after the first reads the rows of the 400 files from memory.
+    let cache = crate::test_support::segment_cache();
+    let mut basis =
+        super::super::metadata_basis_from_manifest(&store, Some(&cache), &current).segments;
+    let mut seed = RunNo(0);
+    loop {
+        basis.manifest = seeded_manifest(&current, seed);
+        let filter = load_kept_inode_filter(
+            &basis,
+            &namespace_id,
+            &spec,
+            &MetadataCompactionCancellation::default(),
+        )
+        .await
+        .expect("build the filter")
+        .expect("not cancelled");
+        if filter.keeps(&hidden_row) {
+            break;
+        }
+        assert!(seed.0 < 100_000, "some seed matches the hidden inode");
+        seed = RunNo(seed.0 + 1);
+    }
+
     compact_with_seed(&store, &namespace_id, &spec, seed).await;
     let inodes = family_rows(&store, &namespace_id, ApiMetadataRowFamily::Inodes).await;
     assert!(

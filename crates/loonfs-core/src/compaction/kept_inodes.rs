@@ -107,10 +107,10 @@ fn removes_hidden_rows(group: MetadataFamilyGroup) -> bool {
 /// schedule, so the other groups can't tell from that family whether they
 /// still store rows that the deletion hides.
 ///
-/// The filter uses ten bits per expected inode, capped at
-/// `MAX_BLOOM_FILTER_BYTES`. Its seed is the output run number. A walk that
-/// would keep more than `MAX_KEPT_INODE_WALK_DEPTH` directories at once keeps
-/// every row and returns `KeptInodeFilter::EveryInodeAtWalkLimit`.
+/// The filter uses ten bits per expected inode, with at least 4,096 bits and
+/// at most `MAX_BLOOM_FILTER_BYTES`. Its seed is the output run number. A
+/// walk that would keep more than `MAX_KEPT_INODE_WALK_DEPTH` directories at
+/// once keeps every row and returns `KeptInodeFilter::EveryInodeAtWalkLimit`.
 pub(crate) async fn load_kept_inode_filter<S: ObjectStore + ?Sized>(
     basis: &VerifiedMetadataSegments<'_, S>,
     namespace_id: &NamespaceId,

@@ -7,6 +7,12 @@ use xxhash_rust::xxh64::xxh64;
 /// Bits that a level has for each expected entry when its byte limit allows.
 const BITS_PER_ENTRY: u64 = 10;
 
+/// Fewest bytes of a level when its byte limit allows, which is 4,096 bits.
+///
+/// A compaction keeps every row that its filter matches, and a level of 40
+/// bits with four entries matches about one other entry in 34.
+const MIN_LEVEL_BYTES: u64 = 512;
+
 /// Most positions that a level sets for one entry, which is the count that
 /// ten bits per entry calls for.
 const MAX_HASH_POSITIONS: u8 = 7;
@@ -35,10 +41,10 @@ impl BloomFilter {
     /// Returns a filter for `expected_entries` whose levels take at most
     /// `max_bytes`.
     ///
-    /// The first level has ten bits for each expected entry, or all of
-    /// `max_bytes` when that's smaller (see `BloomLevel::new`). A smaller
-    /// first level reports more false positives, and it leaves no bytes for
-    /// `insert` to add a level.
+    /// The first level has ten bits for each expected entry and at least
+    /// `MIN_LEVEL_BYTES`, or all of `max_bytes` when that's smaller (see
+    /// `BloomLevel::new`). A smaller first level reports more false
+    /// positives, and it leaves no bytes for `insert` to add a level.
     pub(crate) fn with_max_bytes(expected_entries: u64, seed: u64, max_bytes: usize) -> Self {
         let expected_entries = expected_entries.max(1);
         let level = BloomLevel::new(expected_entries, seed, max_bytes);
@@ -50,7 +56,7 @@ impl BloomFilter {
         }
     }
 
-    /// Whether `max_bytes` fits a level with ten bits for each of
+    /// Whether `max_bytes` fits a level of `full_level_bytes` for
     /// `expected_entries`, which is when `with_max_bytes` doesn't shrink the
     /// first level.
     pub(crate) fn fits_at_full_size(expected_entries: u64, max_bytes: usize) -> bool {
@@ -58,8 +64,8 @@ impl BloomFilter {
     }
 
     /// Inserts `bytes`, or returns `None` when the filter has its expected
-    /// entries and its remaining bytes don't fit a level with ten bits for
-    /// each of twice as many.
+    /// entries and its remaining bytes don't fit a level of
+    /// `full_level_bytes` for twice as many.
     pub(crate) fn insert(&mut self, bytes: &[u8]) -> Option<()> {
         if self.entries == self.expected_entries {
             let expected_entries = self.expected_entries.checked_mul(2)?;
@@ -90,12 +96,13 @@ impl BloomFilter {
 }
 
 /// Bytes of a level with ten bits for each of `expected_entries`, rounded up
-/// to whole bytes, or `None` when that doesn't fit in `usize`.
+/// to whole bytes and to `MIN_LEVEL_BYTES`, or `None` when that doesn't fit
+/// in `usize`.
 fn full_level_bytes(expected_entries: u64) -> Option<usize> {
     let bytes = expected_entries
         .checked_mul(BITS_PER_ENTRY)?
         .div_ceil(8)
-        .max(1);
+        .max(MIN_LEVEL_BYTES);
     usize::try_from(bytes).ok()
 }
 
@@ -103,11 +110,11 @@ impl BloomLevel {
     /// Returns a level for `expected_entries` that takes at most `max_bytes`.
     ///
     /// The level has ten bits for each expected entry, rounded up to whole
-    /// bytes, or `max_bytes` when that's smaller. Each entry sets
-    /// `clamp(round(bits_per_entry * ln 2), 1, 7)` positions, the whole count
-    /// nearest the one with the fewest false positives at the level's bits per
-    /// entry. That count is 7 at ten bits per entry, and 2 for 200 million
-    /// entries in 64 MiB (about 2.7 bits per entry).
+    /// bytes and to `MIN_LEVEL_BYTES`, or `max_bytes` when that's smaller.
+    /// Each entry sets `clamp(round(bits_per_entry * ln 2), 1, 7)` positions,
+    /// the whole count nearest the one with the fewest false positives at the
+    /// level's bits per entry. That count is 7 at ten bits per entry, and 2
+    /// for 200 million entries in 64 MiB (about 2.7 bits per entry).
     fn new(expected_entries: u64, seed: u64, max_bytes: usize) -> Self {
         assert!(
             max_bytes > 0,
@@ -176,7 +183,7 @@ mod tests {
 
     #[test]
     fn the_byte_limit_counts_all_levels_and_refuses_growth_without_losing_keys() {
-        let mut filter = BloomFilter::with_max_bytes(2, 42, 30);
+        let mut filter = BloomFilter::with_max_bytes(2, 42, 3 * 512 + 12);
         for key in 0_u64..14 {
             filter.insert(&key.to_le_bytes()).expect("insert");
         }
@@ -189,17 +196,17 @@ mod tests {
         }
     }
 
-    /// Checks that a level has ten bits per entry and seven hash positions up
-    /// to the byte limit, the same bytes as when a filter over the limit
-    /// wasn't built, and that past the limit it takes the whole limit with
-    /// fewer hash positions.
+    /// Checks that a level has ten bits per entry, at least 512 bytes, and
+    /// seven hash positions up to the byte limit, the same bytes as when a
+    /// filter over the limit wasn't built, and that past the limit it takes
+    /// the whole limit with fewer hash positions.
     #[test]
     fn a_first_level_takes_ten_bits_per_entry_up_to_the_byte_limit_and_the_whole_limit_past_it() {
         // The most entries that fit in 64 MiB at ten bits each.
         let largest_full_size = 53_687_091;
         for (expected_entries, bytes, hash_positions) in [
-            (0, 2, 7),
-            (1, 2, 7),
+            (0, 512, 7),
+            (1, 512, 7),
             (1_000, 1_250, 7),
             (largest_full_size, MAX_BLOOM_FILTER_BYTES, 7),
             (largest_full_size + 1, MAX_BLOOM_FILTER_BYTES, 7),
