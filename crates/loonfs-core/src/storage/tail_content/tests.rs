@@ -11,8 +11,8 @@ use loonfs_types::format::wal::{WalCommitDelta, WalCommitPayload, WalDelta, WalI
 use loonfs_types::{ChangeSeq, CommitId, ContentId, ContentRef, InodeId, NamespaceId, RevisionNo};
 use std::assert_matches;
 
-/// The head of the namespace whose tail these tests write, the root of its
-/// own fork family.
+/// The head of the namespace whose tail these tests write, a namespace that
+/// was created without a source.
 static HEAD: std::sync::LazyLock<NamespaceReadState> = std::sync::LazyLock::new(|| {
     NamespaceReadState::initial(
         NamespaceId::parse("demo").expect("namespace"),

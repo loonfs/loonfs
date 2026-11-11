@@ -1,17 +1,18 @@
 //! The durable key grammar: object families, key classification, and the
-//! namespace listing built on it.
+//! namespace and pool listings built on it.
 
 use crate::keys::{
-    namespace_prefix, CONTENT_DIRECTORY, EXTENSIONS_DIRECTORY, HINT_NAME, MANIFEST_DIRECTORY,
-    MANIFEST_SUFFIX, NAMESPACES_DIRECTORY, PIN_DIRECTORY, PIN_SUFFIX, POOLS_DIRECTORY,
-    POOL_RECORD_NAME, SEGMENT_DIRECTORY, SEGMENT_SUFFIX, TEMPORARY_DIRECTORY, UPLOAD_DIRECTORY,
-    UPLOAD_OUTCOME_SUFFIX, UPLOAD_SESSION_SUFFIX, WAL_DIRECTORY, WAL_SUFFIX,
+    namespace_prefix, pool_prefix, CONTENT_DIRECTORY, EXTENSIONS_DIRECTORY, HINT_NAME,
+    MANIFEST_DIRECTORY, MANIFEST_SUFFIX, NAMESPACES_DIRECTORY, PIN_DIRECTORY, PIN_SUFFIX,
+    POOLS_DIRECTORY, POOL_RECORD_NAME, SEGMENT_DIRECTORY, SEGMENT_SUFFIX, TEMPORARY_DIRECTORY,
+    UPLOAD_DIRECTORY, UPLOAD_OUTCOME_SUFFIX, UPLOAD_SESSION_SUFFIX, WAL_DIRECTORY, WAL_SUFFIX,
 };
 use crate::{ObjectStore, Result};
-use loonfs_types::{ContentId, EffectiveLimit, ManifestNo, NamespaceId, UploadId};
+use loonfs_types::{ContentId, EffectiveLimit, ManifestNo, NamespaceId, PoolId, UploadId};
 use std::num::NonZeroU32;
 
 const NAMESPACES_PREFIX: &str = "namespaces/";
+const POOLS_PREFIX: &str = "pools/";
 
 /// Length of a content ID: `con_` and a generated ID body.
 const CONTENT_ID_BYTES: usize = "con_".len() + loonfs_types::GENERATED_ID_BODY_BYTES;
@@ -20,8 +21,8 @@ const CONTENT_ID_BYTES: usize = "con_".len() + loonfs_types::GENERATED_ID_BODY_B
 /// offset, twice.
 const CONTENT_SPAN_NAME_BYTES: usize = CONTENT_ID_BYTES + 2 * 21;
 
-/// Most namespace ids one [`list_namespace_ids`] page contains: the most keys
-/// S3 and Google Cloud Storage return for one list request.
+/// Most ids one [`list_namespace_ids`] or [`list_pool_ids`] page contains: the
+/// most keys S3 and Google Cloud Storage return for one list request.
 pub const MAX_NAMESPACE_IDS_PER_PAGE: NonZeroU32 = NonZeroU32::new(1_000).unwrap();
 
 /// One family in the [durable object key grammar].
@@ -306,26 +307,99 @@ pub async fn list_namespace_ids<S: ObjectStore + ?Sized>(
     start_after: Option<&NamespacePageCursor>,
     limit: EffectiveLimit,
 ) -> Result<NamespaceIdPage> {
+    let page = list_child_ids(
+        store,
+        NAMESPACES_PREFIX,
+        start_after.map(|cursor| cursor.0.as_str()),
+        limit,
+        |name| NamespaceId::parse(name).ok(),
+    )
+    .await?;
+    Ok(NamespaceIdPage {
+        namespace_ids: page.ids,
+        skipped_entries: page.skipped_entries,
+        next_cursor: page.next_cursor.map(NamespacePageCursor),
+    })
+}
+
+/// One page of pool ids from [`list_pool_ids`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PoolIdPage {
+    /// Pool ids in ascending key order.
+    pub pool_ids: Vec<PoolId>,
+    /// Children of `pools/` on this page whose names are not pool ids.
+    pub skipped_entries: usize,
+    /// Where the next page starts, or `None` when this page ends the listing.
+    pub next_cursor: Option<PoolPageCursor>,
+}
+
+/// A position in the pool listing that [`list_pool_ids`] resumes after.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PoolPageCursor(String);
+
+impl PoolPageCursor {
+    /// Builds the position just after `pool_id`.
+    pub fn after(pool_id: &PoolId) -> Self {
+        Self(pool_prefix(pool_id))
+    }
+}
+
+/// Lists one page of the pool ids in `store`, in ascending key order, with
+/// the paging of [`list_namespace_ids`].
+///
+/// A child of `pools/` whose name is not a pool id is skipped and counted in
+/// `skipped_entries`. A pool whose members are all retired is still listed,
+/// because its pool record stays.
+pub async fn list_pool_ids<S: ObjectStore + ?Sized>(
+    store: &S,
+    start_after: Option<&PoolPageCursor>,
+    limit: EffectiveLimit,
+) -> Result<PoolIdPage> {
+    let page = list_child_ids(
+        store,
+        POOLS_PREFIX,
+        start_after.map(|cursor| cursor.0.as_str()),
+        limit,
+        |name| PoolId::parse(name).ok(),
+    )
+    .await?;
+    Ok(PoolIdPage {
+        pool_ids: page.ids,
+        skipped_entries: page.skipped_entries,
+        next_cursor: page.next_cursor.map(PoolPageCursor),
+    })
+}
+
+/// One page of the ids that name the children of one prefix.
+struct ChildIdPage<T> {
+    ids: Vec<T>,
+    skipped_entries: usize,
+    next_cursor: Option<String>,
+}
+
+/// Lists one page of the children of `prefix` after `start_after`, at most
+/// `limit` or [`MAX_NAMESPACE_IDS_PER_PAGE`], and parses each child's name
+/// with `parse`.
+async fn list_child_ids<S: ObjectStore + ?Sized, T>(
+    store: &S,
+    prefix: &str,
+    start_after: Option<&str>,
+    limit: EffectiveLimit,
+    parse: impl Fn(&str) -> Option<T>,
+) -> Result<ChildIdPage<T>> {
     let max_limit = EffectiveLimit::new(MAX_NAMESPACE_IDS_PER_PAGE);
     let page = store
-        .list_child_prefixes(
-            NAMESPACES_PREFIX,
-            start_after.map(|cursor| cursor.0.as_str()),
-            limit.min(max_limit),
-        )
+        .list_child_prefixes(prefix, start_after, limit.min(max_limit))
         .await?;
-    let namespace_ids: Vec<NamespaceId> = page
+    let ids: Vec<T> = page
         .items
         .iter()
-        .filter_map(|child| {
-            let name = child.strip_prefix(NAMESPACES_PREFIX)?.strip_suffix('/')?;
-            NamespaceId::parse(name).ok()
-        })
+        .filter_map(|child| parse(child.strip_prefix(prefix)?.strip_suffix('/')?))
         .collect();
-    Ok(NamespaceIdPage {
-        skipped_entries: page.items.len() - namespace_ids.len(),
-        namespace_ids,
-        next_cursor: page.next_cursor.map(NamespacePageCursor),
+    Ok(ChildIdPage {
+        skipped_entries: page.items.len() - ids.len(),
+        ids,
+        next_cursor: page.next_cursor,
     })
 }
 

@@ -157,8 +157,8 @@ async fn a_new_namespace_returns_the_state_its_first_manifest_records() {
         ]
     );
     assert_eq!(
-        crate::test_support::namespace_store(&store, &source)
-            .load_pool_record(&created.pool_id)
+        crate::test_support::pool_store(&store, &created.pool_id)
+            .load_pool_record()
             .await
             .expect("load the pool record"),
         Some(PoolRecordPayload {
@@ -512,7 +512,7 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
                 ..context()
             };
             crate::test_support::namespace_store(store.inner(), &namespace_id)
-                .gc(None, &options, &aged.clock())
+                .gc(&options, &aged.clock())
                 .await
                 .expect("collect during pending hint");
             store.release();
@@ -545,7 +545,7 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
         ..context()
     };
     crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(None, &options, &aged.clock())
+        .gc(&options, &aged.clock())
         .await
         .expect("collect after grace");
     assert!(store

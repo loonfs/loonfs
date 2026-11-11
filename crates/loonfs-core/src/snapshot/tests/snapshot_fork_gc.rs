@@ -160,7 +160,7 @@ async fn snapshot_fork_survives_snapshot_deletion_during_an_older_collection() {
     fork_gate.block_next();
     let collect = async {
         crate::test_support::namespace_store(&gc_gate, &fixture.source)
-            .gc(None, &GcOptions::default(), &fixture.context.clock())
+            .gc(&GcOptions::default(), &fixture.context.clock())
             .await
             .expect("old collector keeps its captured snapshot root");
         fixture.assert_replaced_present(true).await;
@@ -186,7 +186,7 @@ async fn snapshot_fork_survives_snapshot_deletion_during_an_older_collection() {
     };
     tokio::join!(collect, fork, release_snapshot);
     crate::test_support::namespace_store(&fixture.store, &fixture.source)
-        .gc(None, &GcOptions::default(), &fixture.context.clock())
+        .gc(&GcOptions::default(), &fixture.context.clock())
         .await
         .expect("new collector keeps the fork root");
     fixture.assert_replaced_present(true).await;
@@ -240,7 +240,7 @@ async fn snapshot_fork_refuses_a_snapshot_deleted_before_post_write_verification
             );
             fixture.delete_snapshot().await;
             crate::test_support::namespace_store(&fixture.store, &fixture.source)
-                .gc(None, &GcOptions::default(), &fixture.context.clock())
+                .gc(&GcOptions::default(), &fixture.context.clock())
                 .await
                 .expect("tentative pin remains a root during verification");
             fixture.assert_replaced_present(true).await;
@@ -261,7 +261,7 @@ async fn snapshot_fork_refuses_a_snapshot_deleted_before_post_write_verification
         .expect("no target installed")
         .is_none());
     crate::test_support::namespace_store(&fixture.store, &fixture.source)
-        .gc(None, &GcOptions::default(), &fixture.context.clock())
+        .gc(&GcOptions::default(), &fixture.context.clock())
         .await
         .expect("later collection sees no historical root");
     fixture.assert_replaced_present(false).await;

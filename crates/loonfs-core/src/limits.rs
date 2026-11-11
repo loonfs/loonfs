@@ -299,27 +299,27 @@ pub const DIRECT_TRANSFER_URL_TTL_MS: u64 = 15 * 60 * 1000;
 pub const NAMESPACE_RETIREMENT_GRACE_WINDOW_MS: u64 =
     METADATA_PUBLICATION_BUDGET_MS + PROVIDER_PUBLICATION_REQUEST_BOUND_MS + GC_MIN_GRACE_WINDOW_MS;
 
-/// Elapsed monotonic time, from the start of a family root's collection,
-/// within which the collection reads the roots of every member of its fork
-/// family, or skips the family's content sweep.
+/// Elapsed monotonic time, from the start of a pool's collection, within
+/// which the collection reads the roots of every member of the pool, or skips
+/// the pool's content sweep.
 ///
 /// A member that the collection hasn't read yet can't be retired until the
 /// retirement grace, less the clock allowance between the deleting host and
 /// the collector, has passed since the collection started, so its fork pin keeps
 /// it in the walk until then (format spec, "Content roots").
-pub const FAMILY_ROOTS_READ_BUDGET_MS: u64 =
+pub const POOL_ROOTS_READ_BUDGET_MS: u64 =
     NAMESPACE_RETIREMENT_GRACE_WINDOW_MS - GC_SAFETY_MARGIN_MS;
 
 pub use loonfs_types::limits::{GC_DEFAULT_GRACE_WINDOW_MS, RETENTION_ADVANCE_MIN_COMMIT_AGE_MS};
 
 const _: () = assert!(GC_DEFAULT_GRACE_WINDOW_MS >= GC_MIN_GRACE_WINDOW_MS);
 
-/// A member that replaces or deletes a revision after a family root's
+/// A member that replaces or deletes a revision after a pool's
 /// collection started keeps the revision's rows until a retention advance
 /// passes that commit, at least the advance's minimum commit age later, so
 /// the collection reads the member's current manifest with the reference
 /// still in it (format section 11.9).
-const _: () = assert!(FAMILY_ROOTS_READ_BUDGET_MS < RETENTION_ADVANCE_MIN_COMMIT_AGE_MS);
+const _: () = assert!(POOL_ROOTS_READ_BUDGET_MS < RETENTION_ADVANCE_MIN_COMMIT_AGE_MS);
 
 /// A retention advance moves the floor only past commits older than the
 /// advance's minimum commit age, so a revision stays referenced for at least

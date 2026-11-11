@@ -71,34 +71,4 @@ impl<S: ObjectStore> NamespaceStore<S> {
             );
         }
     }
-
-    /// Loads the pool record of `pool_id`, or `None` if it's missing.
-    #[cfg(test)]
-    pub(crate) async fn load_pool_record(
-        &self,
-        pool_id: &loonfs_types::PoolId,
-    ) -> Result<Option<PoolRecordPayload>> {
-        use crate::control_object::{
-            expect_identity_field, load_control_object, ControlObjectLoadError,
-        };
-        let loaded = load_control_object(
-            &self.store,
-            pool_record(pool_id),
-            ControlObjectKind::PoolRecord,
-            |object_key, record: &PoolRecordPayload| {
-                expect_identity_field(
-                    object_key,
-                    "pool id",
-                    pool_id.as_str(),
-                    record.pool_id.as_str(),
-                )
-            },
-        )
-        .await;
-        match loaded {
-            Ok(loaded) => Ok(Some(loaded.state)),
-            Err(ControlObjectLoadError::MissingObject { .. }) => Ok(None),
-            Err(error) => Err(CoreError::ControlObjectLoad(error)),
-        }
-    }
 }

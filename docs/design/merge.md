@@ -2,7 +2,7 @@
 
 This note describes which parts of a merge are server operations, and which parts are a loop that a caller runs on top of those operations.
 
-A [fork](../specs/glossary.md#fork) is a namespace that starts as a copy of another namespace at one point in its history, and shares that namespace's stored objects. A "[merge](../specs/glossary.md#merge)" applies a fork's commits to another namespace in its [fork family](../specs/glossary.md#fork-family) as one commit. In this note, "main" is the namespace that a fork was forked from, "the fork" is the namespace whose commits a merge applies, and "the fork point" is the sequence of main that the fork was made at. Most merges apply a fork's commits to main, and a [rebase](#rebasing) applies them to a new fork of main's head instead.
+A [fork](../specs/glossary.md#fork) is a namespace that starts as a copy of another namespace at one point in its history, and shares that namespace's stored objects. A "[merge](../specs/glossary.md#merge)" applies a fork's commits to another namespace in its [pool](../specs/glossary.md#pool) as one commit. In this note, "main" is the namespace that a fork was forked from, "the fork" is the namespace whose commits a merge applies, and "the fork point" is the sequence of main that the fork was made at. Most merges apply a fork's commits to main, and a [rebase](#rebasing) applies them to a new fork of main's head instead.
 
 The storage format defines these parts of a merge:
 
@@ -260,7 +260,7 @@ The API gains the merge and rebase routes, the next-range query, `rebased_from` 
 
 ## What the lab measures
 
-The lab's merge scenario forks namespaces of 10,000 and of 100,000 files, changes a fraction of the files in the fork, and merges, recording how long each step takes against the request deadline and how many pages a client reads to see the merge. The merge's WAL object counts toward main's fold trigger like any other WAL object, so the scenario also measures how large a WAL tail readers read until main's writer session folds the merge. A second scenario makes main change files that the fork also changed, rebases, resolves with a simulated agent, and merges the new fork, recording the report's size, the cost of a replay commit against a merge, and how long the replay commit's classification through the pinned manifest takes against a merge's classification at the cached head. A third runs the fork family's collection against a namespace that has merged, and checks that the fork's content that main now references stays and the rest is collected.
+The lab's merge scenario forks namespaces of 10,000 and of 100,000 files, changes a fraction of the files in the fork, and merges, recording how long each step takes against the request deadline and how many pages a client reads to see the merge. The merge's WAL object counts toward main's fold trigger like any other WAL object, so the scenario also measures how large a WAL tail readers read until main's writer session folds the merge. A second scenario makes main change files that the fork also changed, rebases, resolves with a simulated agent, and merges the new fork, recording the report's size, the cost of a replay commit against a merge, and how long the replay commit's classification through the pinned manifest takes against a merge's classification at the cached head. A third runs the pool's collection against a namespace that has merged, and checks that the fork's content that main now references stays and the rest is collected.
 
 ## Alternatives considered
 

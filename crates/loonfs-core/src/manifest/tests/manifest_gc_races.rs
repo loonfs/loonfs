@@ -69,7 +69,6 @@ async fn discover_during_collection(start: ManifestNo, block_probe: bool) {
         let options = crate::gc::GcOptions::default();
         let report = crate::test_support::namespace_store(blocked.inner(), &namespace_id)
             .gc(
-                None,
                 &options,
                 &WriterAt {
                     now_ms: options.grace_window_ms + 1,
@@ -200,7 +199,6 @@ async fn a_late_ambiguous_put_cannot_confirm_a_recreated_manifest() {
                 ..crate::test_support::namespace_store(&store, &namespace_id)
             }
             .gc(
-                None,
                 &options,
                 &WriterAt {
                     now_ms: timer.now_ms(),
@@ -295,7 +293,6 @@ async fn a_stale_basis_whose_successor_was_collected_publishes_after_the_current
     clock.advance_ms(options.grace_window_ms + 1);
     let report = crate::test_support::namespace_store(&store, &namespace_id)
         .gc(
-            None,
             &options,
             &WriterAt {
                 now_ms: options.grace_window_ms + 1,

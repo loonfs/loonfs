@@ -1,5 +1,5 @@
-//! Maintenance runs: the metadata job's loop, the retention window job, and
-//! runs against namespaces that do not exist or are deleted.
+//! Maintenance runs: the metadata job's loop, the retention window job, runs
+//! against namespaces that do not exist or are deleted, and runs on a pool.
 
 use super::*;
 use loonfs::MaintainMetadataOptions;
@@ -219,6 +219,62 @@ async fn runtime_jobs_answer_a_missing_and_a_deleted_namespace_with_fixed_codes(
             "retention_window deleted: 410 namespace_deleted",
         ]
     );
+    state.runtime.shutdown().await.expect("shutdown writer");
+}
+
+/// Checks that a pool's `gc` run returns the pool's result, that a pool
+/// without a pool record is `pool_not_found`, and that an invalid pool ID is
+/// rejected as the path parameter.
+#[tokio::test]
+async fn a_pool_run_collects_the_pool_and_rejects_a_missing_or_invalid_pool() {
+    let directory = tempdir().expect("tempdir");
+    let (router, state) = test_app(
+        test_options(directory.path(), "maintenance-runs"),
+        TestAppOptions::default(),
+    )
+    .await
+    .expect("app");
+    let pool_id = state
+        .runtime
+        .create_namespace(&namespace_id("pooled"), &loonfs_test_support::test_actor())
+        .await
+        .expect("create namespace")
+        .pool_id;
+    let run_pool = async |pool: &str, body: &str| {
+        send(
+            &router,
+            "POST",
+            &format!("/v0/maintenance/pools/{pool}/runs"),
+            body,
+        )
+        .await
+    };
+
+    let (status, body) = run_pool(pool_id.as_str(), r#"{"kind":"gc"}"#).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["kind"], "gc");
+    assert_eq!(body["pool_id"], pool_id.as_str());
+    assert_eq!(
+        body["deleted"],
+        serde_json::json!({"content_objects": 0, "upload_sessions": 0, "temporary_objects": 0})
+    );
+
+    let missing = loonfs_types::PoolId::generate();
+    let (status, body) = run_pool(missing.as_str(), r#"{"kind":"gc"}"#).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["code"], ErrorCode::PoolNotFound.as_str());
+    assert!(body["message"]
+        .as_str()
+        .expect("message")
+        .contains(missing.as_str()));
+
+    let (status, body) = run_pool("pool_NOT-VALID", r#"{"kind":"gc"}"#).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], ErrorCode::InvalidRequest.as_str());
+    assert_eq!(body["param"], "pool_id");
+
+    let (status, body) = run_pool(pool_id.as_str(), r#"{"kind":"metadata"}"#).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     state.runtime.shutdown().await.expect("shutdown writer");
 }
 

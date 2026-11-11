@@ -52,7 +52,6 @@ async fn collect(store: &LocalFsStore, namespace_id: &NamespaceId) -> GcResponse
     let aged = MetadataMapStore::aged(store, KeyPredicate::any());
     crate::test_support::namespace_store(&aged, namespace_id)
         .gc(
-            None,
             &options(),
             &context(UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1).clock(),
         )
@@ -131,7 +130,7 @@ async fn an_extension_segment_goes_once_no_root_lists_it() {
 /// stops listing it, because the fork pin keeps the source's manifest that
 /// lists it, and goes once the fork's retirement releases the pin.
 #[tokio::test]
-async fn an_inherited_extension_segment_stays_until_no_family_member_lists_it() {
+async fn an_inherited_extension_segment_stays_until_no_fork_pin_keeps_it() {
     let directory = tempdir().expect("directory");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let source = NamespaceId::parse("extension-source").expect("namespace");
@@ -191,11 +190,7 @@ async fn an_inherited_extension_segment_stays_until_no_family_member_lists_it() 
         .await
         .expect("delete the fork");
     let retired = crate::test_support::namespace_store(&store, &fork)
-        .gc(
-            None,
-            &options(),
-            &context(setup.now_ms + retirement_ms()).clock(),
-        )
+        .gc(&options(), &context(setup.now_ms + retirement_ms()).clock())
         .await
         .expect("retire the fork");
     assert_eq!(retired.deleted_checkpoints_by_owner.fork, 1);

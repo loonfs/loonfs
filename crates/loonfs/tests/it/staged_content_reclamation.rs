@@ -7,14 +7,16 @@
 //! consequence: every blob one of these puts writes is eventually either
 //! referenced by metadata or reclaimed, and none of them is immortal.
 //!
-//! Garbage collection is driven through `NamespaceStore::gc` rather
-//! than `Maintenance::gc`, because the maintenance handle stamps its pass
+//! Garbage collection is driven through `PoolStore::gc` rather than
+//! `Maintenance::gc_pool`, because the maintenance handle stamps its pass
 //! from the wall clock and these deadlines are days out. The store is the
 //! same one the runtime wrote through, so the pass sees exactly what the
 //! puts left behind.
 
 use crate::common::{namespace, open_runtime_with_async, store, TestRuntime};
-use loonfs::{ContentRef, GcOptions, GcResponse, NamespaceId, PutFileOptions, SharedObjectStore};
+use loonfs::{
+    ContentRef, GcOptions, NamespaceId, PoolGcResponse, PutFileOptions, SharedObjectStore,
+};
 use loonfs_core::limits::{CONTENT_RECLAMATION_GRACE_WINDOW_MS, UPLOAD_SESSION_LEASE_MS};
 use loonfs_core::test_support::WriterAt;
 use loonfs_objectstore::layout::{upload_id_of, DurableObjectFamily};
@@ -50,10 +52,16 @@ fn gc_options() -> GcOptions {
     }
 }
 
-/// Runs one pass at a fabricated clock. The runtime stamped its sessions
-/// from the real clock, so every deadline here is measured from that.
-async fn collect(store: &SharedObjectStore, namespace_id: &NamespaceId, now_ms: u64) -> GcResponse {
-    loonfs_core::test_support::namespace_store(store.as_ref(), namespace_id)
+/// Runs one pass of the pool of `namespace_id` at a fabricated clock. The
+/// runtime stamped its sessions from the real clock, so every deadline here
+/// is measured from that.
+async fn collect(
+    store: &SharedObjectStore,
+    namespace_id: &NamespaceId,
+    now_ms: u64,
+) -> PoolGcResponse {
+    let pool_id = loonfs_core::test_support::load_pool_id(store, namespace_id).await;
+    loonfs_core::test_support::pool_store(store.as_ref(), &pool_id)
         .gc(
             None,
             &gc_options(),

@@ -260,8 +260,8 @@ fn no_schema_a_response_reaches_admits_null() {
 
 /// Fields that the server always includes in these response types.
 const ALWAYS_SERIALIZED_RESPONSE_FIELDS: &[(&str, &str)] = &[
-    ("DeletedObjectCounts", "content_objects"),
-    ("DeletedObjectCounts", "upload_sessions"),
+    ("PoolDeletedObjectCounts", "content_objects"),
+    ("PoolDeletedObjectCounts", "upload_sessions"),
     ("RunMaintenanceResponseGc", "deleted"),
     ("RunMaintenanceResponseGc", "deleted_checkpoints_by_owner"),
     ("RunMaintenanceResponseGc", "retained"),

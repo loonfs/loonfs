@@ -70,6 +70,7 @@ pub fn openapi_document() -> utoipa::openapi::OpenApi {
         crate::http::handlers_snapshots::list_checkpoints,
         crate::http::handlers_snapshots::get_checkpoint,
         crate::http::handlers_maintenance::run_maintenance,
+        crate::http::handlers_maintenance::run_pool_maintenance,
         crate::http::handlers_query::grep,
         crate::http::handlers_query::get_grep_index,
         crate::http::handlers_query::enable_grep_index,

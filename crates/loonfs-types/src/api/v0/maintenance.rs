@@ -1,6 +1,6 @@
 //! Maintenance job requests and responses for the v0 HTTP API.
 
-use super::{GcRequest, GcResponse};
+use super::{GcRequest, GcResponse, PoolGcResponse};
 use crate::{AccessRevisionNo, ChangeSeq, CommitId, NamespaceId, PrincipalId};
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
@@ -89,6 +89,30 @@ pub enum RunMaintenanceRequest {
     RetentionWindow(SetRetentionWindowRequest),
     /// A job that restores a root administrator.
     RecoverAdministrator(RecoverAdministratorRequest),
+}
+
+/// One maintenance job for one pool.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RunPoolMaintenanceRequest {
+    /// A garbage collection job for the pool's aged, unreferenced content objects, upload records,
+    /// and temporary objects.
+    Gc(GcRequest),
+}
+
+/// The result of one maintenance job on a pool.
+///
+/// The `kind` matches the request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RunPoolMaintenanceResponse {
+    /// The counts and deadlines from one garbage collection call on the pool.
+    Gc(PoolGcResponse),
+    /// A job kind from a newer server. This variant doesn't include the job's own fields.
+    #[serde(other)]
+    Unknown,
 }
 
 /// A request to grant `admin` on the root access row to one principal, through a commit that
@@ -368,5 +392,29 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn run_pool_maintenance_requests_accept_only_gc() {
+        let decoded: RunPoolMaintenanceRequest =
+            serde_json::from_value(serde_json::json!({"kind": "gc", "grace_window_ms": 600_000}))
+                .expect("a pool gc request decodes");
+        assert_eq!(
+            decoded,
+            RunPoolMaintenanceRequest::Gc(GcRequest {
+                grace_window_ms: Some(600_000),
+            })
+        );
+        for body in [
+            serde_json::json!({"kind": "metadata"}),
+            serde_json::json!({"kind": "gc", "bogus": 1}),
+        ] {
+            serde_json::from_value::<RunPoolMaintenanceRequest>(body.clone())
+                .expect_err(&format!("invalid pool maintenance request decoded: {body}"));
+        }
+        let newer: RunPoolMaintenanceResponse =
+            serde_json::from_value(serde_json::json!({"kind": "compaction", "units": 2}))
+                .expect("a newer job kind decodes");
+        assert_eq!(newer, RunPoolMaintenanceResponse::Unknown);
     }
 }

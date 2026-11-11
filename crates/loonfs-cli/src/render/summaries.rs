@@ -1,7 +1,6 @@
 //! Short, reusable phrases for human-readable command summaries.
 
 use super::*;
-use loonfs_types::GcSkippedWork;
 
 /// Overall result of an object-store probe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,7 +144,7 @@ pub(super) fn checkpoint_owner_label(owner: &CheckpointOwner) -> String {
     }
 }
 
-fn gc_deleted_counts(report: &GcResponse) -> [(&'static str, u64); 10] {
+fn gc_deleted_counts(report: &GcResponse) -> [(&'static str, u64); 6] {
     let deleted = &report.deleted;
     let checkpoints = &report.deleted_checkpoints_by_owner;
     [
@@ -155,10 +154,6 @@ fn gc_deleted_counts(report: &GcResponse) -> [(&'static str, u64); 10] {
         ("manifests", deleted.manifests),
         ("fork checkpoints", checkpoints.fork),
         ("snapshots", checkpoints.user),
-        ("upload sessions", deleted.upload_sessions),
-        ("content objects", deleted.content_objects),
-        ("retired content objects", deleted.retired_content_objects),
-        ("temporary objects", deleted.temporary_objects),
     ]
 }
 
@@ -184,18 +179,6 @@ pub(super) fn gc_summary(report: &GcResponse) -> String {
             "\nnamespace can be retired at or after {} after pin cleanup; only fork pins can hold it beyond this deadline",
             format_utc_ms(deadline)
         ));
-    }
-    for reason in &report.skipped {
-        summary.push('\n');
-        summary.push_str(match reason {
-            GcSkippedWork::ContentSweepFamilyBudget => {
-                "skipped the content sweep: the fork family's roots weren't all read within the budget"
-            }
-            GcSkippedWork::ContentSweepUnreadableMember => {
-                "skipped the content sweep: a fork family member's roots couldn't be read"
-            }
-            GcSkippedWork::Unknown => "skipped work for a reason unknown to this CLI",
-        });
     }
     summary
 }

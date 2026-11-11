@@ -3,7 +3,6 @@
 use crate::error::{CoreError, Result};
 use crate::heap_bytes::{hash_map_table_bytes, hash_set_table_bytes, HeapBytes};
 use crate::read_working_memory::ReadWorkingMemory;
-use loonfs_types::NamespaceId;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -13,15 +12,16 @@ use std::sync::Arc;
 /// live set.
 #[derive(Clone)]
 pub(super) struct CollectionMemory {
-    namespace_id: NamespaceId,
+    /// The namespace or the pool that the collection collects.
+    collected_id: Arc<str>,
     memory: Arc<ReadWorkingMemory>,
     held_bytes: Arc<AtomicUsize>,
 }
 
 impl CollectionMemory {
-    pub(super) fn new(namespace_id: &NamespaceId, memory: Arc<ReadWorkingMemory>) -> Self {
+    pub(super) fn new(collected_id: String, memory: Arc<ReadWorkingMemory>) -> Self {
         Self {
-            namespace_id: namespace_id.clone(),
+            collected_id: collected_id.into(),
             memory,
             held_bytes: Arc::default(),
         }
@@ -64,7 +64,7 @@ impl Charge {
         }
         if !self.memory.memory.try_reserve(bytes) {
             return Err(CoreError::LiveSetExceedsReadMemory {
-                namespace_id: self.memory.namespace_id.clone(),
+                collected_id: self.memory.collected_id.to_string(),
                 bytes: self
                     .memory
                     .held_bytes

@@ -677,9 +677,6 @@ async fn collection_runs_hourly_only_when_the_session_moved() {
         .run_steps_after(config.maintenance_interval_ms.get())
         .await;
     server.scheduler.run_due_steps().await;
-    let moved_pool = loonfs_objectstore::keys::pool_prefix(
-        &loonfs_core::test_support::load_pool_id(store.inner(), &moved).await,
-    );
     store.reset();
     server
         .run_steps_after(config.gc_interval_ms.get() - config.maintenance_interval_ms.get() - 1)
@@ -689,13 +686,12 @@ async fn collection_runs_hourly_only_when_the_session_moved() {
     let operations = store.take();
     assert_eq!(
         list_count(&operations),
-        9,
+        6,
         "collection lists the namespace's garbage without listing namespaces"
     );
     assert!(operations.iter().all(|op| op
         .key()
-        .starts_with(&loonfs_objectstore::keys::namespace_prefix(&moved))
-        || op.key().starts_with(&moved_pool)));
+        .starts_with(&loonfs_objectstore::keys::namespace_prefix(&moved))));
     server.run_steps_after(config.gc_interval_ms.get()).await;
     assert!(
         store.take().is_empty(),
@@ -710,7 +706,7 @@ async fn collection_runs_hourly_only_when_the_session_moved() {
         .await;
     assert_eq!(
         list_count(&store.take()),
-        9,
+        6,
         "the first run after the commit collects, because collection comes before the \
          index step"
     );

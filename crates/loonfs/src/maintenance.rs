@@ -14,7 +14,7 @@ use crate::trace::{self, operation_span};
 use crate::{
     AdvanceRetentionFloorOptions, AdvanceRetentionResponse, Checkpoint, FoldWalResponse,
     ListCheckpointsResponse, MaintainMetadataOptions, MetadataMaintenanceOutcome,
-    MetadataMaintenanceResponse, NamespaceDiagnostics, NamespaceId, PinId,
+    MetadataMaintenanceResponse, NamespaceDiagnostics, NamespaceId, PinId, PoolId,
     SetRetentionWindowResponse, WriterState,
 };
 use crate::{Error, Result};
@@ -378,11 +378,7 @@ impl Maintenance {
         trace::in_operation(operation_span!(self.core, "gc", namespace_id), async {
             let namespace = self.core.namespace_store(namespace_id);
             let report = namespace
-                .gc(
-                    Some(self.core.completed_upload_sessions()),
-                    options,
-                    &namespace.start_clock(),
-                )
+                .gc(options, &namespace.start_clock())
                 .await
                 .map_err(Error::from)?;
             // A caller may drop the response, so its counts survive only when
@@ -398,6 +394,45 @@ impl Maintenance {
                 .await;
             Ok(report)
         })
+        .await
+    }
+
+    /// Runs [`Self::gc_pool_with_options`] with the default grace window.
+    pub async fn gc_pool(&self, pool_id: &PoolId) -> Result<crate::PoolGcResponse> {
+        self.gc_pool_with_options(pool_id, &crate::GcOptions::default())
+            .await
+    }
+
+    /// Runs one complete garbage collection of one pool: its content objects,
+    /// upload records, and temporary objects, with roots that it reads from
+    /// every member of the pool.
+    ///
+    /// Every call rebuilds the members' roots and keeps no cursor. A pool
+    /// without a pool record returns `pool_not_found`.
+    pub async fn gc_pool_with_options(
+        &self,
+        pool_id: &PoolId,
+        options: &crate::GcOptions,
+    ) -> Result<crate::PoolGcResponse> {
+        trace::in_operation(
+            operation_span!(self.core, "gc_pool", pool_id = pool_id),
+            async {
+                let pool = self.core.pool_store(pool_id);
+                let report = pool
+                    .gc(
+                        Some(self.core.completed_upload_sessions()),
+                        options,
+                        &pool.start_clock(),
+                    )
+                    .await
+                    .map_err(Error::from)?;
+                // A caller may drop the response, so its counts survive only when
+                // this shared collection path records them here. A pool's
+                // collection publishes no manifest, so no namespace changes.
+                self.core.instruments().gc.record_pool_collection(&report);
+                Ok(report)
+            },
+        )
         .await
     }
 
