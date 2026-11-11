@@ -80,17 +80,23 @@ async fn a_sweep_and_the_session_steps_never_run_on_the_same_namespace_together(
             let operations = store.inner().take();
             assert_matches!(&operations[0], RecordedOperation::List { .. });
             assert_eq!(operations[0].key(), "namespaces/");
-            // The sweep's collection of the pool reads the namespace's roots,
-            // but the sweep runs none of the namespace's steps, so it doesn't
-            // fold the tail.
+            // The sweep's collection of the pool reads the namespace's roots
+            // and lists its pins. A collection of the namespace would list
+            // these four prefixes, and the sweep runs none of the namespace's
+            // steps.
+            let own_prefixes = [
+                loonfs_objectstore::keys::metadata_manifest_prefix(&namespace_id),
+                loonfs_objectstore::keys::wal_prefix(&namespace_id),
+                loonfs_objectstore::keys::metadata_segment_prefix(&namespace_id),
+                loonfs_objectstore::keys::extensions_prefix(&namespace_id),
+            ];
             assert!(
-                operations.iter().all(|operation| matches!(
-                    operation,
-                    RecordedOperation::Get { .. }
-                        | RecordedOperation::GetWithMetadata { .. }
-                        | RecordedOperation::Head { .. }
-                        | RecordedOperation::List { .. }
-                )),
+                !operations.iter().any(|operation| {
+                    matches!(operation, RecordedOperation::List { .. })
+                        && own_prefixes
+                            .iter()
+                            .any(|prefix| operation.key().starts_with(prefix.as_str()))
+                }),
                 "{operations:?}"
             );
         } else {
