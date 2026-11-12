@@ -127,6 +127,14 @@ pub(crate) const OPERATION_SDK_NAMES: &[(&str, SdkName)] = &[
         },
     ),
     (
+        "fork_namespace_for_rebase",
+        SdkName {
+            group: &["namespaces"],
+            method: "forkForRebase",
+            request: None,
+        },
+    ),
+    (
         "get_capabilities",
         SdkName {
             group: &["capabilities"],
@@ -335,10 +343,10 @@ pub(crate) const OPERATION_SDK_NAMES: &[(&str, SdkName)] = &[
         },
     ),
     (
-        "rebase_fork",
+        "replay_fork",
         SdkName {
             group: &["namespaces"],
-            method: "rebase",
+            method: "replay",
             request: None,
         },
     ),

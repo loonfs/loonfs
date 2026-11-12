@@ -96,7 +96,7 @@ pub enum MergeSessionStatus {
         through_seq: CommitSeq,
         /// The new fork that the replay commits go into.
         new_fork_id: NamespaceId,
-        /// The rebase request that the next step sends.
+        /// The replay request that the next step sends.
         replay: PendingCommit,
         /// The conflict reports of the replay commits so far.
         reports: Vec<ConflictReport>,

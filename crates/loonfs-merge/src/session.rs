@@ -7,7 +7,9 @@ use crate::{
     ConflictReport, Mechanics, MergeError, MergeFailure, MergeSessionOutcome, MergeSessionState,
     MergeSessionStatus, PendingCommit, Resolver, Result,
 };
-use loonfs_types::{CommitSeq, ErrorResponse, MergeConflict, NamespaceId, NextMergeRangeOutcome};
+use loonfs_types::{
+    CommitSeq, ErrorCode, ErrorResponse, MergeConflict, NamespaceId, NextMergeRangeOutcome,
+};
 
 /// The most new forks that one session's rebases create.
 ///
@@ -200,8 +202,9 @@ impl<M: Mechanics, R: Resolver> MergeSession<M, R> {
         })
     }
 
-    /// Sends the pending rebase of `fork_id` into `new_fork_id`, and moves on
-    /// to the rest of the range, to a smaller piece, or to the resolver.
+    /// Creates `new_fork_id` for the rebase of `fork_id` unless the new fork
+    /// exists, sends the pending replay commit into the new fork, and moves
+    /// on to the rest of the range, to a smaller piece, or to the resolver.
     async fn rebase(
         &self,
         fork_id: &NamespaceId,
@@ -210,16 +213,30 @@ impl<M: Mechanics, R: Resolver> MergeSession<M, R> {
         replay: &PendingCommit,
         reports: &[ConflictReport],
     ) -> Result<Transition> {
-        let answer = self
+        let created = self
             .mechanics
-            .rebase_fork_with_options(
+            .fork_namespace_for_rebase(
                 &self.state.namespace_id,
                 fork_id,
                 new_fork_id,
                 &self.state.actor_id,
-                &replay.options(),
             )
             .await;
+        // `namespace_exists` means that an earlier step created the new fork,
+        // so the replay commit goes into it.
+        let answer = match created {
+            Err(error) if error.code() != Some(ErrorCode::NamespaceExists) => Err(error),
+            _ => {
+                self.mechanics
+                    .replay_fork_with_options(
+                        new_fork_id,
+                        fork_id,
+                        &self.state.actor_id,
+                        &replay.options(),
+                    )
+                    .await
+            }
+        };
         let error = match answer {
             Ok(response) => match response.conflicts {
                 Some(conflicts) => {

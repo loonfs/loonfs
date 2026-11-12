@@ -2638,6 +2638,24 @@
         ],
         "type": "object"
       },
+      "ForkNamespaceForRebaseRequest": {
+        "additionalProperties": false,
+        "description": "A request to create a rebase's new fork: a new fork of the namespace that a fork was forked\nfrom, which the fork's unmerged commits are then replayed into.",
+        "properties": {
+          "new_namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "The durable ID of the new fork. Without this field, LoonFS generates an ID. The response's\n`namespace_id` is the new fork's ID."
+          },
+          "source_namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "The fork whose unmerged commits the new fork's replay commits replay. It has to be a fork\nof the namespace that the request identifies in its path."
+          }
+        },
+        "required": [
+          "source_namespace_id"
+        ],
+        "type": "object"
+      },
       "ForkNamespaceRequest": {
         "additionalProperties": false,
         "description": "A request to fork a namespace.",
@@ -4034,9 +4052,9 @@
         ],
         "type": "string"
       },
-      "RebaseForkRequest": {
+      "ReplayForkRequest": {
         "additionalProperties": false,
-        "description": "A request to rebase a fork: to replay its unmerged commits into a new fork of the namespace\nthat it was forked from, as one replay commit.",
+        "description": "A request to replay a fork's unmerged commits into a rebase's new fork as one replay commit.",
         "properties": {
           "commit_id": {
             "$ref": "#/components/schemas/CommitId",
@@ -4046,13 +4064,9 @@
             "description": "An annotation from the caller. The message is part of the replay commit's identity.",
             "type": "string"
           },
-          "new_namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "The new fork that the replay commit commits into. The first rebase of the fork creates it\nfrom the namespace's head, and a later rebase continues into it."
-          },
           "source_namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
-            "description": "The fork whose unmerged commits the rebase replays. It has to be a fork of the namespace\nthat the request names in its path."
+            "description": "The fork whose unmerged commits the replay commit replays. The namespace that the request\nidentifies in its path has to be a rebase's new fork for this fork."
           },
           "through_seq": {
             "$ref": "#/components/schemas/CommitSeq",
@@ -4061,13 +4075,12 @@
         },
         "required": [
           "source_namespace_id",
-          "new_namespace_id",
           "commit_id"
         ],
         "type": "object"
       },
-      "RebaseForkResponse": {
-        "description": "The result of a rebase: the new fork, and the changes that the replay commit left out.",
+      "ReplayForkResponse": {
+        "description": "The result of a replay commit: the new fork, and the changes that the replay commit left out.",
         "properties": {
           "conflicts": {
             "description": "The replay commit's conflict report, with one entry for each inode whose change the replay\ncommit didn't apply. It's absent when the request's commit ID identifies a replay commit\nthat an earlier request committed, because only the response that committed the replay\ncommit has its report.",
@@ -9523,8 +9536,8 @@
     },
     "/v0/namespaces/{namespace_id}/rebases": {
       "post": {
-        "description": "Replays a fork's unmerged commits into a new fork of the namespace as one replay commit, which applies the changes that don't conflict with the namespace and reports the ones that do. The first rebase of a fork creates the new fork from the namespace's head, and a later rebase continues into it. The commit ID makes retries idempotent, and a retry of a committed replay commit returns the new fork without the conflict report.",
-        "operationId": "rebase_fork",
+        "description": "Creates a rebase's new fork from the namespace's head, for a fork of the namespace whose unmerged commits the replay route then replays into the new fork. Without `new_namespace_id` in the request, LoonFS generates an ID. The response's `namespace_id` is the new fork's ID, and its `fork_basis.rebased_from` identifies the fork. A request whose new fork already exists returns `namespace_exists`.",
+        "operationId": "fork_namespace_for_rebase",
         "parameters": [
           {
             "description": "The namespace that the fork was forked from.",
@@ -9540,7 +9553,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/RebaseForkRequest"
+                "$ref": "#/components/schemas/ForkNamespaceForRebaseRequest"
               }
             }
           },
@@ -9551,11 +9564,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RebaseForkResponse"
+                  "$ref": "#/components/schemas/NamespaceMetadata"
                 }
               }
             },
-            "description": "Fork rebased"
+            "description": "New fork created"
           },
           "400": {
             "content": {
@@ -9565,7 +9578,7 @@
                 }
               }
             },
-            "description": "Invalid request, the source isn't a fork of this namespace, or the new namespace isn't a rebase of the fork"
+            "description": "Invalid request, or the source isn't a fork of this namespace"
           },
           "401": {
             "content": {
@@ -9605,6 +9618,141 @@
                 }
               }
             },
+            "description": "The new fork already exists, or history is below a retention floor"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The namespace or the fork was deleted, or the new fork's ID was deleted and can't be used again, and `details.namespace_id` identifies which"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "JSON body exceeds the 2 MiB limit"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Merges are disabled"
+          },
+          "503": {
+            "$ref": "#/components/responses/UnavailableResponse"
+          }
+        },
+        "summary": "Fork a namespace for a rebase",
+        "tags": [
+          "namespaces"
+        ],
+        "x-fern-retries": {
+          "disabled": true
+        },
+        "x-fern-sdk-group-name": [
+          "namespaces"
+        ],
+        "x-fern-sdk-method-name": "forkForRebase",
+        "x-loonfs-actor": "required",
+        "x-loonfs-retry": "not_idempotent"
+      }
+    },
+    "/v0/namespaces/{namespace_id}/replays": {
+      "post": {
+        "description": "Replays a fork's unmerged commits into the namespace, a rebase's new fork for the fork, as one replay commit, which applies the changes that don't conflict with the new fork and reports the ones that do. Each request continues after the new fork's previous replay commit. The commit ID makes retries idempotent, and a retry of a committed replay commit returns the new fork without the conflict report.",
+        "operationId": "replay_fork",
+        "parameters": [
+          {
+            "description": "The rebase's new fork, which the replay commit commits into.",
+            "in": "path",
+            "name": "namespace_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReplayForkRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReplayForkResponse"
+                }
+              }
+            },
+            "description": "Fork replayed"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid request, or the namespace isn't a rebase's new fork for the fork"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The new fork or the fork doesn't exist, and `details.namespace_id` identifies which"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
             "description": "Range conflict, or history below a retention floor"
           },
           "410": {
@@ -9615,7 +9763,7 @@
                 }
               }
             },
-            "description": "The namespace or the fork was deleted, and `details.namespace_id` identifies which"
+            "description": "The new fork or the fork was deleted, and `details.namespace_id` identifies which"
           },
           "413": {
             "content": {
@@ -9641,14 +9789,14 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "summary": "Rebase a fork",
+        "summary": "Replay a fork into a rebase's new fork",
         "tags": [
           "namespaces"
         ],
         "x-fern-sdk-group-name": [
           "namespaces"
         ],
-        "x-fern-sdk-method-name": "rebase",
+        "x-fern-sdk-method-name": "replay",
         "x-loonfs-actor": "required",
         "x-loonfs-retry": "replayable"
       }

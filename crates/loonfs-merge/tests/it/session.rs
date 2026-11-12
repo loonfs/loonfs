@@ -96,8 +96,12 @@ async fn a_conflict_rebases_in_pieces_and_the_resolved_new_fork_merges() {
         Answer::ForkSnapshots(Vec::new()),
         Answer::range(10, 20),
         Answer::refused(ErrorCode::MergeConflict),
+        Answer::Forked,
         Answer::too_large(15),
+        // The new fork exists for every later replay commit.
+        Answer::refused(ErrorCode::NamespaceExists),
         Answer::Replayed(Some(vec![conflict("/a.txt")])),
+        Answer::refused(ErrorCode::NamespaceExists),
         Answer::Replayed(Some(vec![conflict("/b.txt")])),
         Answer::range(40, 43),
         Answer::Committed(50),
@@ -117,7 +121,7 @@ async fn a_conflict_rebases_in_pieces_and_the_resolved_new_fork_merges() {
     let rebases: Vec<_> = sent
         .iter()
         .filter_map(|sent| match sent {
-            Sent::Rebase {
+            Sent::Replay {
                 fork_id,
                 new_fork_id,
                 options,
@@ -178,7 +182,9 @@ async fn a_lost_report_rebases_again_and_the_default_resolver_fails_with_the_rep
         Answer::ForkSnapshots(Vec::new()),
         Answer::range(10, 20),
         Answer::refused(ErrorCode::MergeConflict),
+        Answer::Forked,
         Answer::Replayed(None),
+        Answer::Forked,
         Answer::Replayed(Some(vec![conflict("/a.txt")])),
         // After the caller abandons the session, it deletes both new forks.
         Answer::Deleted,
@@ -213,8 +219,8 @@ async fn a_lost_report_rebases_again_and_the_default_resolver_fails_with_the_rep
         "the failure identifies the new fork to inspect"
     );
     let sent = mechanics.sent();
-    let Sent::Rebase { new_fork_id, .. } = &sent[4] else {
-        panic!("the session rebases again: {:?}", sent[4]);
+    let Sent::Replay { new_fork_id, .. } = &sent[6] else {
+        panic!("the session rebases again: {:?}", sent[6]);
     };
     assert_eq!(*new_fork_id, replacement_id);
     assert!(
@@ -241,10 +247,14 @@ async fn a_run_that_stops_after_a_lost_report_resumes_from_its_saved_state() {
         Answer::ForkSnapshots(Vec::new()),
         Answer::range(10, 20),
         Answer::refused(ErrorCode::MergeConflict),
+        Answer::Forked,
         // The run stops after this answer, before it saves the step's state.
         Answer::Replayed(None),
-        // The resumed run sends the same rebase into the same new fork.
+        // The resumed run sends the same rebase into the same new fork,
+        // which exists.
+        Answer::refused(ErrorCode::NamespaceExists),
         Answer::Replayed(None),
+        Answer::Forked,
         Answer::Replayed(Some(vec![conflict("/a.txt")])),
         Answer::range(40, 43),
         Answer::Committed(50),
@@ -273,7 +283,7 @@ async fn a_run_that_stops_after_a_lost_report_resumes_from_its_saved_state() {
     let rebases: Vec<_> = sent
         .iter()
         .filter_map(|sent| match sent {
-            Sent::Rebase {
+            Sent::Replay {
                 new_fork_id,
                 options,
                 ..
@@ -299,8 +309,11 @@ async fn the_default_resolver_merges_a_new_fork_whose_rebase_left_out_nothing() 
         Answer::ForkSnapshots(Vec::new()),
         Answer::range(10, 20),
         Answer::refused(ErrorCode::MergeConflict),
+        Answer::Forked,
         Answer::too_large(15),
+        Answer::refused(ErrorCode::NamespaceExists),
         Answer::Replayed(Some(Vec::new())),
+        Answer::refused(ErrorCode::NamespaceExists),
         Answer::Replayed(Some(Vec::new())),
         Answer::range(40, 43),
         Answer::Committed(50),
@@ -327,6 +340,7 @@ async fn a_new_fork_whose_range_starts_below_its_floor_fails_with_the_reports() 
         Answer::ForkSnapshots(Vec::new()),
         Answer::range(10, 20),
         Answer::refused(ErrorCode::MergeConflict),
+        Answer::Forked,
         Answer::Replayed(Some(vec![conflict("/a.txt")])),
         Answer::RangeOutcome {
             source_head_seq: 43,
@@ -506,4 +520,35 @@ async fn errors_that_the_loop_cant_act_on_fail_the_session() {
             "{case}"
         );
     }
+}
+
+#[tokio::test]
+async fn a_rebase_whose_new_fork_cant_be_created_fails_without_a_replay() {
+    let mechanics = ScriptedMechanics::new([
+        Answer::ForkSnapshots(Vec::new()),
+        Answer::range(10, 20),
+        Answer::refused(ErrorCode::MergeConflict),
+        Answer::refused(ErrorCode::BelowRetentionFloor),
+    ]);
+    let session = recover(&mechanics, DefaultResolver).await;
+
+    let (_, state) = run_to_end(&mechanics, &DefaultResolver, session).await;
+
+    let MergeSessionStatus::Failed {
+        fork_id,
+        failure: MergeFailure::Refused { error },
+        ..
+    } = &state.status
+    else {
+        panic!("the session should fail: {:?}", state.status);
+    };
+    assert_eq!(*fork_id, sandbox());
+    assert_eq!(error.code, ErrorCode::BelowRetentionFloor.as_str());
+    assert!(
+        !mechanics
+            .sent()
+            .iter()
+            .any(|sent| matches!(sent, Sent::Replay { .. })),
+        "the session sends no replay commit into a new fork that it couldn't create"
+    );
 }

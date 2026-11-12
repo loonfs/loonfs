@@ -29,18 +29,30 @@ pub struct MergeForkRequest {
     pub message: Option<String>,
 }
 
-/// A request to rebase a fork: to replay its unmerged commits into a new fork of the namespace
-/// that it was forked from, as one replay commit.
+/// A request to create a rebase's new fork: a new fork of the namespace that a fork was forked
+/// from, which the fork's unmerged commits are then replayed into.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
-pub struct RebaseForkRequest {
-    /// The fork whose unmerged commits the rebase replays. It has to be a fork of the namespace
-    /// that the request names in its path.
+pub struct ForkNamespaceForRebaseRequest {
+    /// The fork whose unmerged commits the new fork's replay commits replay. It has to be a fork
+    /// of the namespace that the request identifies in its path.
     pub source_namespace_id: NamespaceId,
-    /// The new fork that the replay commit commits into. The first rebase of the fork creates it
-    /// from the namespace's head, and a later rebase continues into it.
-    pub new_namespace_id: NamespaceId,
+    /// The durable ID of the new fork. Without this field, LoonFS generates an ID. The response's
+    /// `namespace_id` is the new fork's ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub new_namespace_id: Option<NamespaceId>,
+}
+
+/// A request to replay a fork's unmerged commits into a rebase's new fork as one replay commit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct ReplayForkRequest {
+    /// The fork whose unmerged commits the replay commit replays. The namespace that the request
+    /// identifies in its path has to be a rebase's new fork for this fork.
+    pub source_namespace_id: NamespaceId,
     /// The fork sequence that the replay commit replays the fork's commits through. Without it,
     /// the replay commit replays them through the fork's head.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -54,10 +66,10 @@ pub struct RebaseForkRequest {
     pub message: Option<String>,
 }
 
-/// The result of a rebase: the new fork, and the changes that the replay commit left out.
+/// The result of a replay commit: the new fork, and the changes that the replay commit left out.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct RebaseForkResponse {
+pub struct ReplayForkResponse {
     /// The new fork after the replay commit.
     pub namespace: NamespaceMetadata,
     /// The replay commit's conflict report, with one entry for each inode whose change the replay

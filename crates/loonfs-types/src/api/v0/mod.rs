@@ -41,9 +41,9 @@ pub use maintenance::{
     SetRetentionWindowRequest, SetRetentionWindowResponse,
 };
 pub use merges::{
-    MergeBound, MergeConflict, MergeConflictKind, MergeConflictRevision, MergeConflictVersion,
-    MergeForkRequest, NextMergeRangeOutcome, NextMergeRangeResponse, RebaseForkRequest,
-    RebaseForkResponse,
+    ForkNamespaceForRebaseRequest, MergeBound, MergeConflict, MergeConflictKind,
+    MergeConflictRevision, MergeConflictVersion, MergeForkRequest, NextMergeRangeOutcome,
+    NextMergeRangeResponse, ReplayForkRequest, ReplayForkResponse,
 };
 pub use namespaces::{
     CreateNamespaceRequest, DeleteNamespaceResponse, ForkNamespaceRequest, NamespaceAccessMode,

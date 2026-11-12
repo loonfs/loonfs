@@ -13,7 +13,7 @@ use loonfs_types::options::MergeForkOptions;
 use loonfs_types::{
     ActorId, Commit, CommitSeq, DeleteNamespaceResponse, ErrorCode, ErrorDetails, ErrorResponse,
     ListSnapshotRecordsResponse, Merge, MergeConflict, NamespaceId, NamespaceMetadata,
-    NextMergeRangeOutcome, NextMergeRangeResponse, Pager, RebaseForkResponse,
+    NextMergeRangeOutcome, NextMergeRangeResponse, Pager, ReplayForkResponse,
 };
 use serde_json::json;
 use std::collections::VecDeque;
@@ -27,7 +27,11 @@ pub(crate) enum Sent {
         fork_id: NamespaceId,
         options: MergeForkOptions,
     },
-    Rebase {
+    ForkForRebase {
+        fork_id: NamespaceId,
+        new_fork_id: NamespaceId,
+    },
+    Replay {
         fork_id: NamespaceId,
         new_fork_id: NamespaceId,
         options: MergeForkOptions,
@@ -49,6 +53,8 @@ pub(crate) enum Sent {
 pub(crate) enum Answer {
     /// The merge commits at this sequence, under the request's commit ID.
     Committed(u64),
+    /// The rebase creates the new fork.
+    Forked,
     /// The replay commit commits with this conflict report, or without one,
     /// as when the request's commit ID identifies an earlier replay commit.
     Replayed(Option<Vec<MergeConflict>>),
@@ -176,26 +182,47 @@ impl Mechanics for ScriptedMechanics {
         }
     }
 
-    async fn rebase_fork_with_options(
+    async fn fork_namespace_for_rebase(
         &self,
         namespace_id: &NamespaceId,
         source_namespace_id: &NamespaceId,
         new_namespace_id: &NamespaceId,
         _actor: &ActorId,
-        options: &MergeForkOptions,
-    ) -> Result<RebaseForkResponse> {
-        let sent = Sent::Rebase {
+    ) -> Result<NamespaceMetadata> {
+        let sent = Sent::ForkForRebase {
             fork_id: source_namespace_id.clone(),
             new_fork_id: new_namespace_id.clone(),
+        };
+        match self.answer(sent) {
+            Answer::Forked => Ok(namespace(
+                new_namespace_id,
+                namespace_id,
+                Some(source_namespace_id),
+            )),
+            Answer::Refused(code, details) => Err(refused(code, details)),
+            answer => panic!("a rebase can't answer {answer:?}"),
+        }
+    }
+
+    async fn replay_fork_with_options(
+        &self,
+        namespace_id: &NamespaceId,
+        source_namespace_id: &NamespaceId,
+        _actor: &ActorId,
+        options: &MergeForkOptions,
+    ) -> Result<ReplayForkResponse> {
+        let sent = Sent::Replay {
+            fork_id: source_namespace_id.clone(),
+            new_fork_id: namespace_id.clone(),
             options: options.clone(),
         };
         match self.answer(sent) {
-            Answer::Replayed(conflicts) => Ok(RebaseForkResponse {
-                namespace: namespace(new_namespace_id, namespace_id, Some(source_namespace_id)),
+            Answer::Replayed(conflicts) => Ok(ReplayForkResponse {
+                namespace: namespace(namespace_id, &main(), Some(source_namespace_id)),
                 conflicts,
             }),
             Answer::Refused(code, details) => Err(refused(code, details)),
-            answer => panic!("a rebase can't answer {answer:?}"),
+            answer => panic!("a replay can't answer {answer:?}"),
         }
     }
 

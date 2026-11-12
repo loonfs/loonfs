@@ -9,8 +9,8 @@ use loonfs_client::{ClientError, MergeForkOptions, NamespacePath};
 use loonfs_test_support::ids::namespace_id;
 use loonfs_types::{
     ActorId, Commit, CommitId, CommitSeq, ErrorDetails, MergeConflictKind, NamespaceId,
-    NamespaceRebasedFrom, NextMergeRangeOutcome, NextMergeRangeResponse, RebaseForkResponse,
-    FEATURE_MERGES,
+    NamespaceMetadata, NamespaceRebasedFrom, NextMergeRangeOutcome, NextMergeRangeResponse,
+    ReplayForkResponse, FEATURE_MERGES,
 };
 use tempfile::{tempdir, TempDir};
 
@@ -85,17 +85,26 @@ impl Family {
             .await
     }
 
-    async fn rebase(
+    async fn fork_for_rebase(
+        &self,
+        new_fork: &NamespaceId,
+    ) -> loonfs_client::Result<NamespaceMetadata> {
+        self.harness
+            .client
+            .fork_namespace_for_rebase(&self.main, &self.fork, new_fork, &actor())
+            .await
+    }
+
+    async fn replay(
         &self,
         new_fork: &NamespaceId,
         commit_id: &str,
-    ) -> loonfs_client::Result<RebaseForkResponse> {
+    ) -> loonfs_client::Result<ReplayForkResponse> {
         self.harness
             .client
-            .rebase_fork_with_options(
-                &self.main,
-                &self.fork,
+            .replay_fork_with_options(
                 new_fork,
+                &self.fork,
                 &actor(),
                 &MergeForkOptions {
                     commit_id: Some(CommitId::parse(commit_id).expect("commit id")),
@@ -217,8 +226,8 @@ async fn a_merge_commits_the_forks_change_and_a_retry_returns_it() {
 }
 
 /// Checks that a merge allowance of zero turns merges off. The capability
-/// document leaves out `filesystem.merges`, and the merge, rebase, and
-/// next-range routes return 501 `not_supported` with that key in its
+/// document leaves out `filesystem.merges`, and the merge, rebase, replay,
+/// and next-range routes return 501 `not_supported` with that key in its
 /// `feature` field, and the rebase route creates no new fork.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_zero_allowance_turns_the_merge_routes_and_their_key_off() {
@@ -238,10 +247,17 @@ async fn a_zero_allowance_turns_the_merge_routes_and_their_key_off() {
             .map(drop)
             .expect_err("merges are off"),
         family
-            .rebase(&new_fork, "off")
+            .fork_for_rebase(&new_fork)
             .await
             .map(drop)
             .expect_err("rebases are off"),
+        family
+            .harness
+            .client
+            .replay_fork(&family.main, &family.fork, &actor())
+            .await
+            .map(drop)
+            .expect_err("replays are off"),
         family
             .harness
             .client
@@ -510,7 +526,7 @@ async fn a_source_that_isnt_a_live_fork_returns_the_sources_error() {
             (
                 "/source_namespace_id",
                 client
-                    .rebase_fork(&family.main, source, &rebased, &actor())
+                    .fork_namespace_for_rebase(&family.main, source, &rebased, &actor())
                     .await
                     .map(|_| ()),
             ),
@@ -557,12 +573,13 @@ async fn writer_epoch(family: &Family) -> loonfs_types::WriterEpoch {
         .writer_epoch
 }
 
-/// Checks the rebase route: a fork whose merge conflicts rebases into a new
-/// fork of `main`, which records `rebased_from`, applies the change that
-/// doesn't conflict, and reports the one that does. A retry with the commit
-/// ID returns the new fork without a report, a namespace that isn't a rebase
-/// of the fork returns `invalid_request`, and the new fork then merges into
-/// `main`.
+/// Checks the rebase and replay routes: a fork whose merge conflicts rebases
+/// into a new fork of `main`, which records `rebased_from`, and the replay
+/// commit applies the change that doesn't conflict and reports the one that
+/// does. A retry with the commit ID returns the new fork without a report, a
+/// second rebase into the new fork returns `namespace_exists`, a replay into
+/// a namespace that isn't a rebase of the fork returns `invalid_request`,
+/// and the new fork then merges into `main`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_rebase_replays_into_a_new_fork_and_a_retry_returns_no_report() {
     let family = Family::new("http-rebase").await;
@@ -588,8 +605,8 @@ async fn a_rebase_replays_into_a_new_fork_and_a_retry_returns_no_report() {
     assert_eq!(code, "merge_conflict");
 
     let new_fork = namespace_id("rebase");
-    let rebased = family.rebase(&new_fork, "rebase").await.expect("rebase");
-    let basis = rebased.namespace.fork_basis.as_ref().expect("a fork basis");
+    let created = family.fork_for_rebase(&new_fork).await.expect("rebase");
+    let basis = created.fork_basis.as_ref().expect("a fork basis");
     assert_eq!(basis.source_namespace_id, family.main);
     assert_eq!(
         basis.rebased_from,
@@ -598,6 +615,7 @@ async fn a_rebase_replays_into_a_new_fork_and_a_retry_returns_no_report() {
             resume_after_seq: fork_point,
         })
     );
+    let rebased = family.replay(&new_fork, "rebase").await.expect("replay");
     let conflicts = rebased.conflicts.clone().expect("a conflict report");
     assert_eq!(
         conflicts
@@ -621,20 +639,27 @@ async fn a_rebase_replays_into_a_new_fork_and_a_retry_returns_no_report() {
         Some(&b"ours"[..])
     );
 
-    let retried = family.rebase(&new_fork, "rebase").await.expect("a retry");
+    let retried = family.replay(&new_fork, "rebase").await.expect("a retry");
     assert_eq!(retried.conflicts, None);
     assert_eq!(retried.namespace.head_seq, rebased.namespace.head_seq);
+    let (code, _) = api_error(
+        family
+            .fork_for_rebase(&new_fork)
+            .await
+            .expect_err("the new fork exists"),
+    );
+    assert_eq!(code, "namespace_exists");
 
     let (code, details) = match client
-        .rebase_fork(&family.main, &family.fork, &family.fork, &actor())
+        .replay_fork(&family.main, &family.fork, &actor())
         .await
-        .expect_err("the fork isn't a rebase of itself")
+        .expect_err("main isn't a rebase of the fork")
     {
         ClientError::Api { response, .. } => (response.code, response.param),
         other => panic!("expected an API error, got {other:?}"),
     };
     assert_eq!(code, "invalid_request");
-    assert_eq!(details.as_deref(), Some("/new_namespace_id"));
+    assert_eq!(details.as_deref(), Some("/source_namespace_id"));
 
     let merged = client
         .merge_fork(&family.main, &new_fork, &actor())
