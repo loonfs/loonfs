@@ -46,13 +46,13 @@ Why does the backfill recompute rows that folds already wrote? No manifest recor
 
 ## Reading the target
 
-A reader checks a manifest's version before it decodes the manifest (see [Envelopes and checksums](../specs/format.md#122-envelopes-and-checksums)), and it reads the sources under the first version and the target under the second. The version records whether the target is complete, because the segment descriptors can't. LoonFS doesn't patch a segment or a manifest in place, so every earlier manifest still lists its own segments, and [pins](../specs/glossary.md#snapshot) and [forks](../specs/glossary.md#fork) from before the backfill keep reading the sources (see [Reference roots](../specs/format.md#112-reference-roots)).
+A reader checks a manifest's version before it decodes the manifest (see [Envelopes and checksums](../specs/format.md#122-envelopes-and-checksums)), and it reads the sources under the first version and the target under the second. The version records whether the target is complete, because the segment descriptors can't. LoonFS doesn't patch a segment or a manifest in place, so every earlier manifest still lists its own segments, and [snapshots](../specs/glossary.md#snapshot) and [forks](../specs/glossary.md#fork) from before the backfill keep reading the sources (see [Reference roots](../specs/format.md#112-reference-roots)).
 
 ## Failures
 
 A backfill is abandoned under the same input checks and deadline as any compaction (see [Streaming compaction](../specs/format.md#104-streaming-compaction)). A failed backfill publishes no manifest, and garbage collection deletes its output segments (see [Candidate and age rules](../specs/format.md#113-candidate-and-age-rules)). It keeps no durable progress, so any process can run it again from a basis that step 1 accepts.
 
-A backfill doesn't delete a source's rows. Once the current manifest has the second version, a replaced source leaves the current manifest through an ordinary base compaction, under a manifest version that no longer defines the source. That compaction doesn't wait for pins, because a pinned manifest keeps its own segments.
+A backfill doesn't delete a source's rows. Once the current manifest has the second version, a replaced source leaves the current manifest through an ordinary base compaction, under a manifest version that no longer defines the source. That compaction doesn't wait for snapshots, because a snapshot keeps the segments that its manifest lists.
 
 ## Requirements on the format
 
@@ -60,14 +60,14 @@ A backfill depends on four properties of the current format. Every row is comput
 
 ## Costs
 
-A backfill costs about one base compaction of the target's group, plus one read of each source outside the group, and a sort when the target sorts in another order than its sources. From the first version on, every fold writes the target, and while a target replaces a source, every fold writes both families. Adding a delta field costs one writer takeover in each namespace. Readers pay no extra cost until the backfill publishes, and while a pin keeps a manifest from before the backfill, the namespace stores both shapes.
+A backfill costs about one base compaction of the target's group, plus one read of each source outside the group, and a sort when the target sorts in another order than its sources. From the first version on, every fold writes the target, and while a target replaces a source, every fold writes both families. Adding a delta field costs one writer takeover in each namespace. Readers pay no extra cost until the backfill publishes, and while a snapshot keeps a manifest from before the backfill, the namespace stores both shapes.
 
 ## Alternatives considered
 
-Recreate the store. A copy of each namespace's current state loses the old store's pins and forks, and the history above the floor, such as earlier revisions, commit receipts, and the trash. The copy also assigns new sequences, which changes every inode ID (see [Namespaces and identity](../specs/format.md#11-namespaces-and-identity)).
+Recreate the store. A copy of each namespace's current state loses the old store's snapshots and forks, and the history above the floor, such as earlier revisions, commit receipts, and the trash. The copy also assigns new sequences, which changes every inode ID (see [Namespaces and identity](../specs/format.md#11-namespaces-and-identity)).
 
 Compute the target from the WAL. Keeping WAL objects until the floor passes them would store a second copy of the deltas in `commits`, and it still wouldn't reach the rows at the floor.
 
-Patch rows in place. A segment and its rows are immutable, and a pinned manifest reads the segments that it lists, so a patched segment would change what a read through a pin returns.
+Patch rows in place. A segment and its rows are immutable, and a read through a snapshot reads the segments that the snapshot's manifest lists, so a patched segment would change what that read returns.
 
 Keep both shapes. Readers could use the target for commits after the writer started and the sources for earlier commits. But every read of that fact would need two rules and the commit at which the writer started, which no manifest records.

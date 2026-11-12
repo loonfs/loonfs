@@ -8,7 +8,7 @@ use crate::publisher::MergeReservation;
 use crate::trace::{self, operation_span};
 use crate::{
     ActorId, Commit, CommitId, Consistency, CoreError, Error, MergeForkOptions, Mode, Namespace,
-    NamespaceId, NextMergeRangeResponse, PinId, Result, Writable,
+    NamespaceId, NextMergeRangeResponse, Result, SnapshotId, Writable,
 };
 use futures::future::BoxFuture;
 use loonfs_core::limits::DIRECT_TRANSFER_URL_TTL_MS;
@@ -33,14 +33,14 @@ pub(crate) enum PlannedMerge<R = ()> {
 /// The commit that makes a merge, the reservation that the merge keeps, the
 /// merge's record, whose range a later plan of the request applies, what
 /// the plan reports with the commit (nothing for a merge, which refuses a
-/// conflict, and the conflict report for a replay commit), and the pin on
+/// conflict, and the conflict report for a replay commit), and the snapshot on
 /// the fork's manifest that the plan read, which the commit releases.
 pub(crate) struct PlannedCommit<R = ()> {
     pub(crate) candidate: CommitCandidate,
     pub(crate) reservation: MergeReservation,
     pub(crate) record: MergeRecord,
     pub(crate) report: R,
-    pub(crate) fork_pin: PinId,
+    pub(crate) merge_snapshot: SnapshotId,
 }
 
 /// How the commit of a merge, or of a replay commit, ended.
@@ -169,7 +169,7 @@ impl Namespace<Writable> {
     /// commit ID, or the commit that makes the merge, planned against this
     /// namespace's head under `reservation`, or under a reservation that the
     /// plan takes (see [`Self::plan_commit`]). The plan checks the fork and the
-    /// floors and finds the range's start, folds and pins the fork, and
+    /// floors and finds the range's start, folds and takes a snapshot of the fork, and
     /// plans. It checks the merge's size, and then its conflicts.
     pub(crate) async fn plan_merge(
         &self,
@@ -194,7 +194,9 @@ impl Namespace<Writable> {
                     )
                     .await?;
                 let prepared_at_ms = self.core.now_ms();
-                let (fork, fork_pin) = self.pin_fork(source_namespace_id, prepared_at_ms).await?;
+                let (fork, merge_snapshot) = self
+                    .snapshot_fork(source_namespace_id, prepared_at_ms)
+                    .await?;
                 let planned = async {
                     let plan = main
                         .engine
@@ -211,7 +213,7 @@ impl Namespace<Writable> {
                     Ok::<_, Error>((plan.into_candidate()?, record, ()))
                 }
                 .await;
-                self.planned_with_fork_pin(source_namespace_id, fork_pin, planned)
+                self.planned_with_merge_snapshot(source_namespace_id, merge_snapshot, planned)
                     .await
             })
         })
@@ -220,7 +222,7 @@ impl Namespace<Writable> {
 
     /// Returns the merge or replay commit that this namespace committed under
     /// the request's commit ID, or the commit, its record, its report, and
-    /// the pin on the fork that `plan` plans from this namespace's head under
+    /// the snapshot on the fork that `plan` plans from this namespace's head under
     /// `reservation`, or under a reservation that this call takes. `plan`
     /// plans against the merge allowance with the reservation, and grows
     /// the reservation as it plans.
@@ -238,7 +240,7 @@ impl Namespace<Writable> {
         plan: impl Fn(PinnedRead, MergeAllowance) -> Plan,
     ) -> Result<PlannedMerge<R>>
     where
-        Plan: std::future::Future<Output = Result<(CommitCandidate, MergeRecord, R, PinId)>>,
+        Plan: std::future::Future<Output = Result<(CommitCandidate, MergeRecord, R, SnapshotId)>>,
     {
         let held = Mutex::new(reservation);
         self.core
@@ -255,13 +257,13 @@ impl Namespace<Writable> {
                         None => self.session().reserve_merge()?,
                     };
                     match plan(target, reservation.allowance()).await {
-                        Ok((candidate, record, report, fork_pin)) => {
+                        Ok((candidate, record, report, merge_snapshot)) => {
                             Ok(PlannedMerge::Candidate(Box::new(PlannedCommit {
                                 candidate,
                                 reservation,
                                 record,
                                 report,
-                                fork_pin,
+                                merge_snapshot,
                             })))
                         }
                         Err(error) => {
@@ -281,7 +283,7 @@ impl Namespace<Writable> {
     /// [`MAX_MERGE_PLANS`] plans in all. A later plan applies the first
     /// plan's range, so it never merges a longer range, and a merge of the
     /// fork that committed in between returns `merge_range_conflict`. Each
-    /// plan's pin on the fork is released once its commit returns.
+    /// plan's snapshot on the fork is released once its commit returns.
     pub(crate) async fn commit_merge<'a, R>(
         &'a self,
         request: &MergeRequest,
@@ -295,13 +297,13 @@ impl Namespace<Writable> {
                 reservation,
                 record,
                 report,
-                fork_pin,
+                merge_snapshot,
             } = match planned {
                 PlannedMerge::Committed(commit) => return Ok(MergeOutcome::Found(commit)),
                 PlannedMerge::Candidate(planned) => *planned,
             };
             let committed = self.submit_merge(candidate, &reservation).await;
-            self.release_fork_pin(&request.source_namespace_id, &fork_pin)
+            self.release_merge_snapshot(&request.source_namespace_id, &merge_snapshot)
                 .await;
             match committed {
                 Err(error) if error.code().is_stale_plan() && plans < MAX_MERGE_PLANS => {
@@ -332,29 +334,29 @@ impl Namespace<Writable> {
         self.session().submit_merge(candidate, reservation).await
     }
 
-    /// Folds the fork, pins the manifest that covers its tail, and reads the
-    /// fork through the pin, so the merge's range ends at the fork's folded
-    /// head. The pin keeps that manifest, its segments, and the content its
+    /// Folds the fork, takes a snapshot of the manifest that covers its tail, and reads the
+    /// fork through the snapshot, so the merge's range ends at the fork's folded
+    /// head. The snapshot keeps that manifest, its segments, and the content its
     /// layouts refer to while the merge plans and commits, as a snapshot
     /// does: a fold, a retention advance, and a compaction of the fork in
     /// between can replace the manifest, and the collector keeps only what
-    /// the current manifest and the pinned manifests refer to. The pin
+    /// the current manifest and the snapshots' manifests refer to. The snapshot
     /// expires with the plan's content proofs, so a merge that can't release
     /// it leaves it to the fork's collector.
     ///
     /// The fold is the namespace's one fold path, so when the fork's writer
     /// session in this runtime is already folding, the fold waits for that
     /// fold instead of folding the same tail.
-    pub(super) async fn pin_fork(
+    pub(super) async fn snapshot_fork(
         &self,
         fork_id: &NamespaceId,
         prepared_at_ms: u64,
-    ) -> Result<(PinnedRead, PinId)> {
+    ) -> Result<(PinnedRead, SnapshotId)> {
         let expires_at_ms = Some(prepared_at_ms + DIRECT_TRANSFER_URL_TTL_MS);
         let snapshot = self
             .mode
             .publisher
-            .pin_after_fold(fork_id, |manifest| {
+            .snapshot_after_fold(fork_id, |manifest| {
                 let engine = self
                     .core
                     .writer_engine(&self.mode.writer.writer_id, fork_id);
@@ -372,35 +374,35 @@ impl Namespace<Writable> {
         Ok((fork, snapshot.snapshot_id))
     }
 
-    /// Returns `planned` with the pin its plan read the fork through, or
-    /// releases the pin and returns the plan's error.
-    pub(super) async fn planned_with_fork_pin<R>(
+    /// Returns `planned` with the snapshot its plan read the fork through, or
+    /// releases the snapshot and returns the plan's error.
+    pub(super) async fn planned_with_merge_snapshot<R>(
         &self,
         fork_id: &NamespaceId,
-        fork_pin: PinId,
+        merge_snapshot: SnapshotId,
         planned: Result<(CommitCandidate, MergeRecord, R)>,
-    ) -> Result<(CommitCandidate, MergeRecord, R, PinId)> {
+    ) -> Result<(CommitCandidate, MergeRecord, R, SnapshotId)> {
         match planned {
-            Ok((candidate, record, report)) => Ok((candidate, record, report, fork_pin)),
+            Ok((candidate, record, report)) => Ok((candidate, record, report, merge_snapshot)),
             Err(error) => {
-                self.release_fork_pin(fork_id, &fork_pin).await;
+                self.release_merge_snapshot(fork_id, &merge_snapshot).await;
                 Err(error)
             }
         }
     }
 
-    /// Deletes the pin that a merge's plan took on the fork. A pin that the
+    /// Deletes the snapshot that a merge's plan took on the fork. A snapshot that the
     /// delete leaves behind expires, and the fork's collector deletes it.
-    async fn release_fork_pin(&self, fork_id: &NamespaceId, fork_pin: &PinId) {
+    async fn release_merge_snapshot(&self, fork_id: &NamespaceId, merge_snapshot: &SnapshotId) {
         let engine = self
             .core
             .writer_engine(&self.mode.writer.writer_id, fork_id);
-        if let Err(error) = engine.delete_snapshot(fork_pin).await {
+        if let Err(error) = engine.delete_snapshot(merge_snapshot).await {
             tracing::warn!(
                 namespace_id = %fork_id,
-                snapshot_id = %fork_pin,
+                snapshot_id = %merge_snapshot,
                 error = %error,
-                "could not release a merge's pin on the fork"
+                "could not release a merge's snapshot on the fork"
             );
         }
     }

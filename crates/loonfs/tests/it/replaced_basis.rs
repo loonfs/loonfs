@@ -286,7 +286,7 @@ async fn a_merge_planned_on_a_replaced_manifest_commits_on_the_current_one() {
     let (store, old_segments) = aged_blocking_store(directory.path(), &namespace);
     let seed = cold_runtime(store.clone(), "seed").await;
     create_namespace_with_shared_file(&seed, &namespace).await;
-    // The fork pins the manifest before the folds below, so the collection
+    // The fork keeps the manifest before the folds below, so the collection
     // can remove the folds' segments once a compaction replaces them.
     seed.fork_namespace(&namespace, &fork, &test_actor())
         .await

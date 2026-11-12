@@ -200,10 +200,10 @@ impl GrepEntry {
 
     /// Returns whether `later`, the entry that a step makes from this one,
     /// keeps this entry's build and doesn't move its indexing position back,
-    /// or starts a later build from a new pin.
+    /// or starts a later build from a new snapshot.
     ///
     /// A backfill moves its cursor back only when it restarts from a new
-    /// pin, and an active index keeps the `captured_seq` of the backfill
+    /// snapshot, and an active index keeps the `captured_seq` of the backfill
     /// that built it. Disabling and enabling the index starts over.
     pub(crate) fn is_followed_by(&self, later: &Self) -> bool {
         match (&self.status, &later.status) {
@@ -227,17 +227,17 @@ impl GrepEntry {
             (
                 GrepIndexStatus::Backfilling {
                     captured_seq,
-                    pin_id,
+                    snapshot_id,
                     cursor_inode_id,
                 },
                 GrepIndexStatus::Backfilling {
                     captured_seq: next_target,
-                    pin_id: next_pin_id,
+                    snapshot_id: next_snapshot_id,
                     cursor_inode_id: next_cursor,
                 },
             ) => {
                 next_target >= captured_seq
-                    && (next_pin_id != pin_id
+                    && (next_snapshot_id != snapshot_id
                         || (next_target == captured_seq && next_cursor >= cursor_inode_id))
             }
             (

@@ -359,10 +359,10 @@ async fn a_sweep_stops_between_namespaces_and_cancels_streaming_on_shutdown() {
 async fn shutdown_abandons_a_parked_sweep_at_its_deadline_and_settles_the_runtime() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("parked-collection");
-    // The first sweep collects garbage, and collection lists pins first.
+    // The first sweep collects garbage, and collection lists snapshots first.
     let store = Arc::new(BlockingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::exact(loonfs_objectstore::keys::pin_prefix(&namespace_id)),
+        KeyPredicate::exact(loonfs_objectstore::keys::snapshot_prefix(&namespace_id)),
         OperationSelector::List,
     ));
     let shutdown_deadline_ms = 25;
@@ -403,7 +403,7 @@ async fn shutdown_abandons_a_parked_sweep_at_its_deadline_and_settles_the_runtim
         store.wait_until_blocked(),
     )
     .await
-    .expect("the sweep's collection reaches the parked pin listing");
+    .expect("the sweep's collection reaches the parked snapshot listing");
 
     shutdown_tx.send(()).expect("trigger shutdown");
     loonfs_test_support::clock::bounded(std::time::Duration::from_secs(10), server)
@@ -439,8 +439,8 @@ async fn every_route_except_health_and_readiness_requires_authorization() {
         ("POST", "/v0/namespaces/demo/forks"),
         ("GET", "/v0/namespaces/demo/snapshots"),
         ("POST", "/v0/namespaces/demo/snapshots"),
-        ("POST", "/v0/namespaces/demo/snapshots/pin_test/extend"),
-        ("DELETE", "/v0/namespaces/demo/snapshots/pin_test"),
+        ("POST", "/v0/namespaces/demo/snapshots/snp_test/extend"),
+        ("DELETE", "/v0/namespaces/demo/snapshots/snp_test"),
         ("GET", "/v0/maintenance/namespaces/demo/diagnostics"),
         ("GET", "/v0/namespaces/demo/filesystem/entries"),
         ("GET", "/v0/namespaces/demo/filesystem/entry"),
@@ -483,7 +483,7 @@ async fn every_route_except_health_and_readiness_requires_authorization() {
         ("GET", "/v0/maintenance/namespaces/demo/checkpoints"),
         (
             "GET",
-            "/v0/maintenance/namespaces/demo/checkpoints/pin_test",
+            "/v0/maintenance/namespaces/demo/checkpoints/snp_test",
         ),
         ("POST", "/v0/maintenance/namespaces/demo/jobs"),
         ("POST", "/v0/maintenance/store/probe"),

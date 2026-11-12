@@ -422,7 +422,7 @@ pub struct DirectoryPageCursor {
     /// The snapshot whose read issued this cursor, or `None` for a live
     /// read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pin_id: Option<crate::PinId>,
+    pub snapshot_id: Option<crate::SnapshotId>,
     /// Directory inode resolved at `head_seq`.
     pub directory_inode_id: InodeId,
     /// Last canonical name key returned to the client.
@@ -446,7 +446,7 @@ pub struct DirectoryTreePageCursor {
     /// The snapshot whose read issued this cursor, or `None` for a live
     /// read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pin_id: Option<crate::PinId>,
+    pub snapshot_id: Option<crate::SnapshotId>,
     /// The walk's position in each directory from the listed directory down,
     /// one frame per directory.
     pub frames: Vec<DirectoryTreeFrame>,
@@ -515,18 +515,18 @@ impl ListPageCursor {
 
     /// Returns the snapshot whose read issued the cursor, or `None` for a
     /// live read.
-    pub fn pin_id(&self) -> Option<&crate::PinId> {
+    pub fn snapshot_id(&self) -> Option<&crate::SnapshotId> {
         match self {
-            Self::Directory(cursor) => cursor.pin_id.as_ref(),
-            Self::DirectoryTree(cursor) => cursor.pin_id.as_ref(),
+            Self::Directory(cursor) => cursor.snapshot_id.as_ref(),
+            Self::DirectoryTree(cursor) => cursor.snapshot_id.as_ref(),
         }
     }
 
-    /// Returns the cursor's pin, so the read that issues the cursor can set it.
-    pub fn pin_id_mut(&mut self) -> &mut Option<crate::PinId> {
+    /// Returns the cursor's snapshot, so the read that issues the cursor can set it.
+    pub fn snapshot_id_mut(&mut self) -> &mut Option<crate::SnapshotId> {
         match self {
-            Self::Directory(cursor) => &mut cursor.pin_id,
-            Self::DirectoryTree(cursor) => &mut cursor.pin_id,
+            Self::Directory(cursor) => &mut cursor.snapshot_id,
+            Self::DirectoryTree(cursor) => &mut cursor.snapshot_id,
         }
     }
 }
@@ -921,15 +921,16 @@ mod tests {
     fn every_cursor_kind_round_trips() {
         assert_cursor_round_trips(DirectoryPageCursor {
             head_seq: CommitSeq(11),
-            pin_id: Some(
-                crate::PinId::parse("pin_00000000000000000001-0000000000000001").expect("pin id"),
+            snapshot_id: Some(
+                crate::SnapshotId::parse("snp_00000000000000000001-00000000000000000000000001")
+                    .expect("snapshot id"),
             ),
             directory_inode_id: InodeId(7),
             last_name_key: NameKey::parse("plan.md").expect("name key"),
         });
         assert_cursor_round_trips(DirectoryTreePageCursor {
             head_seq: CommitSeq(11),
-            pin_id: None,
+            snapshot_id: None,
             frames: vec![
                 DirectoryTreeFrame {
                     directory_inode_id: crate::ROOT_INODE_ID,
@@ -972,10 +973,10 @@ mod tests {
     }
 
     #[test]
-    fn a_live_directory_cursor_omits_the_pin_field_and_rejects_unknown_fields() {
+    fn a_live_directory_cursor_omits_the_snapshot_field_and_rejects_unknown_fields() {
         let cursor = DirectoryPageCursor {
             head_seq: CommitSeq(11),
-            pin_id: None,
+            snapshot_id: None,
             directory_inode_id: InodeId(7),
             last_name_key: NameKey::parse("plan.md").expect("name key"),
         };
@@ -985,7 +986,7 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&bytes).expect("decode JSON");
 
         assert!(json["token"].is_object());
-        assert!(json["token"].get("pin_id").is_none());
+        assert!(json["token"].get("snapshot_id").is_none());
         assert_eq!(
             decode_cursor::<DirectoryPageCursor>(&encoded).expect("decode cursor"),
             cursor
@@ -1030,13 +1031,13 @@ mod tests {
     fn a_list_cursor_decodes_only_for_the_kind_of_listing_that_issued_it() {
         let directory = ListPageCursor::Directory(DirectoryPageCursor {
             head_seq: CommitSeq(11),
-            pin_id: None,
+            snapshot_id: None,
             directory_inode_id: InodeId(7),
             last_name_key: NameKey::parse("plan.md").expect("name key"),
         });
         let directory_tree = ListPageCursor::DirectoryTree(DirectoryTreePageCursor {
             head_seq: CommitSeq(11),
-            pin_id: None,
+            snapshot_id: None,
             frames: vec![DirectoryTreeFrame {
                 directory_inode_id: InodeId(7),
                 last_name_key: Some(NameKey::parse("plan.md").expect("name key")),
@@ -1070,7 +1071,7 @@ mod tests {
     fn a_cursor_that_is_not_unpadded_base64url_json_is_invalid_encoding() {
         let cursor = DirectoryPageCursor {
             head_seq: CommitSeq(11),
-            pin_id: None,
+            snapshot_id: None,
             directory_inode_id: InodeId(7),
             last_name_key: NameKey::parse("plan.txt").expect("name key"),
         };
@@ -1096,7 +1097,7 @@ mod tests {
             kind: <DirectoryPageCursor as PageCursor>::KIND.to_owned(),
             token: DirectoryPageCursor {
                 head_seq: CommitSeq(11),
-                pin_id: None,
+                snapshot_id: None,
                 directory_inode_id: InodeId(7),
                 last_name_key: NameKey::parse("plan.md").expect("name key"),
             },

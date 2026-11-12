@@ -3,7 +3,9 @@
 
 use crate::downloads::DirectDownloadByInodeTarget;
 use crate::namespace::reads::ensure_revision_read_at;
-use crate::namespace::reads::{reject_pinned_directory_cursor, validate_snapshot_directory_cursor};
+use crate::namespace::reads::{
+    reject_snapshot_directory_cursor, validate_snapshot_directory_cursor,
+};
 use crate::pagers::{decode_list_page_request, InodeChildrenPager};
 use crate::trace::{self, operation_span};
 use crate::{
@@ -77,7 +79,7 @@ impl<M: crate::Mode> Namespace<M> {
             async {
                 let _permit = self.core.read_permit().await;
                 if matches!(options.at, ReadAt::Live(_)) {
-                    reject_pinned_directory_cursor(request.cursor.as_ref())?;
+                    reject_snapshot_directory_cursor(request.cursor.as_ref())?;
                 }
                 self.read_at(&options.at, |pinned, source| {
                     let request = request.clone();

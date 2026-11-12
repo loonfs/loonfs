@@ -187,9 +187,9 @@ impl Namespace<Writable> {
     /// planned as [`Self::plan_merge`] plans a merge.
     ///
     /// The plan checks that this namespace is a rebase's new fork for the
-    /// fork and checks both floors, folds and pins the fork, and plans
+    /// fork and checks both floors, folds and takes a snapshot of the fork, and plans
     /// against this namespace's head, reading the source through this
-    /// namespace's fork pin.
+    /// namespace's fork snapshot.
     pub(crate) async fn plan_replay(
         &self,
         request: &MergeRequest,
@@ -219,13 +219,15 @@ impl Namespace<Writable> {
                     )
                     .await?;
                 let prepared_at_ms = self.core.now_ms();
-                let (fork, fork_pin) = self.pin_fork(source_namespace_id, prepared_at_ms).await?;
+                let (fork, merge_snapshot) = self
+                    .snapshot_fork(source_namespace_id, prepared_at_ms)
+                    .await?;
                 let planned = async {
                     let source = self
                         .core
                         .pinned_read_at_snapshot(
                             &basis.manifest.owner_namespace_id,
-                            &basis.source_pin_id,
+                            &basis.source_snapshot_id,
                         )
                         .await?;
                     let plan = new_fork
@@ -246,7 +248,7 @@ impl Namespace<Writable> {
                     Ok::<_, Error>((plan.into_candidate(), record, report))
                 }
                 .await;
-                self.planned_with_fork_pin(source_namespace_id, fork_pin, planned)
+                self.planned_with_merge_snapshot(source_namespace_id, merge_snapshot, planned)
                     .await
             })
         })

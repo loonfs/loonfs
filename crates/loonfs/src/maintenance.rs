@@ -14,8 +14,8 @@ use crate::trace::{self, operation_span};
 use crate::{
     AdvanceRetentionFloorOptions, AdvanceRetentionResponse, Checkpoint, FoldWalResponse,
     ListCheckpointsResponse, MaintainMetadataOptions, MetadataMaintenanceOutcome,
-    MetadataMaintenanceResponse, NamespaceDiagnostics, NamespaceId, PinId, PoolId,
-    SetRetentionWindowResponse, WriterState,
+    MetadataMaintenanceResponse, NamespaceDiagnostics, NamespaceId, PoolId,
+    SetRetentionWindowResponse, SnapshotId, WriterState,
 };
 use crate::{Error, Result};
 use loonfs_core::control::{LoadedManifest, NamespaceStorageDiagnostics};
@@ -436,8 +436,8 @@ impl Maintenance {
         .await
     }
 
-    /// Lists every pin as a checkpoint, in ascending id order, including
-    /// fork pins and expired snapshots that garbage collection has not yet
+    /// Lists every snapshot as a checkpoint, in ascending id order, including
+    /// fork snapshots and expired snapshots that garbage collection has not yet
     /// deleted. This is the inventory of what keeps manifests from
     /// collection. The cursor resumes a live listing.
     pub fn list_checkpoints(&self, namespace_id: &NamespaceId) -> CheckpointsPager {
@@ -475,13 +475,13 @@ impl Maintenance {
         .await
     }
 
-    /// Returns one existing pin of any owner, as the checkpoint listing
+    /// Returns one existing snapshot of any owner, as the checkpoint listing
     /// returns it, including an expired snapshot that garbage collection has
     /// not yet deleted. A missing id returns `snapshot_not_found`.
     pub async fn get_checkpoint(
         &self,
         namespace_id: &NamespaceId,
-        checkpoint_id: &PinId,
+        checkpoint_id: &SnapshotId,
     ) -> Result<Checkpoint> {
         trace::in_operation(
             operation_span!(self.core, "get_checkpoint", namespace_id),

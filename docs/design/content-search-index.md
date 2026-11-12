@@ -53,7 +53,7 @@ The tokenizer folds ASCII letters to lowercase, and then extracts every overlapp
 
 A posting identifies a content value and doesn't contain a path, so a rename changes the paths in results without rewriting any postings. [Indexing content, not revisions](grep-across-a-pool.md#indexing-content-not-revisions) describes the posting rows and the value table of each run.
 
-A fork inherits its source's index. The fork's first manifest copies grep's entry, and the fork pin protects the inherited segments, which stay in the source's prefix. Grep reads the source's commits that the inherited index doesn't cover through the fork pin, and after that it indexes only the fork's own commits. [Grep across a pool](grep-across-a-pool.md) describes the rules.
+A fork inherits its source's index. The fork's first manifest copies grep's entry, and the fork snapshot protects the inherited segments, which stay in the source's prefix. Grep reads the source's commits that the inherited index doesn't cover through the fork snapshot, and after that it indexes only the fork's own commits. [Grep across a pool](grep-across-a-pool.md) describes the rules.
 
 ## Segments and grep's entry
 
@@ -84,7 +84,7 @@ An index is in one of three lifecycle states, and grep's entry records the state
 | State | Position and behavior |
 | --- | --- |
 | `disabled` | No segment set that queries can see, and no pending reorganization. |
-| `backfilling` | The ID of the backfill's snapshot (`pin_id`), `captured_seq`, and optionally the last inode consumed (`cursor_inode_id`). Queries are unavailable. |
+| `backfilling` | The ID of the backfill's snapshot (`snapshot_id`), `captured_seq`, and optionally the last inode consumed (`cursor_inode_id`). Queries are unavailable. |
 | `active` | An incremental cursor made of `built_through_seq` and `next_event_index`. Queries can use the completed index plus the unindexed tail. |
 
 ```text
@@ -241,7 +241,7 @@ Index maintenance reduces this gap when it runs. Core backpressure on the WAL ta
 
 ## Grep garbage collection
 
-Core garbage collection collects grep segments under the segment rule that it applies to metadata segments. A segment stays while the current manifest or a pinned manifest lists it in grep's entry, including the inputs and outputs of an in-progress reorganization, and an unlisted segment is deleted once it's more than 24 hours old. The `gc` result counts the deleted segments in `deleted.extension_segments`. A run that lost its publication, or that stopped before it published, leaves its segments unlisted, and a later collection deletes them. Disabling the index and deleting the namespace empty the entry's runs, so the index's segments become unlisted too.
+Core garbage collection collects grep segments under the segment rule that it applies to metadata segments. A segment stays while the current manifest or a manifest that a snapshot keeps lists it in grep's entry, including the inputs and outputs of an in-progress reorganization, and an unlisted segment is deleted once it's more than 24 hours old. The `gc` result counts the deleted segments in `deleted.extension_segments`. A run that lost its publication, or that stopped before it published, leaves its segments unlisted, and a later collection deletes them. Disabling the index and deleting the namespace empty the entry's runs, so the index's segments become unlisted too.
 
 ## Costs and defaults
 

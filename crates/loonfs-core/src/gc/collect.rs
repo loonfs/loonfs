@@ -17,7 +17,7 @@ use std::sync::atomic::AtomicU64;
 
 impl<S: ObjectStore> NamespaceStore<S> {
     /// Collects the namespace's manifests, WAL objects, metadata segments,
-    /// extension segments, and pins, and retires the namespace when its
+    /// extension segments, and snapshots, and retires the namespace when its
     /// tombstone is eligible.
     ///
     /// The collection lists nothing under its pool's prefix. The pool's own

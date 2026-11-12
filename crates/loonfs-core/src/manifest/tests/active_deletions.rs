@@ -764,7 +764,7 @@ async fn trash_pages_resume_after_the_position_the_cursor_names() {
 
     let wrong_kind = loonfs_types::encode_cursor(&loonfs_types::DirectoryPageCursor {
         head_seq: CommitSeq(1),
-        pin_id: None,
+        snapshot_id: None,
         directory_inode_id: ROOT_INODE_ID,
         last_name_key: NameKey::parse("x").expect("name key"),
     })

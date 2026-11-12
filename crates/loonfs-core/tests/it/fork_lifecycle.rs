@@ -11,7 +11,9 @@ use loonfs_core::test_support::{
     compact_every_group, namespace_store, pool_store, NamespaceFixture,
 };
 use loonfs_core::{CoreError, ErrorCode};
-use loonfs_objectstore::keys::{content_blob, hint, metadata_manifest_object, pin, pool_record};
+use loonfs_objectstore::keys::{
+    content_blob, hint, metadata_manifest_object, pool_record, snapshot_record,
+};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_objectstore::{ObjectStore, PutMode};
@@ -21,11 +23,11 @@ use loonfs_test_support::stores::{
     MetadataMapStore, OperationSelector, RecordedOperation, RecordingStore,
 };
 use loonfs_types::{
-    format::control::{decode_control_object, ControlObjectKind, PinOwner, PinPayload},
+    format::control::{decode_control_object, ControlObjectKind, SnapshotOwner, SnapshotPayload},
     format::manifest::{
         decode_namespace_manifest_json, encode_namespace_manifest_json, MetadataRowFamily,
     },
-    AbsolutePath, CommitId, CommitSeq, DestinationBehavior, ManifestNo, NamespaceId, PinId,
+    AbsolutePath, CommitId, CommitSeq, DestinationBehavior, ManifestNo, NamespaceId, SnapshotId,
 };
 use std::assert_matches;
 use std::sync::Arc;
@@ -49,18 +51,18 @@ async fn fork_namespace<S: ObjectStore + ?Sized>(
         .await
 }
 
-async fn load_pin<S: ObjectStore + ?Sized>(
+async fn load_snapshot_record<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    pin_id: &PinId,
-) -> PinPayload {
+    snapshot_id: &SnapshotId,
+) -> SnapshotPayload {
     let bytes = store
-        .get(&pin(namespace_id, pin_id), None)
+        .get(&snapshot_record(namespace_id, snapshot_id), None)
         .await
-        .expect("read pin")
-        .expect("pin exists");
-    decode_control_object::<PinPayload>(&bytes, ControlObjectKind::Pin)
-        .expect("decode pin")
+        .expect("read snapshot")
+        .expect("snapshot exists");
+    decode_control_object::<SnapshotPayload>(&bytes, ControlObjectKind::Snapshot)
+        .expect("decode snapshot")
         .into_payload()
 }
 
@@ -109,7 +111,7 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
         )
         .await
         .expect("snapshot");
-    let snapshot_record = load_pin(&store, &source, &snapshot.snapshot_id).await;
+    let snapshot_record = load_snapshot_record(&store, &source, &snapshot.snapshot_id).await;
     NamespaceFixture::new(&store, &source, &context)
         .write_file_bytes("/docs/later.txt", b"later", Some(&commit_id("later")))
         .await
@@ -150,7 +152,7 @@ async fn snapshot_fork_keeps_its_view_after_source_compaction_collection_and_sna
         ["later.txt", "shared.txt"]
     );
     assert_eq!(
-        load_pin(&store, &source, &snapshot.snapshot_id).await,
+        load_snapshot_record(&store, &source, &snapshot.snapshot_id).await,
         snapshot_record
     );
     engine
@@ -244,13 +246,13 @@ async fn snapshot_deletion_during_fork_deletes_the_attempt_without_installing_a_
     let store = BlockingStore::new(
         BlockingStore::new(
             store,
-            KeyPredicate::exact(loonfs_objectstore::keys::pin(
+            KeyPredicate::exact(loonfs_objectstore::keys::snapshot_record(
                 &source,
                 &snapshot.snapshot_id,
             )),
             OperationSelector::Read,
         ),
-        KeyPredicate::prefix(loonfs_objectstore::keys::pin_prefix(&source)),
+        KeyPredicate::prefix(loonfs_objectstore::keys::snapshot_prefix(&source)),
         OperationSelector::PutCreateIfAbsent,
     );
     let engine = namespace_engine(&store, &source, &context);
@@ -264,16 +266,16 @@ async fn snapshot_deletion_during_fork_deletes_the_attempt_without_installing_a_
         store.inner().wait_until_blocked().await;
         assert_eq!(
             store
-                .list_prefix(&loonfs_objectstore::keys::pin_prefix(&source))
+                .list_prefix(&loonfs_objectstore::keys::snapshot_prefix(&source))
                 .await
-                .expect("durable pins")
+                .expect("durable snapshots")
                 .len(),
             2
         );
         namespace_engine(store.inner().inner(), &source, &context)
             .delete_snapshot(&snapshot.snapshot_id)
             .await
-            .expect("delete snapshot after fork pin is durable");
+            .expect("delete snapshot after fork snapshot is durable");
         store.inner().release();
     };
     let (result, ()) = tokio::join!(forking, deleting);
@@ -281,7 +283,7 @@ async fn snapshot_deletion_during_fork_deletes_the_attempt_without_installing_a_
     assert_eq!(error.code(), ErrorCode::SnapshotNotFound);
     assert!(namespace_keys(&store, &target).await.is_empty());
     let records = store
-        .list_prefix(&format!("namespaces/{source}/pins/"))
+        .list_prefix(&format!("namespaces/{source}/snapshots/"))
         .await
         .expect("list records");
     assert!(records.is_empty());
@@ -570,7 +572,7 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
     .expect("seed shared file");
     namespace_engine(&store, &source_namespace_id, &context)
         .create_snapshot(
-            "test-pin".to_owned(),
+            "test-snapshot".to_owned(),
             None,
             loonfs_core::test_support::folded_manifest(&namespace_store(
                 &store,
@@ -623,17 +625,18 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
     assert_eq!(fork_basis.manifest.owner_namespace_id, source_namespace_id);
     assert_eq!(fork_basis.manifest.head_seq, CommitSeq(1));
     assert_eq!(
-        fork_basis.source_pin_id.manifest_no(),
+        fork_basis.source_snapshot_id.manifest_no(),
         fork_basis.manifest.manifest_no
     );
 
-    let source_record = load_pin(&store, &source_namespace_id, &fork_basis.source_pin_id).await;
+    let source_record =
+        load_snapshot_record(&store, &source_namespace_id, &fork_basis.source_snapshot_id).await;
     assert_eq!(source_record.head_seq, CommitSeq(1));
-    // The fork basis and pin must use the same manifest.
+    // The fork basis and the fork snapshot must use the same manifest.
     assert_eq!(source_record.manifest(), fork_basis.manifest);
     assert_matches!(
         &source_record.owner,
-        PinOwner::Fork {
+        SnapshotOwner::Fork {
             target_namespace_id,
             ..
         }
@@ -1042,17 +1045,17 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
     namespace_store(&store, &descendant)
         .gc(&options, &aged.clock())
         .await
-        .expect("descendant releases its source pin");
+        .expect("descendant releases its fork snapshot");
     let released = namespace_store(&store, &parent)
         .gc(&options, &aged.clock())
         .await
-        .expect("parent releases its source pin");
+        .expect("parent releases its fork snapshot");
     assert_eq!(released.deleted_checkpoints_by_owner.fork, 1);
     assert_eq!(released.reclaimable_at_ms, Some(parent_deadline));
     let released = namespace_store(&store, &ancestor)
         .gc(&options, &aged.clock())
         .await
-        .expect("collect ancestor after parent releases its pin");
+        .expect("collect ancestor after parent releases its snapshot");
     assert_eq!(released.deleted_checkpoints_by_owner.fork, 0);
     assert!(released.reclaimable_at_ms.is_some());
 }
@@ -1098,7 +1101,7 @@ async fn fork_namespace_rejects_corrupt_source_manifest_descriptors() {
     seed_source_namespace_for_fork(&store, &source_namespace_id, &context).await;
     let checkpoint = namespace_engine(&store, &source_namespace_id, &context)
         .create_snapshot(
-            "test-pin".to_owned(),
+            "test-snapshot".to_owned(),
             None,
             loonfs_core::test_support::folded_manifest(&namespace_store(
                 &store,
@@ -1110,9 +1113,12 @@ async fn fork_namespace_rejects_corrupt_source_manifest_descriptors() {
         .await
         .expect("create source checkpoint");
 
-    let source_record = load_pin(&store, &source_namespace_id, &checkpoint.snapshot_id).await;
-    let manifest_key =
-        metadata_manifest_object(&source_namespace_id, &source_record.pin_id.manifest_no());
+    let source_record =
+        load_snapshot_record(&store, &source_namespace_id, &checkpoint.snapshot_id).await;
+    let manifest_key = metadata_manifest_object(
+        &source_namespace_id,
+        &source_record.snapshot_id.manifest_no(),
+    );
     let manifest_bytes = store
         .get(&manifest_key, None)
         .await
@@ -1155,7 +1161,10 @@ async fn fork_source_checkpoint_failure_leaves_target_namespace_absent() {
     let context = default_writer();
     let store = FailStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::prefix(format!("namespaces/{}/pins/", source_namespace_id.as_str())),
+        KeyPredicate::prefix(format!(
+            "namespaces/{}/snapshots/",
+            source_namespace_id.as_str()
+        )),
         OperationSelector::PutCreateIfAbsent,
         InjectedError::PermissionDenied("injected source checkpoint failure".to_owned()),
     );
@@ -1168,7 +1177,7 @@ async fn fork_source_checkpoint_failure_leaves_target_namespace_absent() {
     assert_eq!(error.code(), ErrorCode::StoragePermissionDenied);
     assert!(
         namespace_keys(&store, &clone_namespace_id).await.is_empty(),
-        "the target must not be installed before the source basis is pinned"
+        "the target must not be installed before the fork snapshot keeps the source basis"
     );
     assert!(
         store
@@ -1445,8 +1454,8 @@ async fn creation_and_fork_install_hint_and_manifest_in_order() {
         .await
         .expect_err("target exists");
     assert_eq!(error.code(), ErrorCode::NamespaceExists);
-    // The fork writes its source pin, has the target's hint put refused, and
-    // deletes the pin.
+    // The fork writes its fork snapshot, has the target's hint put refused, and
+    // deletes the snapshot.
     assert_eq!(store.counts().create_if_absent_puts, 2);
     assert_eq!(store.counts().compare_and_swaps, 0);
     assert_eq!(store.counts().deletes, 1);

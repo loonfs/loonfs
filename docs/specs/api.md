@@ -233,7 +233,7 @@ The full registry (`ErrorCode` in `loonfs-types`) lists every error code and its
 | `namespace_not_found` | 404 | The namespace has no installed manifest, so it doesn't exist. |
 | `pool_not_found` | 404 | The pool has no pool record, so the pool's collection deletes nothing. |
 | `namespace_deleted` | 410 | The namespace ID is deleted, and it can never be created or forked into again. Ordinary operations fail. The response's details identify the deleted namespace. |
-| `snapshot_not_found` | 404 | The snapshot ID doesn't identify a snapshot that the operation can use. Either no pin exists under it, the pin is a fork pin and the operation isn't a read, or a read, fork, or extension found the snapshot expired. The checkpoint inventory's retrieve also returns this code for an ID with no pin. Refresh state or choose another snapshot. |
+| `snapshot_not_found` | 404 | The snapshot ID doesn't identify a snapshot that the operation can use. Either no snapshot exists under it, the snapshot is a fork snapshot and the operation isn't a read, or a read, fork, or extension found the snapshot expired. The checkpoint inventory's retrieve also returns this code for an ID with no snapshot. Refresh state or choose another snapshot. |
 | `path_not_found` | 404 | No visible entry exists at the path. In an ACL namespace, the server also returns this code for a checked entry on which the subject has no rights. |
 | `inode_not_found` | 404 | The requested visible or retained inode doesn't exist. In an ACL namespace, the server also returns this code for a checked inode on which the subject has no rights. |
 | `revision_not_found` | 404 | The file has no such revision. |
@@ -268,7 +268,7 @@ The full registry (`ErrorCode` in `loonfs-types`) lists every error code and its
 | `store_contention` | 503 | A write to one of the namespace's control objects used every compare-and-swap attempt it was allowed, usually because concurrent writers changed the object. Back off before retrying the request. |
 | `deadline_exceeded` | 503 | The server cancelled a bounded request at its configured `request_deadline_ms`. A commit might still take effect after this response, so reconcile it by commit ID before retrying. |
 | `content_not_materialized` | 503 | The file is committed, but this deployment can't write its pending content pieces for a direct download. Read through the proxied content route, or retry after a fold writes the pieces. |
-| `checkpoint_unavailable` | 503 | Required checkpoint state is unavailable: the pin exists but its manifest is gone, pin creation couldn't verify its basis, or a metadata publication ran past its budget before publishing. Retry after maintenance. |
+| `checkpoint_unavailable` | 503 | Required checkpoint state is unavailable: the snapshot exists but its manifest is gone, snapshot creation couldn't verify its basis, or a metadata publication ran past its budget before publishing. Retry after maintenance. |
 | `maintenance_required` | 503 | The namespace's metadata needs maintenance before the request can be served. Run maintenance and retry. A new commit at the WAL write-stop threshold waits for a fold, and if the [write-stop wait](format.md#73-recovery-material-and-maintenance-policy) passes first, it returns this code and isn't committed. A request with a commit ID that the namespace already knows still returns the result recorded in its receipt. |
 | `index_lagging` | 503 | The grep index is further behind the head than the exhaustive-scan budget allows. Run maintenance or set `allow_stale`, then retry. |
 | `storage_permission_denied` | 503 | The object store rejected the deployment's storage credentials for this operation. Fix the storage credentials or bucket policy, because an unchanged retry won't succeed. |
@@ -753,7 +753,7 @@ The following table lists v0 operations, with their retry classes and representa
 | List snapshots | `list_snapshots` | `idempotent` | `GET /v0/namespaces/{ns}/snapshots?limit=100&cursor=...` |
 | Read a snapshot | `get_snapshot` | `idempotent` | `GET /v0/namespaces/{ns}/snapshots/{snapshot_id}` (returns an expired snapshot that garbage collection hasn't deleted, and a missing ID returns `snapshot_not_found`) |
 | Extend a snapshot | `extend_snapshot` | `idempotent` | `POST /v0/namespaces/{ns}/snapshots/{snapshot_id}/extend`. Requires `ttl_ms`, and never moves the expiry earlier. |
-| Delete a snapshot | `delete_snapshot` | `idempotent` | `DELETE /v0/namespaces/{ns}/snapshots/{snapshot_id}` (deletes the pin, and a missing ID succeeds) |
+| Delete a snapshot | `delete_snapshot` | `idempotent` | `DELETE /v0/namespaces/{ns}/snapshots/{snapshot_id}` (deletes the snapshot, and a missing ID succeeds) |
 | Fork a namespace | `fork_namespace` | `not_idempotent` | `POST /v0/namespaces/{source_ns}/forks`. Requires the `Loonfs-Actor` header. |
 | Merge a fork | `merge_fork` | `replayable` | `POST /v0/namespaces/{ns}/merges`. Requires the `Loonfs-Actor` header. |
 | Read where a fork's next merge starts | `get_next_merge_range` | `idempotent` | `GET /v0/namespaces/{ns}/merges?source=demo-branch` |
@@ -761,7 +761,7 @@ The following table lists v0 operations, with their retry classes and representa
 | Delete a namespace | `delete_namespace` | `not_idempotent` | `DELETE /v0/namespaces/{ns}?expected_head_seq=418` (the precondition is optional) |
 | Read namespace diagnostics | `get_namespace_diagnostics` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/diagnostics` |
 | List checkpoints | `list_checkpoints` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/checkpoints?limit=100&cursor=...` |
-| Read a checkpoint | `get_checkpoint` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/checkpoints/{checkpoint_id}` (returns any pin the listing returns, and a missing ID returns `snapshot_not_found`) |
+| Read a checkpoint | `get_checkpoint` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/checkpoints/{checkpoint_id}` (returns any snapshot the listing returns, and a missing ID returns `snapshot_not_found`) |
 | Run one maintenance job | `run_maintenance_job` | `not_idempotent` | `POST /v0/maintenance/namespaces/{ns}/jobs`. The body identifies one job with `kind`. |
 | Run one maintenance job on a pool | `run_pool_maintenance_job` | `not_idempotent` | `POST /v0/maintenance/pools/{pool_id}/jobs`. The body identifies one job with `kind`, and `gc` is the pool's one job. |
 | Probe the store contract | `probe_store` | `not_idempotent` | `POST /v0/maintenance/store/probe`. The body contains the probe options, and `{}` uses the defaults. |
@@ -796,7 +796,7 @@ For example:
 ```
 
 ```json
-{"namespace_id":"demo","status":"backfilling","captured_seq":12,"cursor_inode_id":"ino_000000j000000tz7yc2z8ypbmf","checkpoint_id":"pin_00000000000000000009-0000000000000009","reorganize_pending":false}
+{"namespace_id":"demo","status":"backfilling","captured_seq":12,"cursor_inode_id":"ino_000000j000000tz7yc2z8ypbmf","checkpoint_id":"snp_00000000000000000009-00000000000000000000000009","reorganize_pending":false}
 ```
 
 So a backfilling index never reports a `built_through_seq`, and an active index never reports a `captured_seq`. `reorganize_pending` reports whether a partitioned segment reorganization is in progress. The routes read the index from the namespace's current manifest, so the status reports the index's last publication. (The server publishes an index's progress about once per maintenance interval, five seconds by default, and when a run of steps ends.) A client that waits for the index to catch up captures one sequence before it starts waiting, and it stops waiting when the index reaches that sequence, instead of waiting for a head that keeps moving.
@@ -889,7 +889,7 @@ In a `gc` job on a namespace or on a pool, `grace_window_ms` overrides the grace
 
 A namespace's job and a pool's job collect different objects:
 
-- A namespace's collection covers the namespace's manifests, WAL objects, metadata segments, extension segments, and pins. It makes no request under the pool's prefix, and it deletes no content, including when it retires the namespace. Retiring a fork deletes the fork's pin on its source (see [Retiring an eligible tombstone](format.md#118-retiring-an-eligible-tombstone)).
+- A namespace's collection covers the namespace's manifests, WAL objects, metadata segments, extension segments, and snapshots. It makes no request under the pool's prefix, and it deletes no content, including when it retires the namespace. Retiring a fork deletes the fork snapshot on its source (see [Retiring an eligible tombstone](format.md#118-retiring-an-eligible-tombstone)).
 - A pool's collection covers the pool's content objects, upload records, and temporary objects, with roots that it reads from every member of the [pool](glossary.md#pool).
 
 [One complete collection](format.md#111-one-complete-collection) defines both collections.
@@ -900,7 +900,7 @@ Each GC request runs one complete, stateless collection. `GcRequest` accepts `gr
 
 Every GC call uses one clock reading for the whole call. It keeps its live set in memory, and it doesn't write any collection progress. For each object family it lists, the call reads the listing from the beginning to the end.
 
-A namespace's call reads the current manifest, lists the namespace's pins, and loads the manifests that the pins keep. If a manifest read fails, the call fails before it lists or deletes anything. [Reference roots](format.md#112-reference-roots) defines these roots.
+A namespace's call reads the current manifest, lists the namespace's snapshots, and loads the manifests that the snapshots keep. If a manifest read fails, the call fails before it lists or deletes anything. [Reference roots](format.md#112-reference-roots) defines these roots.
 
 A pool's call reads the pool record, lists the pool's upload sessions, and then reads the roots of every member of the pool. It protects content through the extent filters of the rooted layout segments, and it deletes no content objects if it couldn't read the roots of every member within the time that [Content roots](format.md#119-content-roots) allows, or couldn't read one member's roots. [Content roots](format.md#119-content-roots) defines these roots. A pool has no members when its first member is retired, or when its create call failed or lost to another create call for the same namespace ID. In the second case, the call deletes nothing while the pool record is inside its creation grace (the grace window after the record's `created_at_ms`), and after the creation grace it deletes the pool record and lists nothing else.
 
@@ -914,16 +914,16 @@ In a pool's response, the time is one of these:
 - an upload session's cleanup time, which is the lease plus grace, the abort grace, or the completed-content grace, or
 - the end of the pool record's creation grace, when the pool's first member has no current manifest that records the pool.
 
-The value is the earliest of those future times that the collection examined. Fork pins have no cleanup time, and candidates that age out by provider timestamps don't contribute a time. If the field is absent, that doesn't mean nothing remains to collect.
+The value is the earliest of those future times that the collection examined. Fork snapshots have no cleanup time, and candidates that age out by provider timestamps don't contribute a time. If the field is absent, that doesn't mean nothing remains to collect.
 
-A namespace's GC response also includes `reclaimable_at_ms` when the current manifest is deleted. It's the retirement deadline defined in [Retirement](format.md#95-retirement), and it's included even when pins still block retirement. It's absent for an active namespace.
+A namespace's GC response also includes `reclaimable_at_ms` when the current manifest is deleted. It's the retirement deadline defined in [Retirement](format.md#95-retirement), and it's included even when snapshots still block retirement. It's absent for an active namespace.
 
 A GC response includes `listed_bytes`: the bytes of every object that the collection listed, each object once, as the provider reported them, before the collection's deletes. A namespace's collection lists the objects under the namespace's prefix, except the hint and any extension object that isn't a segment. A pool's collection lists the content objects, upload records, and temporary objects under the pool's prefix, so the value leaves out the pool record. When a pool's collection deletes no content objects because it couldn't read every member's roots, it lists the content prefix once to measure the content. An application that meters storage samples a pool's value for the pool's content, and a namespace's value for the namespace's metadata.
 
 A namespace's GC response groups related counts:
 
 - `deleted` contains `wal_objects`, `metadata_segments`, `extension_segments`, and `manifests`. `extension_segments` counts the extension segments (such as the grep index's segments) that no retained manifest lists (see [Extensions](format.md#124-extensions)).
-- `deleted_checkpoints_by_owner` contains `user` and `fork` counts for the pins deleted in the collection. `user` counts snapshots. Their sum is the total number of pins deleted.
+- `deleted_checkpoints_by_owner` contains `user` and `fork` counts for the snapshots deleted in the collection. `user` counts user snapshots. Their sum is the total number of snapshots deleted.
 
 A pool's GC response has no `deleted_checkpoints_by_owner`, and its `deleted` contains these counts:
 
@@ -933,7 +933,7 @@ A pool's GC response has no `deleted_checkpoints_by_owner`, and its `deleted` co
 
 A pool's response doesn't report the deletion of a pool record.
 
-Each deletion is counted once. When a fork's target namespace deletes its source pin, the deletion counts toward `fork` if the pin was present before the deletion, and repeating that deletion on an absent pin adds nothing. Every count field is present, including fields whose value is zero.
+Each deletion is counted once. When a fork's target namespace deletes its fork snapshot, the deletion counts toward `fork` if the snapshot was present before the deletion, and repeating that deletion on an absent snapshot adds nothing. Every count field is present, including fields whose value is zero.
 
 Every core GC response also includes `retained`, which counts the candidates the collection kept, grouped by the reason each one was kept. The reasons are a closed set, so every field of the response's `retained` is always present, a zero means nothing was kept for that reason, and the fields sum to the total. A namespace's response has the first five reasons in this table, and a pool's response has the first four and the two upload session reasons:
 
@@ -943,7 +943,7 @@ Every core GC response also includes `retained`, which counts the candidates the
 | `within_grace_window` | Unreferenced, but younger than `grace_window_ms` by the object's own provider timestamp. |
 | `no_provider_timestamp` | Unreferenced, and the provider reported no last-modified time, so the object's age is unknown and it's treated as young. |
 | `unrecognized_key` | A key under a listed family that the collector doesn't recognize as one of its own. The collector never deletes it, whatever its age. |
-| `checkpoint_not_deletable` | A pin that's kept by its owner or by its grace window. |
+| `checkpoint_not_deletable` | A snapshot that's kept by its owner or by its grace window. |
 | `upload_session_window` | An upload session that's waiting for a window that ends at a known time. These are the same waits that `next_reclamation_at_ms` reports. |
 | `upload_session_undecided` | An upload session that's kept for a reason that doesn't end at a known time: a lost compare-and-swap, a record that disappeared during the collection, or a content cleanup failure. |
 
@@ -972,65 +972,65 @@ A pool's job that deletes two content objects and the records of one upload sess
 
 ### Snapshots
 
-A "snapshot" is a pin that a caller creates to keep one version of a namespace readable (see [Pins](format.md#8-pins)). It's the only kind of pin that a caller creates and deletes. For example, a sandbox can create a snapshot before an agent edits it, and then read the snapshot, or fork it into a new namespace, after the edits. A snapshot's `snapshot_id` is its pin ID, and its `captured_seq` is the namespace sequence it captured.
+A "snapshot" is a stored record that keeps one manifest of a namespace, and the segments it lists, so that version of the namespace stays readable (see [Snapshots](format.md#8-snapshots)). Every snapshot has an owner. A caller creates and deletes a "user snapshot", and a fork keeps a "fork snapshot" on its source until the fork is retired. The snapshot routes manage only user snapshots. For example, a sandbox can create a snapshot before an agent edits it, and then read the snapshot, or fork it into a new namespace, after the edits. A snapshot's `snapshot_id` is its ID, and its `captured_seq` is the namespace sequence it captured.
 
-A create request requires `name`, and it accepts `ttl_ms`. The name is a label, not a key. Every create call writes a new record, so several snapshots can have the same name. Creating a snapshot first folds any WAL tail after the current manifest, and then pins the resulting manifest. A snapshot with `ttl_ms` expires that many milliseconds after the server's current time, and a snapshot without it doesn't expire. A `ttl_ms` of zero returns `invalid_request`.
+A create request requires `name`, and it accepts `ttl_ms`. The name is a label, not a key. Every create call writes a new record, so several snapshots can have the same name. Creating a snapshot first folds any WAL tail after the current manifest, and then writes a snapshot that keeps the resulting manifest. A snapshot with `ttl_ms` expires that many milliseconds after the server's current time, and a snapshot without it doesn't expire. A `ttl_ms` of zero returns `invalid_request`.
 
 Create, list, retrieve, and extend return the same snapshot object, which contains `snapshot_id`, `namespace_id`, `name`, `captured_seq`, `created_at_ms`, and an optional `expires_at_ms`. For example:
 
 ```json
-{"snapshot_id":"pin_00000000000000000009-0000000000000009","namespace_id":"demo","name":"release","captured_seq":12,"created_at_ms":1752623000000,"expires_at_ms":1752626600000}
+{"snapshot_id":"snp_00000000000000000009-00000000000000000000000009","namespace_id":"demo","name":"release","captured_seq":12,"created_at_ms":1752623000000,"expires_at_ms":1752626600000}
 ```
 
 An expired snapshot can't be read, forked, or extended. Each of those requests returns `snapshot_not_found`, the same as for a deleted snapshot. The expired snapshot stays in the snapshot listing, with its past `expires_at_ms`, until garbage collection deletes it after its expiry plus the grace window, and retrieving it by ID returns it until then.
 
 An extension measures its requested `ttl_ms` from the server's current time, and it moves an unexpired snapshot's expiry to that time. It never moves the expiry earlier, so extending a snapshot without an expiry returns the snapshot unchanged.
 
-`GET /v0/namespaces/{ns}/snapshots?limit=100&cursor=...` returns the namespace's snapshots in ascending `snapshot_id` order, including expired snapshots, and it leaves out fork pins. `GET /v0/namespaces/{ns}/snapshots/{snapshot_id}` returns one snapshot, as the same object the listing returns. A missing ID, or the ID of a fork pin, returns `snapshot_not_found`.
+`GET /v0/namespaces/{ns}/snapshots?limit=100&cursor=...` returns the namespace's snapshots in ascending `snapshot_id` order, including expired snapshots, and it leaves out fork snapshots. `GET /v0/namespaces/{ns}/snapshots/{snapshot_id}` returns one snapshot, as the same object the listing returns. A missing ID, or the ID of a fork snapshot, returns `snapshot_not_found`.
 
-Deleting a snapshot removes its pin and returns the addressed namespace and snapshot:
+Deleting a snapshot removes its record and returns the addressed namespace and snapshot:
 
 ```json
-{"namespace_id":"demo","snapshot_id":"pin_00000000000000000009-0000000000000009"}
+{"namespace_id":"demo","snapshot_id":"snp_00000000000000000009-00000000000000000000000009"}
 ```
 
-Deleting a missing snapshot, including one that was already deleted, returns the same response, so a client can retry a delete safely. The ID of a fork pin returns `snapshot_not_found`, because only garbage collection deletes a fork pin. Deletion stays available after the namespace is deleted (see [`DELETE /v0/namespaces/{ns}`](#63-delete-v0namespacesns)).
+Deleting a missing snapshot, including one that was already deleted, returns the same response, so a client can retry a delete safely. The ID of a fork snapshot returns `snapshot_not_found`, because only garbage collection deletes a fork snapshot. Deletion stays available after the namespace is deleted (see [`DELETE /v0/namespaces/{ns}`](#63-delete-v0namespacesns)).
 
 In an ACL namespace, creating, retrieving, listing, extending, and deleting snapshots requires an administrator subject. A request with no subject context acts as the token holder. A snapshot read requires `read` and `history` on the historical inode, evaluated at the current head.
 
 The operations above manage a snapshot's lifetime. Path stat, inode stat, path directory listing, inode children listing, file content, download, and change-feed requests accept an optional `snapshot_id`. The path and inode download requests include it in their bodies. The path content and path download requests can't combine `snapshot_id` with `revision_no`, because the snapshot selects the revision. The inode revision content read (`GET /inodes/{inode_id}/revisions/{revision_no}/content`) identifies its revision in the route, and with `snapshot_id` it reads that revision in the snapshot's state, and the snapshot keeps that revision readable after the namespace's retention floor passes it. The inode revision download route rejects `snapshot_id` with `invalid_request`. A snapshot change feed ends at the captured sequence, and `after_seq` can't exceed that sequence.
 
-A read also accepts one of the namespace's fork pins as `snapshot_id`, because a fork pin keeps a manifest just as a snapshot does. A fork's `fork_basis.source_pin_id` is the ID of its fork pin in the source namespace (see [`POST /forks`](#613-post-forks)), so a client can read the source as it was at the fork point for as long as the fork exists, even after the source's retention floor passes the fork point. For example, a client that compares a file in a fork with the file's version at the fork point reads that version from the source with `GET /inodes/{inode_id}/revisions/{revision_no}/content` and `snapshot_id` set to the fork's `source_pin_id`. A fork pin doesn't expire. The snapshot routes and `POST /forks` still refuse a fork pin's ID with `snapshot_not_found`, because a fork pin isn't a snapshot.
+A read also accepts one of the namespace's fork snapshots as `snapshot_id`, because a fork snapshot keeps a manifest just as a user snapshot does. A fork's `fork_basis.source_snapshot_id` is the ID of its fork snapshot in the source namespace (see [`POST /forks`](#613-post-forks)), so a client can read the source as it was at the fork point for as long as the fork exists, even after the source's retention floor passes the fork point. For example, a client that compares a file in a fork with the file's version at the fork point reads that version from the source with `GET /inodes/{inode_id}/revisions/{revision_no}/content` and `snapshot_id` set to the fork's `source_snapshot_id`. A fork snapshot doesn't expire. The snapshot routes and `POST /forks` still refuse a fork snapshot's ID with `snapshot_not_found`, because those routes manage only user snapshots.
 
 When an embedded read sets `snapshot_id` in its options, the read opens a read view of that snapshot, as the HTTP request does. A read view of a snapshot accepts options that refer to the same snapshot, and it rejects any other snapshot ID with `invalid_request`.
 
 A directory cursor from a read view of a snapshot identifies that snapshot. A read view of the same snapshot can resume the cursor, and a live listing or any other read view rejects it with `invalid_request`.
 
-A snapshot read requires an unexpired snapshot or a fork pin. A read of a missing pin, or of a deleted or expired snapshot, returns `snapshot_not_found`, and the read never falls back to the current namespace state.
+A snapshot read requires an unexpired user snapshot or a fork snapshot. A read of a missing snapshot, or of a deleted or expired snapshot, returns `snapshot_not_found`, and the read never falls back to the current namespace state.
 
-Why does an expired snapshot stay listed when it can't be read? A snapshot's expiry controls whether it can be read, and garbage collection deletes its pin later, after the grace window. Until then, the pin still keeps its manifest and segments, so the listing shows the snapshot as one of the records that keep old data.
+Why does an expired snapshot stay listed when it can't be read? A snapshot's expiry controls whether it can be read, and garbage collection deletes the snapshot later, after the grace window. Until then, the snapshot still keeps its manifest and segments, so the listing shows the snapshot as one of the records that keep old data.
 
 ### Checkpoint inventory
 
-The checkpoint inventory lists every pin of a namespace, so an operator can see what keeps old manifests from garbage collection. It includes snapshots, whose `owner.kind` is `user`, and fork pins, whose `owner.kind` is `fork`. The inventory has no create or delete routes. Snapshots are created and deleted through the snapshot routes (see [Snapshots](#snapshots)), and garbage collection deletes a fork pin once its target namespace no longer reads through it.
+The checkpoint inventory lists every snapshot of a namespace, so an operator can see what keeps old manifests from garbage collection. It includes user snapshots, whose `owner.kind` is `user`, and fork snapshots, whose `owner.kind` is `fork`. The inventory has no create or delete routes. User snapshots are created and deleted through the snapshot routes (see [Snapshots](#snapshots)), and garbage collection deletes a fork snapshot once its target namespace no longer reads through it.
 
 Each entry is a checkpoint object, which contains `namespace_id`, `checkpoint_id`, `owner`, `created_at_ms`, an optional `expires_at_ms`, `captured_seq`, and `manifest_no`. For a snapshot, `checkpoint_id` is its `snapshot_id`, and `owner` contains its `name`.
 
-A checkpoint ID has the form `pin_{manifest_no:020}-{16 lowercase hex}`. It identifies the manifest that a snapshot read uses, and every pin is assigned a new ID.
+A checkpoint ID has the form `snp_{manifest_no:020}-{26 lowercase Crockford base 32 characters}`. It identifies the manifest that a snapshot read uses, and every snapshot is assigned a new ID.
 
-`GET /v0/maintenance/namespaces/{ns}/checkpoints?limit=100&cursor=...` returns existing pins in ascending `checkpoint_id` order. For example, a namespace with one snapshot and one fork returns:
+`GET /v0/maintenance/namespaces/{ns}/checkpoints?limit=100&cursor=...` returns existing snapshots in ascending `checkpoint_id` order. For example, a namespace with one user snapshot and one fork returns:
 
 ```json
-{"namespace_id":"demo","checkpoints":[{"namespace_id":"demo","checkpoint_id":"pin_00000000000000000009-0000000000000009","owner":{"kind":"user","name":"release"},"created_at_ms":1752623000000,"expires_at_ms":1752626600000,"captured_seq":12,"manifest_no":9},{"namespace_id":"demo","checkpoint_id":"pin_00000000000000000009-00000000000000a1","owner":{"kind":"fork","target_namespace_id":"demo-copy"},"created_at_ms":1752623100000,"captured_seq":12,"manifest_no":9}]}
+{"namespace_id":"demo","checkpoints":[{"namespace_id":"demo","checkpoint_id":"snp_00000000000000000009-00000000000000000000000009","owner":{"kind":"user","name":"release"},"created_at_ms":1752623000000,"expires_at_ms":1752626600000,"captured_seq":12,"manifest_no":9},{"namespace_id":"demo","checkpoint_id":"snp_00000000000000000009-000000000000000000000000a1","owner":{"kind":"fork","target_namespace_id":"demo-copy"},"created_at_ms":1752623100000,"captured_seq":12,"manifest_no":9}]}
 ```
 
-`GET /v0/maintenance/namespaces/{ns}/checkpoints/{checkpoint_id}` returns one existing pin, as the same object the listing returns for it, including an expired snapshot that collection hasn't deleted. A missing ID returns `snapshot_not_found`.
+`GET /v0/maintenance/namespaces/{ns}/checkpoints/{checkpoint_id}` returns one existing snapshot, as the same object the listing returns for it, including an expired snapshot that collection hasn't deleted. A missing ID returns `snapshot_not_found`.
 
 `limit` follows the advertised pagination limits, and the response leaves out `next_cursor` after the final page. Cursors are opaque and tied to this namespace and operation, so clients should pass them back unchanged. A namespace-scoped cursor from another namespace returns `invalid_request`.
 
-The checkpoint listing is live, not a point-in-time view. Pins that are created, deleted, or collected while a client is paging can change later pages.
+The checkpoint listing is live, not a point-in-time view. Snapshots that are created, deleted, or collected while a client is paging can change later pages.
 
-An expired snapshot stays listed until GC deletes it, after its expiry plus the grace window. A snapshot without an expiry, on a live namespace, stays until it's explicitly deleted. [Records and owners](format.md#81-records-and-owners) defines reads and removal for each pin owner.
+An expired snapshot stays listed until GC deletes it, after its expiry plus the grace window. A snapshot without an expiry, on a live namespace, stays until it's explicitly deleted. [Records and owners](format.md#81-records-and-owners) defines reads and removal for each snapshot owner.
 
 ### Deleting, retaining, and reclaiming
 
@@ -1042,7 +1042,7 @@ A deleted ancestor namespace keeps every object it published while a live descen
 
 A pool's collection reclaims a content object once it's older than the grace window and nothing in any member of the pool references it. A content object is referenced by:
 
-- a revision in a member's current manifest, in a manifest that a member's pin keeps, or in a member's unfolded WAL tail, or
+- a revision in a member's current manifest, in a manifest that a member's snapshot keeps, or in a member's unfolded WAL tail, or
 - an upload session record, which references its own content.
 
 [Content roots](format.md#119-content-roots) defines these rules. Deleting a file or a tree doesn't reclaim anything while the deletion is recoverable, because a deleted file keeps its newest revision. A compaction that removes old revisions at or below the retention floor makes their content collectable, and so does a base compaction that removes the revisions that an expired deletion hides (see [Retention jobs](#retention-jobs)). So a deleted tree's content is reclaimed once the floor reaches the deletion.
@@ -1051,7 +1051,7 @@ The metadata retention floor is a separate mechanism. It limits WAL replay histo
 
 Completed upload sessions in active namespaces keep their records for the derived completed-content grace, which is slightly longer than seven days. A session record protects its content from collection, so GC reclaims staged content that no commit published on a collection after the record is removed.
 
-GC needs to run repeatedly, including after a collection finds nothing left to delete. A presigned upload URL that was issued before the deletion can still write an object after the deletion, and a late write that one listing misses is found by the next collection. Complete reclamation can be delayed by continued late writes, grace windows, dependent forks, pin cleanup, or maintenance that isn't running.
+GC needs to run repeatedly, including after a collection finds nothing left to delete. A presigned upload URL that was issued before the deletion can still write an object after the deletion, and a late write that one listing misses is found by the next collection. Complete reclamation can be delayed by continued late writes, grace windows, dependent forks, snapshot cleanup, or maintenance that isn't running.
 
 Once the current manifest is deleted, LoonFS refuses commits, requests for new presigned upload URLs, and upload completion, but it doesn't revoke presigned URLs that were already issued. The retirement grace is longer than the presigned URL lifetime.
 
@@ -1309,7 +1309,7 @@ Create and fork install the hint and then manifest 1. Between the hint and manif
 
 [Namespaces and identity](format.md#11-namespaces-and-identity) defines a namespace's lifetime. An application that reuses a human-readable name MUST keep its own map from names to namespace IDs, and generate a new namespace ID for each lifetime.
 
-If a creation acknowledgement is lost, a new request returns `namespace_exists`, unless the request explicitly allows an existing namespace. Within the original attempt, after an unknown transport outcome, an exact read-back of the manifest confirms a plain create and a fork. A plain create's manifest records a pool ID that only that attempt generated, and a fork's manifest refers to the fork's unique fork pin.
+If a creation acknowledgement is lost, a new request returns `namespace_exists`, unless the request explicitly allows an existing namespace. Within the original attempt, after an unknown transport outcome, an exact read-back of the manifest confirms a plain create and a fork. A plain create's manifest records a pool ID that only that attempt generated, and a fork's manifest refers to the fork's unique fork snapshot.
 
 ### 6.1 `GET /v0/capabilities`
 
@@ -1339,7 +1339,7 @@ The `NamespaceMetadata` object has exactly these fields:
 | `access` | The access mode, either `{"kind": "unrestricted"}` or `{"kind": "acl", "principal_scope": "..."}`. |
 | `created_at_ms` | The time the namespace was created, in Unix milliseconds. |
 | `created_by` | The actor that created or forked the namespace, as supplied by the application. |
-| `fork_basis` | The namespace and sequence this namespace was forked from, as `source_namespace_id` and `fork_point_seq`, which records the fork point (the source namespace's sequence at which the fork was taken). It also includes the fork pin that keeps the source's state at that sequence readable (`source_pin_id`) and, for a namespace that a rebase created, `rebased_from` (see [`POST /forks`](#613-post-forks)). Only a forked namespace has this field. |
+| `fork_basis` | The namespace and sequence this namespace was forked from, as `source_namespace_id` and `fork_point_seq`, which records the fork point (the source namespace's sequence at which the fork was taken). It also includes the fork snapshot that keeps the source's state at that sequence readable (`source_snapshot_id`) and, for a namespace that a rebase created, `rebased_from` (see [`POST /forks`](#613-post-forks)). Only a forked namespace has this field. |
 | `pool_id` | The namespace's [pool](glossary.md#pool), whose prefix stores the namespace's content objects and upload records (see [File contents and ownership](format.md#15-file-contents-and-ownership)). A namespace that wasn't created by a fork records a pool ID that its create call generated, and a fork has the same pool as its source. |
 | `head_seq` | The namespace's current visible sequence. |
 | `retention_floor_seq` | The namespace's retention floor. A change feed request can set `after_seq` to this sequence or any later one, and the feed returns the commits after it. |
@@ -1360,7 +1360,7 @@ The maintenance endpoint `GET /v0/maintenance/namespaces/{ns}/diagnostics` retur
 | `namespace_id` | The durable namespace ID. |
 | `created_at_ms` | The time the namespace was created, in Unix milliseconds. |
 | `created_by` | The actor that created or forked the namespace, as supplied by the application. |
-| `fork_basis` | The namespace and sequence this namespace was forked from, as `source_namespace_id` and `fork_point_seq`, which records the fork point (the source namespace's sequence at which the fork was taken). It also includes the source's fork pin (`source_pin_id`) and, for a namespace that a rebase created, `rebased_from`. Only a forked namespace has this field. |
+| `fork_basis` | The namespace and sequence this namespace was forked from, as `source_namespace_id` and `fork_point_seq`, which records the fork point (the source namespace's sequence at which the fork was taken). It also includes the source's fork snapshot (`source_snapshot_id`) and, for a namespace that a rebase created, `rebased_from`. Only a forked namespace has this field. |
 | `head_seq` | The namespace's current visible sequence. |
 | `retention_floor_seq` | The namespace's retention floor. A change feed request can set `after_seq` to this sequence or any later one, and the feed returns the commits after it. |
 | `current_manifest_no` | The current manifest number, present from namespace creation. |
@@ -1405,7 +1405,7 @@ Neither the maximum staleness nor the manifest check interval can exceed `READ_R
 
 In a runtime with the namespace's writer session, a read with either setting starts from the [writer position](glossary.md#writer-position), and the session confirms the position with a HEAD for the next manifest number. An `eventual` read sends no request while the session's last check is younger than the read's maximum staleness, and after that it waits for the session's check. A `strong` read always waits for the session's check, so it sees another writer's claim before it reads. A check counts for a read only if it started after the read did. The session runs one check at a time, so a read that finds a check running waits for it and then for the next one, which every read that arrives during the first check shares, and a wave of concurrent `strong` reads costs at most two checks.
 
-A pinned read (a read with `snapshot_id`, or a read through a read view) has no consistency setting, because the pin selects the state that the read sees. A request that sets `consistency` together with `snapshot_id` returns `invalid_request` with `param` set to `consistency`. In the Rust runtime, the options of a read that can read a snapshot say what the read reads at (`at`): the live head with an optional consistency (`ReadAt::Live`), or a snapshot (`ReadAt::Snapshot`), so a Rust read can't set both. A Rust read through a read view that sets a consistency returns `invalid_request` with `param` set to `consistency`. LoonFS confirms the live head that a pinned read finds its snapshot in, and the head that a read view captures, the way a `strong` read does.
+A pinned read (a read with `snapshot_id`, or a read through a read view) has no consistency setting, because the snapshot or the read view selects the state that the read sees. A request that sets `consistency` together with `snapshot_id` returns `invalid_request` with `param` set to `consistency`. In the Rust runtime, the options of a read that can read a snapshot say what the read reads at (`at`): the live head with an optional consistency (`ReadAt::Live`), or a snapshot (`ReadAt::Snapshot`), so a Rust read can't set both. A Rust read through a read view that sets a consistency returns `invalid_request` with `param` set to `consistency`. LoonFS confirms the live head that a pinned read finds its snapshot in, and the head that a read view captures, the way a `strong` read does.
 
 An `eventual` read can read an older head than one that a caller learned from a fresher read, such as a `strong` read or a response from another server. An `after_seq` above the head that a change feed request reads returns `invalid_request` (see [`GET /changes`](#611-get-changes)), and so do a diff's `to_seq` above that head (see [`GET /diff`](#612-get-diff)) and a directory cursor issued at a newer head. So a poller that learned its `after_seq` or `to_seq` from a fresher read retries the request as `strong`.
 
@@ -1423,7 +1423,7 @@ Deletes a namespace. In an ACL namespace, this operation requires an administrat
 
 Deletion runs in the namespace's writer session, and it's a fenced manifest publication (see [Deleting a namespace](format.md#94-deleting-a-namespace)). The deletion is linearized at the manifest put, so commits acknowledged before that put stay committed. These requests fail with `namespace_deleted` (410) once they observe the deletion: reads, commits, forks from the namespace ID, status requests, another deletion, and creating or forking a namespace into that ID. The namespace tombstone stays the current manifest after the namespace's content is reclaimed.
 
-The checkpoint inventory and snapshot deletion are explicit exceptions, and they stay available after deletion. Deleting a fork pin's ID through the snapshot route still returns `snapshot_not_found`.
+The checkpoint inventory and snapshot deletion are explicit exceptions, and they stay available after deletion. Deleting a fork snapshot's ID through the snapshot route still returns `snapshot_not_found`.
 
 Deletion itself doesn't reclaim anything. [Retirement](format.md#95-retirement) defines when a deleted namespace is eligible for retirement, [Reference roots](format.md#112-reference-roots) defines the roots that garbage collection keeps, and [Retiring an eligible tombstone](format.md#118-retiring-an-eligible-tombstone) defines what retirement deletes. The namespace's content is stored in its [pool](glossary.md#pool), and the pool's collection deletes that content once no member refers to it (see [Garbage collection jobs](#garbage-collection-jobs)).
 
@@ -1517,7 +1517,7 @@ The walk scans every directory it enters, and every directory a page scans is on
 
 In an ACL namespace, a recursive listing requires `read` on the target, like any listing. Below the target, a child directory that the subject can't read is returned without its `attributes` projection, and the walk doesn't descend into it (see [Authorization in ACL namespaces](#authorization-in-acl-namespaces)). A subject with `read` on a deeper directory, but not on the directories above it, lists that directory directly.
 
-A cursor is normally an opaque resume position in the listing order, not a snapshot pin. Directory listing, trash listing, revision listing, grep, and change-feed cursors tolerate forward head drift. A commit made while a client is paging doesn't invalidate these cursors, and the resumed page is evaluated at the head that's current when it's read, continuing strictly after the last returned position.
+A cursor is normally an opaque resume position in the listing order, not a snapshot. Directory listing, trash listing, revision listing, grep, and change-feed cursors tolerate forward head drift. A commit made while a client is paging doesn't invalidate these cursors, and the resumed page is evaluated at the head that's current when it's read, continuing strictly after the last returned position.
 
 Each page is internally consistent at its own head, but a multi-page listing spans whatever heads its pages were read at. So an entry created behind the resume position is missed, an entry deleted behind it was already returned, and a rename can appear as a duplicate or be missed. A client that needs one consistent cut re-issues the listing when `head_seq` changes between pages.
 
@@ -1647,7 +1647,7 @@ For example, a revision listing returns:
 }
 ```
 
-The inode revision route, `GET /inodes/{inode_id}/revisions/{revision_no}/content`, reads and verifies a revision without resolving a current path, so a file under a recoverable deletion stays readable while its revision rows are kept. Once the retention floor reaches a deletion, this route and the inode revision listing return `inode_not_found` for every inode that the deletion hides, as they do for an unknown inode, whatever rights the subject has, and they keep returning it after a compaction removes the bindings under the deletion (see [Paths, listings, and revision reads](format.md#44-paths-listings-and-revision-reads)). A directory returns `path_conflict`, an unknown inode returns `inode_not_found`, and an unknown or removed revision returns `revision_not_found`. With `snapshot_id`, which can be a snapshot or one of the namespace's fork pins (see [Snapshots](#snapshots)), the route finds the revision in the pinned manifest instead of at the live head, and it checks that the pinned manifest publishes the revision's content. So a revision stays readable through the pin after the namespace's retention floor passes it, and a revision committed after the pin returns `revision_not_found`. Like every snapshot read, it requires `history`.
+The inode revision route, `GET /inodes/{inode_id}/revisions/{revision_no}/content`, reads and verifies a revision without resolving a current path, so a file under a recoverable deletion stays readable while its revision rows are kept. Once the retention floor reaches a deletion, this route and the inode revision listing return `inode_not_found` for every inode that the deletion hides, as they do for an unknown inode, whatever rights the subject has, and they keep returning it after a compaction removes the bindings under the deletion (see [Paths, listings, and revision reads](format.md#44-paths-listings-and-revision-reads)). A directory returns `path_conflict`, an unknown inode returns `inode_not_found`, and an unknown or removed revision returns `revision_not_found`. With `snapshot_id`, which can be a user snapshot or one of the namespace's fork snapshots (see [Snapshots](#snapshots)), the route finds the revision in the snapshot's manifest instead of at the live head, and it checks that the snapshot's manifest publishes the revision's content. So a revision stays readable through the snapshot after the namespace's retention floor passes it, and a revision committed after the snapshot returns `revision_not_found`. Like every snapshot read, it requires `history`.
 
 `GET /inodes/{inode_id}/content` reads the current revision of a visible file inode, wherever the inode is bound, and streams and verifies it like the path route. Like the path route without `revision_no`, it requires only the `read` right. A deleted or unknown inode returns `inode_not_found`, and a directory returns `path_conflict`. With `snapshot_id`, the route reads the revision that the snapshot captured, and like every snapshot read, it also requires `history`.
 
@@ -2663,7 +2663,7 @@ Representative response:
   "fork_basis": {
     "source_namespace_id": "demo",
     "fork_point_seq": 418,
-    "source_pin_id": "pin_00000000000000000031-3f9c2a7d41e05b68"
+    "source_snapshot_id": "snp_00000000000000000031-00000000003f9c2a7d41e05b68"
   },
   "pool_id": "pool_3s0drmj8em84yb4mnetqkz2j0x",
   "head_seq": 418,
@@ -2677,14 +2677,14 @@ The `fork_basis` object identifies the captured source:
 | --- | --- |
 | `source_namespace_id` | The namespace that the fork captured. |
 | `fork_point_seq` | The fork point: the source namespace's sequence at which the fork was taken. |
-| `source_pin_id` | The fork pin in the source that keeps the source's state at `fork_point_seq`. A read of the source accepts it as `snapshot_id` (see [Snapshots](#snapshots)). |
+| `source_snapshot_id` | The fork snapshot in the source that keeps the source's state at `fork_point_seq`. A read of the source accepts it as `snapshot_id` (see [Snapshots](#snapshots)). |
 | `rebased_from` | The fork whose unmerged commits a rebase replays into this namespace (`source_namespace_id`), and the fork sequence that the fork's next merge would have started after when the rebase created this namespace (`resume_after_seq`). Only a namespace that a rebase created has this field, and a fork that this route creates never does. |
 
 The optional `snapshot_id` request field selects an unexpired snapshot of the source namespace. Without it, the server captures the current head.
 
-The snapshot has to stay unexpired, and the source namespace has to stay live, while the server verifies the fork pin, which it does after it writes that pin. The server returns these errors:
+The snapshot has to stay unexpired, and the source namespace has to stay live, while the server verifies the fork snapshot, which it does after it writes that fork snapshot. The server returns these errors:
 
-- A missing or expired snapshot (including one that's deleted or expires during fork verification), a fork pin's ID, or an ID owned by another namespace returns `snapshot_not_found`.
+- A missing or expired snapshot (including one that's deleted or expires during fork verification), a fork snapshot's ID, or an ID owned by another namespace returns `snapshot_not_found`.
 - A source deleted during fork verification returns `namespace_deleted`.
 
 Forking doesn't extend the snapshot, and a later deletion of the snapshot doesn't affect the fork. The fork records the `Loonfs-Actor` header as `created_by`, independently of the source's creator. Namespace creation and forking produce no change-feed event.
@@ -2692,13 +2692,13 @@ Forking doesn't extend the snapshot, and a later deletion of the snapshot doesn'
 The new namespace has the same pool as its source. It reads inherited content under the pool's prefix, and it starts its own metadata history. The fork shares the source's existing content and metadata objects instead of copying the filesystem. To create the fork, the server:
 
 1. Might first fold the source's outstanding WAL tail, if the fork captures the current head. The fold writes that tail's inline content to content objects.
-2. Creates a fork pin in the source, so the source-owned immutable metadata segments stay available for as long as the target might still read them.
-3. Verifies the fork pin.
-4. Installs the target namespace with a conditional manifest write. The manifest records the fork pin for the target's lifetime.
+2. Creates a fork snapshot in the source, so the source-owned immutable metadata segments stay available for as long as the target might still read them.
+3. Verifies the fork snapshot.
+4. Installs the target namespace with a conditional manifest write. The manifest records the fork snapshot for the target's lifetime.
 
 The response contains the new namespace's initial state. Its head sequence and retention floor equal the captured basis sequence, and the target's first data commit is one sequence above that head. Inherited file history follows the floor rule from the start. After the target's first base compaction, each inherited file keeps its newest revision at or below the fork point, plus the revisions the target adds.
 
-If the target ID is active, the server returns `namespace_exists` before it writes a source pin. If the target ID is deleted, the server returns `namespace_deleted` before it writes a source pin. If the fork pin can't be verified, the server returns `checkpoint_unavailable`, and no target namespace is installed.
+If the target ID is active, the server returns `namespace_exists` before it writes a fork snapshot. If the target ID is deleted, the server returns `namespace_deleted` before it writes a fork snapshot. If the fork snapshot can't be verified, the server returns `checkpoint_unavailable`, and no target namespace is installed.
 
 ### 6.14 `POST /merges`
 
@@ -2763,7 +2763,7 @@ To merge a fork, the server:
 3. Checks that the fork was made from this namespace, and reads the fork point.
 4. Refuses a fork point below this namespace's retention floor with `rebootstrap_required`.
 5. Reads this namespace's [merge index](glossary.md#merge-index) for the fork's newest merge, which sets where the range starts, and refuses a start below the fork's own retention floor with `rebootstrap_required`.
-6. Folds the fork, so that each content reference in the merge's commit has a layout in the fork's manifest, and pins the folded manifest with a snapshot of the fork named `merge`, which keeps the content that the merge refers to. The server deletes the snapshot after the commit at step 9, and the snapshot expires 15 minutes after the plan started if the delete fails.
+6. Folds the fork, so that each content reference in the merge's commit has a layout in the fork's manifest, and takes a user snapshot named `merge` of the fork's folded manifest, which keeps the content that the merge refers to. The server deletes the snapshot after the commit at step 9, and the snapshot expires 15 minutes after the plan started if the delete fails.
 7. Computes the fork's net change over the range and the commit's planned size, and returns `merge_too_large` with a split hint (described below) if the range's commits touched more inodes than one WAL object could contain an operation for, or if the commit wouldn't fit one WAL object or the merge allowance.
 8. Classifies the change against this namespace's head under the conflict rule ([Validation](format.md#62-validation)), and returns `merge_conflict` if any inode conflicts.
 9. Commits the merge as the only commit in its WAL object. If the commit fails because this namespace changed after the plan, with a code from the table below, the server keeps the reservation, goes back to step 1, and plans the same range again, up to three times, before it returns the commit's error. A later plan reports a row that changed in between, and that isn't the fork's own, as `merge_conflict`. For example, a name that another inode took is a `name` conflict. Another merge of the fork that committed in between makes the later plan return `merge_range_conflict`.
@@ -2909,7 +2909,7 @@ Representative response:
     "fork_basis": {
       "source_namespace_id": "demo",
       "fork_point_seq": 431,
-      "source_pin_id": "pin_00000000000000000035-5c2e8f1a9b7d4e60",
+      "source_snapshot_id": "snp_00000000000000000035-00000000005c2e8f1a9b7d4e60",
       "rebased_from": {"source_namespace_id": "demo-branch", "resume_after_seq": 418}
     },
     "pool_id": "pool_3s0drmj8em84yb4mnetqkz2j0x",
@@ -2945,8 +2945,8 @@ To rebase a fork, the server:
 3. Looks up the commit receipt of `commit_id` in the new fork, and returns the new fork without a conflict report if a replay commit with that ID was committed.
 4. Reserves part of the merge allowance, as a merge does.
 5. Finds where the range starts: after the new fork's previous replay commit, or after `resume_after_seq` for the first replay commit. It refuses a start below the fork's own retention floor, or a new fork whose retention floor is above the new fork's own fork point, with `rebootstrap_required`.
-6. Folds and pins the fork, as a merge does, computes the fork's net change over the range and the commit's planned size, and returns `merge_too_large` if the replay commit doesn't fit, as a merge does.
-7. Classifies the change under the conflict rule against the new fork's head, and reads this namespace's history up to the new fork's fork point through the new fork's fork pin.
+6. Folds the fork and takes a snapshot of it, as a merge does, computes the fork's net change over the range and the commit's planned size, and returns `merge_too_large` if the replay commit doesn't fit, as a merge does.
+7. Classifies the change under the conflict rule against the new fork's head, and reads this namespace's history up to the new fork's fork point through the new fork's fork snapshot.
 8. Commits the changes that don't conflict into the new fork as one replay commit, and returns the new fork and the conflict report. If the commit fails because the new fork changed after the plan, the server keeps the reservation, goes back to step 3, and plans the same range again, up to three times, before it returns the commit's error, as a merge does. A later plan reports a row that changed in between, and that isn't the fork's own, in the conflict report.
 
 If a rebase fails after step 2 created the new fork, the new fork stays, because a later rebase continues into it. Steps 3 to 7 read one view of the new fork's head and one of the fork's, and read a replaced manifest once more from the current one, as a merge does.
@@ -2957,7 +2957,7 @@ The new fork takes ordinary commits while a rebase runs, so the replay commit's 
 
 The conflict rule is the one that a merge applies (see [`POST /merges`](#614-post-merges)), with the new fork in place of this namespace. The new fork supplies the current values, the preconditions, and the name and visibility checks. A row at or below the new fork's fork point is the fork's own when this namespace's commit that wrote it is at or below the fork's fork point or is a merge of the fork. A row above the new fork's fork point is the fork's own when a replay commit wrote it, and a row that any other commit in the new fork wrote, such as a commit that resolves a conflict, is foreign. A file that the fork deleted, merged, and then restored is a `visibility` conflict, because every deletion that the new fork inherits has expired there.
 
-Each conflict entry has the shape of a `merge_conflict` error's `conflict` (see [`POST /merges`](#614-post-merges)), and `kind` can also be `dependency`. For a `dependency` entry, `theirs` is the fork's version of the inode whose change was skipped (the directory, or the moved inode), so its path is the `ours` path of that inode's own entry. A client reads `base` from this namespace with the inode revision content route and `snapshot_id` set to the new fork's `fork_basis.source_pin_id` (see [Snapshots](#snapshots)). The fork pin keeps this namespace's state at the new fork's fork point for as long as the new fork exists, so the base revision stays readable after this namespace's retention floor passes it.
+Each conflict entry has the shape of a `merge_conflict` error's `conflict` (see [`POST /merges`](#614-post-merges)), and `kind` can also be `dependency`. For a `dependency` entry, `theirs` is the fork's version of the inode whose change was skipped (the directory, or the moved inode), so its path is the `ours` path of that inode's own entry. A client reads `base` from this namespace with the inode revision content route and `snapshot_id` set to the new fork's `fork_basis.source_snapshot_id` (see [Snapshots](#snapshots)). The fork snapshot keeps this namespace's state at the new fork's fork point for as long as the new fork exists, so the base revision stays readable after this namespace's retention floor passes it.
 
 The conflict report exists only in the response to the request that committed the replay commit, because a change that the replay commit left out leaves no trace in the new fork. A retry whose `commit_id` identifies a replay commit that was committed returns the new fork without `conflicts`. A client that lost the report deletes the new fork and rebases the fork again into another new fork.
 
@@ -3066,7 +3066,7 @@ A conforming server MUST:
 4. Preserve `(namespace_id, inode_id)` as the canonical identity of an item, and preserve the namespace lifetime described in [Namespaces and identity](format.md#11-namespaces-and-identity).
 5. Resolve content through the reading namespace's pool and the reference's content ID.
 6. Implement tombstone-first delete.
-7. Serve replay from the highest-numbered verified manifest found through `hint.json`, plus the numbered WAL objects after the folded boundary, replayed as logical commits. Pins keep manifest versions for retention, stable reads, restore, and forks.
+7. Serve replay from the highest-numbered verified manifest found through `hint.json`, plus the numbered WAL objects after the folded boundary, replayed as logical commits. Snapshots keep manifest versions for retention, stable reads, restore, and forks.
 8. Map sibling names to name keys exactly as described in [Names and paths](format.md#14-names-and-paths).
 9. Keep upload sessions out of namespace history and the change feed.
 10. Preserve per-commit idempotency, ordering, and change-feed identity, even when it physically batches logical commits in one WAL object.

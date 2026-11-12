@@ -380,7 +380,7 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
     /// Returns whether the row committed at `seq` is the fork's own. A row is
     /// the fork's own when it was committed at or below the fork point, or by
     /// a merge from this fork. A replay commit reads the commit at or below
-    /// the new fork's fork point through the pin.
+    /// the new fork's fork point through the snapshot.
     pub(super) async fn is_own(&mut self, seq: CommitSeq) -> Result<bool> {
         if seq <= self.fork_point_seq {
             return Ok(true);
@@ -389,7 +389,7 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
             return Ok(*own);
         }
         let history = match &self.replay {
-            Some(replay) if seq <= replay.pinned.head().seq => replay.pinned.metadata_view(),
+            Some(replay) if seq <= replay.snapshot.head().seq => replay.snapshot.metadata_view(),
             _ => self.theirs.view(),
         };
         let commit = history.commit_at_seq(seq).await?.ok_or_else(|| {

@@ -13,7 +13,7 @@ async fn a_lost_state_recovers_the_new_fork_that_was_merging_and_merges_the_rest
     let other = namespace_id("other");
     let rebased = namespace_id("rebase-1");
     let mechanics = ScriptedMechanics::new([
-        Answer::ForkPins(vec![other.clone(), sandbox(), rebased.clone()]),
+        Answer::ForkSnapshots(vec![other.clone(), sandbox(), rebased.clone()]),
         Answer::Namespace { rebased_from: None },
         Answer::Namespace {
             rebased_from: Some(sandbox()),
@@ -56,7 +56,7 @@ async fn a_lost_state_recovers_the_new_fork_that_was_merging_and_merges_the_rest
 async fn a_lost_state_rebases_again_when_the_new_fork_never_merged() {
     let rebased = namespace_id("rebase-1");
     let mechanics = ScriptedMechanics::new([
-        Answer::ForkPins(vec![rebased.clone()]),
+        Answer::ForkSnapshots(vec![rebased.clone()]),
         Answer::Namespace {
             rebased_from: Some(sandbox()),
         },
@@ -101,7 +101,7 @@ async fn a_lost_state_rebases_again_when_the_new_fork_never_merged() {
 async fn a_lost_state_fails_when_a_new_forks_next_range_is_unknown() {
     let rebased = namespace_id("rebase-1");
     let mechanics = ScriptedMechanics::new([
-        Answer::ForkPins(vec![rebased.clone()]),
+        Answer::ForkSnapshots(vec![rebased.clone()]),
         Answer::Namespace {
             rebased_from: Some(sandbox()),
         },

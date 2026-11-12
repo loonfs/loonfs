@@ -1,10 +1,10 @@
 //! The manifests, segments, and WAL objects of one namespace that its current
-//! manifest, its WAL tail, and its pins protect.
+//! manifest, its WAL tail, and its snapshots protect.
 
 use super::charged_set::{ChargedMap, ChargedSet, CollectionMemory};
 use super::families::CandidateFamily;
-use super::pinned::{missing_root_manifest, ListedPinKey, PinnedManifest};
-use super::pins::PinSweep;
+use super::snapshot_manifests::{missing_root_manifest, ListedSnapshotKey, SnapshotManifest};
+use super::snapshots::SnapshotSweep;
 use crate::error::Result;
 use crate::limits::NAMESPACE_RETIREMENT_GRACE_WINDOW_MS;
 use crate::namespace::control::LoadedManifest;
@@ -17,7 +17,7 @@ use futures::TryStreamExt;
 use loonfs_objectstore::keys::{extension_segment_object_key, metadata_segment_object_key};
 use loonfs_objectstore::layout::manifest_no_of;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::control::PinPayload;
+use loonfs_types::format::control::SnapshotPayload;
 use loonfs_types::format::manifest::NamespaceManifestPayload;
 use loonfs_types::{ManifestNo, WalNo};
 use std::sync::Arc;
@@ -32,11 +32,11 @@ pub(crate) enum RetirementStatus {
 impl RetirementStatus {
     /// Returns the [retirement](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#95-retirement)
     /// status at `now_ms` of a namespace whose current manifest is `tombstone`
-    /// when the namespace is deleted, and whose complete pin listing returned
-    /// a key when `pinned`.
+    /// when the namespace is deleted, and whose complete snapshot listing returned
+    /// a key when `has_snapshots`.
     pub(super) fn of(
         tombstone: Option<&NamespaceManifestPayload>,
-        pinned: bool,
+        has_snapshots: bool,
         retirement_grace_window_ms: u64,
         now_ms: u64,
     ) -> Self {
@@ -48,7 +48,7 @@ impl RetirementStatus {
             Self::Retained {
                 reclaimable_at_ms: Some(deadline_ms),
             }
-        } else if pinned {
+        } else if has_snapshots {
             Self::Retained {
                 reclaimable_at_ms: None,
             }
@@ -62,14 +62,14 @@ pub(super) struct LiveSet {
     pub(super) current_tombstone: Option<NamespaceManifestPayload>,
     pub(super) discovery_start_manifest_no: ManifestNo,
     pub(super) objects: ChargedSet<String>,
-    /// The records of the namespace's pins that the collection read while it
-    /// loaded its roots, keyed by object key, which the pin sweep uses instead
+    /// The records of the namespace's snapshots that the collection read while it
+    /// loaded its roots, keyed by object key, which the snapshot sweep uses instead
     /// of reading each record again.
-    pub(super) pin_records: ChargedMap<String, PinPayload>,
+    pub(super) snapshot_records: ChargedMap<String, SnapshotPayload>,
     pub(super) memory: CollectionMemory,
-    /// Whether the pin listing returned any key, recognized or not, which
+    /// Whether the snapshot listing returned any key, recognized or not, which
     /// keeps a tombstone from retirement.
-    has_pins: bool,
+    has_snapshots: bool,
     /// The configured grace, or the retirement grace when that's longer.
     pub(super) retirement_grace_window_ms: u64,
     pub(super) now_ms: u64,
@@ -78,10 +78,10 @@ pub(super) struct LiveSet {
 
 impl LiveSet {
     /// Loads the namespace's roots and the objects that they protect: the
-    /// current manifest, the WAL tail above it, and the manifests that pins
+    /// current manifest, the WAL tail above it, and the manifests that snapshots
     /// keep, with their metadata and extension segments.
     ///
-    /// The object keys and pin records that the collection keeps are charged
+    /// The object keys and snapshot records that the collection keeps are charged
     /// to the read working memory of the namespace's segment cache as they
     /// arrive.
     pub(super) async fn load<S: ObjectStore>(
@@ -104,22 +104,22 @@ impl LiveSet {
             current_tombstone: head.status.is_deleted().then(|| head.clone()),
             discovery_start_manifest_no: anchor.hint.state.manifest_no,
             objects: ChargedSet::new(&memory),
-            pin_records: ChargedMap::new(&memory),
+            snapshot_records: ChargedMap::new(&memory),
             memory,
-            has_pins: false,
+            has_snapshots: false,
             retirement_grace_window_ms: grace_window_ms.max(NAMESPACE_RETIREMENT_GRACE_WINDOW_MS),
             now_ms: clock.request_at_ms(),
             live_folded_wal_no: live_folded_wal_no(&anchor.read_state),
         };
         let outcome = async {
             live.protect_manifest(&anchor.manifest)?;
-            live.load_pins(namespace, head.manifest_no, grace_window_ms, clock)
+            live.load_snapshots(namespace, head.manifest_no, grace_window_ms, clock)
                 .await
         }
         .await;
         tracing::info!(namespace_id = %namespace_id,
             object_key_bytes = live.objects.reserved_bytes(),
-            pin_record_bytes = live.pin_records.reserved_bytes(),
+            snapshot_record_bytes = live.snapshot_records.reserved_bytes(),
             live_set_bytes = live.memory.held_bytes(),
             read_memory_limit_bytes = live.memory.limit(),
             complete = outcome.is_ok(),
@@ -128,52 +128,54 @@ impl LiveSet {
         Ok(live)
     }
 
-    /// Protects the manifest of each listed pin, and keeps each pin record
-    /// for the pin sweep.
+    /// Protects the manifest of each listed snapshot, and keeps each snapshot record
+    /// for the snapshot sweep.
     ///
-    /// A pin whose manifest is missing fails the collection unless pin cleanup
-    /// would delete the pin.
-    async fn load_pins<S: ObjectStore>(
+    /// A snapshot whose manifest is missing fails the collection unless snapshot cleanup
+    /// would delete the snapshot.
+    async fn load_snapshots<S: ObjectStore>(
         &mut self,
         namespace: &NamespaceStore<S>,
         current_manifest_no: ManifestNo,
         grace_window_ms: u64,
         clock: &OperationClock,
     ) -> Result<()> {
-        let mut pins = namespace.list_pinned_manifests(current_manifest_no);
-        while let Some(listed) = pins.try_next().await? {
-            self.has_pins = true;
-            let ListedPinKey::Pin(pin) = listed else {
+        let mut snapshots = namespace.list_snapshot_manifests(current_manifest_no);
+        while let Some(listed) = snapshots.try_next().await? {
+            self.has_snapshots = true;
+            let ListedSnapshotKey::Snapshot(snapshot) = listed else {
                 continue;
             };
-            match &pin.manifest {
-                PinnedManifest::Loaded(manifest) => self.protect_manifest(manifest)?,
-                PinnedManifest::Rooted => {}
-                // A failed pin installation can outlive both its basis and its
+            match &snapshot.manifest {
+                SnapshotManifest::Loaded(manifest) => self.protect_manifest(manifest)?,
+                SnapshotManifest::Rooted => {}
+                // A failed snapshot installation can outlive both its basis and its
                 // cleanup attempt. Another collector can also remove a released
-                // pin's basis after this collection listed it. Every pin for a
-                // missing manifest is checked on its own, because another pin
+                // snapshot's basis after this collection listed it. Every snapshot for a
+                // missing manifest is checked on its own, because another snapshot
                 // for the number can still require retention when an earlier
-                // pin was deletable. The pin's record is read again, because
-                // the pin can have been released after the listing read it.
-                PinnedManifest::Missing(manifest_no) => {
+                // snapshot was deletable. The snapshot's record is read again, because
+                // the snapshot can have been released after the listing read it.
+                SnapshotManifest::Missing(manifest_no) => {
                     match namespace
-                        .sweep_pin(&pin.key, grace_window_ms, self, clock)
+                        .sweep_snapshot(&snapshot.key, grace_window_ms, self, clock)
                         .await?
                     {
-                        PinSweep::Retain { .. } => {
+                        SnapshotSweep::Retain { .. } => {
                             return Err(missing_root_manifest(
                                 &namespace.namespace_id,
                                 *manifest_no,
-                                &pin.key,
+                                &snapshot.key,
                             ));
                         }
-                        PinSweep::Gone | PinSweep::DeleteUser | PinSweep::DeleteFork => continue,
+                        SnapshotSweep::Gone
+                        | SnapshotSweep::DeleteUser
+                        | SnapshotSweep::DeleteFork => continue,
                     }
                 }
             }
-            if let Some(record) = pin.record {
-                self.pin_records.insert(pin.key, record)?;
+            if let Some(record) = snapshot.record {
+                self.snapshot_records.insert(snapshot.key, record)?;
             }
         }
         Ok(())
@@ -207,7 +209,7 @@ impl LiveSet {
                     .is_some_and(|folded_wal_no| object_is_required(key, folded_wal_no)),
                 CandidateFamily::MetadataSegments
                 | CandidateFamily::ExtensionSegments
-                | CandidateFamily::Pins => false,
+                | CandidateFamily::Snapshots => false,
             }
     }
 
@@ -219,7 +221,7 @@ impl LiveSet {
     pub(super) fn retirement_status(&self) -> RetirementStatus {
         RetirementStatus::of(
             self.current_tombstone.as_ref(),
-            self.has_pins,
+            self.has_snapshots,
             self.retirement_grace_window_ms,
             self.now_ms,
         )

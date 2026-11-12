@@ -209,8 +209,8 @@ mod tests {
                 Ok(GrepIndexStatus::Backfilling {
                     captured_seq: CommitSeq(3),
                     cursor_inode_id: None,
-                    checkpoint_id: loonfs_types::PinId::parse(
-                        "pin_00000000000000000001-0123456789abcdef",
+                    checkpoint_id: loonfs_types::SnapshotId::parse(
+                        "snp_00000000000000000001-00000000000123456789abcdef",
                     )
                     .expect("checkpoint id"),
                 })

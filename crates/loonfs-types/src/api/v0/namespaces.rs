@@ -1,7 +1,8 @@
 //! Namespace requests and responses for the v0 HTTP API.
 
 use crate::{
-    ActorId, CommitSeq, ManifestNo, NamespaceAccess, NamespaceId, PinId, PoolId, PrincipalScope,
+    ActorId, CommitSeq, ManifestNo, NamespaceAccess, NamespaceId, PoolId, PrincipalScope,
+    SnapshotId,
 };
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
@@ -39,7 +40,7 @@ pub struct ForkNamespaceRequest {
     /// An unexpired snapshot to fork from. Without it, the fork starts from the current head.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub snapshot_id: Option<PinId>,
+    pub snapshot_id: Option<SnapshotId>,
 }
 
 /// The current state of one namespace.
@@ -113,9 +114,9 @@ pub struct NamespaceForkBasis {
     pub source_namespace_id: NamespaceId,
     /// The source namespace's sequence that the fork captured.
     pub fork_point_seq: CommitSeq,
-    /// The fork pin that keeps the source's state at `fork_point_seq` readable. A read of the
+    /// The fork snapshot that keeps the source's state at `fork_point_seq` readable. A read of the
     /// source namespace accepts it as `snapshot_id`.
-    pub source_pin_id: PinId,
+    pub source_snapshot_id: SnapshotId,
     /// The fork whose unmerged commits a rebase replays into this namespace. Only a namespace that
     /// a rebase created has this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]

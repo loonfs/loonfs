@@ -130,7 +130,7 @@ impl Model {
                 deadline: started + GRACE,
             });
         }
-        // Each fork pins its source, so the first member is retired last, and
+        // Each fork keeps a fork snapshot on its source, so the first member is retired last, and
         // the pool has no members from then on.
         self.collectable |= retired && namespace == 0;
     }

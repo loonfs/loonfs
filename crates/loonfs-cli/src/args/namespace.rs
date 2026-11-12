@@ -3,7 +3,7 @@
 use super::flags::{ActorSelectorArgs, PaginationArgs};
 use super::parse::parse_change_seq;
 use clap::{Args, Subcommand, ValueEnum, ValueHint};
-use loonfs_types::{CommitSeq, NamespaceId, PinId, PrincipalId};
+use loonfs_types::{CommitSeq, NamespaceId, PrincipalId, SnapshotId};
 use std::num::NonZeroU64;
 use std::path::PathBuf;
 
@@ -87,7 +87,7 @@ pub(crate) struct NamespaceForkArgs {
     pub new_namespace_id: NamespaceId,
     /// Fork from an unexpired snapshot instead of the current head.
     #[arg(long = "snapshot", value_name = "id")]
-    pub snapshot_id: Option<PinId>,
+    pub snapshot_id: Option<SnapshotId>,
 }
 
 #[derive(Debug, Args)]
@@ -165,7 +165,7 @@ pub(crate) struct SnapshotExtendArgs {
     pub target: SnapshotTargetArgs,
     /// Snapshot ID to extend.
     #[arg(value_hint = ValueHint::Other)]
-    pub snapshot_id: PinId,
+    pub snapshot_id: SnapshotId,
     /// New lifetime from now, in milliseconds. The expiry never moves
     /// earlier.
     #[arg(long)]
@@ -178,5 +178,5 @@ pub(crate) struct SnapshotDeleteArgs {
     pub target: SnapshotTargetArgs,
     /// Snapshot ID to delete.
     #[arg(value_hint = ValueHint::Other)]
-    pub snapshot_id: PinId,
+    pub snapshot_id: SnapshotId,
 }

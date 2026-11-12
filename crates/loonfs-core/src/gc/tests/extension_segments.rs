@@ -60,7 +60,7 @@ async fn collect(store: &LocalFsStore, namespace_id: &NamespaceId) -> GcResponse
 }
 
 /// Checks that a collection keeps the extension segments that the current
-/// manifest or a pinned manifest lists, and an unrecognized key under the
+/// manifest or a snapshot's manifest lists, and an unrecognized key under the
 /// extension's prefix, and deletes an aged segment once no root lists it,
 /// including the segments of a tombstone, which lists none.
 #[tokio::test]
@@ -81,9 +81,9 @@ async fn an_extension_segment_goes_once_no_root_lists_it() {
     let first = extension_segment(&namespace_id, 1);
     let first_key = write_segment(&store, &first).await;
     publish_run(&store, &namespace_id, first).await;
-    let pin = create_checkpoint(&store, &namespace_id, &setup)
+    let snapshot = create_checkpoint(&store, &namespace_id, &setup)
         .await
-        .expect("pin the first entry");
+        .expect("take a snapshot of the first entry");
     let second = extension_segment(&namespace_id, 2);
     let second_key = write_segment(&store, &second).await;
     publish_run(&store, &namespace_id, second).await;
@@ -102,9 +102,9 @@ async fn an_extension_segment_goes_once_no_root_lists_it() {
     }
 
     crate::test_support::namespace_store(&store, &namespace_id)
-        .delete_pin(&pin.checkpoint_id)
+        .delete_snapshot_record(&snapshot.checkpoint_id)
         .await
-        .expect("delete the pin");
+        .expect("delete the snapshot");
     let report = collect(&store, &namespace_id).await;
     assert_eq!(report.deleted.extension_segments, 1, "{report:?}");
     assert!(store.head(&first_key).await.expect("first").is_none());
@@ -127,10 +127,10 @@ async fn an_extension_segment_goes_once_no_root_lists_it() {
 
 /// Checks that a fork's first manifest lists the segments of its source's
 /// entry, and that a segment the fork inherited stays after the source
-/// stops listing it, because the fork pin keeps the source's manifest that
-/// lists it, and goes once the fork's retirement releases the pin.
+/// stops listing it, because the fork snapshot keeps the source's manifest that
+/// lists it, and goes once the fork's retirement releases the snapshot.
 #[tokio::test]
-async fn an_inherited_extension_segment_stays_until_no_fork_pin_keeps_it() {
+async fn an_inherited_extension_segment_stays_until_no_fork_snapshot_keeps_it() {
     let directory = tempdir().expect("directory");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let source = NamespaceId::parse("extension-source").expect("namespace");

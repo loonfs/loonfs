@@ -14,7 +14,9 @@ use loonfs_grep::{
     GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepReorganizeOutcome, GrepService,
     GrepWorker,
 };
-use loonfs_objectstore::keys::{extension_segment_prefix, metadata_manifest_prefix, pin};
+use loonfs_objectstore::keys::{
+    extension_segment_prefix, metadata_manifest_prefix, snapshot_record,
+};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_test_support::ids::{first_page, nonzero_usize};
@@ -22,7 +24,7 @@ use loonfs_test_support::stores::{
     replace_object, FailStore, InjectedError, KeyPredicate, OperationContext, OperationSelector,
     RecordingStore,
 };
-use loonfs_types::format::control::PinOwner;
+use loonfs_types::format::control::SnapshotOwner;
 use loonfs_types::format::manifest::ExtensionEntry;
 use loonfs_types::{
     AbsolutePath, CommitSeq, GrepRequest, GrepResponse, GrepScope, IndexSegmentId, PageRequest,
@@ -164,10 +166,10 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
     let manifest = crate::common::control::grep_entry(&store, &namespace_id)
         .await
         .expect("manifest exists");
-    let GrepIndexStatus::Backfilling { pin_id, .. } = manifest.status() else {
+    let GrepIndexStatus::Backfilling { snapshot_id, .. } = manifest.status() else {
         panic!("enable must publish checkpointed backfill: {:?}", manifest);
     };
-    let pin_id = pin_id.clone();
+    let snapshot_id = snapshot_id.clone();
 
     let policy = GramIndexBuildPolicy {
         max_files_per_step: NonZeroUsize::MIN,
@@ -185,7 +187,11 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
     assert_eq!(error.code(), ErrorCode::NotSupported);
 
     drive_worker_to_current(&worker, &namespace_id, policy).await;
-    assert!(control::pin(&store, &namespace_id, &pin_id).await.is_none());
+    assert!(
+        control::snapshot_record(&store, &namespace_id, &snapshot_id)
+            .await
+            .is_none()
+    );
     let response = new_query(&store, &namespace_id, &request("needle"))
         .await
         .expect("materialized query");
@@ -571,7 +577,7 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
         "a rebootstrap keeps the index's segments, whose postings stay valid"
     );
 
-    // The second trigger: the pinned checkpoint stops pinning its basis
+    // The second trigger: the checkpoint stops keeping its basis
     // mid-backfill. The enumeration says so out loud instead of quietly
     // answering current state, and the worker starts over again.
     namespace
@@ -585,7 +591,7 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
         .expect("vanished checkpoint restart");
     assert_matches!(vanished, GrepBuildOutcome::BackfillRestarted { .. });
     // A deleted record is finished for good, so the new attempt takes a
-    // pin of its own: a new id, pinning its basis, with the walk starting
+    // snapshot of its own: a new id, keeping its basis, with the walk starting
     // from nothing.
     let fresh_checkpoint_id = assert_fresh_backfill_attempt(&store, &namespace_id).await;
     assert_ne!(fresh_checkpoint_id, gap_checkpoint_id);
@@ -642,7 +648,7 @@ async fn retention_passing_a_backfill_checkpoint_never_serves_a_partial_query() 
     }
 
     // The maintenance handle is a separate runtime. The feed reads the
-    // retention floor from the reader's pinned manifest, so the worker must
+    // retention floor from the manifest of the reader's snapshot, so the worker must
     // revalidate on every read to observe the advance within this test.
     let worker = GrepHost::with_reader(&store, "grep-worker-tests", |builder| {
         builder.config(loonfs::RuntimeConfig {
@@ -739,7 +745,7 @@ async fn retention_passing_a_backfill_checkpoint_never_serves_a_partial_query() 
 /// snapshot, deletes the expired one, and builds an index that serves the
 /// namespace's files.
 #[tokio::test]
-async fn an_expired_backfill_pin_restarts_the_backfill_from_a_fresh_pin() {
+async fn an_expired_backfill_snapshot_restarts_the_backfill_from_a_fresh_snapshot() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
@@ -772,17 +778,17 @@ async fn an_expired_backfill_pin_restarts_the_backfill_from_a_fresh_pin() {
     worker.enable(&namespace_id).await.expect("enable");
     let checkpoint_id = assert_fresh_backfill_attempt(&store, &namespace_id).await;
 
-    // Expire the pin under the backfill without deleting it.
-    let key = pin(&namespace_id, &checkpoint_id);
-    let mut record = control::pin(&store, &namespace_id, &checkpoint_id)
+    // Expire the snapshot under the backfill without deleting it.
+    let key = snapshot_record(&namespace_id, &checkpoint_id);
+    let mut record = control::snapshot_record(&store, &namespace_id, &checkpoint_id)
         .await
-        .expect("backfill pin");
+        .expect("backfill snapshot");
     assert!(
         record.owner.expires_at_ms().is_some(),
-        "the backfill pin carries a ttl"
+        "the backfill snapshot carries a ttl"
     );
-    let PinOwner::User { expires_at_ms, .. } = &mut record.owner else {
-        panic!("the backfill pin is user-owned");
+    let SnapshotOwner::User { expires_at_ms, .. } = &mut record.owner else {
+        panic!("the backfill snapshot is user-owned");
     };
     *expires_at_ms = Some(record.created_at_ms);
     let expired = record;
@@ -791,7 +797,7 @@ async fn an_expired_backfill_pin_restarts_the_backfill_from_a_fresh_pin() {
         &key,
         Bytes::from(
             loonfs_types::format::control::encode_control_state(
-                loonfs_types::format::control::ControlObjectKind::Pin,
+                loonfs_types::format::control::ControlObjectKind::Snapshot,
                 &expired,
             )
             .expect("encode record"),
@@ -801,29 +807,31 @@ async fn an_expired_backfill_pin_restarts_the_backfill_from_a_fresh_pin() {
     .expect("write the expired record");
 
     drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
-    assert!(control::pin(&store, &namespace_id, &checkpoint_id)
-        .await
-        .is_none());
+    assert!(
+        control::snapshot_record(&store, &namespace_id, &checkpoint_id)
+            .await
+            .is_none()
+    );
     let response = new_query(&store, &namespace_id, &request("needle"))
         .await
-        .expect("query after a backfill on an expired pin");
+        .expect("query after a backfill on an expired snapshot");
     assert_eq!(response.matches.len(), 1);
     writer.shutdown().await.expect("shutdown");
 }
 
 /// Asserts the namespace's grep entry is at the start of a backfill attempt
-/// — nothing walked, an active checkpoint pinning its basis — and returns
+/// — nothing walked, an active checkpoint keeping its basis — and returns
 /// the checkpoint that attempt holds.
 async fn assert_fresh_backfill_attempt(
     store: &SharedObjectStore,
     namespace_id: &NamespaceId,
-) -> loonfs_types::PinId {
+) -> loonfs_types::SnapshotId {
     let manifest = crate::common::control::grep_entry(store, namespace_id)
         .await
         .expect("grep entry exists");
     let GrepIndexStatus::Backfilling {
         cursor_inode_id,
-        pin_id,
+        snapshot_id,
         ..
     } = manifest.status()
     else {
@@ -833,8 +841,10 @@ async fn assert_fresh_backfill_attempt(
         *cursor_inode_id, None,
         "a fresh backfill starts the walk from the beginning"
     );
-    assert!(control::pin(store, namespace_id, pin_id).await.is_some());
-    pin_id.clone()
+    assert!(control::snapshot_record(store, namespace_id, snapshot_id)
+        .await
+        .is_some());
+    snapshot_id.clone()
 }
 
 /// Every grep segment the namespace's manifest names, for asserting that an
@@ -933,8 +943,8 @@ async fn commits_during_backfill_are_indexed_once_by_the_feed_phase() {
         first
     );
 
-    // Commits strictly after the pinned sequence: one new file, and a
-    // replacement of a file the checkpoint already pinned.
+    // Commits strictly after the checkpoint's sequence: one new file, and a
+    // replacement of a file the checkpoint already captured.
     namespace
         .put_file(
             "/during.txt",
@@ -983,7 +993,7 @@ async fn commits_during_backfill_are_indexed_once_by_the_feed_phase() {
         .expect("query the superseded revision");
     assert!(
         superseded.matches.is_empty(),
-        "a revision the checkpoint pinned but the feed replaced must not match"
+        "a revision the checkpoint kept but the feed replaced must not match"
     );
     writer.shutdown().await.expect("shutdown");
 }
@@ -1408,7 +1418,7 @@ async fn a_backfill_checkpoint_mismatch_is_corruption_without_writes() {
 }
 
 #[tokio::test]
-async fn a_backfilling_entry_without_a_pin_id_is_index_corrupt() {
+async fn a_backfilling_entry_without_a_snapshot_id_is_index_corrupt() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
@@ -1433,13 +1443,13 @@ async fn a_backfilling_entry_without_a_pin_id_is_index_corrupt() {
         entry["status"]
             .as_object_mut()
             .expect("backfilling status is an object")
-            .remove("pin_id")
-            .expect("a backfilling entry has a pin id");
+            .remove("snapshot_id")
+            .expect("a backfilling entry has a snapshot id");
     })
     .await;
 
     assert_corrupt_index_error(
-        "backfilling entry missing pin id",
+        "backfilling entry missing snapshot id",
         new_query(&store, &namespace_id, &request("needle")).await,
     );
     writer.shutdown().await.expect("shutdown");
@@ -1511,10 +1521,12 @@ async fn disable_resets_an_invalid_entry_and_enable_starts_a_new_backfill() {
             .expect("grep's entry");
         assert_matches!(disabled.status(), GrepIndexStatus::Disabled {}, "{case}");
         assert!(disabled.runs().is_empty(), "{case}");
-        if let GrepIndexStatus::Backfilling { pin_id, .. } = before.status() {
+        if let GrepIndexStatus::Backfilling { snapshot_id, .. } = before.status() {
             assert!(
-                control::pin(&store, &namespace_id, pin_id).await.is_some(),
-                "the invalid entry's backfill pin is left to expire"
+                control::snapshot_record(&store, &namespace_id, snapshot_id)
+                    .await
+                    .is_some(),
+                "the invalid entry's backfill snapshot is left to expire"
             );
         }
         assert_not_enabled_error(
@@ -2144,7 +2156,7 @@ async fn a_backfilling_manifest_never_reports_a_built_through_sequence() {
             captured_seq: CommitSeq(1),
             cursor_inode_id: None,
             checkpoint_id: match &state {
-                GrepIndexStatus::Backfilling { pin_id, .. } => pin_id.clone(),
+                GrepIndexStatus::Backfilling { snapshot_id, .. } => snapshot_id.clone(),
                 other => panic!("expected a backfill: {other:?}"),
             },
         }

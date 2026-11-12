@@ -1,4 +1,4 @@
-//! Receipt retention is independent of retained revisions and pinned history.
+//! Receipt retention is independent of retained revisions and the history that snapshots keep.
 
 use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
@@ -6,7 +6,7 @@ use crate::compaction::CompactionUnitOutcome;
 use crate::gc::GcOptions;
 use crate::test_support::WriterAt;
 use loonfs_test_support::stores::MetadataMapStore;
-use loonfs_types::format::control::PinOwner;
+use loonfs_types::format::control::SnapshotOwner;
 use std::assert_matches;
 
 fn replace(bytes: &'static [u8]) -> CommitCandidate {
@@ -92,8 +92,8 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
         .expect("original inline commit");
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let snapshot = namespace
-        .create_pin(
-            PinOwner::User {
+        .create_snapshot_record(
+            SnapshotOwner::User {
                 name: "before reuse".into(),
                 expires_at_ms: Some(u64::MAX),
             },
@@ -103,7 +103,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
             &context.clock(),
         )
         .await
-        .expect("pin the original history");
+        .expect("take a snapshot of the original history");
     // The session advances the floor itself, through a floor object at its
     // tip, so it keeps its position for the replay below.
     let floor =
@@ -222,7 +222,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
             .clock(),
         )
         .await
-        .expect("collect old WAL and unpinned segments");
+        .expect("collect old WAL and segments that no snapshot keeps");
     assert!(store
         .list_prefix(&wal_prefix(&namespace_id))
         .await
@@ -251,16 +251,16 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
         .load_current_metadata_view()
         .await
         .expect("fresh current view");
-    let pinned =
+    let snapshot_basis =
         crate::test_support::NamespaceFixture::new(&store, &current.head().namespace_id, &context)
             .namespace
-            .load_snapshot_read_basis(current.head(), &snapshot.pin_id)
+            .load_snapshot_read_basis(current.head(), &snapshot.snapshot_id)
             .await
-            .expect("snapshot still pins original history");
+            .expect("snapshot still keeps original history");
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let old = namespace
         .load_metadata_view(&crate::RuntimeReadContext {
-            read_basis: pinned,
+            read_basis: snapshot_basis,
             tail: None,
             visible_seq: None,
         })

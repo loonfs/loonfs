@@ -2,13 +2,13 @@
 //! parameters and request bodies.
 
 use loonfs_types::options::{Consistency, ReadAt, ReadConsistency};
-use loonfs_types::PinId;
+use loonfs_types::SnapshotId;
 
 /// The fields that say what a read reads at: `snapshot_id` for a snapshot,
 /// and the consistency fields of a live read that sets a consistency. A live
 /// read that sets none sends neither, so the server's default applies.
 pub(crate) struct ReadAtFields {
-    pub(crate) snapshot_id: Option<PinId>,
+    pub(crate) snapshot_id: Option<SnapshotId>,
     pub(crate) consistency: Option<ReadConsistency>,
     pub(crate) max_staleness_ms: Option<u64>,
 }

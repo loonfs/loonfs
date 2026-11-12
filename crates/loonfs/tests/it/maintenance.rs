@@ -59,7 +59,7 @@ fn namespace_diagnostics_reports_wal_tail_objects() {
 
 /// Checks that namespace diagnostics count the snapshots that haven't
 /// expired, with or without an expiry, and leave out expired snapshots and
-/// fork pins.
+/// fork snapshots.
 #[tokio::test]
 async fn namespace_diagnostics_count_unexpired_snapshots_only() {
     let temp_dir = tempdir().expect("tempdir");
@@ -205,11 +205,11 @@ fn maintenance_step_at_wal_object_threshold_folds_the_wal() {
     // under `checkpoints/`.
     let raw_store = LocalFsStore::new(temp_dir.path()).expect("store");
     let records =
-        block_on(raw_store.list_prefix(&loonfs_objectstore::keys::pin_prefix(&namespace_id)))
-            .expect("list pins");
+        block_on(raw_store.list_prefix(&loonfs_objectstore::keys::snapshot_prefix(&namespace_id)))
+            .expect("list snapshots");
     assert!(
         records.is_empty(),
-        "maintenance pass created pins: {records:?}"
+        "maintenance pass created snapshots: {records:?}"
     );
 }
 

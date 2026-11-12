@@ -1,6 +1,6 @@
 //! A rebase's replay commit: the merge of a fork into a new fork of the
 //! fork's source, classified against the new fork's head with the source's
-//! history read through the new fork's pin, which skips the changes that
+//! history read through the new fork's snapshot, which skips the changes that
 //! conflict and reports them
 //! ([design note](https://github.com/loonfs/loonfs/blob/main/docs/design/merge.md#rebasing)).
 
@@ -51,12 +51,12 @@ impl ReplayPlan {
 }
 
 /// What a replay commit's classification has beyond a merge's: the source
-/// through the new fork's pin, and the conflict report.
+/// through the new fork's snapshot, and the conflict report.
 pub(super) struct Replay<'v, S: ObjectStore + ?Sized> {
-    /// The namespace that the rebase forked, read through the new fork's pin,
+    /// The namespace that the rebase forked, read through the new fork's snapshot,
     /// whose history at or below the new fork's fork point the
     /// classification reads.
-    pub(super) pinned: &'v LoadedMetadataView<'v, S>,
+    pub(super) snapshot: &'v LoadedMetadataView<'v, S>,
     /// Every conflict, in the order that the classification finds them.
     pub(super) report: Vec<MergeConflict>,
 }
@@ -71,7 +71,7 @@ struct ReplayRange<'a> {
 
 /// One part of the history after the fork point that the subtree check
 /// reads with one diff: the merged-into namespace's history for a merge, and
-/// for a replay commit, the source's part through the new fork's pin or the
+/// for a replay commit, the source's part through the new fork's snapshot or the
 /// new fork's own part above its fork point.
 pub(super) struct HistoryPart<'v, S: ObjectStore + ?Sized> {
     pub(super) view: &'v LoadedMetadataView<'v, S>,
@@ -113,7 +113,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// Checks that this namespace, read at `context`, is a rebase's new fork
     /// for `fork`, read at `fork_context`, and that the replay commit's range
     /// starts at or above both floors, as [`Self::plan_replay`] does, and
-    /// returns this namespace's fork basis, which identifies the pin that
+    /// returns this namespace's fork basis, which identifies the snapshot that
     /// the plan reads the source through. A caller runs the checks before it
     /// folds the fork, so a request that would fail them folds nothing.
     pub async fn check_replay<F>(
@@ -132,7 +132,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// Plans a replay commit of `fork`, read at `fork_context`, into this
     /// namespace, a rebase's new fork read at `context`. `source`, read at
     /// `source_context`, is the namespace that the rebase forked, read
-    /// through this namespace's fork pin, and a context at another manifest
+    /// through this namespace's fork snapshot, and a context at another manifest
     /// returns `namespace_corrupt`, as a context of another namespace does
     /// ([design note](https://github.com/loonfs/loonfs/blob/main/docs/design/merge.md#rebasing)).
     ///
@@ -143,7 +143,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// values, the preconditions, the name and visibility checks, and the
     /// order. It reads whether a row at or below this namespace's fork point
     /// is the fork's own, the base version, and the source's part of a
-    /// subtree check through the pin, and the rest from this namespace. It
+    /// subtree check through the snapshot, and the rest from this namespace. It
     /// fails with `merge_too_large` when the commit wouldn't fit one WAL
     /// object or `allowance`, skips each conflicting change and each change
     /// that depends on a skipped one, and reports them. Like a merge's
@@ -173,23 +173,23 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             fork_point_seq,
             source_after_seq,
         } = replay_range_start(&new_fork, &fork_view, request).await?;
-        let pinned = source.namespace.load_metadata_view(source_context).await?;
-        if pinned.head().namespace_id != basis.manifest.owner_namespace_id
-            || pinned.anchor.manifest_no != basis.manifest.manifest_no
+        let snapshot = source.namespace.load_metadata_view(source_context).await?;
+        if snapshot.head().namespace_id != basis.manifest.owner_namespace_id
+            || snapshot.anchor.manifest_no != basis.manifest.manifest_no
         {
             return Err(CoreError::NamespaceCorrupt(format!(
-                "a replay commit reads `{}` at manifest `{}` through the new fork's pin, but \
+                "a replay commit reads `{}` at manifest `{}` through the new fork's snapshot, but \
                  its context is at manifest `{}` of `{}`",
                 basis.manifest.owner_namespace_id,
                 basis.manifest.manifest_no,
-                pinned.anchor.manifest_no,
-                pinned.head().namespace_id
+                snapshot.anchor.manifest_no,
+                snapshot.head().namespace_id
             )));
         }
         let planned = self
             .plan_merge_commit(
                 &new_fork,
-                Some(&pinned),
+                Some(&snapshot),
                 fork,
                 &fork_view,
                 (fork_point_seq, source_after_seq),
@@ -245,7 +245,7 @@ impl<'v, S: ObjectStore + ?Sized> Classifier<'v, S> {
     /// Returns the parts of the history after the fork point that the
     /// subtree check of `checks` reads: the merged-into namespace's history
     /// up to its head for a merge, and for a replay commit, the source's
-    /// history through the pin up to the new fork's fork point, at each
+    /// history through the snapshot up to the new fork's fork point, at each
     /// directory's path there, and the new fork's own history above it, at
     /// each directory's current path.
     pub(super) async fn history_parts(
@@ -260,7 +260,7 @@ impl<'v, S: ObjectStore + ?Sized> Classifier<'v, S> {
                 .map(|(index, check)| (index, check.path.clone()))
                 .collect()
         };
-        let Some(pinned) = self.replay.as_ref().map(|replay| replay.pinned) else {
+        let Some(snapshot) = self.replay.as_ref().map(|replay| replay.snapshot) else {
             return Ok(vec![HistoryPart {
                 view: main,
                 from_seq: self.fork_point_seq,
@@ -268,26 +268,26 @@ impl<'v, S: ObjectStore + ?Sized> Classifier<'v, S> {
                 paths: current_paths(),
             }]);
         };
-        let own_fork_point_seq = pinned.head().seq;
+        let own_fork_point_seq = snapshot.head().seq;
         let mut parts = Vec::with_capacity(2);
         // A directory that an earlier replay commit created has no path at
         // the new fork's fork point, and nothing below it changed before.
-        let mut pinned_head = StateReader::new(pinned.metadata_view(), &self.memory);
-        let mut pinned_paths = Vec::with_capacity(checks.len());
+        let mut snapshot_head = StateReader::new(snapshot.metadata_view(), &self.memory);
+        let mut snapshot_paths = Vec::with_capacity(checks.len());
         for (index, check) in checks.iter().enumerate() {
-            let path = pinned_head
+            let path = snapshot_head
                 .state(check.directory)
                 .await?
                 .and_then(|state| state.visible)
                 .map(|visible| visible.path);
-            pinned_paths.extend(path.map(|path| (index, path)));
+            snapshot_paths.extend(path.map(|path| (index, path)));
         }
-        if !pinned_paths.is_empty() {
+        if !snapshot_paths.is_empty() {
             parts.push(HistoryPart {
-                view: pinned,
+                view: snapshot,
                 from_seq: self.fork_point_seq,
                 to_seq: own_fork_point_seq,
-                paths: pinned_paths,
+                paths: snapshot_paths,
             });
         }
         if main.head().seq > own_fork_point_seq {

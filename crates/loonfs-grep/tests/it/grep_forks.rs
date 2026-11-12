@@ -1,6 +1,6 @@
 //! A fork's grep index: the fork inherits its source's entry at the fork
 //! point, reads the source's commits that the inherited index doesn't cover
-//! through the fork pin, restarts an inherited backfill in the fork, and
+//! through the fork snapshot, restarts an inherited backfill in the fork, and
 //! clears an inherited reorganization.
 
 use crate::common::control;
@@ -122,11 +122,11 @@ async fn a_fork_answers_from_the_inherited_index_before_any_step() {
 }
 
 /// Checks that a fork whose inherited watermark is below the fork point
-/// reads the source's commits between the two through the fork pin, in a
+/// reads the source's commits between the two through the fork snapshot, in a
 /// query's tail and in the fork's first build step, after the source's
 /// retention floor has passed the fork point.
 #[tokio::test]
-async fn the_gap_below_the_fork_point_is_read_through_the_fork_pin() {
+async fn the_gap_below_the_fork_point_is_read_through_the_fork_snapshot() {
     let fixture = ContentFixture::new("fork-gap").await;
     fixture.put("/a.txt", b"indexed needle\n").await;
     fixture
@@ -172,7 +172,7 @@ async fn the_gap_below_the_fork_point_is_read_through_the_fork_pin() {
                 assert_eq!(built_through_seq, gap);
                 break;
             }
-            other => panic!("the gap is readable through the pin, not {other:?}"),
+            other => panic!("the gap is readable through the snapshot, not {other:?}"),
         }
     }
     assert_eq!(indexed, 1, "the gap's commit, and nothing before it");
@@ -185,7 +185,7 @@ async fn the_gap_below_the_fork_point_is_read_through_the_fork_pin() {
 }
 
 /// Checks that a fork with commits of its own and an inherited watermark
-/// below the fork point reads the gap through the fork pin and then its own
+/// below the fork point reads the gap through the fork snapshot and then its own
 /// feed, in a query's tail and in the fork's build steps, which end up to
 /// date at the fork's head.
 #[tokio::test]
@@ -265,7 +265,7 @@ async fn a_fork_reads_the_gap_and_then_its_own_commits() {
                 assert_eq!(built_through_seq, own, "up to date at the fork's head");
                 break;
             }
-            other => panic!("the gap is readable through the pin, not {other:?}"),
+            other => panic!("the gap is readable through the snapshot, not {other:?}"),
         }
     }
     assert_eq!(indexed, 2, "the gap's commit and the fork's own commit");
@@ -281,7 +281,7 @@ async fn a_fork_reads_the_gap_and_then_its_own_commits() {
     assert_eq!(found.built_through_seq, found.head_seq);
 }
 
-/// Checks that a fork restarts a backfill that it inherited, from a pin on
+/// Checks that a fork restarts a backfill that it inherited, from a snapshot on
 /// its own head, with the inherited segments, so the restarted walk reads
 /// only the values that the inherited segments don't record.
 #[tokio::test]
@@ -311,7 +311,7 @@ async fn a_fork_restarts_an_inherited_backfill_and_keeps_its_segments() {
         .expect("index one file");
     let source_entry = entry(&fixture, &fixture.namespace_id).await;
     let GrepIndexStatus::Backfilling {
-        pin_id: source_pin_id,
+        snapshot_id: source_snapshot_id,
         ..
     } = source_entry.status().clone()
     else {
@@ -328,22 +328,24 @@ async fn a_fork_restarts_an_inherited_backfill_and_keeps_its_segments() {
     );
     let restarted = entry(&fixture, &fork_id).await;
     let GrepIndexStatus::Backfilling {
-        pin_id,
+        snapshot_id,
         cursor_inode_id: None,
         ..
     } = restarted.status()
     else {
         panic!("the fork restarts the backfill from the beginning");
     };
-    assert!(control::pin(&fixture.store, &fork_id, pin_id)
-        .await
-        .is_some());
+    assert!(
+        control::snapshot_record(&fixture.store, &fork_id, snapshot_id)
+            .await
+            .is_some()
+    );
     assert_eq!(restarted.runs(), source_entry.runs());
     assert!(
-        control::pin(&fixture.store, &fixture.namespace_id, &source_pin_id)
+        control::snapshot_record(&fixture.store, &fixture.namespace_id, &source_snapshot_id)
             .await
             .is_some(),
-        "the source keeps its own backfill pin"
+        "the source keeps its own backfill snapshot"
     );
 
     fixture
@@ -438,7 +440,7 @@ async fn a_forks_first_step_clears_an_inherited_reorganization() {
 
 /// Checks that a fork whose first change both clears an inherited
 /// reorganization and restarts an inherited backfill, with an unfolded tail
-/// of its own, publishes the cleared entry before the backfill's pin folds
+/// of its own, publishes the cleared entry before the backfill's snapshot folds
 /// the tail, so the restarted backfill and its steps publish.
 #[tokio::test]
 async fn a_forks_restart_publishes_after_clearing_an_inherited_reorganization() {

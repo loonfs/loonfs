@@ -545,7 +545,7 @@ fn existing_namespace(namespace_id: NamespaceId, current: &LoadedManifest) -> Co
 /// Returns whether `payload` references an ID that this attempt generated.
 ///
 /// Every manifest 1, which is the only manifest without a `current`, refers to
-/// one (a plain create's pool ID, or a fork's source pin). A successor refers
+/// one (a plain create's pool ID, or the fork snapshot of a fork). A successor refers
 /// to one when it lists a metadata or extension segment that `current`
 /// doesn't list. Identical bytes prove authorship only for such a manifest. A
 /// rival can rebuild any other manifest byte for byte.

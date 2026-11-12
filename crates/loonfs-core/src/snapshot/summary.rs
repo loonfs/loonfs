@@ -1,15 +1,15 @@
-//! The API summaries of a pin record.
+//! The API summaries of a snapshot record.
 
-use loonfs_types::format::control::{PinOwner, PinPayload};
+use loonfs_types::format::control::{SnapshotOwner, SnapshotPayload};
 use loonfs_types::{Checkpoint, CheckpointOwner, Snapshot};
 
-/// Converts a pin record of any owner to the row the checkpoint inventory
+/// Converts a snapshot record of any owner to the row the checkpoint inventory
 /// returns.
-pub(crate) fn checkpoint_summary(record: PinPayload) -> Checkpoint {
+pub(crate) fn checkpoint_summary(record: SnapshotPayload) -> Checkpoint {
     let expires_at_ms = record.owner.expires_at_ms();
     let owner = match record.owner {
-        PinOwner::User { name, .. } => CheckpointOwner::User { name },
-        PinOwner::Fork {
+        SnapshotOwner::User { name, .. } => CheckpointOwner::User { name },
+        SnapshotOwner::Fork {
             target_namespace_id,
         } => CheckpointOwner::Fork {
             target_namespace_id,
@@ -17,8 +17,8 @@ pub(crate) fn checkpoint_summary(record: PinPayload) -> Checkpoint {
     };
     Checkpoint {
         namespace_id: record.namespace_id,
-        manifest_no: record.pin_id.manifest_no(),
-        checkpoint_id: record.pin_id,
+        manifest_no: record.snapshot_id.manifest_no(),
+        checkpoint_id: record.snapshot_id,
         owner,
         created_at_ms: record.created_at_ms,
         expires_at_ms,
@@ -26,10 +26,10 @@ pub(crate) fn checkpoint_summary(record: PinPayload) -> Checkpoint {
     }
 }
 
-/// Converts a user pin record to the snapshot the API returns, or returns
-/// `None` for a fork pin.
-pub(crate) fn user_pin_snapshot(record: PinPayload) -> Option<Snapshot> {
-    let PinOwner::User {
+/// Converts a user snapshot record to the snapshot the API returns, or returns
+/// `None` for a fork snapshot.
+pub(crate) fn user_snapshot(record: SnapshotPayload) -> Option<Snapshot> {
+    let SnapshotOwner::User {
         name,
         expires_at_ms,
     } = record.owner
@@ -37,7 +37,7 @@ pub(crate) fn user_pin_snapshot(record: PinPayload) -> Option<Snapshot> {
         return None;
     };
     Some(Snapshot {
-        snapshot_id: record.pin_id,
+        snapshot_id: record.snapshot_id,
         namespace_id: record.namespace_id,
         name,
         captured_seq: record.head_seq,
@@ -46,8 +46,8 @@ pub(crate) fn user_pin_snapshot(record: PinPayload) -> Option<Snapshot> {
     })
 }
 
-/// Converts a user pin record to the snapshot the API returns.
-pub(crate) fn snapshot_summary(record: PinPayload) -> Snapshot {
-    user_pin_snapshot(record)
-        .expect("a pin created or loaded as a user pin should have a user owner")
+/// Converts a user snapshot record to the snapshot the API returns.
+pub(crate) fn snapshot_summary(record: SnapshotPayload) -> Snapshot {
+    user_snapshot(record)
+        .expect("a snapshot record created or loaded as a user snapshot should have a user owner")
 }

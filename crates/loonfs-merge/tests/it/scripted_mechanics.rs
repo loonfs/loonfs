@@ -69,8 +69,8 @@ pub(crate) enum Answer {
     /// The namespace is a fork of `main`, which a rebase of `rebased_from`
     /// created when it has one.
     Namespace { rebased_from: Option<NamespaceId> },
-    /// One page of `main`'s checkpoints: a fork pin for each namespace.
-    ForkPins(Vec<NamespaceId>),
+    /// One page of `main`'s checkpoints: a fork snapshot for each namespace.
+    ForkSnapshots(Vec<NamespaceId>),
     /// The server refuses the request.
     Refused(ErrorCode, Box<ErrorDetails>),
 }
@@ -269,14 +269,14 @@ impl Mechanics for ScriptedMechanics {
 
     fn list_checkpoints(&self, namespace_id: &NamespaceId) -> CheckpointsPager {
         let answer = self.answer(Sent::ListCheckpoints);
-        let Answer::ForkPins(targets) = answer else {
+        let Answer::ForkSnapshots(targets) = answer else {
             panic!("a checkpoint listing can't answer {answer:?}");
         };
         let page: ListCheckpointsResponse = serde_json::from_value(json!({
             "namespace_id": namespace_id,
             "checkpoints": targets.iter().enumerate().map(|(index, target)| json!({
                 "namespace_id": namespace_id,
-                "checkpoint_id": format!("pin_{:020}-{index:016x}", index + 1),
+                "checkpoint_id": format!("snp_{:020}-{index:026x}", index + 1),
                 "owner": {"kind": "fork", "target_namespace_id": target},
                 "created_at_ms": 0,
                 "captured_seq": 10,
@@ -422,7 +422,7 @@ fn namespace(
     let mut basis = json!({
         "source_namespace_id": source_namespace_id,
         "fork_point_seq": 10,
-        "source_pin_id": "pin_00000000000000000001-0000000000000001",
+        "source_snapshot_id": "snp_00000000000000000001-00000000000000000000000001",
     });
     if let Some(rebased_from) = rebased_from {
         basis["rebased_from"] =

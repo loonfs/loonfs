@@ -146,7 +146,7 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
     let manifest =
         loonfs_core::test_support::folded_manifest(&namespace_store(store, namespace_id)).await?;
     namespace_engine(store, namespace_id, context)
-        .create_snapshot("test-pin".to_owned(), None, manifest)
+        .create_snapshot("test-snapshot".to_owned(), None, manifest)
         .await
 }
 

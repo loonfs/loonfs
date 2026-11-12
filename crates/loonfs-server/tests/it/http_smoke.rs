@@ -536,8 +536,8 @@ async fn http_namespace_fork_uses_the_snapshot_sequence() {
     assert_eq!(fork_basis.source_namespace_id, source);
     assert_eq!(fork_basis.fork_point_seq, snapshot.captured_seq);
     assert_ne!(
-        fork_basis.source_pin_id, snapshot.snapshot_id,
-        "a fork of a snapshot pins the snapshot's manifest under a pin of its own"
+        fork_basis.source_snapshot_id, snapshot.snapshot_id,
+        "a fork of a snapshot keeps the snapshot's manifest with a fork snapshot of its own"
     );
     harness.server.abort();
 }

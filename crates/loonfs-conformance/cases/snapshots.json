@@ -16,7 +16,7 @@
     "added_content_utf8": "added after snapshot",
     "create_ttl_ms": 3600000,
     "extend_ttl_ms": 7200000,
-    "unknown_snapshot_id": "pin_00000000000000000001-ffffffffffffffff"
+    "unknown_snapshot_id": "snp_00000000000000000001-0000000000ffffffffffffffff"
   },
   "expected": {
     "snapshot_head_seq": 3,

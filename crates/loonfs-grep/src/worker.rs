@@ -1,4 +1,4 @@
-//! The grep worker: its lifecycle, its backfill pins, and the bounded steps
+//! The grep worker: its lifecycle, its backfill snapshots, and the bounded steps
 //! that build and reorganize one namespace's grep index.
 
 mod build;
@@ -24,7 +24,7 @@ use loonfs_types::format::segment_blocks::{
     DEFAULT_MAX_DELTA_RUNS, DEFAULT_MAX_ROWS_PER_SEGMENT, DEFAULT_TARGET_BLOCK_BYTES,
 };
 use loonfs_types::GrepIndex;
-use loonfs_types::{CommitSeq, NamespaceId, PinId, RunNo};
+use loonfs_types::{CommitSeq, NamespaceId, RunNo, SnapshotId};
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
 
@@ -32,7 +32,7 @@ use std::sync::Arc;
 ///
 /// If the snapshot expires before backfill finishes, reads through it
 /// return `snapshot_not_found` and the worker restarts from a fresh
-/// snapshot. The worker does not extend an old pin.
+/// snapshot. The worker does not extend an old snapshot.
 pub(crate) const GREP_BACKFILL_CHECKPOINT_TTL_MS: NonZeroU64 =
     NonZeroU64::new(24 * 60 * 60 * 1000).expect("a day is a nonzero lifetime");
 
@@ -253,7 +253,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         GrepSteps::new(self, namespace_id, publish_interval_ms)
     }
 
-    /// Enables grep by pinning a snapshot and publishing a backfilling entry.
+    /// Enables grep by taking a snapshot and publishing a backfilling entry.
     /// Enabling an enabled index changes nothing.
     ///
     /// If grep's entry is invalid, enabling returns
@@ -295,17 +295,17 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     ///
     /// An invalid entry of this build's version (one that doesn't decode or
     /// fails validation) is replaced the same way, so grep can be enabled
-    /// again. Disabling can't read which backfill pin such an entry refers
-    /// to, so it doesn't delete the pin, and garbage collection removes the
-    /// pin after the pin expires. If the entry has another version, disabling
+    /// again. Disabling can't read which backfill snapshot such an entry refers
+    /// to, so it doesn't delete the snapshot, and garbage collection removes the
+    /// snapshot after the snapshot expires. If the entry has another version, disabling
     /// returns [`GrepError::UnsupportedVersion`] and leaves the entry in
     /// place, so a build never discards an index that it can't read.
     pub async fn disable(&self, namespace_id: &NamespaceId) -> Result<GrepDisableOutcome> {
         let mut steps = self.steps(namespace_id, 0);
         let pending = steps.pending_for_disable().await?;
         if let Some(entry) = pending.enabled_entry() {
-            if let Some(pin_id) = entry.status().backfill_pin_id().cloned() {
-                pending.record_released_pin(pin_id);
+            if let Some(snapshot_id) = entry.status().backfill_snapshot_id().cloned() {
+                pending.record_released_snapshot(snapshot_id);
             }
             pending.set_entry(GrepEntry::disabled());
         }
@@ -363,28 +363,32 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             .await?)
     }
 
-    /// Deletes a backfill pin. Deleting a missing pin succeeds. A failed
-    /// delete is only logged, and collection removes the pin after it
+    /// Deletes a backfill snapshot. Deleting a missing snapshot succeeds. A failed
+    /// delete is only logged, and collection removes the snapshot after it
     /// expires.
-    async fn delete_pin_if_present(&self, namespace_id: &NamespaceId, pin_id: &PinId) {
+    async fn delete_snapshot_if_present(
+        &self,
+        namespace_id: &NamespaceId,
+        snapshot_id: &SnapshotId,
+    ) {
         let deleted = match self.writer.open_namespace(namespace_id) {
-            Ok(namespace) => namespace.delete_snapshot(pin_id).await.map(drop),
+            Ok(namespace) => namespace.delete_snapshot(snapshot_id).await.map(drop),
             Err(error) => Err(error),
         };
         match deleted {
             Ok(()) => {}
             Err(error) => tracing::warn!(
                 %namespace_id,
-                %pin_id,
+                %snapshot_id,
                 %error,
-                "failed to delete a grep backfill pin"
+                "failed to delete a grep backfill snapshot"
             ),
         }
     }
 }
 
 impl<S: ObjectStore + Clone> GrepSteps<'_, S> {
-    /// Pins a snapshot and, if the pending entry is still `expected`, makes
+    /// Takes a snapshot and, if the pending entry is still `expected`, makes
     /// the pending entry a backfill from the snapshot's beginning.
     ///
     /// Returns the snapshot, or `None` after deleting it when the entry
@@ -419,17 +423,17 @@ impl<S: ObjectStore + Clone> GrepSteps<'_, S> {
         let pending = self.pending().await?;
         if pending.entry.as_ref() != expected {
             self.worker
-                .delete_pin_if_present(&self.namespace_id, &checkpoint.snapshot_id)
+                .delete_snapshot_if_present(&self.namespace_id, &checkpoint.snapshot_id)
                 .await;
             return Ok(None);
         }
-        pending.record_created_pin(checkpoint.snapshot_id.clone());
-        let previous_pin_id = pending
+        pending.record_created_snapshot(checkpoint.snapshot_id.clone());
+        let previous_snapshot_id = pending
             .entry
             .as_ref()
-            .and_then(|entry| entry.status().backfill_pin_id().cloned());
-        if let Some(pin_id) = previous_pin_id {
-            pending.record_released_pin(pin_id);
+            .and_then(|entry| entry.status().backfill_snapshot_id().cloned());
+        if let Some(snapshot_id) = previous_snapshot_id {
+            pending.record_released_snapshot(snapshot_id);
         }
         let (reorganize, runs) = pending.entry.as_ref().map_or_else(
             || (None, Vec::new()),
@@ -448,13 +452,13 @@ fn backfill_status(checkpoint: &loonfs_types::Snapshot) -> GrepIndexStatus {
     GrepIndexStatus::Backfilling {
         captured_seq: checkpoint.captured_seq,
         cursor_inode_id: None,
-        pin_id: checkpoint.snapshot_id.clone(),
+        snapshot_id: checkpoint.snapshot_id.clone(),
     }
 }
 
 /// The errors that mean "the state this projection was built from is
 /// gone": the change feed's cursor fell below the retention floor, the
-/// backfill snapshot was deleted or expired, or it no longer pins its
+/// backfill snapshot was deleted or expired, or it no longer keeps its
 /// manifest. Every other failure is a failure.
 fn rebootstrap_required(error: &GrepError) -> bool {
     matches!(

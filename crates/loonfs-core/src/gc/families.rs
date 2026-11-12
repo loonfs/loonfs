@@ -4,7 +4,8 @@
 use super::deletes::Counter;
 use crate::limits::UNREFERENCED_SEGMENT_GRACE_WINDOW_MS;
 use loonfs_objectstore::keys::{
-    extensions_prefix, metadata_manifest_prefix, metadata_segment_prefix, pin_prefix, wal_prefix,
+    extensions_prefix, metadata_manifest_prefix, metadata_segment_prefix, snapshot_prefix,
+    wal_prefix,
 };
 use loonfs_objectstore::layout::{manifest_no_of, parse_object_key, DurableObjectFamily};
 use loonfs_types::{GcResponse, NamespaceId};
@@ -16,7 +17,7 @@ pub(super) enum CandidateFamily {
     MetadataSegments,
     /// The segments of every extension, which the extensions prefix lists.
     ExtensionSegments,
-    Pins,
+    Snapshots,
 }
 
 impl CandidateFamily {
@@ -25,7 +26,7 @@ impl CandidateFamily {
         Self::WalObjects,
         Self::MetadataSegments,
         Self::ExtensionSegments,
-        Self::Pins,
+        Self::Snapshots,
     ];
 
     pub(super) fn recognizes(self, key: &str) -> bool {
@@ -37,7 +38,7 @@ impl CandidateFamily {
             Self::WalObjects => loonfs_objectstore::layout::wal_no_of(key).is_some(),
             Self::MetadataSegments => family == DurableObjectFamily::MetadataSegment,
             Self::ExtensionSegments => family == DurableObjectFamily::ExtensionSegment,
-            Self::Pins => family == DurableObjectFamily::Pin,
+            Self::Snapshots => family == DurableObjectFamily::Snapshot,
         }
     }
 
@@ -50,19 +51,19 @@ impl CandidateFamily {
             Self::MetadataSegments | Self::ExtensionSegments => {
                 UNREFERENCED_SEGMENT_GRACE_WINDOW_MS + 1
             }
-            Self::Manifests | Self::WalObjects | Self::Pins => grace_window_ms,
+            Self::Manifests | Self::WalObjects | Self::Snapshots => grace_window_ms,
         }
     }
 
     /// Returns the report counter of the family's deleted objects, or `None`
-    /// for pins, which a collection counts by owner.
+    /// for snapshots, which a collection counts by owner.
     pub(super) fn deleted_counter(self) -> Option<Counter<GcResponse>> {
         Some(match self {
             Self::Manifests => |report| &mut report.deleted.manifests,
             Self::WalObjects => |report| &mut report.deleted.wal_objects,
             Self::MetadataSegments => |report| &mut report.deleted.metadata_segments,
             Self::ExtensionSegments => |report| &mut report.deleted.extension_segments,
-            Self::Pins => return None,
+            Self::Snapshots => return None,
         })
     }
 
@@ -72,7 +73,7 @@ impl CandidateFamily {
             Self::WalObjects => wal_prefix(namespace_id),
             Self::MetadataSegments => metadata_segment_prefix(namespace_id),
             Self::ExtensionSegments => extensions_prefix(namespace_id),
-            Self::Pins => pin_prefix(namespace_id),
+            Self::Snapshots => snapshot_prefix(namespace_id),
         }
     }
 }

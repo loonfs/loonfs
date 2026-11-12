@@ -20,7 +20,7 @@ use tempfile::TempDir;
 use tower::ServiceExt as _;
 
 /// A snapshot ID that parses, for the rejections that come before any read.
-const SNAPSHOT_ID: &str = "pin_00000000000000000001-0000000000000002";
+const SNAPSHOT_ID: &str = "snp_00000000000000000001-00000000000000000000000002";
 
 struct Fixture {
     /// Keeps the store's directory until the test ends.

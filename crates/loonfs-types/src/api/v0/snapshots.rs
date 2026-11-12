@@ -1,6 +1,6 @@
 //! Snapshot and checkpoint shapes for the v0 HTTP API.
 
-use crate::{CommitSeq, ManifestNo, NamespaceId, PinId};
+use crate::{CommitSeq, ManifestNo, NamespaceId, SnapshotId};
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
 
@@ -42,7 +42,7 @@ pub enum CheckpointOwner {
         /// The label that the creator recorded. Labels don't need to be unique.
         name: String,
     },
-    /// A pin that keeps the source state that one fork attempt starts from.
+    /// A snapshot that keeps the source state that one fork attempt starts from.
     #[cfg_attr(feature = "openapi", schema(title = "CheckpointOwnerFork"))]
     Fork {
         /// The fork's target namespace. Garbage collection keeps this checkpoint while that
@@ -60,9 +60,9 @@ pub enum CheckpointOwner {
 pub struct Checkpoint {
     /// The namespace that the checkpoint belongs to.
     pub namespace_id: NamespaceId,
-    /// The checkpoint's durable ID. For a user pin, it's also the snapshot's `snapshot_id`.
-    pub checkpoint_id: PinId,
-    /// The checkpoint's owner. For a user pin, the owner includes the label.
+    /// The checkpoint's durable ID. For a user snapshot, it's also the snapshot's `snapshot_id`.
+    pub checkpoint_id: SnapshotId,
+    /// The checkpoint's owner. For a user snapshot, the owner includes the label.
     pub owner: CheckpointOwner,
     /// The time the checkpoint record was created, in Unix milliseconds.
     pub created_at_ms: u64,
@@ -73,7 +73,7 @@ pub struct Checkpoint {
     pub expires_at_ms: Option<u64>,
     /// The namespace sequence that the checkpoint captured.
     pub captured_seq: CommitSeq,
-    /// The manifest that the checkpoint pins.
+    /// The manifest that the checkpoint keeps.
     pub manifest_no: ManifestNo,
 }
 
@@ -82,7 +82,7 @@ pub struct Checkpoint {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Snapshot {
     /// The snapshot ID.
-    pub snapshot_id: PinId,
+    pub snapshot_id: SnapshotId,
     /// The namespace whose state the snapshot captured.
     pub namespace_id: NamespaceId,
     /// The snapshot's label.
@@ -142,7 +142,7 @@ pub struct DeleteSnapshotResponse {
     /// The namespace that the snapshot belonged to.
     pub namespace_id: NamespaceId,
     /// The ID of the deleted snapshot record.
-    pub snapshot_id: PinId,
+    pub snapshot_id: SnapshotId,
 }
 
 #[cfg(test)]
@@ -154,7 +154,7 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let checkpoint = Checkpoint {
             namespace_id: namespace_id.clone(),
-            checkpoint_id: PinId::parse("pin_00000000000000000001-0000000000000001")
+            checkpoint_id: SnapshotId::parse("snp_00000000000000000001-00000000000000000000000001")
                 .expect("checkpoint id"),
             owner: CheckpointOwner::User {
                 name: "release".to_owned(),
@@ -166,7 +166,7 @@ mod tests {
         };
         let checkpoint_json = serde_json::json!({
             "namespace_id": "demo",
-            "checkpoint_id": "pin_00000000000000000001-0000000000000001",
+            "checkpoint_id": "snp_00000000000000000001-00000000000000000000000001",
             "owner": {"kind": "user", "name": "release"},
             "created_at_ms": 1_752_623_000_000_u64,
             "expires_at_ms": 1_752_626_600_000_u64,
@@ -195,7 +195,7 @@ mod tests {
     fn optional_checkpoint_fields_are_omitted_and_default_when_absent() {
         let checkpoint_json = serde_json::to_value(Checkpoint {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
-            checkpoint_id: PinId::parse("pin_00000000000000000001-0000000000000001")
+            checkpoint_id: SnapshotId::parse("snp_00000000000000000001-00000000000000000000000001")
                 .expect("checkpoint id"),
             owner: CheckpointOwner::User {
                 name: "release".to_owned(),
@@ -216,7 +216,7 @@ mod tests {
     fn a_checkpoint_owner_from_a_newer_server_decodes_as_unknown() {
         let checkpoint: Checkpoint = serde_json::from_value(serde_json::json!({
             "namespace_id": "demo",
-            "checkpoint_id": "pin_00000000000000000001-0000000000000001",
+            "checkpoint_id": "snp_00000000000000000001-00000000000000000000000001",
             "owner": {"kind": "retention_policy", "policy_id": "nightly"},
             "created_at_ms": 1,
             "captured_seq": 3,

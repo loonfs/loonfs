@@ -6,7 +6,9 @@ use super::parse::{
     parse_public_inode_id, parse_revision_no,
 };
 use clap::{ArgGroup, Args, Subcommand, ValueHint};
-use loonfs_types::{AccessRevisionNo, AttributesRevisionNo, CommitSeq, InodeId, PinId, RevisionNo};
+use loonfs_types::{
+    AccessRevisionNo, AttributesRevisionNo, CommitSeq, InodeId, RevisionNo, SnapshotId,
+};
 
 #[derive(Debug, Args)]
 pub(crate) struct FilesystemLsArgs {
@@ -16,7 +18,7 @@ pub(crate) struct FilesystemLsArgs {
     pub pagination: PaginationArgs,
     /// Read from this snapshot instead of the current state.
     #[arg(long, value_hint = ValueHint::Other)]
-    pub snapshot_id: Option<PinId>,
+    pub snapshot_id: Option<SnapshotId>,
 }
 
 #[derive(Debug, Args)]
@@ -38,7 +40,7 @@ pub(crate) struct FilesystemStatArgs {
     pub inode: Option<InodeId>,
     /// Read from this snapshot instead of the current state.
     #[arg(long, value_hint = ValueHint::Other)]
-    pub snapshot_id: Option<PinId>,
+    pub snapshot_id: Option<SnapshotId>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -151,7 +153,7 @@ pub(crate) struct FilesystemCatArgs {
     pub revision: Option<RevisionNo>,
     /// Read from this snapshot instead of the current state.
     #[arg(long, value_hint = ValueHint::Other, conflicts_with = "revision")]
-    pub snapshot_id: Option<PinId>,
+    pub snapshot_id: Option<SnapshotId>,
 }
 
 #[derive(Debug, Args)]
@@ -197,7 +199,7 @@ pub(crate) struct FilesystemGetArgs {
     pub revision: Option<RevisionNo>,
     /// Read from this snapshot instead of the current state.
     #[arg(long, value_hint = ValueHint::Other, conflicts_with = "revision")]
-    pub snapshot_id: Option<PinId>,
+    pub snapshot_id: Option<SnapshotId>,
     /// Overwrite existing local files.
     #[arg(long)]
     pub force: bool,
@@ -339,5 +341,5 @@ pub(crate) struct ChangesArgs {
     pub pagination: SeqPaginationArgs,
     /// End the change feed at this snapshot.
     #[arg(long, value_hint = ValueHint::Other)]
-    pub snapshot_id: Option<PinId>,
+    pub snapshot_id: Option<SnapshotId>,
 }

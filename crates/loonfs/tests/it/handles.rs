@@ -963,7 +963,7 @@ fn maintenance_checkpoint_and_retention_are_explicit_one_shot_calls() {
         let checkpoint = maintenance_runtime
             .open_namespace(&namespace_id)
             .expect("open namespace")
-            .create_snapshot("handle-pin")
+            .create_snapshot("handle-snapshot")
             .await
             .expect("create snapshot");
         assert!(checkpoint.snapshot_id.manifest_no() > ManifestNo(0));

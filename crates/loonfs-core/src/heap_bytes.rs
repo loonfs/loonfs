@@ -12,7 +12,7 @@ use crate::path::write::{CommitIntent, FilesystemOperation};
 use crate::storage::content_admission::ContentTokenError;
 use crate::storage::inline_content::InlineContent;
 use loonfs_types::format::control::{
-    ForkBasis, ManifestRef, PinOwner, PinPayload, RebasedFrom, WriterBlock,
+    ForkBasis, ManifestRef, RebasedFrom, SnapshotOwner, SnapshotPayload, WriterBlock,
 };
 use loonfs_types::format::envelope::VerifiedEnvelope;
 use loonfs_types::format::manifest::{
@@ -31,8 +31,8 @@ use loonfs_types::{
     AbsolutePath, AccessGrants, ActorId, AttributeKey, AttributeValue, Attributes, BindingVersion,
     Checksum, ChecksumHex, CommitFingerprint, CommitId, CommitPrecondition, CommitSeq, ContentId,
     ContentRef, DisplayName, ExtensionName, FileContent, IndexSegmentId, InodeId,
-    MetadataSegmentId, NameKey, NamespaceId, PathComponent, PayloadChecksum, PinId, PoolId,
-    PrincipalId, PrincipalScope, Subject, SubjectId, UploadId, WriterId,
+    MetadataSegmentId, NameKey, NamespaceId, PathComponent, PayloadChecksum, PoolId, PrincipalId,
+    PrincipalScope, SnapshotId, Subject, SubjectId, UploadId, WriterId,
 };
 use loonfs_types::{DiffEntry, FilesystemEvent};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -174,7 +174,7 @@ text_heap_bytes!(
     NameKey,
     NamespaceId,
     PayloadChecksum,
-    PinId,
+    SnapshotId,
     PoolId,
     PrincipalId,
     PrincipalScope,
@@ -717,14 +717,14 @@ impl HeapBytes for ManifestRef {
     }
 }
 
-impl HeapBytes for PinPayload {
+impl HeapBytes for SnapshotPayload {
     fn heap_bytes(&self) -> usize {
         self.namespace_id.heap_bytes()
-            + self.pin_id.heap_bytes()
+            + self.snapshot_id.heap_bytes()
             + self.payload_checksum.heap_bytes()
             + match &self.owner {
-                PinOwner::User { name, .. } => name.heap_bytes(),
-                PinOwner::Fork {
+                SnapshotOwner::User { name, .. } => name.heap_bytes(),
+                SnapshotOwner::Fork {
                     target_namespace_id,
                 } => target_namespace_id.heap_bytes(),
             }
@@ -734,7 +734,7 @@ impl HeapBytes for PinPayload {
 impl HeapBytes for ForkBasis {
     fn heap_bytes(&self) -> usize {
         self.manifest.heap_bytes()
-            + self.source_pin_id.heap_bytes()
+            + self.source_snapshot_id.heap_bytes()
             + self.rebased_from.heap_bytes()
     }
 }

@@ -39,8 +39,8 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// Plans the commit of a merge of `fork`, read as `fork_view`, into
     /// `main`, over the range that starts after `source_after_seq` of a fork
     /// made at `fork_point_seq`, or of a rebase's replay commit, when
-    /// `pinned` is the source that `main`, the rebase's new fork, was forked
-    /// from, read through its pin (see [`Self::plan_merge`] and
+    /// `snapshot` is the source that `main`, the rebase's new fork, was forked
+    /// from, read through its snapshot (see [`Self::plan_merge`] and
     /// [`Self::plan_replay`]).
     ///
     /// The commit expects `main`'s head when it deletes or moves a
@@ -58,12 +58,12 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// merges' reservations leave no room for the growth.
     #[allow(
         clippy::too_many_arguments,
-        reason = "a merge and a replay commit share every input, and a replay commit adds the pin"
+        reason = "a merge and a replay commit share every input, and a replay commit adds the snapshot"
     )]
     pub(super) async fn plan_merge_commit<'v, F>(
         &self,
         main: &'v LoadedMetadataView<'v, S>,
-        pinned: Option<&'v LoadedMetadataView<'v, S>>,
+        snapshot: Option<&'v LoadedMetadataView<'v, S>>,
         fork: &NamespaceEngine<S, F>,
         fork_view: &'v LoadedMetadataView<'v, S>,
         (fork_point_seq, source_after_seq): (CommitSeq, CommitSeq),
@@ -95,7 +95,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             main,
             theirs: StateReader::new(main.metadata_view(), &memory),
             base: StateReader::new(
-                pinned.unwrap_or(main).metadata_view_at(fork_point_seq),
+                snapshot.unwrap_or(main).metadata_view_at(fork_point_seq),
                 &memory,
             ),
             ours: StateReader::new(
@@ -118,8 +118,8 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             subtree_checks: Vec::new(),
             conflicted: HashSet::new(),
             first_conflict: None,
-            replay: pinned.map(|pinned| Replay {
-                pinned,
+            replay: snapshot.map(|snapshot| Replay {
+                snapshot,
                 report: Vec::new(),
             }),
         };

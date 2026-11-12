@@ -377,7 +377,7 @@ async fn a_replay_from_retained_commit_metadata_keeps_its_events() {
         "the fresh commit reports its events"
     );
 
-    // Pin the head, then give up incremental replay below it.
+    // Take a snapshot of the head, then give up incremental replay below it.
     harness
         .client
         .create_snapshot(&namespace, "retired")

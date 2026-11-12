@@ -4,7 +4,7 @@ use super::*;
 use crate::publish::SharedWriterSessionStatus;
 use crate::segment::block_memo::SessionBlockMemo;
 use crate::time::OperationClock;
-use loonfs_objectstore::keys::{pin_prefix, wal_prefix};
+use loonfs_objectstore::keys::{snapshot_prefix, wal_prefix};
 use loonfs_test_support::clock::ManualClock;
 use std::assert_matches;
 
@@ -1341,12 +1341,12 @@ async fn two_advances_to_different_floors_leave_the_higher_floor() {
     }
 }
 
-/// Reads the files one checkpoint pins at the test clock, or the error that
-/// says it no longer pins anything.
+/// Reads the files one checkpoint keeps at the test clock, or the error that
+/// says it no longer keeps anything.
 async fn read_checkpoint_files<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    checkpoint_id: &PinId,
+    checkpoint_id: &SnapshotId,
 ) -> crate::error::Result<Vec<InodeId>> {
     let page = crate::test_support::namespace_store(store, namespace_id)
         .list_snapshot_files_page(
@@ -1362,9 +1362,9 @@ async fn read_checkpoint_files<S: ObjectStore + ?Sized>(
 }
 
 #[tokio::test]
-async fn deleting_a_pin_never_reuses_its_id() {
-    // A deleted pin id is never reused. A caller asking for
-    // a pin again — even at the same instant, over the same basis, under the
+async fn deleting_a_snapshot_never_reuses_its_id() {
+    // A deleted snapshot id is never reused. A caller asking for
+    // a snapshot again — even at the same instant, over the same basis, under the
     // same owner name — gets a brand new record, so the delete can never be
     // undone by racing it.
     let temp_dir = tempdir().expect("tempdir");
@@ -1384,7 +1384,7 @@ async fn deleting_a_pin_never_reuses_its_id() {
     assert!(
         !read_checkpoint_files(&store, &namespace_id, &first.checkpoint_id)
             .await
-            .expect("the first pin serves")
+            .expect("the first snapshot serves")
             .is_empty()
     );
 
@@ -1398,16 +1398,16 @@ async fn deleting_a_pin_never_reuses_its_id() {
     let recreate = create_checkpoint(&store, &namespace_id, &context);
     let (delete, second) = tokio::join!(delete, recreate);
     assert_eq!(delete.expect("delete").snapshot_id, first.checkpoint_id);
-    let second = second.expect("a concurrent create takes a fresh pin");
+    let second = second.expect("a concurrent create takes a fresh snapshot");
     assert_ne!(
         second.checkpoint_id, first.checkpoint_id,
-        "a new pin is never written at a deleted record's key"
+        "a new snapshot is never written at a deleted record's key"
     );
 
     assert!(crate::test_support::namespace_store(&store, &namespace_id)
-        .load_pin(&first.checkpoint_id)
+        .load_snapshot_record(&first.checkpoint_id)
         .await
-        .expect("load pin")
+        .expect("load snapshot")
         .is_none());
     let error = read_checkpoint_files(&store, &namespace_id, &first.checkpoint_id)
         .await
@@ -1416,7 +1416,7 @@ async fn deleting_a_pin_never_reuses_its_id() {
     assert!(
         !read_checkpoint_files(&store, &namespace_id, &second.checkpoint_id)
             .await
-            .expect("the new pin serves")
+            .expect("the new snapshot serves")
             .is_empty()
     );
 
@@ -1434,13 +1434,13 @@ async fn deleting_a_pin_never_reuses_its_id() {
 #[tokio::test]
 async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
     // Re-creating a checkpoint is not a renewal of an earlier one. Every
-    // call is its own pin with its own id, its own creation instant, and
+    // call is its own snapshot with its own id, its own creation instant, and
     // exactly the expiry it asked for; earlier records are left alone.
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let owner = |expires_at_ms| loonfs_types::format::control::PinOwner::User {
-        name: "test-pin".to_owned(),
+    let owner = |expires_at_ms| loonfs_types::format::control::SnapshotOwner::User {
+        name: "test-snapshot".to_owned(),
         expires_at_ms,
     };
     let context = test_context();
@@ -1454,7 +1454,7 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
 
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let first = namespace
-        .create_pin(
+        .create_snapshot_record(
             owner(Some(10_000)),
             crate::test_support::folded_manifest(&namespace)
                 .await
@@ -1472,7 +1472,7 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
     for expiry in [Some(99_000), Some(5_000), None] {
         let namespace = crate::test_support::namespace_store(&store, &namespace_id);
         let next = namespace
-            .create_pin(
+            .create_snapshot_record(
                 owner(expiry),
                 crate::test_support::folded_manifest(&namespace)
                     .await
@@ -1484,25 +1484,25 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
             .expect("create checkpoint");
         assert!(
             minted.insert(next.checkpoint_id.clone()),
-            "each pin gets an id of its own"
+            "each snapshot gets an id of its own"
         );
         assert_eq!(next.expires_at_ms, expiry);
         let record = crate::test_support::namespace_store(&store, &namespace_id)
-            .load_pin(&next.checkpoint_id)
+            .load_snapshot_record(&next.checkpoint_id)
             .await
-            .expect("read pin")
+            .expect("read snapshot")
             .expect("record exists")
             .state;
         assert_eq!(record.owner.expires_at_ms(), expiry);
         assert_eq!(record.created_at_ms, 2_000);
     }
 
-    // The very first record is untouched by any of it: a pin taken without
+    // The very first record is untouched by any of it: a snapshot taken without
     // an expiry, or with one, is held until something deletes it.
     let original = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_pin(&first.checkpoint_id)
+        .load_snapshot_record(&first.checkpoint_id)
         .await
-        .expect("read pin")
+        .expect("read snapshot")
         .expect("record exists")
         .state;
     assert_eq!(original.created_at_ms, 1_000, "creation instant is history");
@@ -1510,8 +1510,8 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
 }
 
 #[tokio::test]
-async fn an_expired_pin_serves_no_reads_but_stays_until_a_collection_deletes_it() {
-    // A read refuses an expired pin, but the record is still a
+async fn an_expired_snapshot_serves_no_reads_but_stays_until_a_collection_deletes_it() {
+    // A read refuses an expired snapshot, but the record is still a
     // garbage-collection root until a collection deletes it, so its state stays
     // in place.
     let temp_dir = tempdir().expect("tempdir");
@@ -1527,9 +1527,9 @@ async fn an_expired_pin_serves_no_reads_but_stays_until_a_collection_deletes_it(
         .expect("write");
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let already_expired = namespace
-        .create_pin(
-            loonfs_types::format::control::PinOwner::User {
-                name: "test-pin".to_owned(),
+        .create_snapshot_record(
+            loonfs_types::format::control::SnapshotOwner::User {
+                name: "test-snapshot".to_owned(),
                 expires_at_ms: Some(context.now_ms),
             },
             crate::test_support::folded_manifest(&namespace)
@@ -1541,13 +1541,13 @@ async fn an_expired_pin_serves_no_reads_but_stays_until_a_collection_deletes_it(
         .map(crate::snapshot::checkpoint_summary)
         .expect("create checkpoint whose expiry has already passed");
     assert!(crate::test_support::namespace_store(&store, &namespace_id)
-        .load_pin(&already_expired.checkpoint_id)
+        .load_snapshot_record(&already_expired.checkpoint_id)
         .await
-        .expect("load pin")
+        .expect("load snapshot")
         .is_some());
     let error = read_checkpoint_files(&store, &namespace_id, &already_expired.checkpoint_id)
         .await
-        .expect_err("an expired pin serves no read");
+        .expect_err("an expired snapshot serves no read");
     assert_eq!(error.code(), ErrorCode::SnapshotNotFound);
 
     // The collection after the grace deletes the record.
@@ -1564,18 +1564,18 @@ async fn an_expired_pin_serves_no_reads_but_stays_until_a_collection_deletes_it(
         .expect("collection");
     let error = read_checkpoint_files(&store, &namespace_id, &already_expired.checkpoint_id)
         .await
-        .expect_err("a deleted pin serves nothing");
+        .expect_err("a deleted snapshot serves nothing");
     assert_eq!(error.code(), ErrorCode::SnapshotNotFound);
     assert!(crate::test_support::namespace_store(&store, &namespace_id)
-        .load_pin(&already_expired.checkpoint_id)
+        .load_snapshot_record(&already_expired.checkpoint_id)
         .await
-        .expect("load pin")
+        .expect("load snapshot")
         .is_none());
 }
 
 #[tokio::test]
-async fn a_pin_without_a_ttl_is_held_until_it_is_deleted() {
-    // No expiry means no clock: the record stays a serving pin however far
+async fn a_snapshot_without_a_ttl_is_kept_until_it_is_deleted() {
+    // No expiry means no clock: the record stays a serving snapshot however far
     // the wall clock moves, and only an explicit delete ends it.
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -1588,10 +1588,10 @@ async fn a_pin_without_a_ttl_is_held_until_it_is_deleted() {
         .write_file_bytes("/docs/file.txt", b"body\n", None)
         .await
         .expect("write");
-    let pin = create_checkpoint(&store, &namespace_id, &context)
+    let snapshot = create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("create checkpoint");
-    assert_eq!(pin.expires_at_ms, None);
+    assert_eq!(snapshot.expires_at_ms, None);
 
     let mut distant = test_context();
     distant.now_ms = u64::MAX / 2;
@@ -1602,14 +1602,14 @@ async fn a_pin_without_a_ttl_is_held_until_it_is_deleted() {
             .expect("collection");
     }
     crate::test_support::namespace_store(&store, &namespace_id)
-        .load_pin(&pin.checkpoint_id)
+        .load_snapshot_record(&snapshot.checkpoint_id)
         .await
-        .expect("read pin")
-        .expect("an unexpiring pin survives every collection");
+        .expect("read snapshot")
+        .expect("an unexpiring snapshot survives every collection");
     assert!(
-        !read_checkpoint_files(&store, &namespace_id, &pin.checkpoint_id)
+        !read_checkpoint_files(&store, &namespace_id, &snapshot.checkpoint_id)
             .await
-            .expect("the pin still serves")
+            .expect("the snapshot still serves")
             .is_empty()
     );
 
@@ -1619,17 +1619,17 @@ async fn a_pin_without_a_ttl_is_held_until_it_is_deleted() {
         &crate::test_support::writer_at("test-writer", 0),
     )
     .engine()
-    .delete_snapshot(&pin.checkpoint_id)
+    .delete_snapshot(&snapshot.checkpoint_id)
     .await
     .expect("delete");
-    let error = read_checkpoint_files(&store, &namespace_id, &pin.checkpoint_id)
+    let error = read_checkpoint_files(&store, &namespace_id, &snapshot.checkpoint_id)
         .await
         .expect_err("delete ends it");
     assert_eq!(error.code(), ErrorCode::SnapshotNotFound);
 }
 
 #[tokio::test]
-async fn checkpoint_creation_deletes_its_pin_when_the_floor_passed_its_manifest() {
+async fn checkpoint_creation_deletes_its_snapshot_when_the_floor_passed_its_manifest() {
     let directory = tempdir().expect("tempdir");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -1663,11 +1663,11 @@ async fn checkpoint_creation_deletes_its_pin_when_the_floor_passed_its_manifest(
     .expect("advance floor");
     let store = loonfs_test_support::stores::RecordingStore::new(
         store,
-        loonfs_test_support::stores::KeyPredicate::prefix(pin_prefix(&namespace_id)),
+        loonfs_test_support::stores::KeyPredicate::prefix(snapshot_prefix(&namespace_id)),
     );
     let error = crate::test_support::namespace_store(&store, &namespace_id)
-        .create_pin(
-            loonfs_types::format::control::PinOwner::User {
+        .create_snapshot_record(
+            loonfs_types::format::control::SnapshotOwner::User {
                 name: "old".to_owned(),
                 expires_at_ms: None,
             },
@@ -1676,19 +1676,19 @@ async fn checkpoint_creation_deletes_its_pin_when_the_floor_passed_its_manifest(
         )
         .await
         .map(crate::snapshot::checkpoint_summary)
-        .expect_err("floor passed pin");
+        .expect_err("floor passed snapshot");
     assert_eq!(error.code(), ErrorCode::CheckpointUnavailable);
     assert!(store
-        .list_prefix(&pin_prefix(&namespace_id))
+        .list_prefix(&snapshot_prefix(&namespace_id))
         .await
-        .expect("pins")
+        .expect("snapshots")
         .is_empty());
     assert_eq!(store.counts().create_if_absent_puts, 1);
     assert_eq!(store.counts().deletes, 1);
 }
 
 #[tokio::test]
-async fn pin_verification_rejects_a_deleted_namespace() {
+async fn snapshot_verification_rejects_a_deleted_namespace() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1704,7 +1704,7 @@ async fn pin_verification_rejects_a_deleted_namespace() {
         .await
         .expect("create checkpoint");
     let record = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_pin(&checkpoint.checkpoint_id)
+        .load_snapshot_record(&checkpoint.checkpoint_id)
         .await
         .expect("load checkpoint")
         .expect("checkpoint exists")
@@ -1720,18 +1720,18 @@ async fn pin_verification_rejects_a_deleted_namespace() {
         .expect("delete");
 
     let verified = crate::test_support::namespace_store(&store, &record.namespace_id)
-        .verify_pin_basis(&record)
+        .verify_snapshot_basis(&record)
         .await
         .expect("verification runs");
     assert_eq!(
         verified,
-        crate::snapshot::record::PinBasisVerification::Invalid,
+        crate::snapshot::record::SnapshotBasisVerification::Invalid,
         "a tombstoned namespace cannot acquire a new checkpoint dependency"
     );
 }
 
 #[tokio::test]
-async fn pin_basis_verification_store_failure_deletes_the_record() {
+async fn snapshot_basis_verification_store_failure_deletes_the_record() {
     let directory = tempdir().expect("tempdir");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -1753,8 +1753,8 @@ async fn pin_basis_verification_store_failure_deletes_the_record() {
     );
     store.fail_next(1);
     let error = crate::test_support::namespace_store(&store, &namespace_id)
-        .create_pin(
-            loonfs_types::format::control::PinOwner::User {
+        .create_snapshot_record(
+            loonfs_types::format::control::SnapshotOwner::User {
                 name: "failed".to_owned(),
                 expires_at_ms: None,
             },
@@ -1766,9 +1766,9 @@ async fn pin_basis_verification_store_failure_deletes_the_record() {
         .expect_err("verification failed");
     assert_eq!(error.code(), ErrorCode::ServerError);
     assert!(store
-        .list_prefix(&pin_prefix(&namespace_id))
+        .list_prefix(&snapshot_prefix(&namespace_id))
         .await
-        .expect("pins")
+        .expect("snapshots")
         .is_empty());
 }
 
@@ -3117,10 +3117,10 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
 }
 
 #[tokio::test]
-async fn a_floor_past_a_pin_keeps_its_manifest_and_runs_readable_until_deletion() {
+async fn a_floor_past_a_snapshot_keeps_its_manifest_and_runs_readable_until_deletion() {
     let directory = tempdir().expect("directory");
     let store = LocalFsStore::new(directory.path()).expect("store");
-    let namespace_id = NamespaceId::parse("retained-pin").expect("namespace");
+    let namespace_id = NamespaceId::parse("retained-snapshot").expect("namespace");
     let context = test_context();
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
@@ -3129,13 +3129,14 @@ async fn a_floor_past_a_pin_keeps_its_manifest_and_runs_readable_until_deletion(
         .write_file_bytes("/first", b"first", None)
         .await
         .expect("first write");
-    let pin = create_checkpoint(&store, &namespace_id, &context)
+    let snapshot = create_checkpoint(&store, &namespace_id, &context)
         .await
-        .expect("pin");
-    let pinned_files = read_checkpoint_files(&store, &namespace_id, &pin.checkpoint_id)
+        .expect("snapshot");
+    let snapshot_files = read_checkpoint_files(&store, &namespace_id, &snapshot.checkpoint_id)
         .await
-        .expect("pinned files");
-    let pinned_segments = super::segment_keys_of_the_current_manifest(&store, &namespace_id).await;
+        .expect("snapshot files");
+    let snapshot_segments =
+        super::segment_keys_of_the_current_manifest(&store, &namespace_id).await;
     crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
         .write_file_bytes("/second", b"second", None)
         .await
@@ -3145,11 +3146,11 @@ async fn a_floor_past_a_pin_keeps_its_manifest_and_runs_readable_until_deletion(
         .await
         .expect("fold");
     let current_segments = super::compact_a_family_group(&store, &namespace_id, &context).await;
-    let only_pinned: Vec<_> = pinned_segments
+    let only_snapshot: Vec<_> = snapshot_segments
         .difference(&current_segments)
         .cloned()
         .collect();
-    assert!(!only_pinned.is_empty());
+    assert!(!only_snapshot.is_empty());
     let floor = crate::test_support::NamespaceFixture::new(
         &store,
         &namespace_id,
@@ -3163,7 +3164,7 @@ async fn a_floor_past_a_pin_keeps_its_manifest_and_runs_readable_until_deletion(
     .await
     .expect("advance floor")
     .response;
-    assert!(floor.retention_floor_seq > pin.captured_seq);
+    assert!(floor.retention_floor_seq > snapshot.captured_seq);
     // The runtime that published the advance raises the hint.
     crate::test_support::namespace_store(&store, &namespace_id)
         .raise_hint_to_current_manifest()
@@ -3174,19 +3175,19 @@ async fn a_floor_past_a_pin_keeps_its_manifest_and_runs_readable_until_deletion(
         .await
         .expect("collect past the floor");
     assert_eq!(
-        read_checkpoint_files(&store, &namespace_id, &pin.checkpoint_id)
+        read_checkpoint_files(&store, &namespace_id, &snapshot.checkpoint_id)
             .await
-            .expect("pin readable"),
-        pinned_files
+            .expect("snapshot readable"),
+        snapshot_files
     );
-    for key in &pinned_segments {
-        assert!(store.head(key).await.expect("pinned segment").is_some());
+    for key in &snapshot_segments {
+        assert!(store.head(key).await.expect("snapshot segment").is_some());
     }
-    let manifest_key = metadata_manifest_object(&namespace_id, &pin.manifest_no);
+    let manifest_key = metadata_manifest_object(&namespace_id, &snapshot.manifest_no);
     assert!(store
         .head(&manifest_key)
         .await
-        .expect("pinned manifest")
+        .expect("snapshot's manifest")
         .is_some());
     crate::test_support::NamespaceFixture::new(
         &store,
@@ -3194,9 +3195,9 @@ async fn a_floor_past_a_pin_keeps_its_manifest_and_runs_readable_until_deletion(
         &crate::test_support::writer_at("test-writer", 0),
     )
     .engine()
-    .delete_snapshot(&pin.checkpoint_id)
+    .delete_snapshot(&snapshot.checkpoint_id)
     .await
-    .expect("delete pin");
+    .expect("delete snapshot");
     crate::test_support::namespace_store(&store, &namespace_id)
         .gc(&crate::gc::GcOptions::default(), &aged.clock())
         .await
@@ -3206,7 +3207,7 @@ async fn a_floor_past_a_pin_keeps_its_manifest_and_runs_readable_until_deletion(
         .await
         .expect("deleted manifest")
         .is_none());
-    for key in &only_pinned {
+    for key in &only_snapshot {
         assert!(store.head(key).await.expect("deleted segment").is_none());
     }
 }

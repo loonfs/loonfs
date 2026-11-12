@@ -4,7 +4,7 @@
 use super::*;
 use axum::http::Method;
 use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
-use loonfs_types::PinId;
+use loonfs_types::SnapshotId;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
@@ -37,7 +37,7 @@ async fn request(
     )
 }
 
-/// Checks that deleting a snapshot deletes its pin once and that repeating
+/// Checks that deleting a snapshot deletes its record once and that repeating
 /// the delete succeeds without a write, that the checkpoint inventory has
 /// no create or delete route, and that a deleted snapshot can't be extended.
 #[tokio::test]
@@ -47,13 +47,13 @@ async fn snapshot_deletes_are_idempotent_and_the_checkpoint_inventory_is_read_on
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
     ));
-    let mut config = test_options(directory.path(), "pin-deletion-writer");
+    let mut config = test_options(directory.path(), "snapshot-deletion-writer");
     config.http.serves_maintenance = true;
     config.grep = JobMode::Disabled;
     let (router, state) = test_app(config, options_with_store(store.clone()))
         .await
         .expect("app");
-    let namespace_id = namespace_id("pins");
+    let namespace_id = namespace_id("snapshots");
     state
         .runtime
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
@@ -69,8 +69,8 @@ async fn snapshot_deletes_are_idempotent_and_the_checkpoint_inventory_is_read_on
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{created}");
-    let snapshot_id =
-        PinId::parse(created["snapshot_id"].as_str().expect("pin id")).expect("snapshot id");
+    let snapshot_id = SnapshotId::parse(created["snapshot_id"].as_str().expect("snapshot id"))
+        .expect("snapshot id");
     let uri = format!("{snapshots}/{snapshot_id}");
 
     for (method, path) in [
@@ -112,8 +112,8 @@ async fn snapshot_deletes_are_idempotent_and_the_checkpoint_inventory_is_read_on
 }
 
 /// Checks that a snapshot without an expiry can still be deleted after its
-/// namespace is deleted, and that the ID of a fork pin returns
-/// `snapshot_not_found` and leaves the pin in place.
+/// namespace is deleted, and that the ID of a fork snapshot returns
+/// `snapshot_not_found` and leaves the snapshot in place.
 #[tokio::test]
 async fn a_snapshot_on_a_deleted_namespace_stays_deletable() {
     let directory = tempdir().expect("tempdir");
@@ -121,13 +121,13 @@ async fn a_snapshot_on_a_deleted_namespace_stays_deletable() {
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
     ));
-    let mut config = test_options(directory.path(), "deleted-pin-writer");
+    let mut config = test_options(directory.path(), "deleted-snapshot-writer");
     config.http.serves_maintenance = true;
     config.grep = JobMode::Disabled;
     let (router, state) = test_app(config, options_with_store(store.clone()))
         .await
         .expect("app");
-    let namespace_id = namespace_id("deleted-pins");
+    let namespace_id = namespace_id("deleted-snapshots");
     let actor = loonfs_test_support::test_actor();
     state
         .runtime
@@ -138,7 +138,7 @@ async fn a_snapshot_on_a_deleted_namespace_stays_deletable() {
         .runtime
         .fork_namespace(
             &namespace_id,
-            &self::namespace_id("deleted-pins-fork"),
+            &self::namespace_id("deleted-snapshots-fork"),
             &actor,
         )
         .await
@@ -148,7 +148,10 @@ async fn a_snapshot_on_a_deleted_namespace_stays_deletable() {
         request(&router, Method::POST, &snapshots, json!({"name": "kept"})).await;
     assert_eq!(status, StatusCode::OK, "{created}");
     assert!(created.get("expires_at_ms").is_none(), "{created}");
-    let snapshot_id = created["snapshot_id"].as_str().expect("pin id").to_owned();
+    let snapshot_id = created["snapshot_id"]
+        .as_str()
+        .expect("snapshot id")
+        .to_owned();
     let (status, listed) = request(
         &router,
         Method::GET,
@@ -157,14 +160,14 @@ async fn a_snapshot_on_a_deleted_namespace_stays_deletable() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{listed}");
-    let fork_pin_id = listed["checkpoints"]
+    let fork_snapshot_id = listed["checkpoints"]
         .as_array()
         .expect("checkpoints")
         .iter()
         .find(|checkpoint| checkpoint["owner"]["kind"] == "fork")
-        .expect("fork pin")["checkpoint_id"]
+        .expect("fork snapshot")["checkpoint_id"]
         .as_str()
-        .expect("fork pin id")
+        .expect("fork snapshot id")
         .to_owned();
     let (status, body) = request(
         &router,
@@ -179,7 +182,7 @@ async fn a_snapshot_on_a_deleted_namespace_stays_deletable() {
     let (status, body) = request(
         &router,
         Method::DELETE,
-        &format!("{snapshots}/{fork_pin_id}"),
+        &format!("{snapshots}/{fork_snapshot_id}"),
         json!({}),
     )
     .await;

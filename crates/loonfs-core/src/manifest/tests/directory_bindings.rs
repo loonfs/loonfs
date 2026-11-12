@@ -113,7 +113,7 @@ async fn a_cold_checkpoint_files_page_bounds_its_parent_binding_reads() {
     .await;
     let checkpoint = create_checkpoint(&inner, &namespace_id, &context)
         .await
-        .expect("pin the compacted manifest");
+        .expect("take a snapshot of the compacted manifest");
     let binding_segments: BTreeSet<_> = crate::test_support::namespace_store(&inner, &namespace_id)
         .load_current_manifest()
         .await
@@ -189,7 +189,7 @@ async fn assert_names<S: ObjectStore + ?Sized>(
 }
 
 #[tokio::test]
-async fn slot_versions_preserve_moves_name_reuse_and_pinned_reads() {
+async fn slot_versions_preserve_moves_name_reuse_and_snapshot_reads() {
     let directory = tempdir().expect("tempdir");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let namespace_id = NamespaceId::parse("binding-values").expect("namespace id");
@@ -203,7 +203,7 @@ async fn slot_versions_preserve_moves_name_reuse_and_pinned_reads() {
         .expect("bind a");
     create_checkpoint(&store, &namespace_id, &context)
         .await
-        .expect("pin first binding");
+        .expect("take a snapshot of the first binding");
     let original = crate::test_support::namespace_store(&store, &namespace_id)
         .load_read_anchor(crate::test_support::observed_now())
         .await
@@ -258,7 +258,7 @@ async fn slot_versions_preserve_moves_name_reuse_and_pinned_reads() {
     assert_names(&moved_tail, &[("/b", inode_id)]).await;
     create_checkpoint(&store, &namespace_id, &context)
         .await
-        .expect("pin moved binding");
+        .expect("take a snapshot of the moved binding");
     let moved = crate::test_support::namespace_store(&store, &namespace_id)
         .load_read_anchor(crate::test_support::observed_now())
         .await
@@ -342,11 +342,11 @@ async fn slot_versions_preserve_moves_name_reuse_and_pinned_reads() {
             tail: None,
             visible_seq: None,
         };
-        let pinned = namespace
+        let snapshot_view = namespace
             .load_metadata_view(&context)
             .await
-            .expect("pinned manifest");
-        assert_names(&pinned, &[(path, inode_id)]).await;
+            .expect("snapshot's manifest");
+        assert_names(&snapshot_view, &[(path, inode_id)]).await;
     }
 }
 

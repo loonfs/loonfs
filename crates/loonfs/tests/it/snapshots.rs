@@ -6,7 +6,7 @@ use loonfs::{
     ForkNamespaceOptions, ListChangesOptions, ListSnapshotsResponse, LoonFs, NamespaceId, ReadAt,
     ReadFileOptions, ReadOnly, RevisionNo, SharedObjectStore,
 };
-use loonfs_objectstore::keys::pin_prefix;
+use loonfs_objectstore::keys::snapshot_prefix;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{FailStore, InjectedError, KeyPredicate, OperationSelector};
@@ -88,7 +88,7 @@ async fn snapshot_create_recovers_a_record_write_with_an_ambiguous_outcome() {
     let store = Arc::new(
         FailStore::new(
             LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
-            KeyPredicate::prefix(pin_prefix(&namespace_id)),
+            KeyPredicate::prefix(snapshot_prefix(&namespace_id)),
             OperationSelector::PutCreateIfAbsent,
             InjectedError::Transport("lost checkpoint write acknowledgement".to_owned()),
         )
@@ -125,11 +125,11 @@ async fn snapshot_create_recovers_a_record_write_with_an_ambiguous_outcome() {
 async fn snapshot_extension_recovers_a_record_write_with_an_ambiguous_outcome() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("snapshot-ambiguous-extension");
-    let pin_key_prefix = pin_prefix(&namespace_id);
+    let snapshot_key_prefix = snapshot_prefix(&namespace_id);
     let store = Arc::new(
         FailStore::new(
             LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
-            KeyPredicate::prefix(pin_key_prefix),
+            KeyPredicate::prefix(snapshot_key_prefix),
             OperationSelector::CompareAndSwap,
             InjectedError::Transport("lost snapshot extension acknowledgement".to_owned()),
         )
@@ -168,7 +168,7 @@ async fn snapshot_extension_recovers_a_record_write_with_an_ambiguous_outcome() 
 }
 
 /// Checks that a delete whose acknowledgement is lost reports the error, and
-/// that the retry succeeds without recreating the pin.
+/// that the retry succeeds without recreating the snapshot.
 #[tokio::test]
 async fn a_retried_snapshot_delete_succeeds_after_an_uncertain_delete() {
     let temp_dir = tempdir().expect("tempdir");
@@ -176,7 +176,7 @@ async fn a_retried_snapshot_delete_succeeds_after_an_uncertain_delete() {
     let store = Arc::new(
         FailStore::new(
             LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
-            KeyPredicate::prefix(pin_prefix(&namespace_id)),
+            KeyPredicate::prefix(snapshot_prefix(&namespace_id)),
             OperationSelector::Delete,
             InjectedError::Transport("lost snapshot delete acknowledgement".to_owned()),
         )
@@ -215,8 +215,8 @@ async fn a_retried_snapshot_delete_succeeds_after_an_uncertain_delete() {
 }
 
 /// Checks that after a namespace is deleted, the checkpoint inventory still
-/// lists its snapshot and fork pin, the snapshot can still be deleted, and a
-/// fork pin's ID returns `snapshot_not_found`.
+/// lists its snapshot and fork snapshot, the snapshot can still be deleted, and a
+/// fork snapshot's ID returns `snapshot_not_found`.
 #[tokio::test]
 async fn a_deleted_namespace_keeps_its_checkpoint_inventory_and_snapshot_delete() {
     let temp_dir = tempdir().expect("tempdir");
@@ -618,18 +618,19 @@ async fn shared_file_and_download_options_select_the_snapshot() {
     writer.shutdown().await.expect("shutdown");
 }
 
-/// Checks that a read of the source through a fork pin returns a revision
+/// Checks that a read of the source through a fork snapshot returns a revision
 /// after the source's retention floor and a compaction removed it from the
-/// source's live history, and that a fork pin's ID still isn't a snapshot to
-/// fork from.
+/// source's live history, and that a fork snapshot's ID still isn't a user snapshot
+/// to fork from.
 #[tokio::test]
-async fn a_fork_pin_reads_a_revision_after_the_sources_floor_passes_it() {
+async fn a_fork_snapshot_reads_a_revision_after_the_sources_floor_passes_it() {
     let temp_dir = tempdir().expect("tempdir");
-    let fs =
-        open_compacting_runtime_with_async(store(temp_dir.path()), "fork-pin-reads", |builder| {
-            builder
-        })
-        .await;
+    let fs = open_compacting_runtime_with_async(
+        store(temp_dir.path()),
+        "fork-snapshot-reads",
+        |builder| builder,
+    )
+    .await;
     let actor = loonfs_test_support::test_actor();
     let source = namespace_id("source");
     fs.create_namespace(&source, &actor)
@@ -643,7 +644,7 @@ async fn a_fork_pin_reads_a_revision_after_the_sources_floor_passes_it() {
         .fork_namespace(&source, &namespace_id("fork"), &actor)
         .await
         .expect("fork source namespace");
-    let pin_id = forked.fork_basis.expect("fork basis").source_pin_id;
+    let snapshot_id = forked.fork_basis.expect("fork basis").source_snapshot_id;
     let replace = loonfs::PutFileOptions {
         behavior: loonfs::DestinationBehavior::Replace,
         ..Default::default()
@@ -673,14 +674,14 @@ async fn a_fork_pin_reads_a_revision_after_the_sources_floor_passes_it() {
             .map(drop),
         ErrorCode::RevisionNotFound,
     );
-    let pinned = loonfs::ReadFileStreamOptions {
-        at: ReadAt::Snapshot(pin_id.clone()),
+    let snapshot_options = loonfs::ReadFileStreamOptions {
+        at: ReadAt::Snapshot(snapshot_id.clone()),
         ..Default::default()
     };
     let mut stream = namespace
-        .read_file_revision_stream_by_inode_with_options(inode_id, RevisionNo(1), &pinned)
+        .read_file_revision_stream_by_inode_with_options(inode_id, RevisionNo(1), &snapshot_options)
         .await
-        .expect("read the revision through the fork pin");
+        .expect("read the revision through the fork snapshot");
     let mut bytes = Vec::new();
     while let Some(chunk) = stream.next_chunk().await.expect("verified chunk") {
         bytes.extend_from_slice(&chunk);
@@ -694,7 +695,7 @@ async fn a_fork_pin_reads_a_revision_after_the_sources_floor_passes_it() {
                 &namespace_id("again"),
                 &actor,
                 &ForkNamespaceOptions {
-                    snapshot_id: Some(pin_id),
+                    snapshot_id: Some(snapshot_id),
                 },
             )
             .await,

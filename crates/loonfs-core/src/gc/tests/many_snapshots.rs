@@ -1,16 +1,17 @@
-//! Complete collection across pin and upload families.
+//! Complete collection across snapshot and upload families.
 
 use super::*;
 use loonfs_objectstore::keys::{
-    content_prefix, extensions_prefix, pin, temporary_prefix, upload_outcome, upload_session_prefix,
+    content_prefix, extensions_prefix, snapshot_record, temporary_prefix, upload_outcome,
+    upload_session_prefix,
 };
 use loonfs_test_support::stores::RecordedOperation;
 use loonfs_types::format::control::UploadOutcome;
 
 #[tokio::test]
-async fn one_collection_deletes_an_aged_upload_and_every_expired_snapshot_among_many_pins() {
+async fn one_collection_deletes_an_aged_upload_and_every_expired_snapshot_among_many_snapshots() {
     let directory = tempdir().expect("directory");
-    let namespace_id = NamespaceId::parse("many-pins").expect("namespace");
+    let namespace_id = NamespaceId::parse("many-snapshots").expect("namespace");
     let store = RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::new({
@@ -26,29 +27,29 @@ async fn one_collection_deletes_an_aged_upload_and_every_expired_snapshot_among_
         .pool_id;
     let permanent = create_checkpoint(&store, &namespace_id, &setup)
         .await
-        .expect("permanent pin");
+        .expect("permanent snapshot");
     let basis = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_pin(&permanent.checkpoint_id)
+        .load_snapshot_record(&permanent.checkpoint_id)
         .await
-        .expect("pin")
+        .expect("snapshot")
         .expect("record")
         .state;
     for number in 0..1025 {
-        let record = PinPayload {
-            pin_id: PinId::parse(format!(
-                "pin_{:020}-{number:016x}",
-                basis.pin_id.manifest_no().0
+        let record = SnapshotPayload {
+            snapshot_id: SnapshotId::parse(format!(
+                "snp_{:020}-{number:026x}",
+                basis.snapshot_id.manifest_no().0
             ))
-            .expect("pin id"),
-            owner: PinOwner::User {
+            .expect("snapshot id"),
+            owner: SnapshotOwner::User {
                 name: "expired".to_owned(),
                 expires_at_ms: Some(2_000),
             },
             ..basis.clone()
         };
-        crate::snapshot::record::write_pin(&store, &record)
+        crate::snapshot::record::write_snapshot_record(&store, &record)
             .await
-            .expect("expired pin");
+            .expect("expired snapshot");
     }
     let session = crate::test_support::proxied_upload_session(&namespace_id, 2_000);
     let session_key = crate::test_support::write_upload_records(
@@ -76,7 +77,7 @@ async fn one_collection_deletes_an_aged_upload_and_every_expired_snapshot_among_
             .filter(|operation| matches!(
                 operation,
                 RecordedOperation::GetWithMetadata { key, .. }
-                    if key.starts_with(&pin_prefix(&namespace_id))
+                    if key.starts_with(&snapshot_prefix(&namespace_id))
             ))
             .count(),
         1026
@@ -91,12 +92,12 @@ async fn one_collection_deletes_an_aged_upload_and_every_expired_snapshot_among_
     assert_eq!(
         listings,
         vec![
-            pin_prefix(&namespace_id),
+            snapshot_prefix(&namespace_id),
             metadata_manifest_prefix(&namespace_id),
             wal_prefix(&namespace_id),
             metadata_segment_prefix(&namespace_id),
             extensions_prefix(&namespace_id),
-            pin_prefix(&namespace_id),
+            snapshot_prefix(&namespace_id),
         ]
     );
     store.reset();
@@ -117,7 +118,7 @@ async fn one_collection_deletes_an_aged_upload_and_every_expired_snapshot_among_
         vec![
             // Root content before reading the WAL tail, and sweep the sessions.
             upload_session_prefix(&pool_id),
-            pin_prefix(&namespace_id),
+            snapshot_prefix(&namespace_id),
             content_prefix(&pool_id),
             temporary_prefix(&pool_id),
         ]
@@ -128,9 +129,9 @@ async fn one_collection_deletes_an_aged_upload_and_every_expired_snapshot_among_
     assert_eq!(
         store
             .inner()
-            .list_prefix(&pin_prefix(&namespace_id))
+            .list_prefix(&snapshot_prefix(&namespace_id))
             .await
-            .expect("remaining pins"),
-        vec![pin(&namespace_id, &permanent.checkpoint_id)],
+            .expect("remaining snapshots"),
+        vec![snapshot_record(&namespace_id, &permanent.checkpoint_id)],
     );
 }

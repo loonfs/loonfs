@@ -482,7 +482,7 @@ async fn an_enable_that_loses_to_another_enable_deletes_its_checkpoint() {
     });
     assert_matches!(lost, Ok(GrepEnableOutcome::Superseded));
     let Ok(GrepIndexStatus::Backfilling {
-        pin_id: rival_pin_id,
+        snapshot_id: rival_snapshot_id,
         ..
     }) = host.worker.lifecycle(&namespace_id).await
     else {
@@ -500,7 +500,7 @@ async fn an_enable_that_loses_to_another_enable_deletes_its_checkpoint() {
             .iter()
             .map(|checkpoint| &checkpoint.checkpoint_id)
             .collect::<Vec<_>>(),
-        [&rival_pin_id],
+        [&rival_snapshot_id],
         "the lost enable deleted its own checkpoint"
     );
 }

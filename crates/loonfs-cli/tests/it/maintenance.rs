@@ -922,7 +922,7 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
             .as_str()
             .expect("json string")
             .to_owned();
-        assert!(checkpoint_id.starts_with("pin_"));
+        assert!(checkpoint_id.starts_with("snp_"));
 
         // Names are labels rather than unique keys. Reusing one creates a
         // second snapshot with a different id.

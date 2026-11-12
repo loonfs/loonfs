@@ -763,7 +763,7 @@ async fn http_put_conflict_stands_when_retention_trimmed_the_committed_seq() {
         .await
         .expect("first put");
 
-    // Pin the head, then give up incremental replay below it.
+    // Take a snapshot of the head, then give up incremental replay below it.
     harness
         .client
         .create_snapshot(&namespace, "trimmed")

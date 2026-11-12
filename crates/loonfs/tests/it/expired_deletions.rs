@@ -3,8 +3,8 @@
 
 use loonfs::{
     AccessState, CommitSeq, CreateNamespaceOptions, DeleteDirectoryBehavior, DeleteOptions,
-    ErrorCode, InodeId, LoonFs, Namespace, PinId, ReadAt, ReadOnly, RevisionNo, SharedObjectStore,
-    StatOptions, Writable,
+    ErrorCode, InodeId, LoonFs, Namespace, ReadAt, ReadOnly, RevisionNo, SharedObjectStore,
+    SnapshotId, StatOptions, Writable,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::clock::ManualClock;
@@ -244,7 +244,7 @@ async fn history_reads(
     namespace_id: &NamespaceId,
     subjects: &[Subject],
     inode_id: InodeId,
-    snapshot_id: &PinId,
+    snapshot_id: &SnapshotId,
 ) -> Vec<(String, [Result<(), ErrorCode>; 4])> {
     let at_snapshot = StatOptions {
         at: ReadAt::Snapshot(snapshot_id.clone()),
