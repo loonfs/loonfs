@@ -22,7 +22,7 @@ use loonfs_types::format::manifest::{
 use loonfs_types::format::segment_blocks::string_prefix_upper_bound;
 use loonfs_types::format::wal::WalCommitPayload;
 use loonfs_types::{AbsolutePath, CommitId, CommitSeq, InodeId, NameKey, NamespaceId};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -384,23 +384,42 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         Ok(durable)
     }
 
-    /// Returns up to `limit` of the view's inode rows whose row keys are at
-    /// or after `lower_bound`, with their row keys, in inode order. The
-    /// manifest's rows combine with the WAL tail's rows, as in
-    /// [`Self::revisions_page`].
+    /// Returns up to `limit` of the view's inode rows after the inode
+    /// `after`, in inode order. The manifest's rows combine with the WAL
+    /// tail's rows, as in [`Self::revisions_page`].
+    ///
+    /// A page copies at most `limit` of the tail's rows, however many rows
+    /// the tail has.
     pub(crate) async fn inodes_page(
         &self,
-        lower_bound: &str,
+        after: Option<InodeId>,
         limit: usize,
-    ) -> Result<Vec<(String, InodeRecord)>> {
+    ) -> Result<Vec<InodeRecord>> {
         let visible_seq = self.visible_seq();
-        let mut tail: Vec<(String, InodeRecord)> = self
-            .row_states()
-            .flat_map(MetadataState::inodes)
+        // A page returns at most `limit` rows, so every tail row in the page
+        // is among the `limit` lowest tail rows at the view's sequence. Row
+        // keys sort by inode ID (see `InodeId::body`), so the walk compares
+        // IDs and copies nothing, and the rows that it keeps are copied
+        // afterwards.
+        let mut lowest: BTreeMap<InodeId, &InodeRecord> = BTreeMap::new();
+        for inode in self.row_states().flat_map(MetadataState::inodes) {
+            if inode.committed_seq <= visible_seq
+                && after.is_none_or(|after| inode.inode_id > after)
+            {
+                lowest.entry(inode.inode_id).or_insert(inode);
+                if lowest.len() > limit {
+                    lowest.pop_last();
+                }
+            }
+        }
+        let tail = lowest
+            .into_values()
             .map(|inode| (lookup_keys::inode_key(inode.inode_id), inode.clone()))
-            .filter(|(row_key, _)| row_key.as_str() >= lower_bound)
             .collect();
-        tail.sort_by(|(left, _), (right, _)| left.cmp(right));
+        let lower_bound = match after {
+            Some(after) => lookup_keys::inode_key_after(after),
+            None => lookup_keys::INODE_ROW_PREFIX.to_owned(),
+        };
         let segments = self.manifest_segments();
         let upper_bound = string_prefix_upper_bound(lookup_keys::INODE_ROW_PREFIX);
         let upper_bound = upper_bound.as_deref();
@@ -429,18 +448,17 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
                     .collect::<Result<_>>()?,
             })
         };
-        let mut combiner =
-            ManifestTailCombiner::new(lower_bound.to_owned(), tail, TieOrder::TailFirst);
-        let mut rows = Vec::with_capacity(limit);
-        while rows.len() < limit {
-            let Some((row_key, inode)) = combiner.next(refill).await? else {
+        let mut combiner = ManifestTailCombiner::new(lower_bound, tail, TieOrder::TailFirst);
+        let mut inodes = Vec::with_capacity(limit);
+        while inodes.len() < limit {
+            let Some((_, inode)) = combiner.next(refill).await? else {
                 break;
             };
             if inode.committed_seq <= visible_seq {
-                rows.push((row_key, inode));
+                inodes.push(inode);
             }
         }
-        Ok(rows)
+        Ok(inodes)
     }
 
     pub(crate) async fn find_commit_receipt(

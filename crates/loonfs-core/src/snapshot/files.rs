@@ -8,7 +8,6 @@ use crate::error::Result;
 use crate::metadata::MetadataView;
 use crate::namespace::store::NamespaceStore;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::manifest::lookup_keys;
 use loonfs_types::{
     CommitSeq, ContentRef, InodeId, InodeKind, PageRequest, PagedResponse, RevisionNo, SnapshotId,
 };
@@ -154,23 +153,20 @@ impl<S: ObjectStore> NamespaceStore<S> {
         // Read one extra file to determine whether another page exists.
         let wanted = request.limit.limit_plus_one();
         let wave_rows = wanted.max(INODE_SCAN_WAVE_ROWS);
-        let mut lower_bound = match request.cursor {
-            Some(cursor) => lookup_keys::inode_key_after(cursor.after_inode_id),
-            None => lookup_keys::INODE_ROW_PREFIX.to_owned(),
-        };
+        let mut after = request.cursor.map(|cursor| cursor.after_inode_id);
         let mut files = Vec::with_capacity(wanted);
         while files.len() < wanted {
-            let rows = view.inodes_page(&lower_bound, wave_rows).await?;
-            let family_exhausted = rows.len() < wave_rows;
+            let inodes = view.inodes_page(after, wave_rows).await?;
+            let family_exhausted = inodes.len() < wave_rows;
             // Resume after the last scanned row, including rows filtered out below.
-            match rows.last() {
-                Some((row_key, _)) => lower_bound = lookup_keys::after_row_key(row_key),
+            match inodes.last() {
+                Some(inode) => after = Some(inode.inode_id),
                 None => break,
             }
-            let file_inode_ids = rows
+            let file_inode_ids = inodes
                 .iter()
-                .filter(|(_, inode)| inode.inode_kind == InodeKind::File)
-                .map(|(_, inode)| inode.inode_id)
+                .filter(|inode| inode.inode_kind == InodeKind::File)
+                .map(|inode| inode.inode_id)
                 .collect::<Vec<_>>();
             if !options.include_deleted {
                 session.preload_visibility(&file_inode_ids).await?;
