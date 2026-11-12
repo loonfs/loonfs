@@ -218,7 +218,7 @@ A page is limited by both its match limit and its budget of verified candidates.
 
 The continuation cursor records the scan's progress, including candidates that produced no matches, not just the last match that was returned. It's bound to the request fields that select results (the pattern, the case flag, the path scope, `allow_scan`, and `allow_stale`), and a request that reuses it with different values for those fields is rejected.
 
-Each page reports the namespace `head_seq` that it used. Every later page reads the namespace at the first page's `head_seq`, which the cursor records, so a search across several pages reads one consistent view ([`GET /grep`](../specs/api.md#617-get-grep)).
+Each page reports the namespace `head_seq` that it used. Every later page reads the namespace at the first page's `head_seq`, which the cursor records, so a search across several pages reads one consistent view ([`GET /grep`](../specs/api.md#618-get-grep)).
 
 Why does a page need a candidate budget as well as a match limit? A pattern with many false-positive candidates produces few matches, and it must not trigger an unlimited content scan just because of that.
 

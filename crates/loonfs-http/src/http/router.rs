@@ -16,8 +16,9 @@ use super::handlers_inodes::{
 };
 use super::handlers_maintenance::{run_maintenance_job, run_pool_maintenance_job};
 use super::handlers_namespace::{
-    create_namespace, delete_namespace, fork_namespace, get_capabilities, get_namespace,
-    get_namespace_diagnostics, get_next_merge_range, merge_fork, rebase_fork,
+    create_namespace, delete_namespace, fork_namespace, fork_namespace_for_rebase,
+    get_capabilities, get_namespace, get_namespace_diagnostics, get_next_merge_range, merge_fork,
+    replay_fork,
 };
 use super::handlers_query::{
     disable_grep_index, enable_grep_index, get_grep_index, grep, grep_index_not_maintained,
@@ -98,7 +99,8 @@ routes! {
     "/v0/namespaces/{namespace_id}" => { GET get_namespace, DELETE delete_namespace },
     "/v0/namespaces/{namespace_id}/forks" => { POST fork_namespace },
     "/v0/namespaces/{namespace_id}/merges" => { POST merge_fork, GET get_next_merge_range },
-    "/v0/namespaces/{namespace_id}/rebases" => { POST rebase_fork },
+    "/v0/namespaces/{namespace_id}/rebases" => { POST fork_namespace_for_rebase },
+    "/v0/namespaces/{namespace_id}/replays" => { POST replay_fork },
     "/v0/namespaces/{namespace_id}/snapshots" => { POST create_snapshot, GET list_snapshots },
     "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}/extend" => { POST extend_snapshot },
     "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}" => {

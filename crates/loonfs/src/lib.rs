@@ -122,7 +122,7 @@ pub use loonfs_types::{
     Commit, CompleteUploadBody, CreateUploadBody, DiffEntry, DiffEntryKind, DiffResponse,
     FilesystemEvent, ListChangesResponse, MergeConflict, MergeConflictKind, MergeConflictRevision,
     MergeConflictVersion, NextMergeRangeOutcome, NextMergeRangeResponse, ObjectTransfer,
-    RebaseForkResponse, UploadContentClaim, UploadMode, UploadPartChecksumClaim, UploadSession,
+    ReplayForkResponse, UploadContentClaim, UploadMode, UploadPartChecksumClaim, UploadSession,
     UploadSessionStatus,
 };
 

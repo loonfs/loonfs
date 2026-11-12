@@ -5,7 +5,7 @@ use loonfs_client::{Client, Result, SnapshotRecordsPager};
 use loonfs_types::options::MergeForkOptions;
 use loonfs_types::{
     ActorId, Commit, DeleteNamespaceResponse, NamespaceId, NamespaceMetadata,
-    NextMergeRangeResponse, RebaseForkResponse,
+    NextMergeRangeResponse, ReplayForkResponse,
 };
 use std::future::Future;
 
@@ -26,16 +26,27 @@ pub trait Mechanics: Send + Sync {
         options: &MergeForkOptions,
     ) -> impl Future<Output = Result<Commit>> + Send;
 
-    /// Replays the fork `source_namespace_id`'s unmerged commits into
-    /// `new_namespace_id` (see [`Client::rebase_fork_with_options`]).
-    fn rebase_fork_with_options(
+    /// Creates `new_namespace_id` as a rebase's new fork of `namespace_id`
+    /// for the fork `source_namespace_id` (see
+    /// [`Client::fork_namespace_for_rebase`]).
+    fn fork_namespace_for_rebase(
         &self,
         namespace_id: &NamespaceId,
         source_namespace_id: &NamespaceId,
         new_namespace_id: &NamespaceId,
         actor: &ActorId,
+    ) -> impl Future<Output = Result<NamespaceMetadata>> + Send;
+
+    /// Replays the fork `source_namespace_id`'s unmerged commits into
+    /// `namespace_id`, a rebase's new fork (see
+    /// [`Client::replay_fork_with_options`]).
+    fn replay_fork_with_options(
+        &self,
+        namespace_id: &NamespaceId,
+        source_namespace_id: &NamespaceId,
+        actor: &ActorId,
         options: &MergeForkOptions,
-    ) -> impl Future<Output = Result<RebaseForkResponse>> + Send;
+    ) -> impl Future<Output = Result<ReplayForkResponse>> + Send;
 
     /// Returns where the fork `source_namespace_id`'s next merge into
     /// `namespace_id` starts (see [`Client::next_merge_range`]).
@@ -75,23 +86,32 @@ impl Mechanics for Client {
             .await
     }
 
-    async fn rebase_fork_with_options(
+    async fn fork_namespace_for_rebase(
         &self,
         namespace_id: &NamespaceId,
         source_namespace_id: &NamespaceId,
         new_namespace_id: &NamespaceId,
         actor: &ActorId,
-        options: &MergeForkOptions,
-    ) -> Result<RebaseForkResponse> {
-        Client::rebase_fork_with_options(
+    ) -> Result<NamespaceMetadata> {
+        Client::fork_namespace_for_rebase(
             self,
             namespace_id,
             source_namespace_id,
             new_namespace_id,
             actor,
-            options,
         )
         .await
+    }
+
+    async fn replay_fork_with_options(
+        &self,
+        namespace_id: &NamespaceId,
+        source_namespace_id: &NamespaceId,
+        actor: &ActorId,
+        options: &MergeForkOptions,
+    ) -> Result<ReplayForkResponse> {
+        Client::replay_fork_with_options(self, namespace_id, source_namespace_id, actor, options)
+            .await
     }
 
     async fn next_merge_range(
