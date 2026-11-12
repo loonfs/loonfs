@@ -8,10 +8,10 @@ use loonfs_types::options::GcOptions;
 use loonfs_types::{
     headers, ActorId, AdvanceRetentionRequest, AdvanceRetentionResponse, Checkpoint, GcRequest,
     GcResponse, ListCheckpointsResponse, MetadataMaintenanceRequest, MetadataMaintenanceResponse,
-    NamespaceDiagnostics, NamespaceId, PageRequest, Pager, PinId, PoolGcResponse, PoolId,
-    PrincipalId, RecoverAdministratorRequest, RecoverAdministratorResponse,
-    RunMaintenanceJobRequest, RunMaintenanceJobResponse, RunPoolMaintenanceJobRequest,
-    RunPoolMaintenanceJobResponse, SetRetentionWindowRequest, SetRetentionWindowResponse,
+    NamespaceDiagnostics, NamespaceId, PageRequest, Pager, PoolGcResponse, PoolId, PrincipalId,
+    RecoverAdministratorRequest, RecoverAdministratorResponse, RunMaintenanceJobRequest,
+    RunMaintenanceJobResponse, RunPoolMaintenanceJobRequest, RunPoolMaintenanceJobResponse,
+    SetRetentionWindowRequest, SetRetentionWindowResponse, SnapshotId,
 };
 use loonfs_types::{GrepIndex, StoreProbeRequest, StoreProbeResponse};
 use std::num::NonZeroU64;
@@ -47,7 +47,7 @@ impl Client {
             .await
     }
 
-    /// Lists every pin as a checkpoint, including fork pins and expired
+    /// Lists every snapshot as a checkpoint, including fork snapshots and expired
     /// snapshots that garbage collection has not yet deleted (maintenance API
     /// group).
     pub fn list_checkpoints(&self, namespace_id: &NamespaceId) -> CheckpointsPager {
@@ -73,13 +73,13 @@ impl Client {
             .await
     }
 
-    /// Returns one existing pin, as the checkpoint listing returns it,
+    /// Returns one existing snapshot of any owner, as the checkpoint listing returns it,
     /// through the maintenance API. A missing id returns
     /// `snapshot_not_found`.
     pub async fn get_checkpoint(
         &self,
         namespace_id: &NamespaceId,
-        checkpoint_id: &PinId,
+        checkpoint_id: &SnapshotId,
     ) -> Result<Checkpoint> {
         let url = format!(
             "{}/v0/maintenance/namespaces/{namespace_id}/checkpoints/{checkpoint_id}",

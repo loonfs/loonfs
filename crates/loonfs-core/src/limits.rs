@@ -217,8 +217,8 @@ const fn max_u64(left: u64, right: u64) -> u64 {
 /// it was planned against, and the provider applies it within its request
 /// bound, so an object older than the longest budget plus the request bound
 /// plus the clock allowance was written before any put still in flight was
-/// planned. Collection roots only the current manifest and the pinned
-/// manifests. A read whose manifest a newer one replaced can find a segment
+/// planned. Collection roots only the current manifest and the manifests
+/// that snapshots keep. A read whose manifest a newer one replaced can find a segment
 /// collected; it returns `stale_head` and is read again. A read that must
 /// outlive the current manifest takes a snapshot.
 pub const GC_MIN_GRACE_WINDOW_MS: u64 =
@@ -305,7 +305,7 @@ pub const NAMESPACE_RETIREMENT_GRACE_WINDOW_MS: u64 =
 ///
 /// A member that the collection hasn't read yet can't be retired until the
 /// retirement grace, less the clock allowance between the deleting host and
-/// the collector, has passed since the collection started, so its fork pin keeps
+/// the collector, has passed since the collection started, so its fork snapshot keeps
 /// it in the walk until then (format spec, "Content roots").
 pub const POOL_ROOTS_READ_BUDGET_MS: u64 =
     NAMESPACE_RETIREMENT_GRACE_WINDOW_MS - GC_SAFETY_MARGIN_MS;

@@ -1,7 +1,7 @@
 //! The lifecycle of grep's index and its in-progress reorganization, as
 //! grep's entry records them.
 
-use loonfs_types::{CommitSeq, IndexSegmentId, InodeId, PinId, RunNo};
+use loonfs_types::{CommitSeq, IndexSegmentId, InodeId, RunNo, SnapshotId};
 use serde::{Deserialize, Serialize};
 
 /// Durable status of grep indexing for one namespace.
@@ -18,9 +18,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GrepIndexStatus {
-    /// The initial build is walking the files that a snapshot pins.
+    /// The initial build is walking the files that a snapshot keeps.
     Backfilling {
-        /// Namespace sequence the pinned checkpoint captured. The walk ends
+        /// Namespace sequence the checkpoint captured. The walk ends
         /// at exactly this state however far the namespace has moved since.
         captured_seq: CommitSeq,
         /// Inode the next backfill step resumes strictly after; absent means
@@ -28,8 +28,8 @@ pub enum GrepIndexStatus {
         /// inode id, so one id is the whole resume position.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cursor_inode_id: Option<InodeId>,
-        /// The user pin whose manifest this backfill walks.
-        pin_id: PinId,
+        /// The user snapshot whose manifest this backfill walks.
+        snapshot_id: SnapshotId,
     },
     /// Backfill is complete and changes are consumed incrementally.
     Active {
@@ -82,10 +82,10 @@ impl GrepIndexStatus {
         }
     }
 
-    /// Returns the pin a backfilling status walks.
-    pub fn backfill_pin_id(&self) -> Option<&PinId> {
+    /// Returns the snapshot a backfilling status walks.
+    pub fn backfill_snapshot_id(&self) -> Option<&SnapshotId> {
         match self {
-            Self::Backfilling { pin_id, .. } => Some(pin_id),
+            Self::Backfilling { snapshot_id, .. } => Some(snapshot_id),
             Self::Active { .. } | Self::Disabled {} => None,
         }
     }
@@ -98,11 +98,11 @@ impl From<&GrepIndexStatus> for loonfs_types::GrepIndexStatus {
             GrepIndexStatus::Backfilling {
                 captured_seq,
                 cursor_inode_id,
-                pin_id,
+                snapshot_id,
             } => Self::Backfilling {
                 captured_seq: *captured_seq,
                 cursor_inode_id: *cursor_inode_id,
-                checkpoint_id: pin_id.clone(),
+                checkpoint_id: snapshot_id.clone(),
             },
             GrepIndexStatus::Active {
                 built_through_seq,

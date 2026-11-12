@@ -23,7 +23,7 @@ At sequence `N`, an edge's value is its first row in key order whose `committed_
 
 LoonFS checks two rules when it validates a commit: a slot has at most one child, and a child has at most one parent. A commit fails validation if it binds into a slot that already has another child, or binds a child that already has a binding, unless the same operation unbinds that binding first. A move unbinds the old slot before it binds the new one, and a restore binds a deletion root, which has no binding. So the two indexes agree at every readable sequence.
 
-A path lookup reads the slot index once for each path component. A listing scans the parent's prefix of the slot index once, takes each edge's value, and includes the bound children that no tombstone hides. A file's entry reports its revision number, size, and revision attribution from the summary in its row, so the listing reads no revision row and no inode row, and it doesn't report a content reference. The parent probe in each `direntry_binds` filter lets the listing skip a run that has no row under the parent. Snapshots read through their pinned manifests, at their captured sequences, and the first row at or below the captured sequence has the summary as of that sequence.
+A path lookup reads the slot index once for each path component. A listing scans the parent's prefix of the slot index once, takes each edge's value, and includes the bound children that no tombstone hides. A file's entry reports its revision number, size, and revision attribution from the summary in its row, so the listing reads no revision row and no inode row, and it doesn't report a content reference. The parent probe in each `direntry_binds` filter lets the listing skip a run that has no row under the parent. Snapshots read through their own manifests, at their captured sequences, and the first row at or below the captured sequence has the summary as of that sequence.
 
 ## Retention
 
@@ -52,7 +52,7 @@ This section describes how bindings work with subtree deletion, forks, and the A
 
 Deleting a subtree unbinds its root and records a subtree tombstone. The descendants stay bound beneath that root, and the covering-tombstone rule hides them. A restore binds the root again, either at the name saved in the tombstone or at the caller's destination. Reusing a name writes a newer bound value.
 
-In a fork, compaction applies the same retention rule to inherited runs and local runs. Inherited segments keep their owner namespace, and pins still protect their captured manifests and runs.
+In a fork, compaction applies the same retention rule to inherited runs and local runs. Inherited segments keep their owner namespace, and snapshots still protect their captured manifests and runs.
 
 WAL deltas, semantic fingerprints, and change-feed events don't depend on how binding rows are encoded. The API's `binding_version` token represents a binding's `bind_position`, which a summary row keeps. Creating, moving, or restoring an entry changes the token, but writing its content or attributes doesn't. Binding preconditions compare the same positions that reads return.
 

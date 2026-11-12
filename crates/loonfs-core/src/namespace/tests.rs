@@ -269,7 +269,7 @@ async fn an_ambiguous_first_manifest_confirms_a_create_and_a_fork() {
                 .expect("fold the WAL tail"),
         )
         .await
-        .expect("fork source pin proves authorship from matching bytes");
+        .expect("fork snapshot proves authorship from matching bytes");
     assert!(forked.fork_basis.is_some());
     assert_eq!(store.attempts(), 1);
     assert_eq!(store.remaining(), 0);
@@ -538,7 +538,7 @@ async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement()
 }
 
 #[tokio::test]
-async fn fork_into_a_deleted_id_leaves_no_source_pin() {
+async fn fork_into_a_deleted_id_leaves_no_source_snapshot() {
     let directory = tempdir().expect("directory");
     let store = RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
@@ -574,28 +574,28 @@ async fn fork_into_a_deleted_id_leaves_no_source_pin() {
         .await
         .expect_err("deleted target");
     assert_eq!(error.code(), ErrorCode::NamespaceDeleted);
-    // The fork writes its source pin, has the put of the target's hint
-    // refused, reads the tombstone, and deletes the pin.
+    // The fork writes its fork snapshot, has the put of the target's hint
+    // refused, reads the tombstone, and deletes the snapshot.
     assert_eq!(store.counts().create_if_absent_puts, 2);
     assert_eq!(store.counts().compare_and_swaps, 0);
     assert_eq!(store.counts().deletes, 1);
     assert!(store
-        .list_prefix(&loonfs_objectstore::keys::pin_prefix(&source))
+        .list_prefix(&loonfs_objectstore::keys::snapshot_prefix(&source))
         .await
-        .expect("source pins")
+        .expect("fork snapshots")
         .is_empty());
 }
 
 #[tokio::test]
-async fn a_fork_that_loses_target_publication_deletes_its_source_pin() {
+async fn a_fork_that_loses_target_publication_deletes_its_source_snapshot() {
     for deleted in [false, true] {
         let directory = tempdir().expect("directory");
         let source = NamespaceId::parse("source").expect("source");
         let target = NamespaceId::parse("target").expect("target");
-        let pin_prefix = loonfs_objectstore::keys::pin_prefix(&source);
+        let snapshot_prefix = loonfs_objectstore::keys::snapshot_prefix(&source);
         let store = BlockingStore::new(
             LocalFsStore::new(directory.path()).expect("store"),
-            KeyPredicate::prefix(&pin_prefix),
+            KeyPredicate::prefix(&snapshot_prefix),
             OperationSelector::PutCreateIfAbsent,
         );
         let setup = context();
@@ -638,9 +638,9 @@ async fn a_fork_that_loses_target_publication_deletes_its_source_pin() {
             }
         );
         assert!(store
-            .list_prefix(&pin_prefix)
+            .list_prefix(&snapshot_prefix)
             .await
-            .expect("source pins")
+            .expect("fork snapshots")
             .is_empty());
     }
 }

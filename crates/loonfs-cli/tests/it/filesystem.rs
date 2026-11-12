@@ -1266,7 +1266,7 @@ fn embedded_profile_namespace_fork_reads_shared_content_and_diverges() {
             "fork_basis": {
                 "source_namespace_id": "demo",
                 "fork_point_seq": 1,
-                "source_pin_id": json_data(&fork)["fork_basis"]["source_pin_id"]
+                "source_snapshot_id": json_data(&fork)["fork_basis"]["source_snapshot_id"]
             },
             "pool_id": json_data(&fork)["pool_id"],
             "head_seq": 1,

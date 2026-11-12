@@ -2,7 +2,7 @@
 
 use super::ObjectTransfer;
 use crate::options::ReadConsistency;
-use crate::{AbsolutePath, ContentRef, InodeId, NamespaceId, PinId, RevisionNo};
+use crate::{AbsolutePath, ContentRef, InodeId, NamespaceId, RevisionNo, SnapshotId};
 use serde::{Deserialize, Serialize};
 
 /// A request to download a file by path, and optionally a revision.
@@ -21,7 +21,7 @@ pub struct CreateDownloadRequest {
     /// captured. It can't be combined with `revision_no`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub snapshot_id: Option<PinId>,
+    pub snapshot_id: Option<SnapshotId>,
     /// How recently the read confirms the namespace head. `eventual` (the default, unless the
     /// server's `consistency` setting is `strong`) reads at the head that the server confirmed last
     /// while that confirmation is younger than the maximum staleness, and `strong` confirms the
@@ -51,7 +51,7 @@ pub struct CreateDownloadByInodeRequest {
     /// captured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub snapshot_id: Option<PinId>,
+    pub snapshot_id: Option<SnapshotId>,
     /// How recently the read confirms the namespace head. `eventual` (the default, unless the
     /// server's `consistency` setting is `strong`) reads at the head that the server confirmed last
     /// while that confirmation is younger than the maximum staleness, and `strong` confirms the
@@ -149,7 +149,7 @@ mod tests {
         CreateDownloadByInodeRequest, CreateDownloadByInodeResponse, CreateDownloadRequest,
         CreateDownloadResponse, CreateRevisionDownloadByInodeRequest, ReadConsistency,
     };
-    use crate::{AbsolutePath, ContentId, ContentRef, NamespaceId, PinId, RevisionNo};
+    use crate::{AbsolutePath, ContentId, ContentRef, NamespaceId, RevisionNo, SnapshotId};
     use crate::{DownloadRange, ObjectTransfer};
     use std::collections::BTreeMap;
 
@@ -189,8 +189,8 @@ mod tests {
                 .expect("decode pinned request");
         assert_eq!(pinned.revision_no, Some(RevisionNo(3)));
 
-        let snapshot_id =
-            PinId::parse("pin_00000000000000000001-0000000000000002").expect("snapshot id");
+        let snapshot_id = SnapshotId::parse("snp_00000000000000000001-00000000000000000000000002")
+            .expect("snapshot id");
         for revision_no in [None, Some(RevisionNo(3))] {
             let request: CreateDownloadRequest = serde_json::from_value(serde_json::json!({
                 "path": "/docs/report.txt",

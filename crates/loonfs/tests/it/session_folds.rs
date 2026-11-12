@@ -334,39 +334,39 @@ async fn a_delete_waits_for_a_requested_fold() {
     family.runtime.shutdown().await.expect("shutdown");
 }
 
-/// A pin of a namespace's current head, which folds the namespace's WAL tail
-/// before the pin.
+/// A snapshot of a namespace's current head, which folds the namespace's WAL tail
+/// before the snapshot.
 #[derive(Debug, Clone, Copy)]
-enum HeadPin {
+enum HeadSnapshot {
     Snapshot,
     Fork,
 }
 
 /// Checks that a fold of the namespace's session waits for a snapshot's or a
-/// fork's pin until the pin is verified, so the pin isn't written again. The
-/// pin put is parked while more commits make the session's fold due. No
-/// manifest is published while the pin is parked, the pin keeps the
-/// manifest of its own fold, and the session's fold publishes once the pin
+/// fork's snapshot until the snapshot is verified, so the snapshot isn't written again. The
+/// snapshot put is parked while more commits make the session's fold due. No
+/// manifest is published while the snapshot is parked, the snapshot keeps the
+/// manifest of its own fold, and the session's fold publishes once the snapshot
 /// returns.
 #[tokio::test]
-async fn a_sessions_fold_waits_for_a_snapshot_or_a_fork_to_verify_its_pin() {
-    for head_pin in [HeadPin::Snapshot, HeadPin::Fork] {
-        fold_beside_a_parked_pin(head_pin).await;
+async fn a_sessions_fold_waits_for_a_snapshot_or_a_fork_to_verify_its_snapshot_record() {
+    for head_snapshot in [HeadSnapshot::Snapshot, HeadSnapshot::Fork] {
+        fold_beside_a_parked_snapshot(head_snapshot).await;
     }
 }
 
-async fn fold_beside_a_parked_pin(head_pin: HeadPin) {
-    let fork_id = namespace_id("pin-wait-fork");
-    let namespace_id = namespace_id("pin-wait");
-    let pins = KeyPredicate::prefix(loonfs_objectstore::keys::pin_prefix(&namespace_id));
+async fn fold_beside_a_parked_snapshot(head_snapshot: HeadSnapshot) {
+    let fork_id = namespace_id("snapshot-wait-fork");
+    let namespace_id = namespace_id("snapshot-wait");
+    let snapshots = KeyPredicate::prefix(loonfs_objectstore::keys::snapshot_prefix(&namespace_id));
     let blocking = Arc::new(BlockingStore::new(
         MemoryStore::new(ChecksumAlgorithm::Crc64nvme),
-        pins.clone(),
+        snapshots.clone(),
         OperationSelector::Put,
     ));
     let store = Arc::new(RecordingStore::new(blocking.clone(), KeyPredicate::any()));
     let runtime = LoonFs::builder_with_store(store.clone())
-        .writer_id(writer_id("pin-wait"))
+        .writer_id(writer_id("snapshot-wait"))
         .session_fold_at_wal_objects(FOLD_AT_WAL_OBJECTS)
         .build()
         .await
@@ -390,7 +390,7 @@ async fn fold_beside_a_parked_pin(head_pin: HeadPin) {
     };
     let current_manifest_no = || async {
         runtime
-            .maintenance(writer_id("pin-wait"))
+            .maintenance(writer_id("snapshot-wait"))
             .diagnostics(&namespace_id)
             .await
             .expect("diagnostics")
@@ -400,32 +400,32 @@ async fn fold_beside_a_parked_pin(head_pin: HeadPin) {
     write(0, FILES - 1).await;
     store.reset();
     blocking.block_next();
-    let pinned = async {
-        match head_pin {
-            HeadPin::Snapshot => namespace
+    let created = async {
+        match head_snapshot {
+            HeadSnapshot::Snapshot => namespace
                 .create_snapshot("parked")
                 .await
                 .expect("the snapshot")
                 .snapshot_id
                 .manifest_no(),
-            HeadPin::Fork => runtime
+            HeadSnapshot::Fork => runtime
                 .fork_namespace(&namespace_id, &fork_id, &actor())
                 .await
                 .expect("the fork")
                 .fork_basis
                 .expect("a fork basis")
-                .source_pin_id
+                .source_snapshot_id
                 .manifest_no(),
         }
     };
-    tokio::pin!(pinned);
+    tokio::pin!(created);
     tokio::select! {
-        _ = &mut pinned => panic!("{head_pin:?}: the pin finished without writing its record"),
+        _ = &mut created => panic!("{head_snapshot:?}: the snapshot finished without writing its record"),
         () = blocking.wait_until_blocked() => {}
     }
     let folded = current_manifest_no().await;
     let before = store.take();
-    // The pin's fold folded the fence, so one more file than before brings
+    // The snapshot's fold folded the fence, so one more file than before brings
     // the tail to the fold trigger.
     write(FILES - 1, FILES + 1).await;
     for _ in 0..100 {
@@ -435,17 +435,21 @@ async fn fold_beside_a_parked_pin(head_pin: HeadPin) {
     assert_eq!(
         write_keys(&parked, &KeyPredicate::manifest(&namespace_id)),
         Vec::<String>::new(),
-        "{head_pin:?}: no fold publishes while the pin is parked"
+        "{head_snapshot:?}: no fold publishes while the snapshot is parked"
     );
     blocking.release();
-    assert_eq!(pinned.await, folded, "{head_pin:?}");
+    assert_eq!(created.await, folded, "{head_snapshot:?}");
     namespace.wait_for_fold().await.expect("the session's fold");
-    assert_eq!(current_manifest_no().await.0, folded.0 + 1, "{head_pin:?}");
+    assert_eq!(
+        current_manifest_no().await.0,
+        folded.0 + 1,
+        "{head_snapshot:?}"
+    );
     let operations = [before, parked, store.take()].concat();
     assert_eq!(
-        write_keys(&operations, &pins).len(),
+        write_keys(&operations, &snapshots).len(),
         1,
-        "{head_pin:?}: one pin put"
+        "{head_snapshot:?}: one snapshot record put"
     );
     runtime.shutdown().await.expect("shutdown");
 }

@@ -215,7 +215,7 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
     let baseline = namespace_store(&store, &parent)
         .load_snapshot_statistics(&snapshot.snapshot_id)
         .await
-        .expect("pin activity");
+        .expect("snapshot activity");
     NamespaceFixture::new(&store, &parent, &context)
         .write_file_bytes("/file", b"newer", Some(&commit_id("newer")))
         .await
@@ -362,7 +362,7 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
         namespace_store(&store, &parent)
             .load_snapshot_statistics(&snapshot.snapshot_id)
             .await
-            .expect("pin unchanged"),
+            .expect("snapshot unchanged"),
         baseline
     );
 }

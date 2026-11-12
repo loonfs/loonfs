@@ -228,7 +228,7 @@ async fn content_that_only_a_member_view_refers_to_stays_through_every_generatio
     let aged = aged_context(&store, &members).await;
     store.reset();
     let report = collect_pool(&store, &pool_id, &aged).await;
-    // A member's roots cost one pin listing, and the pool's collection lists
+    // A member's roots cost one snapshot listing, and the pool's collection lists
     // nothing else under the member's prefix.
     let listings = store
         .take()
@@ -238,7 +238,7 @@ async fn content_that_only_a_member_view_refers_to_stays_through_every_generatio
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(listings, [pin_prefix(&members[1])]);
+    assert_eq!(listings, [snapshot_prefix(&members[1])]);
     assert_eq!(report.deleted.content_objects, 1);
     assert!(!exists(&store, &unreferenced).await);
     for key in &referenced {
@@ -292,17 +292,17 @@ async fn content_that_only_a_deleted_fork_refers_to_stays_until_the_fork_is_reti
 }
 
 #[tokio::test]
-async fn a_fork_pin_whose_target_has_no_manifest_is_skipped() {
+async fn a_fork_snapshot_whose_target_has_no_manifest_is_skipped() {
     let directory = tempdir().expect("directory");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let (pool_id, members) = pool(&store, &["first", "fork"]).await;
     let first = &members[0];
-    // An installation that hasn't finished has written its pin and nothing
+    // An installation that hasn't finished has written its snapshot and nothing
     // else.
     let namespace = crate::test_support::namespace_store(&store, first);
     namespace
-        .create_pin(
-            PinOwner::Fork {
+        .create_snapshot_record(
+            SnapshotOwner::Fork {
                 target_namespace_id: NamespaceId::parse("pending").expect("namespace"),
             },
             crate::test_support::folded_manifest(&namespace)
@@ -311,7 +311,7 @@ async fn a_fork_pin_whose_target_has_no_manifest_is_skipped() {
             &context(1_000).clock(),
         )
         .await
-        .expect("fork pin");
+        .expect("fork snapshot");
     let unreferenced = plant(&store, &pool_id, &ContentId::generate()).await;
     let aged = aged_context(&store, &members).await;
     let report = collect_pool(&store, &pool_id, &aged).await;
@@ -322,7 +322,7 @@ async fn a_fork_pin_whose_target_has_no_manifest_is_skipped() {
 #[tokio::test]
 async fn an_unreadable_member_skips_the_content_sweep_and_the_collection_sweeps_temporary_objects()
 {
-    // The fork's pin is on the first member, and the grandchild's pin is on
+    // The fork's snapshot is on the first member, and the grandchild's snapshot is on
     // the fork.
     for corrupt in [0, 1, 2] {
         let directory = tempdir().expect("directory");
@@ -400,8 +400,8 @@ async fn a_collection_fails_when_a_members_fork_targets_do_not_fit_the_read_memo
             NamespaceId::parse(format!("pending-{index:0120}")).expect("namespace");
         let namespace = crate::test_support::namespace_store(&store, fork);
         namespace
-            .create_pin(
-                PinOwner::Fork {
+            .create_snapshot_record(
+                SnapshotOwner::Fork {
                     target_namespace_id,
                 },
                 crate::test_support::folded_manifest(&namespace)
@@ -410,7 +410,7 @@ async fn a_collection_fails_when_a_members_fork_targets_do_not_fit_the_read_memo
                 &context(1_000).clock(),
             )
             .await
-            .expect("fork pin");
+            .expect("fork snapshot");
     }
     let unreferenced = plant(&store, &pool_id, &ContentId::generate()).await;
     let aged = aged_context(&store, &members).await;
@@ -557,7 +557,7 @@ async fn a_deleted_first_members_pool_sweeps_a_live_forks_sessions_by_the_forks_
     let first_completed =
         plant_session(&store, &pool_id, first, base_ms, Some(completed(base_ms))).await;
 
-    // The fork's pin keeps the first member from retirement, so its own
+    // The fork's snapshot keeps the first member from retirement, so its own
     // sessions stay, and the fork's sessions follow the fork's rules.
     collect_pool_at(&store, &pool_id, base_ms + GRACE_MS).await;
     assert!(exists(&store, &upload_outcome(&pool_id, &fork_open.upload_id)).await);
@@ -625,7 +625,7 @@ async fn an_unreadable_member_leaves_the_sessions_of_unread_namespaces_undecided
     let directory = tempdir().expect("directory");
     let store = LocalFsStore::new(directory.path()).expect("store");
     // Each name is forked from the one before it, so the walk finds `c`
-    // only through the pins of `b`.
+    // only through the snapshots of `b`.
     let (pool_id, members) = pool(&store, &["first", "a", "b", "c"]).await;
     let b_manifest = crate::test_support::namespace_store(&store, &members[2])
         .load_current_manifest()

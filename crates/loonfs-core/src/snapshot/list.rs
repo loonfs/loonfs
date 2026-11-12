@@ -1,16 +1,16 @@
-//! Lists existing pins: every pin as a checkpoint, or the user pins as
+//! Lists existing snapshots: every snapshot as a checkpoint, or only the user
 //! snapshots.
 
-use super::record::load_pin_at_key;
+use super::record::load_snapshot_record_at_key;
 use crate::control_object::ControlObjectLoadError;
 use crate::engine::NamespaceEngine;
 use crate::error::{CoreError, Result};
 use futures::StreamExt;
-use loonfs_objectstore::keys::pin_prefix;
+use loonfs_objectstore::keys::snapshot_prefix;
 use loonfs_objectstore::ObjectStore;
 use loonfs_objectstore::ObjectStoreExtension;
-use loonfs_types::format::control::PinPayload;
-use loonfs_types::{Checkpoint, NamespaceId, Page, PageCursor, PageRequest, PinId, Snapshot};
+use loonfs_types::format::control::SnapshotPayload;
+use loonfs_types::{Checkpoint, NamespaceId, Page, PageCursor, PageRequest, Snapshot, SnapshotId};
 use serde::{Deserialize, Serialize};
 
 /// Resume position for a checkpoint listing.
@@ -65,9 +65,9 @@ impl CheckpointPageCursor {
                 "cursor belongs to a different namespace".to_owned(),
             ));
         }
-        if !self.last_key.starts_with(&pin_prefix(namespace_id)) {
+        if !self.last_key.starts_with(&snapshot_prefix(namespace_id)) {
             return Err(CoreError::InvalidCursor(
-                "cursor refers to a key outside the pin listing".to_owned(),
+                "cursor refers to a key outside the snapshot listing".to_owned(),
             ));
         }
         Ok(())
@@ -75,14 +75,14 @@ impl CheckpointPageCursor {
 }
 
 impl<S: ObjectStore, M> NamespaceEngine<S, M> {
-    /// Loads one existing pin of any owner by id, as the checkpoint listing
+    /// Loads one existing snapshot of any owner by id, as the checkpoint listing
     /// returns it. An expired record stays readable until garbage collection
-    /// deletes it. A missing pin returns `snapshot_not_found`.
-    pub async fn get_checkpoint(&self, checkpoint_id: &PinId) -> Result<Checkpoint> {
+    /// deletes it. A missing snapshot returns `snapshot_not_found`.
+    pub async fn get_checkpoint(&self, checkpoint_id: &SnapshotId) -> Result<Checkpoint> {
         self.namespace.load_current_manifest().await?;
         let loaded = self
             .namespace
-            .load_pin(checkpoint_id)
+            .load_snapshot_record(checkpoint_id)
             .await?
             .ok_or_else(|| CoreError::SnapshotNotFound {
                 snapshot_id: checkpoint_id.clone(),
@@ -90,18 +90,18 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         Ok(super::checkpoint_summary(loaded.state))
     }
 
-    /// Lists one page of existing checkpoints, fork pins included, in
+    /// Lists one page of existing checkpoints, fork snapshots included, in
     /// ascending id order. Expired records remain visible until garbage
     /// collection deletes them.
     pub async fn list_checkpoints_page(
         &self,
         request: PageRequest<CheckpointPageCursor>,
     ) -> Result<Page<Checkpoint, CheckpointPageCursor>> {
-        self.list_pins_page(request, |record| Some(super::checkpoint_summary(record)))
+        self.list_snapshot_records_page(request, |record| Some(super::checkpoint_summary(record)))
             .await
     }
 
-    /// Lists one page of snapshots (the user pins) in ascending ID order,
+    /// Lists one page of snapshots (the user snapshots) in ascending ID order,
     /// including expired snapshots that garbage collection hasn't deleted.
     pub async fn list_snapshots_page(
         &self,
@@ -112,7 +112,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             cursor: request.cursor.map(CheckpointPageCursor::from),
         };
         let page = self
-            .list_pins_page(request, super::user_pin_snapshot)
+            .list_snapshot_records_page(request, super::user_snapshot)
             .await?;
         Ok(Page {
             items: page.items,
@@ -120,13 +120,13 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         })
     }
 
-    /// Lists the pins after the request's cursor and returns up to its limit of
-    /// the rows that `row` returns for them. A pin for which `row` returns
+    /// Lists the snapshots after the request's cursor and returns up to its limit of
+    /// the rows that `row` returns for them. A snapshot for which `row` returns
     /// `None` doesn't count toward the limit.
-    async fn list_pins_page<T>(
+    async fn list_snapshot_records_page<T>(
         &self,
         request: PageRequest<CheckpointPageCursor>,
-        row: impl Fn(PinPayload) -> Option<T>,
+        row: impl Fn(SnapshotPayload) -> Option<T>,
     ) -> Result<Page<T, CheckpointPageCursor>> {
         self.namespace.load_current_manifest().await?;
 
@@ -135,7 +135,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         }
 
         let limit = request.limit;
-        let prefix = pin_prefix(&self.namespace.namespace_id);
+        let prefix = snapshot_prefix(&self.namespace.namespace_id);
         let start_after = request
             .cursor
             .as_ref()
@@ -155,7 +155,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             let key = item.map_err(|error| CoreError::store(&prefix, &error))?;
             last_inspected_key = Some(key.clone());
             // Skip records deleted after the key listing was read.
-            let loaded = match load_pin_at_key(&self.namespace.store, &key).await {
+            let loaded = match load_snapshot_record_at_key(&self.namespace.store, &key).await {
                 Ok(loaded) => loaded,
                 Err(ControlObjectLoadError::MissingObject { .. }) => continue,
                 Err(error) => return Err(CoreError::ControlObjectLoad(error)),
@@ -199,7 +199,7 @@ mod cursor_tests {
         let token = |extra: Option<(&str, serde_json::Value)>| {
             let mut cursor = serde_json::json!({
                 "namespace_id": "demo",
-                "last_key": "namespaces/demo/pins/pin_00000000000000000001-0000000000000001.json",
+                "last_key": "namespaces/demo/snapshots/snp_00000000000000000001-00000000000000000000000001.json",
             });
             if let Some((name, value)) = extra {
                 cursor[name] = value;
@@ -217,7 +217,7 @@ mod cursor_tests {
         let cursor = decode_cursor::<CheckpointPageCursor>(&token(None)).expect("decode cursor");
         assert_eq!(
             cursor.last_key,
-            "namespaces/demo/pins/pin_00000000000000000001-0000000000000001.json"
+            "namespaces/demo/snapshots/snp_00000000000000000001-00000000000000000000000001.json"
         );
         decode_cursor::<CheckpointPageCursor>(&token(Some((
             "future_field",
@@ -236,15 +236,16 @@ mod cursor_tests {
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
         let checkpoint = CheckpointPageCursor {
             namespace_id: namespace_id.clone(),
-            last_key: "namespaces/demo/pins/pin_00000000000000000001-0000000000000001.json"
-                .to_owned(),
+            last_key:
+                "namespaces/demo/snapshots/snp_00000000000000000001-00000000000000000000000001.json"
+                    .to_owned(),
         };
         let cursors = [
             (
                 "directory.txt",
                 encode_cursor(&DirectoryPageCursor {
                     head_seq: CommitSeq(12),
-                    pin_id: None,
+                    snapshot_id: None,
                     directory_inode_id: InodeId(1),
                     last_name_key: NameKey::parse("report.txt").expect("name key"),
                 }),
@@ -296,7 +297,7 @@ mod cursor_tests {
     fn cursor_is_operation_bound() {
         let directory = DirectoryPageCursor {
             head_seq: loonfs_types::CommitSeq(1),
-            pin_id: None,
+            snapshot_id: None,
             directory_inode_id: loonfs_types::InodeId(1),
             last_name_key: NameKey::parse("entry").expect("name key"),
         };

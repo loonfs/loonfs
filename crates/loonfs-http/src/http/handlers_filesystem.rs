@@ -14,7 +14,7 @@ use axum::Json;
 use loonfs::publish::{CommitCandidate, CommitIntent, ContentPreparationError};
 use loonfs::{
     AbsolutePath, CommitSeq, DiffOptions, ErrorCode, ListChangesOptions, ListFileRevisionsOptions,
-    ListOptions, ListTrashOptions, PinId, ReadConsistency, ReadFileStreamOptions, StatOptions,
+    ListOptions, ListTrashOptions, ReadConsistency, ReadFileStreamOptions, SnapshotId, StatOptions,
 };
 use loonfs_types::options::CommitSplitting;
 #[cfg(feature = "openapi")]
@@ -39,7 +39,7 @@ pub(super) struct PathQuery {
     #[cfg_attr(feature = "openapi", param(default = true))]
     include_attributes: Option<bool>,
     /// The snapshot whose captured path state to read.
-    snapshot_id: Option<PinId>,
+    snapshot_id: Option<SnapshotId>,
     /// How recently the read confirms the namespace head. `eventual` (the default, unless the
     /// server's `consistency` setting is `strong`) reads at the head that the server confirmed last
     /// while that confirmation is younger than the maximum staleness, and `strong` confirms the
@@ -109,7 +109,7 @@ pub(super) struct ListPathPageQuery {
     #[cfg_attr(feature = "openapi", param(default = false))]
     recursive: Option<bool>,
     /// The snapshot whose captured directory state to read.
-    snapshot_id: Option<PinId>,
+    snapshot_id: Option<SnapshotId>,
     /// How recently the read confirms the namespace head. `eventual` (the default, unless the
     /// server's `consistency` setting is `strong`) reads at the head that the server confirmed last
     /// while that confirmation is younger than the maximum staleness, and `strong` confirms the
@@ -174,7 +174,7 @@ pub(super) struct ContentQuery {
     /// An earlier revision to read. It can't be combined with `snapshot_id`.
     revision_no: Option<RevisionNo>,
     /// The snapshot whose captured file revision to read.
-    snapshot_id: Option<PinId>,
+    snapshot_id: Option<SnapshotId>,
     /// How recently the read confirms the namespace head. `eventual` (the default, unless the
     /// server's `consistency` setting is `strong`) reads at the head that the server confirmed last
     /// while that confirmation is younger than the maximum staleness, and `strong` confirms the
@@ -212,7 +212,7 @@ pub(super) struct ChangesQuery {
     )]
     limit: Option<u32>,
     /// A snapshot to read the feed from. The feed ends at the sequence that the snapshot captured.
-    snapshot_id: Option<PinId>,
+    snapshot_id: Option<SnapshotId>,
     /// How recently the read confirms the namespace head. `eventual` (the default, unless the
     /// server's `consistency` setting is `strong`) reads at the head that the server confirmed last
     /// while that confirmation is younger than the maximum staleness, and `strong` confirms the
@@ -748,7 +748,7 @@ fn commit_splitting(split_commits: Option<bool>) -> CommitSplitting {
 }
 
 pub(super) fn reject_snapshot_with_revision(
-    snapshot_id: Option<&PinId>,
+    snapshot_id: Option<&SnapshotId>,
     revision_no: Option<RevisionNo>,
     param: &str,
 ) -> Result<(), ApiResponseError> {

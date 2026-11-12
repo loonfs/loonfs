@@ -20,14 +20,14 @@ const FOLDED: &str = "/folded/file.txt";
 const TAIL: &str = "/tail.txt";
 
 #[derive(Clone, Copy, Debug)]
-enum PinCreation {
+enum SnapshotCreation {
     Fold,
     Snapshot,
     Fork,
 }
 
-async fn pin_fold_reads(
-    creation: PinCreation,
+async fn snapshot_fold_reads(
+    creation: SnapshotCreation,
     max_read_working_bytes: usize,
     max_segment_bytes: usize,
 ) -> usize {
@@ -45,7 +45,7 @@ async fn pin_fold_reads(
         .metrics_recorder(recorder.clone())
         .build();
     let runtime = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id("pin-writer"))
+        .writer_id(loonfs_test_support::ids::writer_id("snapshot-writer"))
         .execution_budget(budget.clone())
         .metadata_cache(
             MetadataCache::builder()
@@ -66,7 +66,7 @@ async fn pin_fold_reads(
             .await
             .expect("put log");
     }
-    let maintenance = runtime.maintenance(writer_id("pin-maintenance"));
+    let maintenance = runtime.maintenance(writer_id("snapshot-maintenance"));
     maintenance.fold_wal(&demo()).await.expect("fold logs");
     // Each append extends its folded chain, so the fold that writes the
     // appended bytes reads the chain's layout from the folded segments.
@@ -88,16 +88,16 @@ async fn pin_fold_reads(
     store.inner().block_next();
     let mut operation = Box::pin(async {
         match creation {
-            PinCreation::Fold => {
+            SnapshotCreation::Fold => {
                 maintenance.fold_wal(&demo()).await.expect("fold tail");
             }
-            PinCreation::Snapshot => {
+            SnapshotCreation::Snapshot => {
                 namespace
                     .create_snapshot("snapshot")
                     .await
                     .expect("create snapshot");
             }
-            PinCreation::Fork => {
+            SnapshotCreation::Fork => {
                 runtime
                     .fork_namespace(&demo(), &namespace_id("fork"), &test_actor())
                     .await
@@ -146,12 +146,16 @@ async fn pin_fold_reads(
 }
 
 #[tokio::test]
-async fn folds_and_pin_folds_use_the_shared_pool_and_segment_cache() {
-    for creation in [PinCreation::Fold, PinCreation::Snapshot, PinCreation::Fork] {
-        let small_memo_reads = pin_fold_reads(creation, 1, 0).await;
+async fn folds_and_snapshot_folds_use_the_shared_pool_and_segment_cache() {
+    for creation in [
+        SnapshotCreation::Fold,
+        SnapshotCreation::Snapshot,
+        SnapshotCreation::Fork,
+    ] {
+        let small_memo_reads = snapshot_fold_reads(creation, 1, 0).await;
         let default_memo_reads =
-            pin_fold_reads(creation, crate::DEFAULT_MAX_READ_WORKING_BYTES, 0).await;
-        let warm_cache_reads = pin_fold_reads(creation, 1, 1024 * 1024).await;
+            snapshot_fold_reads(creation, crate::DEFAULT_MAX_READ_WORKING_BYTES, 0).await;
+        let warm_cache_reads = snapshot_fold_reads(creation, 1, 1024 * 1024).await;
         assert!(
             default_memo_reads > 0,
             "{creation:?} reads the chains' layouts"

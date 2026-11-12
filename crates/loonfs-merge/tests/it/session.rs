@@ -15,7 +15,7 @@ use std::collections::BTreeSet;
 #[tokio::test]
 async fn a_fork_without_conflicts_merges_in_one_commit() {
     let mechanics = ScriptedMechanics::new([
-        Answer::ForkPins(Vec::new()),
+        Answer::ForkSnapshots(Vec::new()),
         Answer::range(10, 20),
         Answer::Committed(31),
     ]);
@@ -42,7 +42,7 @@ async fn a_fork_without_conflicts_merges_in_one_commit() {
 #[tokio::test]
 async fn a_merge_too_large_merges_through_the_split_hint_and_then_the_rest() {
     let mechanics = ScriptedMechanics::new([
-        Answer::ForkPins(Vec::new()),
+        Answer::ForkSnapshots(Vec::new()),
         Answer::range(10, 20),
         Answer::too_large(15),
         Answer::Committed(31),
@@ -93,7 +93,7 @@ async fn a_merge_too_large_merges_through_the_split_hint_and_then_the_rest() {
 #[tokio::test]
 async fn a_conflict_rebases_in_pieces_and_the_resolved_new_fork_merges() {
     let mechanics = ScriptedMechanics::new([
-        Answer::ForkPins(Vec::new()),
+        Answer::ForkSnapshots(Vec::new()),
         Answer::range(10, 20),
         Answer::refused(ErrorCode::MergeConflict),
         Answer::too_large(15),
@@ -175,7 +175,7 @@ async fn a_conflict_rebases_in_pieces_and_the_resolved_new_fork_merges() {
 #[tokio::test]
 async fn a_lost_report_rebases_again_and_the_default_resolver_fails_with_the_reports() {
     let mechanics = ScriptedMechanics::new([
-        Answer::ForkPins(Vec::new()),
+        Answer::ForkSnapshots(Vec::new()),
         Answer::range(10, 20),
         Answer::refused(ErrorCode::MergeConflict),
         Answer::Replayed(None),
@@ -238,7 +238,7 @@ async fn a_lost_report_rebases_again_and_the_default_resolver_fails_with_the_rep
 #[tokio::test]
 async fn a_run_that_stops_after_a_lost_report_resumes_from_its_saved_state() {
     let mechanics = ScriptedMechanics::new([
-        Answer::ForkPins(Vec::new()),
+        Answer::ForkSnapshots(Vec::new()),
         Answer::range(10, 20),
         Answer::refused(ErrorCode::MergeConflict),
         // The run stops after this answer, before it saves the step's state.
@@ -296,7 +296,7 @@ async fn a_run_that_stops_after_a_lost_report_resumes_from_its_saved_state() {
 #[tokio::test]
 async fn the_default_resolver_merges_a_new_fork_whose_rebase_left_out_nothing() {
     let mechanics = ScriptedMechanics::new([
-        Answer::ForkPins(Vec::new()),
+        Answer::ForkSnapshots(Vec::new()),
         Answer::range(10, 20),
         Answer::refused(ErrorCode::MergeConflict),
         Answer::too_large(15),
@@ -324,7 +324,7 @@ async fn the_default_resolver_merges_a_new_fork_whose_rebase_left_out_nothing() 
 #[tokio::test]
 async fn a_new_fork_whose_range_starts_below_its_floor_fails_with_the_reports() {
     let mechanics = ScriptedMechanics::new([
-        Answer::ForkPins(Vec::new()),
+        Answer::ForkSnapshots(Vec::new()),
         Answer::range(10, 20),
         Answer::refused(ErrorCode::MergeConflict),
         Answer::Replayed(Some(vec![conflict("/a.txt")])),
@@ -390,7 +390,7 @@ async fn a_fork_point_below_the_floor_fails_the_session_before_it_merges() {
     ];
     for (outcome, failure) in cases {
         let mechanics = ScriptedMechanics::new([
-            Answer::ForkPins(Vec::new()),
+            Answer::ForkSnapshots(Vec::new()),
             Answer::RangeOutcome {
                 source_head_seq: 20,
                 outcome,
@@ -415,7 +415,7 @@ async fn a_fork_point_below_the_floor_fails_the_session_before_it_merges() {
 #[tokio::test]
 async fn a_retry_after_commit_queue_full_returns_the_original_commit() {
     let mechanics = ScriptedMechanics::new([
-        Answer::ForkPins(Vec::new()),
+        Answer::ForkSnapshots(Vec::new()),
         Answer::range(10, 20),
         Answer::refused(ErrorCode::CommitQueueFull),
         Answer::Committed(31),
@@ -474,7 +474,7 @@ async fn errors_that_the_loop_cant_act_on_fail_the_session() {
     ];
     for (case, answers, code) in cases {
         let mechanics = ScriptedMechanics::new(
-            [Answer::ForkPins(Vec::new()), Answer::range(10, 20)]
+            [Answer::ForkSnapshots(Vec::new()), Answer::range(10, 20)]
                 .into_iter()
                 .chain(answers),
         );

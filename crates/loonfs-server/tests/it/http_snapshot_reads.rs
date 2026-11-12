@@ -1,4 +1,4 @@
-//! HTTP reads pinned to snapshots.
+//! HTTP reads at snapshots.
 
 use crate::common::http_split_support::{replace_file_options, test_config};
 use crate::common::{start_server, TestServer};
@@ -264,14 +264,14 @@ async fn snapshot_reads_answer_the_captured_namespace() {
         .expect("delete captured file");
 
     let snapshot_id = snapshot.snapshot_id.as_str();
-    let pinned_entry: PathEntry = get_json(&stat_url(
+    let snapshot_entry: PathEntry = get_json(&stat_url(
         &harness.server_url,
         namespace.as_str(),
         Some(snapshot_id),
     ))
     .expect("snapshot stat");
-    assert_eq!(pinned_entry.revision_no(), captured_entry.revision_no());
-    let pinned_listing: ListPathEntriesResponse = get_json(&listing_url(
+    assert_eq!(snapshot_entry.revision_no(), captured_entry.revision_no());
+    let snapshot_listing: ListPathEntriesResponse = get_json(&listing_url(
         &harness.server_url,
         namespace.as_str(),
         Some(snapshot_id),
@@ -280,7 +280,7 @@ async fn snapshot_reads_answer_the_captured_namespace() {
     ))
     .expect("snapshot listing");
     assert_eq!(
-        entry_paths(&pinned_listing),
+        entry_paths(&snapshot_listing),
         BTreeSet::from(["/deleted.txt".to_owned(), "/keep.txt".to_owned()])
     );
     let inode_entry = harness
@@ -295,7 +295,7 @@ async fn snapshot_reads_answer_the_captured_namespace() {
         )
         .await
         .expect("snapshot inode stat");
-    assert_eq!(inode_entry, pinned_entry);
+    assert_eq!(inode_entry, snapshot_entry);
     let options = loonfs_client::ListOptions {
         at: ReadAt::Snapshot(snapshot.snapshot_id.clone()),
         ..Default::default()
@@ -308,7 +308,7 @@ async fn snapshot_reads_answer_the_captured_namespace() {
         .await
         .expect("snapshot children first page");
     assert_eq!(first.head_seq, snapshot.captured_seq);
-    assert_eq!(first.entries[0], pinned_listing.entries[0]);
+    assert_eq!(first.entries[0], snapshot_listing.entries[0]);
     let cursor = first.next_cursor.as_deref().expect("children cursor");
     let error = harness
         .client
@@ -328,7 +328,7 @@ async fn snapshot_reads_answer_the_captured_namespace() {
         .await
         .expect("snapshot children second page");
     assert_eq!(second.head_seq, snapshot.captured_seq);
-    assert_eq!(second.entries[0], pinned_listing.entries[1]);
+    assert_eq!(second.entries[0], snapshot_listing.entries[1]);
     assert!(second.next_cursor.is_none());
 
     assert_eq!(
@@ -357,11 +357,11 @@ async fn snapshot_reads_answer_the_captured_namespace() {
 }
 
 /// Checks that by-inode reads through a snapshot, and revision reads through
-/// a snapshot or a fork pin, serve the revision that the pinned manifest
-/// keeps after a later put, and that a revision committed after the pin
+/// a snapshot or a fork snapshot, serve the revision that the snapshot's manifest
+/// keeps after a later put, and that a revision committed after the snapshot
 /// isn't found through it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn pinned_reads_by_inode_serve_the_pinned_revision_after_a_later_put() {
+async fn snapshot_reads_by_inode_serve_the_snapshot_revision_after_a_later_put() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_snapshot_server(temp_dir.path(), "snapshot-inode-reads").await;
     let namespace = namespace_id("snapshot-inode-reads");
@@ -397,10 +397,10 @@ async fn pinned_reads_by_inode_serve_the_pinned_revision_after_a_later_put() {
         )
         .await
         .expect("fork namespace");
-    let fork_pin_id = fork
+    let fork_snapshot_id = fork
         .fork_basis
         .expect("a fork has a fork basis")
-        .source_pin_id;
+        .source_snapshot_id;
     harness
         .client
         .put_file_with_options(
@@ -412,20 +412,20 @@ async fn pinned_reads_by_inode_serve_the_pinned_revision_after_a_later_put() {
         .await
         .expect("replace file");
 
-    let pinned = ReadFileOptions {
+    let snapshot_options = ReadFileOptions {
         at: ReadAt::Snapshot(snapshot.snapshot_id.clone()),
     };
     assert_eq!(
         harness
             .client
-            .read_file_by_inode_with_options(&namespace, inode_id, &pinned)
+            .read_file_by_inode_with_options(&namespace, inode_id, &snapshot_options)
             .await
             .expect("snapshot read by inode"),
         b"captured bytes"
     );
     let mut stream = harness
         .client
-        .read_file_stream_by_inode_with_options(&namespace, inode_id, &pinned)
+        .read_file_stream_by_inode_with_options(&namespace, inode_id, &snapshot_options)
         .await
         .expect("snapshot stream by inode");
     let mut streamed = Vec::new();
@@ -441,9 +441,9 @@ async fn pinned_reads_by_inode_serve_the_pinned_revision_after_a_later_put() {
             .expect("current read by inode"),
         b"current bytes"
     );
-    for pin_id in [&snapshot.snapshot_id, &fork_pin_id] {
-        let pinned = ReadFileOptions {
-            at: ReadAt::Snapshot(pin_id.clone()),
+    for snapshot_id in [&snapshot.snapshot_id, &fork_snapshot_id] {
+        let snapshot_options = ReadFileOptions {
+            at: ReadAt::Snapshot(snapshot_id.clone()),
         };
         let read_revision = |revision_no| {
             harness
@@ -452,20 +452,24 @@ async fn pinned_reads_by_inode_serve_the_pinned_revision_after_a_later_put() {
                     &namespace,
                     inode_id,
                     RevisionNo(revision_no),
-                    &pinned,
+                    &snapshot_options,
                 )
         };
-        let mut stream = read_revision(1).await.expect("pinned revision read");
+        let mut stream = read_revision(1).await.expect("snapshot revision read");
         let mut streamed = Vec::new();
         while let Some(chunk) = stream.next().await {
             streamed.extend_from_slice(&chunk.expect("content chunk"));
         }
-        assert_eq!(streamed, b"captured bytes", "{pin_id}");
+        assert_eq!(streamed, b"captured bytes", "{snapshot_id}");
         let error = read_revision(2)
             .await
             .map(drop)
-            .expect_err("the pin predates revision 2");
-        assert_eq!(error.code(), Some(ErrorCode::RevisionNotFound), "{pin_id}");
+            .expect_err("the snapshot predates revision 2");
+        assert_eq!(
+            error.code(),
+            Some(ErrorCode::RevisionNotFound),
+            "{snapshot_id}"
+        );
     }
 
     harness.server.abort();
@@ -711,7 +715,7 @@ async fn snapshot_reads_enforce_lease_identity_and_revision_rules() {
     .expect("a snapshot without an expiry is readable");
     assert_eq!(entry.path.as_str(), "/keep.txt");
 
-    let unknown = "pin_00000000000000000001-ffffffffffffffff";
+    let unknown = "snp_00000000000000000001-0000000000ffffffffffffffff";
     let (status, error) = get_json::<PathEntry>(&stat_url(
         &harness.server_url,
         namespace.as_str(),
@@ -777,7 +781,7 @@ async fn snapshot_reads_enforce_lease_identity_and_revision_rules() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn snapshot_page_cursors_resume_one_pinned_directory() {
+async fn snapshot_page_cursors_resume_one_snapshot_directory() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_snapshot_server(temp_dir.path(), "snapshot-pagination").await;
     let namespace = namespace_id("snapshot-pagination");

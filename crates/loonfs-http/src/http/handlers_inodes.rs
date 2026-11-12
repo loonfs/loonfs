@@ -14,7 +14,7 @@ use loonfs::{
 };
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
-use loonfs_types::{InodeId, ListFileRevisionsResponse, PinId, RevisionNo};
+use loonfs_types::{InodeId, ListFileRevisionsResponse, RevisionNo, SnapshotId};
 use std::sync::Arc;
 
 #[derive(Debug, serde::Deserialize)]
@@ -37,7 +37,7 @@ pub(super) struct InodeRevisionPathParams {
 #[serde(deny_unknown_fields)]
 pub(super) struct InodeContentQuery {
     /// The snapshot whose captured file revision to read.
-    snapshot_id: Option<PinId>,
+    snapshot_id: Option<SnapshotId>,
     /// How recently the read confirms the namespace head. `eventual` (the default, unless the
     /// server's `consistency` setting is `strong`) reads at the head that the server confirmed last
     /// while that confirmation is younger than the maximum staleness, and `strong` confirms the
@@ -55,9 +55,9 @@ pub(super) struct InodeContentQuery {
 #[cfg_attr(feature = "openapi", into_params(parameter_in = Query))]
 #[serde(deny_unknown_fields)]
 pub(super) struct InodeRevisionContentQuery {
-    /// A snapshot, or one of the namespace's fork pins, whose pinned state to find the revision
-    /// in. The pinned manifest keeps the revision after the namespace's retention floor passes it.
-    snapshot_id: Option<PinId>,
+    /// A snapshot, or one of the namespace's fork snapshots, whose state to find the revision
+    /// in. The snapshot's manifest keeps the revision after the namespace's retention floor passes it.
+    snapshot_id: Option<SnapshotId>,
     /// How recently the read confirms the namespace head that it finds the revision in. `eventual`
     /// (the default, unless the server's `consistency` setting is `strong`) reads at the head that
     /// the server confirmed last while that confirmation is younger than the maximum staleness, and
@@ -80,7 +80,7 @@ pub(super) struct StatInodeQuery {
     #[cfg_attr(feature = "openapi", param(default = true))]
     include_attributes: Option<bool>,
     /// The snapshot whose captured path state to read.
-    snapshot_id: Option<PinId>,
+    snapshot_id: Option<SnapshotId>,
     /// How recently the read confirms the namespace head. `eventual` (the default, unless the
     /// server's `consistency` setting is `strong`) reads at the head that the server confirmed last
     /// while that confirmation is younger than the maximum staleness, and `strong` confirms the
@@ -165,7 +165,7 @@ pub(super) struct ListInodeChildrenQuery {
     #[cfg_attr(feature = "openapi", param(default = false))]
     recursive: Option<bool>,
     /// The snapshot whose captured directory state to read.
-    snapshot_id: Option<PinId>,
+    snapshot_id: Option<SnapshotId>,
     /// How recently the read confirms the namespace head. `eventual` (the default, unless the
     /// server's `consistency` setting is `strong`) reads at the head that the server confirmed last
     /// while that confirmation is younger than the maximum staleness, and `strong` confirms the
@@ -344,7 +344,7 @@ pub(super) async fn get_file_content_by_inode(
         path = "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content",
         tag = "inodes",
         summary = "Read file revision by inode",
-        description = "Reads and verifies one retained file revision by inode ID and revision number, at the live head or in the state that a snapshot or a fork pin keeps. A `Range` header asks for one byte range of the revision instead.",
+        description = "Reads and verifies one retained file revision by inode ID and revision number, at the live head or in the state that a snapshot or a fork snapshot keeps. A `Range` header asks for one byte range of the revision instead.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             ("inode_id" = String, Path, description = "The file's inode ID.", pattern = r"^ino_[0-7][0-9a-hjkmnp-tv-z]{25}$", example = "ino_000000r0000013kje0d47gc8kw"),

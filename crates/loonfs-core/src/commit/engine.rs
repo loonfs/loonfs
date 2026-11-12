@@ -732,7 +732,7 @@ struct TailProjectionUpdate {
 /// replaced by `ManifestReplaced`, and the batch's effect set to drop the
 /// position, when the store shows a manifest above the batch's basis.
 /// Garbage collection keeps the segments of the current manifest and of
-/// pinned manifests, so a successor can drop the basis's, and the next unit
+/// snapshots' manifests, so a successor can drop the basis's, and the next unit
 /// plans on the current manifest. Without a successor, the segment is
 /// missing from the current manifest, and the result stays
 /// `namespace_corrupt`.

@@ -783,7 +783,7 @@ async fn an_idle_namespace_visit_costs_a_fixed_number_of_requests() {
 
     // A load of a live namespace sends a HEAD request for the missing
     // manifest after the current one in its discovery, and again in its
-    // check of the manifest's successor. A collection lists the pins once for
+    // check of the manifest's successor. A collection lists the snapshots once for
     // its roots and once for each family that it sweeps, and lists nothing
     // under its pool's prefix, whether the namespace is live or deleted.
     let heads = 2;

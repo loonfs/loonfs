@@ -203,8 +203,10 @@ pub(crate) mod control {
     use loonfs::control::NamespaceReadState;
     use loonfs::SharedObjectStore;
     use loonfs_objectstore::keys;
-    use loonfs_types::format::control::{decode_control_object, ControlObjectKind, PinPayload};
-    use loonfs_types::{NamespaceId, PinId};
+    use loonfs_types::format::control::{
+        decode_control_object, ControlObjectKind, SnapshotPayload,
+    };
+    use loonfs_types::{NamespaceId, SnapshotId};
 
     async fn control_bytes(store: &SharedObjectStore, object_key: &str) -> Option<Vec<u8>> {
         store
@@ -248,15 +250,16 @@ pub(crate) mod control {
             .map(|entry| loonfs_grep::entry::GrepEntry::decode(entry).expect("decode grep's entry"))
     }
 
-    pub(crate) async fn pin(
+    pub(crate) async fn snapshot_record(
         store: &SharedObjectStore,
         namespace_id: &NamespaceId,
-        checkpoint_id: &PinId,
-    ) -> Option<PinPayload> {
-        let bytes = control_bytes(store, &keys::pin(namespace_id, checkpoint_id)).await?;
+        checkpoint_id: &SnapshotId,
+    ) -> Option<SnapshotPayload> {
+        let bytes =
+            control_bytes(store, &keys::snapshot_record(namespace_id, checkpoint_id)).await?;
         Some(
-            decode_control_object::<PinPayload>(&bytes, ControlObjectKind::Pin)
-                .expect("decode pin")
+            decode_control_object::<SnapshotPayload>(&bytes, ControlObjectKind::Snapshot)
+                .expect("decode snapshot")
                 .into_payload(),
         )
     }

@@ -261,7 +261,7 @@ async fn content_an_expired_deletion_hid_is_deleted_once_its_rows_are_removed() 
 }
 
 #[tokio::test]
-async fn content_only_a_pinned_manifest_names_stays_until_the_pin_is_released() {
+async fn content_only_a_snapshot_manifest_names_stays_until_the_snapshot_is_released() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -271,12 +271,12 @@ async fn content_only_a_pinned_manifest_names_stays_until_the_pin_is_released() 
         .await
         .expect("bootstrap")
         .pool_id;
-    let pinned = put_file_content_with_id(
+    let kept = put_file_content_with_id(
         &store,
         &namespace_id,
         "/file",
         b"pinned",
-        loonfs_types::ContentId::parse("con_00000000000000000000000001").expect("pinned id"),
+        loonfs_types::ContentId::parse("con_00000000000000000000000001").expect("kept id"),
     )
     .await;
     let checkpoint = create_checkpoint(&store, &namespace_id, &setup)
@@ -291,12 +291,12 @@ async fn content_only_a_pinned_manifest_names_stays_until_the_pin_is_released() 
     )
     .await;
     compact_below_the_floor(&store, &namespace_id).await;
-    let pinned_key = loonfs_objectstore::keys::content_blob(&pool_id, &pinned.content_id);
+    let kept_key = loonfs_objectstore::keys::content_blob(&pool_id, &kept.content_id);
 
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
     let report = collect_pool(&store, &pool_id, &aged).await;
     assert_eq!(report.deleted.content_objects, 0);
-    assert!(store.head(&pinned_key).await.expect("head").is_some());
+    assert!(store.head(&kept_key).await.expect("head").is_some());
 
     crate::test_support::NamespaceFixture::new(
         &store,
@@ -306,14 +306,14 @@ async fn content_only_a_pinned_manifest_names_stays_until_the_pin_is_released() 
     .engine()
     .delete_snapshot(&checkpoint.checkpoint_id)
     .await
-    .expect("release the pin");
+    .expect("release the snapshot");
     let report = collect_pool(&store, &pool_id, &aged).await;
     assert_eq!(report.deleted.content_objects, 1);
-    assert!(store.head(&pinned_key).await.expect("head").is_none());
+    assert!(store.head(&kept_key).await.expect("head").is_none());
 }
 
 #[tokio::test]
-async fn a_source_keeps_content_its_fork_inherited_while_the_fork_pin_exists() {
+async fn a_source_keeps_content_its_fork_inherited_while_the_fork_snapshot_exists() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let source = NamespaceId::parse("source").expect("namespace id");

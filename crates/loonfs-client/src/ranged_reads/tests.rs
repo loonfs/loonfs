@@ -4,7 +4,7 @@ use super::*;
 use crate::scripted_transport::{self, Outcome, ScriptedTransport};
 use crate::ClientConfig;
 use loonfs_types::options::ReadAt;
-use loonfs_types::PinId;
+use loonfs_types::SnapshotId;
 use std::assert_matches;
 use std::num::NonZeroU64;
 
@@ -49,8 +49,8 @@ async fn a_ranged_read_sends_one_range_and_returns_what_the_server_sent() {
     ]);
     let client = client_for(&transport);
     let spec = NamespacePath::parse("demo", "/file.txt").expect("namespace path");
-    let snapshot_id =
-        PinId::parse("pin_00000000000000000001-0000000000000002").expect("snapshot ID");
+    let snapshot_id = SnapshotId::parse("snp_00000000000000000001-00000000000000000000000002")
+        .expect("snapshot ID");
 
     let by_path = client
         .read_file_range_stream(&spec, range(2, Some(4)))

@@ -245,7 +245,7 @@ fn no_schema_a_response_reaches_admits_null() {
         "ErrorDetails",
         "RunMaintenanceJobResponseGc",
         "GrepMatch",
-        "PinId",
+        "SnapshotId",
     ] {
         assert!(
             seen.contains(&format!("#/components/schemas/{schema_name}")),

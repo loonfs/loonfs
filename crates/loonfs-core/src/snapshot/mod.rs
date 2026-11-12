@@ -1,4 +1,4 @@
-//! Snapshots: durable pin records that each keep one manifest.
+//! Snapshots: durable records that each keep one manifest.
 //!
 //! A snapshot keeps a manifest for retention, forks, stable reads, or
 //! restore. Each snapshot has an owner: `user` for a snapshot that a caller
@@ -20,5 +20,5 @@ pub use self::files::{
 pub use self::list::{CheckpointPageCursor, SnapshotPageCursor};
 
 pub(crate) use self::lifecycle::ensure_unexpired;
-pub(crate) use self::read_basis::load_pin_basis;
-pub(crate) use self::summary::{checkpoint_summary, snapshot_summary, user_pin_snapshot};
+pub(crate) use self::read_basis::load_snapshot_basis;
+pub(crate) use self::summary::{checkpoint_summary, snapshot_summary, user_snapshot};

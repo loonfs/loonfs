@@ -23,7 +23,7 @@ loonfs maintenance index enable --namespace docs
 
 On an embedded profile, `maintenance index enable` runs the same steps until the index reaches the namespace's sequence number from when the command started. On a remote profile, it waits for the server to get there. `--max-steps` and `--deadline-ms` limit the wait. A write through an embedded profile doesn't update the index, so to bring an active index up to the namespace head, run `maintenance index enable` again.
 
-The core garbage collector (`loonfs maintenance gc`) collects the index's segments that neither the current manifest nor a pinned manifest lists, and it counts them in the result's `deleted.extension_segments`. A query reads grep's entry from the manifest of its read view, so it sends no request for the index beyond the segment reads. [Grep extension format](../../docs/specs/format.md#appendix-d-grep-extension-format) defines the entry, its publication, and the stored layout.
+The core garbage collector (`loonfs maintenance gc`) collects the index's segments that neither the current manifest nor a manifest that a snapshot keeps lists, and it counts them in the result's `deleted.extension_segments`. A query reads grep's entry from the manifest of its read view, so it sends no request for the index beyond the segment reads. [Grep extension format](../../docs/specs/format.md#appendix-d-grep-extension-format) defines the entry, its publication, and the stored layout.
 
 `GrepWorkerConfig` controls how much work one step can do, and how many steps can read and process content at once. A server reads these values from its `[grep]` table:
 

@@ -29,7 +29,7 @@ use std::sync::Arc;
 /// A host that injects the clocks with [`Self::monotonic_timer`] and
 /// [`Self::wall_clock`] to make a run repeatable also needs repeatable IDs,
 /// and those aren't a builder setting. Generated IDs (content, segment,
-/// upload, pin, and commit IDs, and the low word of every inode ID) draw
+/// upload, snapshot, and commit IDs, and the low word of every inode ID) draw
 /// their random bits from one process-wide entropy source, and
 /// [`loonfs_types::install_entropy`] replaces that source for every runtime
 /// in the process.

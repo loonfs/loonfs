@@ -677,12 +677,15 @@ async fn a_checkpoint_that_loses_its_fold_to_a_compaction_reads_no_wal_object() 
     let checkpoint = checkpoint.expect("checkpoint");
     let after_park = writer.store.take();
     assert!(writer.wal_reads(&after_park).is_empty(), "{after_park:?}");
-    let pin = crate::test_support::namespace_store(&*writer.store, &writer.namespace_id)
-        .load_pin(&checkpoint.checkpoint_id)
+    let snapshot = crate::test_support::namespace_store(&*writer.store, &writer.namespace_id)
+        .load_snapshot_record(&checkpoint.checkpoint_id)
         .await
-        .expect("pin record")
-        .expect("pin");
-    assert_eq!(pin.state.manifest().manifest_no, ManifestNo(basis.0 + 2));
+        .expect("snapshot record")
+        .expect("snapshot");
+    assert_eq!(
+        snapshot.state.manifest().manifest_no,
+        ManifestNo(basis.0 + 2)
+    );
 }
 
 /// Checks that a session's fold that loses its manifest number to another

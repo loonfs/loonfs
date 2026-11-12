@@ -2380,7 +2380,7 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 	}
 	if checkpoint.CheckpointID != snapshotID || int64(checkpoint.CapturedSeq) != expected.SnapshotHeadSeq ||
 		checkpoint.ExpiresAtMs == nil || *checkpoint.ExpiresAtMs != *extended.ExpiresAtMs {
-		t.Errorf("retrieved checkpoint = %#v, want the snapshot's pin", checkpoint)
+		t.Errorf("retrieved checkpoint = %#v, want the snapshot", checkpoint)
 	}
 
 	listed, err := h.client.Snapshots.List(ctx, &loonfs.ListSnapshotsRequest{
@@ -2431,7 +2431,7 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 	})
 	assertNotFoundError(t, err, expected.SnapshotNotFound)
 
-	unknownSnapshotID := loonfs.PinID(request.UnknownSnapshotID)
+	unknownSnapshotID := loonfs.SnapshotID(request.UnknownSnapshotID)
 	_, err = h.client.Files.Retrieve(ctx, &loonfs.GetPathEntryRequest{
 		NamespaceID: request.NamespaceID,
 		Path:        childPath(request.ReplacedFileName),

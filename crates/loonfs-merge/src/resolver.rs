@@ -12,7 +12,7 @@ use std::future::Future;
 /// routes: `ours` from the fork that the new fork's
 /// `fork_basis.rebased_from` identifies, `theirs` from the namespace that the
 /// session merges into, and the base from that namespace through the new
-/// fork's fork pin (API spec, `POST /rebases`). It writes the resolved
+/// fork's snapshot of its source (API spec, `POST /rebases`). It writes the resolved
 /// content into the new fork with ordinary commits.
 pub trait Resolver: Send + Sync {
     /// Writes resolutions of the changes that `reports` list into

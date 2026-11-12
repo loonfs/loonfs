@@ -1683,9 +1683,9 @@ async fn publish_views_reuse_cached_segment_blocks_across_publishes() {
         .expect("seed publish");
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     namespace
-        .create_pin(
-            loonfs_types::format::control::PinOwner::User {
-                name: "test-pin".to_owned(),
+        .create_snapshot_record(
+            loonfs_types::format::control::SnapshotOwner::User {
+                name: "test-snapshot".to_owned(),
                 expires_at_ms: None,
             },
             crate::test_support::folded_manifest(&namespace)

@@ -9,7 +9,7 @@ use crate::uploads::UploadJournal;
 use loonfs_client::{
     DownloadOptions, NamespacePath, PutFileOptions, ReadAt, ReadFileOptions, StatOptions,
 };
-use loonfs_types::{ActorId, Commit, PathEntry, PinId};
+use loonfs_types::{ActorId, Commit, PathEntry, SnapshotId};
 use std::sync::Arc;
 
 impl ResolvedTarget {
@@ -20,7 +20,7 @@ impl ResolvedTarget {
     pub(crate) async fn stat_without_attributes_at_snapshot(
         &self,
         spec: &NamespacePath,
-        snapshot_id: Option<&PinId>,
+        snapshot_id: Option<&SnapshotId>,
     ) -> Result<PathEntry> {
         Ok(self
             .client

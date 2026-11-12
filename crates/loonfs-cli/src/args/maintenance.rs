@@ -19,7 +19,7 @@ pub(crate) enum MaintenanceCommand {
     /// Fold the WAL tail whatever its length, and compact metadata until
     /// nothing is due.
     Fold,
-    /// List the checkpoint inventory: every pin, snapshots and fork pins.
+    /// List the checkpoint inventory: every snapshot, user snapshots and fork snapshots.
     Checkpoint {
         #[command(subcommand)]
         command: MaintenanceCheckpointCommand,
@@ -59,7 +59,7 @@ pub(crate) struct MaintenanceRecoverAdministratorArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum MaintenanceCheckpointCommand {
-    /// List every pin in checkpoint ID order, snapshots and fork pins.
+    /// List every snapshot in checkpoint ID order, user snapshots and fork snapshots.
     ///
     /// Expired snapshots remain listed until garbage collection deletes them.
     List(MaintenanceCheckpointListArgs),

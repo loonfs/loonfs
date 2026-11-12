@@ -36,7 +36,7 @@ To handle a retried commit, LoonFS:
 
 The two rows share a run and a retention rule, so a receipt whose commit row is missing is corruption, not a record that retention removed.
 
-A snapshot's change feed reads its pinned manifest's `commits` family and nothing later, so the page ends at the captured sequence, without reading live history.
+A snapshot's change feed reads the `commits` family of the snapshot's manifest and nothing later, so the page ends at the captured sequence, without reading live history.
 
 A page costs the blocks it returns, and a replay costs two point reads, in addition to the read view that every read shares. Neither one reads retained history. The only WAL that a cold view replays is the unfolded tail, and the fold trigger limits the size of that tail.
 
@@ -54,6 +54,6 @@ The `commits` family has these costs:
 This section describes other designs for reading commit history, and why LoonFS doesn't use them.
 
 - **Search the retained WAL.** A reader probes WAL objects by their sequence ranges, with a binary or exponential search. Every probe fetches and decompresses a whole object to learn its range, and the reader has to handle fences and batches along the way. This design keeps the WAL as the history store.
-- **Index WAL locations in a metadata family.** A family that maps sequence ranges to WAL numbers finds the object without probing. Two problems rule it out. A pinned manifest would list rows that point to WAL objects that garbage collection is allowed to delete, and no other reference in the format points to an object that doesn't have to exist. And every page would still fetch and decode a whole WAL object.
+- **Index WAL locations in a metadata family.** A family that maps sequence ranges to WAL numbers finds the object without probing. Two problems rule it out. A manifest that a snapshot keeps would list rows that point to WAL objects that garbage collection is allowed to delete, and no other reference in the format points to an object that doesn't have to exist. And every page would still fetch and decode a whole WAL object.
 - **Encode the WAL as block-indexed segments.** Each WAL object would include a sequence index, so a reader could fetch one block. This design needs self-describing framing, because segments keep their handles in the manifest, and it doesn't help a reader find the object. A store whose queries search the unindexed tail by key needs an index in each WAL entry. LoonFS replays a bounded tail into memory, so it doesn't need an index. LoonFS WAL objects average tens of kilobytes.
 - **Store events rather than deltas.** Storing the API's event shape would tie the durable row to the wire format. Deltas are already the durable vocabulary, and one mapping works for both the row and the WAL record.

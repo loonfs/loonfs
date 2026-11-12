@@ -9,7 +9,7 @@ use crate::{
 };
 use loonfs_core::SnapshotPageCursor;
 use loonfs_types::PageRequest;
-use loonfs_types::PinId;
+use loonfs_types::SnapshotId;
 use std::num::NonZeroU64;
 
 /// Returns the expiry of a snapshot whose lifetime of `ttl_ms` starts at
@@ -22,7 +22,7 @@ impl<M: crate::Mode> Namespace<M> {
     /// Returns one snapshot, as the listing returns it, including an expired
     /// snapshot that garbage collection hasn't deleted. A missing id returns
     /// `snapshot_not_found`.
-    pub async fn get_snapshot(&self, snapshot_id: &PinId) -> Result<Snapshot> {
+    pub async fn get_snapshot(&self, snapshot_id: &SnapshotId) -> Result<Snapshot> {
         trace::in_operation(
             operation_span!(self.core, "get_snapshot", self.namespace_id),
             async {
@@ -110,7 +110,7 @@ impl Namespace<Writable> {
                 self.ensure_administrator().await?;
                 self.mode
                     .publisher
-                    .pin_after_fold(&self.namespace_id, |manifest| {
+                    .snapshot_after_fold(&self.namespace_id, |manifest| {
                         let engine = self.engine();
                         async move {
                             engine
@@ -130,7 +130,7 @@ impl Namespace<Writable> {
     /// `snapshot_not_found`.
     pub async fn extend_snapshot(
         &self,
-        snapshot_id: &PinId,
+        snapshot_id: &SnapshotId,
         ttl_ms: NonZeroU64,
     ) -> Result<Snapshot> {
         trace::in_operation(operation_span!(self.core, "extend_snapshot", self.namespace_id, snapshot_id = %snapshot_id), async {
@@ -148,12 +148,15 @@ impl Namespace<Writable> {
     }
 
     /// Deletes a snapshot. Deleting a missing snapshot succeeds, so a retry
-    /// returns the same response. The id of a fork pin returns
+    /// returns the same response. The id of a fork snapshot returns
     /// `snapshot_not_found`.
     ///
     /// Deletion works after the namespace is deleted, so a snapshot without
     /// an expiry can still be released.
-    pub async fn delete_snapshot(&self, snapshot_id: &PinId) -> Result<DeleteSnapshotResponse> {
+    pub async fn delete_snapshot(
+        &self,
+        snapshot_id: &SnapshotId,
+    ) -> Result<DeleteSnapshotResponse> {
         trace::in_operation(operation_span!(self.core, "delete_snapshot", self.namespace_id, snapshot_id = %snapshot_id), async {
         self.ensure_administrator().await?;
         let result = self.engine()

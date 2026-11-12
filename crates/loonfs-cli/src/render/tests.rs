@@ -676,7 +676,7 @@ fn gc_summaries_report_counts_retention_namespace_retirement_and_skipped_pool_wo
         pass.next_reclamation_at_ms = next;
         assert_eq!(
             gc_summary(&pass).lines().last(),
-            Some("namespace can be retired at or after 2023-11-14 22:13:20Z after pin cleanup; only fork pins can hold it beyond this deadline")
+            Some("namespace can be retired at or after 2023-11-14 22:13:20Z after snapshot cleanup; only fork snapshots can hold it beyond this deadline")
         );
     }
     let empty = gc_summary(&GcResponse::empty(

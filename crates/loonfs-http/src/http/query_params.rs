@@ -2,7 +2,7 @@
 
 use super::error::ApiResponseError;
 use loonfs::engine::READ_REVALIDATION_BOUND_MS;
-use loonfs::{Consistency, ErrorCode, PinId, ReadAt, ReadConsistency};
+use loonfs::{Consistency, ErrorCode, ReadAt, ReadConsistency, SnapshotId};
 use loonfs_types::LimitError;
 
 // The `limit` and `max_staleness_ms` query parameters declare these bounds
@@ -27,7 +27,7 @@ pub(super) fn required_query_param<T>(value: Option<T>, name: &str) -> Result<T,
 /// query parameters or as body fields. A read with a `snapshot_id` has no
 /// consistency setting, so a request can't set `consistency` with one.
 pub(super) fn read_at(
-    snapshot_id: Option<PinId>,
+    snapshot_id: Option<SnapshotId>,
     consistency: Option<ReadConsistency>,
     max_staleness_ms: Option<u64>,
 ) -> Result<ReadAt, ApiResponseError> {

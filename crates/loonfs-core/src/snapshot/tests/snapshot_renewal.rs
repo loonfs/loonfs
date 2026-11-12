@@ -1,10 +1,10 @@
-//! Snapshot expiry must include time spent loading and retrying its pin.
+//! Snapshot expiry must include time spent loading and retrying its record.
 
 use super::*;
 use crate::snapshot::lifecycle::ensure_unexpired;
 use loonfs_objectstore::keys;
 use loonfs_test_support::clock::ManualClock;
-use loonfs_types::format::control::PinOwner;
+use loonfs_types::format::control::SnapshotOwner;
 
 #[tokio::test]
 async fn snapshot_expiry_after_the_renewal_cas_starts_preserves_success() {
@@ -17,9 +17,9 @@ async fn snapshot_expiry_after_the_renewal_cas_starts_preserves_success() {
             .await
             .expect("bootstrap");
         let namespace = crate::test_support::namespace_store(&inner, &namespace_id);
-        let pin = namespace
-            .create_pin(
-                PinOwner::User {
+        let snapshot = namespace
+            .create_snapshot_record(
+                SnapshotOwner::User {
                     name: "short lease".to_owned(),
                     expires_at_ms: Some(1_001),
                 },
@@ -30,7 +30,7 @@ async fn snapshot_expiry_after_the_renewal_cas_starts_preserves_success() {
             )
             .await
             .expect("snapshot");
-        let key = keys::pin(&namespace_id, &pin.pin_id);
+        let key = keys::snapshot_record(&namespace_id, &snapshot.snapshot_id);
         let failing = FailStore::new(
             inner.clone(),
             KeyPredicate::exact(&key),
@@ -55,7 +55,7 @@ async fn snapshot_expiry_after_the_renewal_cas_starts_preserves_success() {
             fixture
         }
         .engine();
-        let renew = namespace.extend_snapshot(&pin.pin_id, 1_002);
+        let renew = namespace.extend_snapshot(&snapshot.snapshot_id, 1_002);
         let expire = async {
             store.wait_until_blocked().await;
             clock.advance_ms(3);
@@ -67,15 +67,20 @@ async fn snapshot_expiry_after_the_renewal_cas_starts_preserves_success() {
             Some(1_002)
         );
         let stored = crate::test_support::namespace_store(&inner, &namespace_id)
-            .load_pin(&pin.pin_id)
+            .load_snapshot_record(&snapshot.snapshot_id)
             .await
             .expect("load");
         assert_eq!(
-            stored.as_ref().expect("pin").state.owner.expires_at_ms(),
+            stored
+                .as_ref()
+                .expect("snapshot")
+                .state
+                .owner
+                .expires_at_ms(),
             Some(1_002)
         );
         assert_eq!(
-            ensure_unexpired(stored.expect("pin"), clock.now_ms())
+            ensure_unexpired(stored.expect("snapshot"), clock.now_ms())
                 .expect_err("later reads see expiry")
                 .code(),
             ErrorCode::SnapshotNotFound
@@ -94,9 +99,9 @@ async fn snapshot_expiring_during_renewal_load_cannot_be_extended_or_reported_li
             .await
             .expect("bootstrap");
         let namespace = crate::test_support::namespace_store(&inner, &namespace_id);
-        let pin = namespace
-            .create_pin(
-                PinOwner::User {
+        let snapshot = namespace
+            .create_snapshot_record(
+                SnapshotOwner::User {
                     name: "short lease".to_owned(),
                     expires_at_ms: Some(1_001),
                 },
@@ -109,7 +114,7 @@ async fn snapshot_expiring_during_renewal_load_cannot_be_extended_or_reported_li
             .expect("snapshot");
         let store = BlockingStore::new(
             inner.clone(),
-            KeyPredicate::exact(keys::pin(&namespace_id, &pin.pin_id)),
+            KeyPredicate::exact(keys::snapshot_record(&namespace_id, &snapshot.snapshot_id)),
             OperationSelector::Read,
         );
         let clock = Arc::new(ManualClock::new(context.now_ms));
@@ -121,16 +126,16 @@ async fn snapshot_expiring_during_renewal_load_cannot_be_extended_or_reported_li
             fixture
         }
         .engine();
-        let renew = namespace.extend_snapshot(&pin.pin_id, requested_expiry);
+        let renew = namespace.extend_snapshot(&snapshot.snapshot_id, requested_expiry);
         let expire = async {
             store.wait_until_blocked().await;
             clock.advance_ms(2);
             let error = ensure_unexpired(
                 crate::test_support::namespace_store(&inner, &namespace_id)
-                    .load_pin(&pin.pin_id)
+                    .load_snapshot_record(&snapshot.snapshot_id)
                     .await
                     .expect("load")
-                    .expect("pin"),
+                    .expect("snapshot"),
                 clock.now_ms(),
             )
             .expect_err("an independent reader observes expiry");
@@ -143,10 +148,10 @@ async fn snapshot_expiring_during_renewal_load_cannot_be_extended_or_reported_li
             ErrorCode::SnapshotNotFound
         );
         let stored = crate::test_support::namespace_store(&inner, &namespace_id)
-            .load_pin(&pin.pin_id)
+            .load_snapshot_record(&snapshot.snapshot_id)
             .await
             .expect("load")
-            .expect("retained expired pin");
+            .expect("retained expired snapshot");
         assert_eq!(stored.state.owner.expires_at_ms(), Some(1_001));
     }
 }
@@ -161,9 +166,9 @@ async fn snapshot_renewal_contention_does_not_restart_the_expiry_clock() {
         .await
         .expect("bootstrap");
     let namespace = crate::test_support::namespace_store(&inner, &namespace_id);
-    let pin = namespace
-        .create_pin(
-            PinOwner::User {
+    let snapshot = namespace
+        .create_snapshot_record(
+            SnapshotOwner::User {
                 name: "short lease".to_owned(),
                 expires_at_ms: Some(1_001),
             },
@@ -176,7 +181,7 @@ async fn snapshot_renewal_contention_does_not_restart_the_expiry_clock() {
         .expect("snapshot");
     let store = BlockingStore::new(
         inner.clone(),
-        KeyPredicate::exact(keys::pin(&namespace_id, &pin.pin_id)),
+        KeyPredicate::exact(keys::snapshot_record(&namespace_id, &snapshot.snapshot_id)),
         OperationSelector::CompareAndSwap,
     );
     let clock = Arc::new(ManualClock::new(context.now_ms));
@@ -188,7 +193,7 @@ async fn snapshot_renewal_contention_does_not_restart_the_expiry_clock() {
         fixture
     }
     .engine();
-    let renew = namespace.extend_snapshot(&pin.pin_id, 10_000);
+    let renew = namespace.extend_snapshot(&snapshot.snapshot_id, 10_000);
     let contender = async {
         store.wait_until_blocked().await;
         {
@@ -198,7 +203,7 @@ async fn snapshot_renewal_contention_does_not_restart_the_expiry_clock() {
             fixture
         }
         .engine()
-        .extend_snapshot(&pin.pin_id, 1_002)
+        .extend_snapshot(&snapshot.snapshot_id, 1_002)
         .await
         .expect("competing extension");
         clock.advance_ms(3);
@@ -210,9 +215,9 @@ async fn snapshot_renewal_contention_does_not_restart_the_expiry_clock() {
         ErrorCode::SnapshotNotFound
     );
     let stored = crate::test_support::namespace_store(&inner, &namespace_id)
-        .load_pin(&pin.pin_id)
+        .load_snapshot_record(&snapshot.snapshot_id)
         .await
         .expect("load")
-        .expect("retained expired pin");
+        .expect("retained expired snapshot");
     assert_eq!(stored.state.owner.expires_at_ms(), Some(1_002));
 }

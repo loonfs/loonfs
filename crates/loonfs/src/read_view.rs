@@ -11,8 +11,8 @@ use crate::runtime_core::{classify_read_result, RuntimeCore};
 use crate::{
     CommitSeq, ContentRef, CoreError, CurrentFileState, DownloadOptions, Error, FileBytes,
     FileContentStream, InodeId, ListInodeChildrenResponse, ListOptions, ListPathEntriesResponse,
-    NamespaceId, PathEntry, PinId, ReadAt, ReadFileStreamOptions, Result, RevisionNo,
-    SharedObjectStore, StatOptions,
+    NamespaceId, PathEntry, ReadAt, ReadFileStreamOptions, Result, RevisionNo, SharedObjectStore,
+    SnapshotId, StatOptions,
 };
 use loonfs_core::RuntimeReadContext;
 use loonfs_types::format::manifest::ExtensionEntry;
@@ -40,12 +40,12 @@ pub struct ReadView {
 #[derive(Clone)]
 pub(crate) enum ReadSource {
     Head,
-    Snapshot(PinId),
+    Snapshot(SnapshotId),
 }
 
 impl ReadSource {
     /// Returns the snapshot this source reads, or `None` for the live head.
-    pub(crate) fn snapshot_id(&self) -> Option<&PinId> {
+    pub(crate) fn snapshot_id(&self) -> Option<&SnapshotId> {
         match self {
             Self::Snapshot(snapshot_id) => Some(snapshot_id),
             Self::Head => None,
@@ -58,7 +58,7 @@ impl ReadSource {
 pub(crate) fn validate_view_directory_cursor(
     cursor: Option<&ListPageCursor>,
     captured_seq: CommitSeq,
-    pin_id: Option<&PinId>,
+    snapshot_id: Option<&SnapshotId>,
 ) -> Result<()> {
     let Some(cursor) = cursor else {
         return Ok(());
@@ -70,18 +70,18 @@ pub(crate) fn validate_view_directory_cursor(
         ))
         .into());
     }
-    match (cursor.pin_id(), pin_id) {
+    match (cursor.snapshot_id(), snapshot_id) {
         (Some(actual), Some(expected)) if actual == expected => Ok(()),
         (Some(actual), Some(expected)) => Err(CoreError::InvalidCursor(format!(
-            "directory cursor pin `{actual}` does not match requested pin `{expected}`"
+            "directory cursor snapshot `{actual}` does not match requested snapshot `{expected}`"
         ))
         .into()),
         (Some(actual), None) => Err(CoreError::InvalidCursor(format!(
-            "directory cursor is bound to pin `{actual}`"
+            "directory cursor is bound to snapshot `{actual}`"
         ))
         .into()),
         (None, Some(expected)) => Err(CoreError::InvalidCursor(format!(
-            "directory cursor is not bound to pin `{expected}`"
+            "directory cursor is not bound to snapshot `{expected}`"
         ))
         .into()),
         (None, None) => Ok(()),
@@ -102,7 +102,7 @@ impl ReadView {
         classify_read_result(&self.core, &self.pinned.context, &self.source, read.await).await
     }
 
-    fn snapshot_id(&self) -> Option<&PinId> {
+    fn snapshot_id(&self) -> Option<&SnapshotId> {
         self.source.snapshot_id()
     }
 

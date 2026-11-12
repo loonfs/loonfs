@@ -19,7 +19,7 @@
 
 use loonfs_types::format::control::{
     decode_control_object, ControlObjectEnvelope, ControlObjectKind, ForkBasis, HintPayload,
-    ManifestRef, NamespaceStatus, PinOwner, PinPayload, PoolRecordPayload, RebasedFrom,
+    ManifestRef, NamespaceStatus, PoolRecordPayload, RebasedFrom, SnapshotOwner, SnapshotPayload,
     UploadOutcome, UploadOutcomePayload, UploadSessionMode, UploadSessionPayload, WriterBlock,
 };
 use loonfs_types::format::envelope::EnvelopeCodecError;
@@ -39,7 +39,7 @@ use loonfs_types::{
     AttributeValue, Attributes, AttributesRevisionNo, Checksum, ChecksumAlgorithm, ChecksumHex,
     CommitFingerprint, CommitId, CommitSeq, ContentId, ContentRef, ContentRefKind, ExtensionName,
     IndexSegmentId, InodeId, InodeKind, ManifestNo, MetadataSegmentId, NameKey, NamespaceId,
-    PayloadChecksum, PinId, PrincipalId, PrincipalScope, RevisionNo, RunNo, UploadId, WalNo,
+    PayloadChecksum, PrincipalId, PrincipalScope, RevisionNo, RunNo, SnapshotId, UploadId, WalNo,
     WriterEpoch,
 };
 use serde::de::DeserializeOwned;
@@ -123,8 +123,8 @@ fn commit_id() -> CommitId {
     CommitId::parse("c_00000000000000000000000000000042").expect("valid commit id")
 }
 
-fn pin_id(value: &str) -> PinId {
-    PinId::parse(value).expect("valid pin id")
+fn snapshot_id(value: &str) -> SnapshotId {
+    SnapshotId::parse(value).expect("valid snapshot id")
 }
 
 fn content_id(value: &str) -> ContentId {
@@ -747,7 +747,7 @@ fn sample_extensions_manifest() -> NamespaceManifestPayload {
     }
 }
 
-/// A fork manifest records its source pin and manifest, and its source's
+/// A fork manifest records its fork snapshot and manifest, and its source's
 /// pool.
 fn sample_fork_manifest() -> NamespaceManifestPayload {
     NamespaceManifestPayload {
@@ -759,7 +759,7 @@ fn sample_fork_manifest() -> NamespaceManifestPayload {
                 head_seq: CommitSeq(2),
                 payload_checksum: payload_checksum(),
             },
-            source_pin_id: pin_id("pin_00000000000000000002-0000000000000002"),
+            source_snapshot_id: snapshot_id("snp_00000000000000000002-00000000000000000000000002"),
             rebased_from: None,
         }),
         ..sample_manifest_payload()
@@ -1033,30 +1033,30 @@ fn control_objects_match_golden_bytes() {
         },
     );
     check_control_golden(
-        "control_pin.v1.json",
-        ControlObjectKind::Pin,
-        PinPayload {
-            pin_id: pin_id("pin_00000000000000000002-0000000000000002"),
+        "control_snapshot.v1.json",
+        ControlObjectKind::Snapshot,
+        SnapshotPayload {
+            snapshot_id: snapshot_id("snp_00000000000000000002-00000000000000000000000002"),
             namespace_id: namespace_id(),
             head_seq: (sample_manifest_ref(2)).head_seq,
             payload_checksum: (sample_manifest_ref(2)).payload_checksum.clone(),
             created_at_ms: 3_000,
-            owner: PinOwner::User {
+            owner: SnapshotOwner::User {
                 name: "nightly".to_owned(),
                 expires_at_ms: None,
             },
         },
     );
     check_control_golden(
-        "control_pin_fork.v1.json",
-        ControlObjectKind::Pin,
-        PinPayload {
-            pin_id: pin_id("pin_00000000000000000004-0000000000000004"),
+        "control_snapshot_fork.v1.json",
+        ControlObjectKind::Snapshot,
+        SnapshotPayload {
+            snapshot_id: snapshot_id("snp_00000000000000000004-00000000000000000000000004"),
             namespace_id: namespace_id(),
             head_seq: (sample_manifest_ref(4)).head_seq,
             payload_checksum: (sample_manifest_ref(4)).payload_checksum.clone(),
             created_at_ms: 3_000,
-            owner: PinOwner::Fork {
+            owner: SnapshotOwner::Fork {
                 target_namespace_id: NamespaceId::parse("clone").expect("valid namespace id"),
             },
         },
@@ -1193,9 +1193,9 @@ fn every_control_payload_rejects_unknown_fields_as_corruption() {
         ControlObjectKind::Hint,
         add_unknown,
     );
-    assert_control_payload_edit_is_corrupt::<PinPayload>(
-        "control_pin.v1.json",
-        ControlObjectKind::Pin,
+    assert_control_payload_edit_is_corrupt::<SnapshotPayload>(
+        "control_snapshot.v1.json",
+        ControlObjectKind::Snapshot,
         add_unknown,
     );
     assert_control_payload_edit_is_corrupt::<UploadSessionPayload>(
@@ -1212,9 +1212,9 @@ fn every_control_payload_rejects_unknown_fields_as_corruption() {
 
 #[test]
 fn mutable_control_nested_structs_reject_unknown_fields_as_corruption() {
-    assert_control_payload_edit_is_corrupt::<PinPayload>(
-        "control_pin.v1.json",
-        ControlObjectKind::Pin,
+    assert_control_payload_edit_is_corrupt::<SnapshotPayload>(
+        "control_snapshot.v1.json",
+        ControlObjectKind::Snapshot,
         |payload| payload["owner"]["field_from_the_future"] = serde_json::Value::from(true),
     );
     assert_control_payload_edit_is_corrupt::<UploadOutcomePayload>(
@@ -1251,15 +1251,15 @@ fn mutable_control_nested_structs_reject_unknown_fields_as_corruption() {
 }
 
 #[test]
-fn pins_reject_an_untagged_or_unknown_owner() {
-    assert_control_payload_edit_is_corrupt::<PinPayload>(
-        "control_pin.v1.json",
-        ControlObjectKind::Pin,
+fn snapshot_records_reject_an_untagged_or_unknown_owner() {
+    assert_control_payload_edit_is_corrupt::<SnapshotPayload>(
+        "control_snapshot.v1.json",
+        ControlObjectKind::Snapshot,
         |payload| payload["owner"]["kind"] = serde_json::Value::from("unknown_owner"),
     );
-    assert_control_payload_edit_is_corrupt::<PinPayload>(
-        "control_pin.v1.json",
-        ControlObjectKind::Pin,
+    assert_control_payload_edit_is_corrupt::<SnapshotPayload>(
+        "control_snapshot.v1.json",
+        ControlObjectKind::Snapshot,
         |payload| payload["owner"] = serde_json::Value::from("user"),
     );
 }
@@ -1443,14 +1443,14 @@ fn mutable_control_envelope_rejects_unknown_fields_as_corruption() {
 fn control_object_decoders_reject_wrong_format_version_without_fallback() {
     let cases = [
         (
-            ControlObjectKind::Pin,
-            serde_json::to_value(PinPayload {
-                pin_id: pin_id("pin_00000000000000000005-0000000000000005"),
+            ControlObjectKind::Snapshot,
+            serde_json::to_value(SnapshotPayload {
+                snapshot_id: snapshot_id("snp_00000000000000000005-00000000000000000000000005"),
                 namespace_id: namespace_id(),
                 head_seq: CommitSeq(5),
                 payload_checksum: sha256_digest(b"manifest"),
                 created_at_ms: 3_000,
-                owner: PinOwner::User {
+                owner: SnapshotOwner::User {
                     name: "nightly".to_owned(),
                     expires_at_ms: None,
                 },

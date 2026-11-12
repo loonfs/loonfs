@@ -13,7 +13,7 @@ use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::replace_object;
 use loonfs_types::{
     Checkpoint, CheckpointOwner, CommitSeq, DeleteSnapshotResponse, ErrorCode, ErrorResponse,
-    ManifestNo, PinId, PoolId, Snapshot,
+    ManifestNo, PoolId, Snapshot, SnapshotId,
 };
 use tempfile::tempdir;
 
@@ -283,7 +283,7 @@ async fn http_maintenance_checkpoint_and_retention_are_idempotent_and_soft() {
     let target = NamespacePath::parse("demo", "/docs/hello.txt").expect("target");
 
     let first = post_checkpoint(&server_url, namespace.as_str()).expect("first checkpoint");
-    assert!(PinId::parse(first.checkpoint_id.as_str()).is_ok());
+    assert!(SnapshotId::parse(first.checkpoint_id.as_str()).is_ok());
     assert_eq!(
         first.owner,
         CheckpointOwner::User {

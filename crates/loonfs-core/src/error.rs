@@ -216,7 +216,9 @@ pub enum CoreError {
     #[error("invalid snapshot request: {0}")]
     InvalidSnapshotRequest(String),
     #[error("snapshot `{snapshot_id}` was not found")]
-    SnapshotNotFound { snapshot_id: loonfs_types::PinId },
+    SnapshotNotFound {
+        snapshot_id: loonfs_types::SnapshotId,
+    },
     #[error(
         "metadata publication ran out of its {budget_ms}ms budget after {elapsed_ms}ms \
          and stopped before its next write"
@@ -335,7 +337,7 @@ pub enum CoreError {
     },
     /// A read or a publication on a manifest that a newer manifest replaced
     /// found a metadata segment missing. Garbage collection keeps the
-    /// segments of the current manifest and of pinned manifests, so a
+    /// segments of the current manifest and of snapshots' manifests, so a
     /// successor can drop the replaced manifest's. The code is `stale_head`:
     /// a read runs again at the current manifest, and the publisher plans the
     /// commit again on it.
@@ -1163,7 +1165,7 @@ mod tests {
         ));
         assert_eq!(segment_read.code(), ErrorCode::StoragePermissionDenied);
 
-        let contended = CoreError::contention_exhausted("namespaces/demo/pins/p");
+        let contended = CoreError::contention_exhausted("namespaces/demo/snapshots/p");
         assert_eq!(contended.code(), ErrorCode::StoreContention);
         assert_eq!(contended.kind(), ErrorKind::Unavailable);
         assert!(!contended.code().retryable_without_operator_action());

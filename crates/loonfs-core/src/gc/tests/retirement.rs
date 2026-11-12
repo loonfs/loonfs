@@ -29,7 +29,7 @@ async fn deleted_namespace_uses_its_deletion_clock_without_publishing_a_manifest
         .await
         .expect("at deadline");
     assert_eq!(reclaimed.next_reclamation_at_ms, None);
-    // The first member of a pool has no source pin, so its retirement deletes
+    // The first member of a pool has no fork snapshot, so its retirement deletes
     // nothing, and its content stays for the pool's collection.
     assert_eq!(reclaimed.deleted_checkpoints_by_owner, Default::default());
     assert_eq!(store.counts().deletes, 0);
@@ -84,11 +84,11 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
         .await
         .expect("target tombstone");
     let payload = tombstone.payload();
-    let source_pin = &payload
+    let source_snapshot = &payload
         .fork_basis
         .as_ref()
         .expect("fork basis")
-        .source_pin_id;
+        .source_snapshot_id;
     let source_segments = payload
         .runs
         .iter()
@@ -106,12 +106,12 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
     let first = crate::test_support::namespace_store(&store, &target)
         .gc(&options(), &context(setup.now_ms + retirement_ms()).clock())
         .await
-        .expect("release source pin with retained session");
-    // A fork's retirement deletes its source pin and nothing else, and makes
+        .expect("release fork snapshot with retained session");
+    // A fork's retirement deletes its fork snapshot and nothing else, and makes
     // no request under its pool's prefix.
     assert_eq!(first.deleted_checkpoints_by_owner.fork, 1);
     assert_eq!(store.take(), []);
-    assert!(!pin_exists(&store, &source, source_pin).await);
+    assert!(!snapshot_record_exists(&store, &source, source_snapshot).await);
     assert!(read_upload_session(&store, &target, &upload.upload_id)
         .await
         .is_some());
@@ -263,7 +263,7 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
 }
 
 #[tokio::test]
-async fn a_fork_basis_naming_its_pin_with_a_different_checksum_is_corrupt() {
+async fn a_fork_basis_naming_its_snapshot_with_a_different_checksum_is_corrupt() {
     let directory = tempdir().expect("directory");
     let store = RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
@@ -295,7 +295,7 @@ async fn a_fork_basis_naming_its_pin_with_a_different_checksum_is_corrupt() {
     let mut payload = current.payload().clone();
     let basis = payload.fork_basis.as_mut().expect("fork basis");
     basis.manifest.payload_checksum = loonfs_types::sha256_digest(b"retired");
-    let pin_id = basis.source_pin_id.clone();
+    let snapshot_id = basis.source_snapshot_id.clone();
     let bytes = crate::manifest::publish::encode_manifest(payload);
     replace_object(&store, &current.object_key, bytes.into_bytes().into())
         .await
@@ -308,5 +308,5 @@ async fn a_fork_basis_naming_its_pin_with_a_different_checksum_is_corrupt() {
     assert_matches!(error, CoreError::NamespaceCorrupt(_));
     assert_eq!(store.counts().puts, 0);
     assert_eq!(store.counts().deletes, 0);
-    assert!(pin_exists(&store, &source, &pin_id).await);
+    assert!(snapshot_record_exists(&store, &source, &snapshot_id).await);
 }

@@ -144,9 +144,9 @@ impl<M: Mechanics, R: Resolver> MergeSession<M, R> {
 /// or of another fork that the result lists, created.
 ///
 /// The search reads the namespace's checkpoint inventory once, and the
-/// namespace of each fork pin's target once. A fork's pin can come before
-/// the pin of the fork that it was rebased from, so the search follows the
-/// rebases from the original fork only after it read every pin.
+/// namespace of each fork snapshot's target once. A fork's snapshot can come before
+/// the snapshot of the fork that it was rebased from, so the search follows the
+/// rebases from the original fork only after it read every snapshot.
 async fn find_rebased_forks(
     mechanics: &impl Mechanics,
     namespace_id: &NamespaceId,

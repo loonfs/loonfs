@@ -227,7 +227,7 @@ pub enum ObjectKeyKind {
     MetadataSegment,
     /// Groups immutable extension segments, such as the grep index's.
     ExtensionSegment,
-    /// Groups pins and retained-history floors consulted by garbage collection.
+    /// Groups snapshots and retained-history floors consulted by garbage collection.
     GcControl,
     /// Groups unrecognized keys and coarse listing prefixes.
     Unknown,
@@ -716,7 +716,7 @@ fn classify_key(key: &str) -> ObjectKeyKind {
         }
         DurableObjectFamily::MetadataSegment => ObjectKeyKind::MetadataSegment,
         DurableObjectFamily::ExtensionSegment => ObjectKeyKind::ExtensionSegment,
-        DurableObjectFamily::Pin => ObjectKeyKind::GcControl,
+        DurableObjectFamily::Snapshot => ObjectKeyKind::GcControl,
         DurableObjectFamily::UploadSession
         | DurableObjectFamily::UploadOutcome
         | DurableObjectFamily::PoolRecord => ObjectKeyKind::Metadata,

@@ -208,7 +208,7 @@ Namespace management
     resumes the session, and it has to use the same actor, subject, and
     --through. The command removes the record once the session is merged
     or abandoned. Without a record, it recovers the session's new forks
-    from the namespace's fork pins. --abandon abandons a failed session and
+    from the namespace's fork snapshots. --abandon abandons a failed session and
     deletes the new forks that its rebases created
 
   loonfs use <namespace>
@@ -436,11 +436,11 @@ Maintenance
 
   loonfs maintenance gc [--grace-window-ms <ms>]
     Run one collection of the namespace and print its report. Each
-    call reads the current manifest and hint, lists the pins, then lists
+    call reads the current manifest and hint, lists the snapshots, then lists
     every family under the namespace's prefix from the beginning and
     sweeps each family to the end. The collection deletes the namespace's
     unreferenced manifests, WAL objects, metadata segments, extension
-    segments, and pins. The namespace's content objects, upload records,
+    segments, and snapshots. The namespace's content objects, upload records,
     and temporary objects are stored in its pool, and this command doesn't
     delete them. `loonfs maintenance pool gc` collects them, and a
     server's sweep runs a collection of each pool.
@@ -469,10 +469,10 @@ Maintenance
 
   loonfs maintenance checkpoint list [--limit <n>] [--page-size <n>]
                                [--cursor <cursor>] [--all] [--jsonl]
-    List every pin in checkpoint ID order: snapshots and the pins that
-    forks keep on their source. This is the inventory of what keeps old
-    manifests from garbage collection. Expired snapshots remain listed
-    until garbage collection deletes them.
+    List every snapshot in checkpoint ID order: user snapshots and the fork
+    snapshots that forks keep on their source. This is the inventory of what
+    keeps old manifests from garbage collection. Expired snapshots remain
+    listed until garbage collection deletes them.
 
   loonfs maintenance index enable [--no-wait] [--max-steps <n>] [--deadline-ms <ms>]
     Enable the gram content index and wait for its backfill to reach the

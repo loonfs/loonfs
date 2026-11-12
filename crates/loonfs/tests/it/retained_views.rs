@@ -277,7 +277,7 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
             }
             "gc" => {
                 // Every object is fresh, so the pass runs at a clock past
-                // every age gate. The checkpoint and fork pins are the only
+                // every age gate. The checkpoint and fork snapshots are the only
                 // roots for the pre-rebuild file set.
                 let now_ms = loonfs_core::time::current_time_ms()
                     + UNREFERENCED_SEGMENT_GRACE_WINDOW_MS

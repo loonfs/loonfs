@@ -3,8 +3,8 @@
 
 use crate::keys::{
     namespace_prefix, pool_prefix, CONTENT_DIRECTORY, EXTENSIONS_DIRECTORY, HINT_NAME,
-    MANIFEST_DIRECTORY, MANIFEST_SUFFIX, NAMESPACES_DIRECTORY, PIN_DIRECTORY, PIN_SUFFIX,
-    POOLS_DIRECTORY, POOL_RECORD_NAME, SEGMENT_DIRECTORY, SEGMENT_SUFFIX, TEMPORARY_DIRECTORY,
+    MANIFEST_DIRECTORY, MANIFEST_SUFFIX, NAMESPACES_DIRECTORY, POOLS_DIRECTORY, POOL_RECORD_NAME,
+    SEGMENT_DIRECTORY, SEGMENT_SUFFIX, SNAPSHOT_DIRECTORY, SNAPSHOT_SUFFIX, TEMPORARY_DIRECTORY,
     UPLOAD_DIRECTORY, UPLOAD_OUTCOME_SUFFIX, UPLOAD_SESSION_SUFFIX, WAL_DIRECTORY, WAL_SUFFIX,
 };
 use crate::{ObjectStore, Result};
@@ -40,8 +40,8 @@ pub enum DurableObjectFamily {
     MetadataSegment,
     /// Classifies an immutable segment that an extension entry lists.
     ExtensionSegment,
-    /// Classifies a pin to a numbered manifest.
-    Pin,
+    /// Classifies a snapshot to a numbered manifest.
+    Snapshot,
     /// Classifies the record that starts an upload session.
     UploadSession,
     /// Classifies the record of how an upload session ended.
@@ -59,7 +59,7 @@ pub enum DurableObjectFamily {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyPrefix<'a> {
     /// The prefix of a namespace (`namespaces/{namespace_id}/`), which
-    /// contains the namespace's WAL objects, manifests, hint, pins, and the
+    /// contains the namespace's WAL objects, manifests, hint, snapshots, and the
     /// metadata and extension segments that the namespace owns.
     Namespace(&'a str),
     /// The prefix of a pool (`pools/{pool_id}/`), which contains the pool's
@@ -176,10 +176,10 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
                 )
             })
         }
-        [NAMESPACES_DIRECTORY, namespace, PIN_DIRECTORY, pin] => {
-            pin.strip_suffix(PIN_SUFFIX).map(|identifier| {
+        [NAMESPACES_DIRECTORY, namespace, SNAPSHOT_DIRECTORY, snapshot] => {
+            snapshot.strip_suffix(SNAPSHOT_SUFFIX).map(|identifier| {
                 parsed(
-                    DurableObjectFamily::Pin,
+                    DurableObjectFamily::Snapshot,
                     KeyPrefix::Namespace(namespace),
                     Some(identifier),
                 )
@@ -423,13 +423,13 @@ mod tests {
     use super::{parse_object_key, DurableObjectFamily, KeyPrefix};
     use crate::keys::{
         content_blob, extension_segment, hint, metadata_manifest_object, metadata_segment,
-        metadata_segment_prefix, pin, pool_record, temporary_object, upload_outcome,
+        metadata_segment_prefix, pool_record, snapshot_record, temporary_object, upload_outcome,
         upload_session, wal_object, wal_prefix,
     };
     use loonfs_test_support::ids::numbered_pool_id;
     use loonfs_types::{
         ContentId, ExtensionName, IndexSegmentId, ManifestNo, MetadataSegmentId, NamespaceId,
-        PinId, UploadId, WalNo,
+        SnapshotId, UploadId, WalNo,
     };
 
     #[test]
@@ -469,7 +469,8 @@ mod tests {
         let manifest_object_id = ManifestNo(400);
         let metadata_segment_id = MetadataSegmentId::parse("seg_00000000000000000000000001")
             .expect("metadata segment id");
-        let pin_id = PinId::parse("pin_00000000000000000001-0000000000000001").expect("pin id");
+        let snapshot_id = SnapshotId::parse("snp_00000000000000000001-00000000000000000000000001")
+            .expect("snapshot id");
         let upload_id = UploadId::parse("upl_00000000000000000000000001").expect("upload id");
         let content_id = ContentId::parse("con_5bsqqg28t5cy4tqkff04hmasw9").expect("content id");
         let index_segment_id =
@@ -512,10 +513,10 @@ mod tests {
                 Some(index_segment_id.as_str()),
             ),
             (
-                pin(&namespace_id, &pin_id),
-                DurableObjectFamily::Pin,
+                snapshot_record(&namespace_id, &snapshot_id),
+                DurableObjectFamily::Snapshot,
                 namespace,
-                Some(pin_id.as_str()),
+                Some(snapshot_id.as_str()),
             ),
             (
                 pool_record(&pool_id),
@@ -617,7 +618,7 @@ mod tests {
             "namespaces/ns-1/segments/seg_1.tmp",
             "namespaces/ns-1/manifests/00000000000000000001.tmp",
             "namespaces/ns-1/manifests/00000000000000000001.json",
-            "namespaces/ns-1/pins/pin_1.tmp",
+            "namespaces/ns-1/snapshots/snp_1.tmp",
             "namespaces/ns-1/uploads/upl_1.tmp",
             "namespaces/ns-1/content/con_5bsqqg28t5cy4tqkff04hmasw9",
             "namespaces/ns-1/content/con_5bsqqg28t5cy4tqkff04hmasw9-00000000000000000002-00000000000000000019",

@@ -459,28 +459,27 @@ async fn a_merge_reads_the_fork_at_its_folds_manifest() {
     }
 }
 
-/// Checks that a merge's plan pins the fork's folded manifest while the
-/// merge runs, and that the merge deletes the pin once it commits. The
+/// Checks that a merge's plan takes a snapshot of the fork's folded manifest while the
+/// merge runs, and that the merge deletes the snapshot once it commits. The
 /// request's commit ID is the longest that the commit ID grammar accepts.
 #[tokio::test]
-async fn a_merge_releases_the_pin_its_plan_took_on_the_fork() {
+async fn a_merge_releases_the_snapshot_its_plan_took_on_the_fork() {
     let family = family().await;
     let request = family.request(&"m".repeat(128));
     let planned = family.plan(&request).await;
-    let pinned = family
+    let page = family
         .fork
         .list_snapshots()
         .page()
         .await
         .expect("the fork's snapshots while the merge is planned");
     assert_eq!(
-        pinned
-            .snapshots
+        page.snapshots
             .iter()
             .map(|snapshot| snapshot.snapshot_id.clone())
             .collect::<Vec<_>>(),
-        vec![planned.fork_pin.clone()],
-        "the plan pins the fork"
+        vec![planned.merge_snapshot.clone()],
+        "the plan takes a snapshot of the fork"
     );
     let mut replans = 0;
     family
@@ -500,7 +499,7 @@ async fn a_merge_releases_the_pin_its_plan_took_on_the_fork() {
         .expect("the fork's snapshots after the merge");
     assert!(
         released.snapshots.is_empty(),
-        "the merge releases its pin: {:?}",
+        "the merge releases its snapshot: {:?}",
         released.snapshots
     );
 }

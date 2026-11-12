@@ -646,7 +646,7 @@ pub(crate) enum NamespaceChange {
     /// dropped.
     Published(PublishedManifest),
     /// The mutation published no manifest, such as a garbage collection
-    /// or a change to a pin. The publisher keeps its position, and the
+    /// or a change to a snapshot. The publisher keeps its position, and the
     /// cached head stays confirmed, because the head didn't move.
     Unchanged,
     /// The mutation may have changed the namespace in ways this runtime

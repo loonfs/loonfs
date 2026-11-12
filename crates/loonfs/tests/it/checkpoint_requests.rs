@@ -91,14 +91,14 @@ impl Fixture {
 /// costs 2, whichever fold folded the tail.
 ///
 /// A creation folds from the session's position and finds nothing to fold,
-/// so it writes the pin and then loads the current manifest to verify the
-/// pin (5 requests). The fold's manifest is in the segment cache from its
+/// so it writes the snapshot and then loads the current manifest to verify the
+/// snapshot (5 requests). The fold's manifest is in the segment cache from its
 /// publication, so the first creation after an explicit fold costs the same.
 /// A read at a snapshot checks the writer position's manifest for a
-/// successor with one HEAD and loads the pin, and the pinned manifest's
-/// segments are cached. A deletion loads the pin and deletes it.
+/// successor with one HEAD and loads the snapshot, and the segments of the
+/// snapshot's manifest are cached. A deletion loads the snapshot and deletes it.
 #[tokio::test]
-async fn snapshot_calls_after_a_fold_cost_a_pin_and_its_verification() {
+async fn snapshot_calls_after_a_fold_cost_a_snapshot_record_and_its_verification() {
     for fold in [Fold::Session, Fold::Explicit] {
         let fixture = fixture(fold).await;
         let mut snapshots = Vec::new();
@@ -131,15 +131,15 @@ async fn snapshot_calls_after_a_fold_cost_a_pin_and_its_verification() {
     }
 }
 
-/// Checks that creating a snapshot of a namespace with 32 fork pins costs
+/// Checks that creating a snapshot of a namespace with 32 fork snapshots costs
 /// the same 11 store requests as creating one with none, so the cost doesn't
-/// grow with the number of pins.
+/// grow with the number of snapshots.
 ///
-/// (A count of the namespace's live snapshots before and after the pin
-/// write, which loads every pin twice, would make this call cost 86
+/// (A count of the namespace's live snapshots before and after the snapshot
+/// write, which loads every snapshot twice, would make this call cost 86
 /// requests.)
 #[tokio::test]
-async fn a_snapshot_of_a_namespace_with_32_fork_pins_costs_11_requests() {
+async fn a_snapshot_of_a_namespace_with_32_fork_snapshots_costs_11_requests() {
     for fold in [Fold::Session, Fold::Explicit] {
         let fixture = fixture(fold).await;
         let actor = loonfs_test_support::test_actor();
@@ -159,6 +159,6 @@ async fn a_snapshot_of_a_namespace_with_32_fork_pins_costs_11_requests() {
             .await;
         created.expect("create");
         fixture.namespace.wait_for_fold().await.expect("settle");
-        fixture.assert_requests(&format!("{fold:?}: create with 32 fork pins"), 11);
+        fixture.assert_requests(&format!("{fold:?}: create with 32 fork snapshots"), 11);
     }
 }

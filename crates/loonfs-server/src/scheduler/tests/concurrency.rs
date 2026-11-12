@@ -81,7 +81,7 @@ async fn a_sweep_and_the_session_steps_never_run_on_the_same_namespace_together(
             assert_matches!(&operations[0], RecordedOperation::List { .. });
             assert_eq!(operations[0].key(), "namespaces/");
             // The sweep's collection of the pool reads the namespace's roots
-            // and lists its pins. A collection of the namespace would list
+            // and lists its snapshots. A collection of the namespace would list
             // these four prefixes, and the sweep runs none of the namespace's
             // steps.
             let own_prefixes = [

@@ -83,7 +83,7 @@ fn fork_basis(basis: Option<ForkBasis>) -> Option<NamespaceForkBasis> {
     basis.map(|basis| NamespaceForkBasis {
         source_namespace_id: basis.manifest.owner_namespace_id,
         fork_point_seq: basis.manifest.head_seq,
-        source_pin_id: basis.source_pin_id,
+        source_snapshot_id: basis.source_snapshot_id,
         rebased_from: basis.rebased_from.map(|rebased_from| NamespaceRebasedFrom {
             source_namespace_id: rebased_from.source_namespace_id,
             resume_after_seq: rebased_from.resume_after_seq,

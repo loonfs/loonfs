@@ -1,4 +1,4 @@
-//! Pin creation, point reads, deletion, and manifest verification.
+//! Snapshot creation, point reads, deletion, and manifest verification.
 
 use crate::control_object::{
     expect_identity_field, expect_namespace, load_control_object, ControlObjectLoadError,
@@ -8,75 +8,80 @@ use crate::control_update::create_control_object_under_generated_id;
 use crate::error::{CoreError, Result};
 use crate::namespace::store::NamespaceStore;
 use bytes::Bytes;
-use loonfs_objectstore::keys::pin;
+use loonfs_objectstore::keys::snapshot_record;
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily, KeyPrefix};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::{
-    encode_control_state, ControlObjectKind, PinOwner, PinPayload,
+    encode_control_state, ControlObjectKind, SnapshotOwner, SnapshotPayload,
 };
-use loonfs_types::{NamespaceId, PinId};
+use loonfs_types::{NamespaceId, SnapshotId};
 
-pub(crate) fn encode_pin(record: &PinPayload) -> Bytes {
-    encode_control_state(ControlObjectKind::Pin, record)
+pub(crate) fn encode_snapshot_record(record: &SnapshotPayload) -> Bytes {
+    encode_control_state(ControlObjectKind::Snapshot, record)
         .map(Bytes::from)
-        .expect("a pin record should encode")
+        .expect("a snapshot record should encode")
 }
 
-/// Writes a record under its freshly generated [`PinId`].
-pub(crate) async fn write_pin<S: ObjectStore + ?Sized>(
+/// Writes a record under its freshly generated [`SnapshotId`].
+pub(crate) async fn write_snapshot_record<S: ObjectStore + ?Sized>(
     store: &S,
-    record: &PinPayload,
+    record: &SnapshotPayload,
 ) -> Result<()> {
-    let encoded = encode_pin(record);
-    let object_key = pin(&record.namespace_id, &record.pin_id);
+    let encoded = encode_snapshot_record(record);
+    let object_key = snapshot_record(&record.namespace_id, &record.snapshot_id);
     if let Err(error) = create_control_object_under_generated_id(store, &object_key, encoded).await
     {
         tracing::error!(
             namespace_id = %record.namespace_id,
             object_key = %object_key,
             error = %error,
-            "pin write failed"
+            "snapshot record write failed"
         );
         return Err(error);
     }
     Ok(())
 }
 
-pub(crate) type LoadedPin = LoadedControl<PinPayload>;
+pub(crate) type LoadedSnapshotRecord = LoadedControl<SnapshotPayload>;
 
-/// Loads the exact pin key returned by a prefix listing.
+/// Loads the exact snapshot key returned by a prefix listing.
 ///
 /// The key is durable identity, so a scan must validate the same namespace
-/// and pin id that a point read validates instead of trusting only the
+/// and snapshot id that a point read validates instead of trusting only the
 /// decoded namespace. Invalid identifier text is a key-layout failure; bytes
 /// that decode but disagree with the key are identity failures.
-pub(crate) async fn load_pin_at_key<S: ObjectStore + ?Sized>(
+pub(crate) async fn load_snapshot_record_at_key<S: ObjectStore + ?Sized>(
     store: &S,
     object_key: &str,
-) -> std::result::Result<LoadedPin, ControlObjectLoadError> {
-    let (namespace_id, pin_id) = pin_key_ids(object_key)?;
+) -> std::result::Result<LoadedSnapshotRecord, ControlObjectLoadError> {
+    let (namespace_id, snapshot_id) = snapshot_record_key_ids(object_key)?;
     load_control_object(
         store,
         object_key.to_owned(),
-        ControlObjectKind::Pin,
-        |object_key, state: &PinPayload| {
+        ControlObjectKind::Snapshot,
+        |object_key, state: &SnapshotPayload| {
             expect_namespace(object_key, &namespace_id, &state.namespace_id)?;
-            expect_identity_field(object_key, "pin id", pin_id.as_str(), state.pin_id.as_str())
+            expect_identity_field(
+                object_key,
+                "snapshot id",
+                snapshot_id.as_str(),
+                state.snapshot_id.as_str(),
+            )
         },
     )
     .await
 }
 
-pub(crate) fn pin_key_ids(
+pub(crate) fn snapshot_record_key_ids(
     object_key: &str,
-) -> std::result::Result<(NamespaceId, PinId), ControlObjectLoadError> {
-    let expected_family = "pin";
+) -> std::result::Result<(NamespaceId, SnapshotId), ControlObjectLoadError> {
+    let expected_family = "snapshot";
     let parsed = parse_object_key(object_key).ok_or_else(|| ControlObjectLoadError::KeyLayout {
         object_key: object_key.to_owned(),
         expected_family: expected_family.to_owned(),
         reason: "the key does not match a recognized durable object family".to_owned(),
     })?;
-    if parsed.family() != DurableObjectFamily::Pin {
+    if parsed.family() != DurableObjectFamily::Snapshot {
         return Err(ControlObjectLoadError::KeyLayout {
             object_key: object_key.to_owned(),
             expected_family: expected_family.to_owned(),
@@ -87,28 +92,32 @@ pub(crate) fn pin_key_ids(
         KeyPrefix::Namespace(namespace) => Some(namespace),
         KeyPrefix::Pool(_) => None,
     }
-    .expect("`parse_object_key` should find every pin key under a namespace prefix");
+    .expect("`parse_object_key` should find every snapshot key under a namespace prefix");
     let identifier = parsed
         .identifier()
-        .expect("`parse_object_key` should give every pin key its pin ID");
+        .expect("`parse_object_key` should give every snapshot key its snapshot ID");
     let namespace_id =
         NamespaceId::parse(namespace).map_err(|error| ControlObjectLoadError::KeyLayout {
             object_key: object_key.to_owned(),
             expected_family: expected_family.to_owned(),
             reason: format!("the namespace path component is invalid: {error}"),
         })?;
-    let pin_id = PinId::parse(identifier).map_err(|error| ControlObjectLoadError::KeyLayout {
-        object_key: object_key.to_owned(),
-        expected_family: expected_family.to_owned(),
-        reason: format!("the pin filename id is invalid: {error}"),
-    })?;
-    Ok((namespace_id, pin_id))
+    let snapshot_id =
+        SnapshotId::parse(identifier).map_err(|error| ControlObjectLoadError::KeyLayout {
+            object_key: object_key.to_owned(),
+            expected_family: expected_family.to_owned(),
+            reason: format!("the snapshot record filename id is invalid: {error}"),
+        })?;
+    Ok((namespace_id, snapshot_id))
 }
 
 impl<S: ObjectStore> NamespaceStore<S> {
-    pub(crate) async fn load_pin(&self, pin_id: &PinId) -> Result<Option<LoadedPin>> {
-        let object_key = pin(&self.namespace_id, pin_id);
-        let loaded = load_pin_at_key(&self.store, &object_key).await;
+    pub(crate) async fn load_snapshot_record(
+        &self,
+        snapshot_id: &SnapshotId,
+    ) -> Result<Option<LoadedSnapshotRecord>> {
+        let object_key = snapshot_record(&self.namespace_id, snapshot_id);
+        let loaded = load_snapshot_record_at_key(&self.store, &object_key).await;
         match loaded {
             Ok(loaded) => Ok(Some(loaded)),
             Err(ControlObjectLoadError::MissingObject { .. }) => Ok(None),
@@ -116,60 +125,67 @@ impl<S: ObjectStore> NamespaceStore<S> {
         }
     }
 
-    /// Loads the user pin `pin_id`. A missing pin, or a fork pin, returns
-    /// `snapshot_not_found`, because only a user pin is a snapshot.
-    pub(crate) async fn load_user_pin(&self, pin_id: &PinId) -> Result<LoadedPin> {
-        self.load_pin(pin_id)
+    /// Loads the user snapshot `snapshot_id`. A missing snapshot, or a fork snapshot, returns
+    /// `snapshot_not_found`, because the snapshot API reads only user snapshots.
+    pub(crate) async fn load_user_snapshot(
+        &self,
+        snapshot_id: &SnapshotId,
+    ) -> Result<LoadedSnapshotRecord> {
+        self.load_snapshot_record(snapshot_id)
             .await?
-            .filter(|loaded| matches!(loaded.state.owner, PinOwner::User { .. }))
+            .filter(|loaded| matches!(loaded.state.owner, SnapshotOwner::User { .. }))
             .ok_or_else(|| CoreError::SnapshotNotFound {
-                snapshot_id: pin_id.clone(),
+                snapshot_id: snapshot_id.clone(),
             })
     }
 
-    pub(crate) async fn delete_pin(&self, pin_id: &PinId) -> Result<()> {
-        let object_key = pin(&self.namespace_id, pin_id);
+    pub(crate) async fn delete_snapshot_record(&self, snapshot_id: &SnapshotId) -> Result<()> {
+        let object_key = snapshot_record(&self.namespace_id, snapshot_id);
         self.store
             .delete(&object_key)
             .await
             .map_err(|error| CoreError::store(&object_key, &error))
     }
 
-    /// Deletes a pin whose creation failed with `error`. A failed delete is
-    /// only logged, and collection removes the pin later.
-    pub(crate) async fn delete_failed_pin(&self, pin_id: &PinId, error: &CoreError) {
-        if let Err(cleanup_error) = self.delete_pin(pin_id).await {
+    /// Deletes a snapshot whose creation failed with `error`. A failed delete is
+    /// only logged, and collection removes the snapshot later.
+    pub(crate) async fn delete_failed_snapshot_record(
+        &self,
+        snapshot_id: &SnapshotId,
+        error: &CoreError,
+    ) {
+        if let Err(cleanup_error) = self.delete_snapshot_record(snapshot_id).await {
             tracing::warn!(
                 namespace_id = %self.namespace_id,
-                pin_id = %pin_id,
+                snapshot_id = %snapshot_id,
                 original_error = %error,
                 cleanup_error = %cleanup_error,
-                "failed to delete a pin after its creation failed"
+                "failed to delete a snapshot record after its creation failed"
             );
         }
     }
 
-    pub(crate) async fn verify_pin_basis(
+    pub(crate) async fn verify_snapshot_basis(
         &self,
-        record: &PinPayload,
-    ) -> Result<PinBasisVerification> {
+        record: &SnapshotPayload,
+    ) -> Result<SnapshotBasisVerification> {
         let manifest = self.load_current_manifest().await?;
-        let pinned = record.manifest();
+        let kept = record.manifest();
         Ok(
             if manifest.payload().status.is_deleted()
-                || manifest.manifest().manifest_no != pinned.manifest_no
-                || manifest.manifest().payload_checksum != pinned.payload_checksum
+                || manifest.manifest().manifest_no != kept.manifest_no
+                || manifest.manifest().payload_checksum != kept.payload_checksum
             {
-                PinBasisVerification::Invalid
+                SnapshotBasisVerification::Invalid
             } else {
-                PinBasisVerification::Verified
+                SnapshotBasisVerification::Verified
             },
         )
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PinBasisVerification {
+pub(crate) enum SnapshotBasisVerification {
     Verified,
     Invalid,
 }
@@ -194,18 +210,18 @@ mod tests {
         loonfs_test_support::ids::namespace_id(value)
     }
 
-    fn pin_id(value: &str) -> PinId {
-        PinId::parse(value).expect("valid pin id")
+    fn snapshot_id(value: &str) -> SnapshotId {
+        SnapshotId::parse(value).expect("valid snapshot id")
     }
 
-    fn record(namespace_id: NamespaceId, pin_id: PinId) -> PinPayload {
-        PinPayload {
-            pin_id,
+    fn record(namespace_id: NamespaceId, snapshot_id: SnapshotId) -> SnapshotPayload {
+        SnapshotPayload {
+            snapshot_id,
             namespace_id: namespace_id.clone(),
             head_seq: CommitSeq(1),
             payload_checksum: loonfs_types::sha256_digest(b"test"),
             created_at_ms: 1,
-            owner: PinOwner::User {
+            owner: SnapshotOwner::User {
                 name: "test".to_owned(),
                 expires_at_ms: None,
             },
@@ -218,7 +234,7 @@ mod tests {
         let object_key =
             hint(&loonfs_types::NamespaceId::parse("demo").expect("valid namespace id"));
 
-        let error = load_pin_at_key(&store, &object_key)
+        let error = load_snapshot_record_at_key(&store, &object_key)
             .await
             .expect_err("wrong family should fail");
 
@@ -228,14 +244,14 @@ mod tests {
     #[tokio::test]
     async fn listed_loader_rejects_invalid_key_ids() {
         let (_directory, store) = local_store();
-        let pin_id = "pin_00000000000000000001-0000000000000001";
+        let snapshot_id = "snp_00000000000000000001-00000000000000000000000001";
         let invalid_keys = [
-            format!("namespaces/not valid/pins/{pin_id}.json"),
-            "namespaces/demo/pins/not-a-pin.json".to_owned(),
+            format!("namespaces/not valid/snapshots/{snapshot_id}.json"),
+            "namespaces/demo/snapshots/not-a-snapshot.json".to_owned(),
         ];
 
         for object_key in invalid_keys {
-            let error = load_pin_at_key(&store, &object_key)
+            let error = load_snapshot_record_at_key(&store, &object_key)
                 .await
                 .expect_err("invalid key id should fail");
             assert_matches!(error, ControlObjectLoadError::KeyLayout { .. });
@@ -246,37 +262,37 @@ mod tests {
     async fn listed_loader_validates_the_record_against_its_key() {
         enum Mismatch {
             Namespace,
-            PinId,
+            SnapshotId,
         }
 
         let (_directory, store) = local_store();
         let key_namespace_id = namespace("demo");
-        let key_pin_id = pin_id("pin_00000000000000000001-0000000000000001");
-        let object_key = pin(&key_namespace_id, &key_pin_id);
+        let key_snapshot_id = snapshot_id("snp_00000000000000000001-00000000000000000000000001");
+        let object_key = snapshot_record(&key_namespace_id, &key_snapshot_id);
 
         let cases = [
             (
                 "embedded namespace",
-                record(namespace("other"), key_pin_id.clone()),
+                record(namespace("other"), key_snapshot_id.clone()),
                 Mismatch::Namespace,
             ),
             (
-                "embedded pin id",
+                "embedded snapshot id",
                 record(
                     key_namespace_id.clone(),
-                    pin_id("pin_00000000000000000001-0000000000000002"),
+                    snapshot_id("snp_00000000000000000001-00000000000000000000000002"),
                 ),
-                Mismatch::PinId,
+                Mismatch::SnapshotId,
             ),
         ];
 
         for (label, forged, expected) in cases {
-            let bytes = encode_pin(&forged);
+            let bytes = encode_snapshot_record(&forged);
             replace_object(&store, &object_key, bytes)
                 .await
                 .expect("write record");
 
-            let error = load_pin_at_key(&store, &object_key)
+            let error = load_snapshot_record_at_key(&store, &object_key)
                 .await
                 .expect_err("a record that does not describe its key should fail");
             match expected {
@@ -285,10 +301,10 @@ mod tests {
                     ControlObjectLoadError::NamespaceMismatch { .. },
                     "for `{label}`: {error:?}"
                 ),
-                Mismatch::PinId => assert_matches!(
+                Mismatch::SnapshotId => assert_matches!(
                     error,
                     ControlObjectLoadError::IdentityMismatch { ref field, .. }
-                        if field == "pin id",
+                        if field == "snapshot id",
                     "for `{label}`: {error:?}"
                 ),
             }

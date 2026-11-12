@@ -22,7 +22,7 @@ A writer session's [writer position](../specs/glossary.md#writer-position) is th
 
 So each runtime has one "fold path" and one "compaction path" for each namespace, and every part of LoonFS that folds or compacts the namespace goes through them. The fold path is the one place where the runtime folds the namespace, and it runs one fold at a time, so a fold that starts during another fold waits for that fold to finish. The compaction path does the same for compaction units.
 
-Every fold first takes the namespace's "fold lock", an in-memory read-write lock. A fold takes the fold lock in exclusive mode, so one fold of the namespace has the lock at a time. (A pin takes the lock in shared mode, as described below.) LoonFS checks whether the fold is due (defined below) after the fold has the lock, so if a fold waited for another fold, the check finds the tail already folded and the second fold does nothing. With a current position, LoonFS also checks the position before the fold takes the lock, and if no fold is due, the fold returns without a store request and without taking the lock.
+Every fold first takes the namespace's "fold lock", an in-memory read-write lock. A fold takes the fold lock in exclusive mode, so one fold of the namespace has the lock at a time. (A snapshot takes the lock in shared mode, as described below.) LoonFS checks whether the fold is due (defined below) after the fold has the lock, so if a fold waited for another fold, the check finds the tail already folded and the second fold does nothing. With a current position, LoonFS also checks the position before the fold takes the lock, and if no fold is due, the fold returns without a store request and without taking the lock.
 
 Some requests need a folded manifest: a merge's fold of the fork, a snapshot, a fork, an explicit fold, and a retention advance. Any fold of the namespace in the same runtime serves such a request if the fold took its input after the request arrived, because that fold covers every commit that was acknowledged before the request. The request folds only when no fold like that has finished, so the requests that wait for one fold share the next fold. For example, if three snapshots arrive while a fold is running, the first of the three snapshots to get the fold lock folds the tail, and the other two use the manifest that the first snapshot's fold published.
 
@@ -34,9 +34,9 @@ A fold that's due then:
 4. Raises the namespace's hint to the new manifest number.
 5. Wakes the commits that are waiting at the [write stop](write-stop-wait.md).
 
-A snapshot, a fork, and a merge's plan [pin](../specs/glossary.md#snapshot) the manifest of the fold that served the request, and LoonFS verifies each pin after it writes the pin. A pin keeps the fold lock in shared mode from the moment it has the fold's manifest until its verification. Any number of pins can have the lock in shared mode at once. So a fold in the same runtime waits for the pins in progress, and a pin waits for the fold in progress.
+Creating a snapshot, a fork, or a merge's plan writes a [snapshot](../specs/glossary.md#snapshot) that keeps the manifest of the fold that served the request, and LoonFS verifies each snapshot after it writes the snapshot. A snapshot keeps the fold lock in shared mode from the moment it has the fold's manifest until its verification. Any number of snapshots can have the lock in shared mode at once. So a fold in the same runtime waits for the snapshots in progress, and a snapshot waits for the fold in progress.
 
-A request that folds for its pin releases the fold lock, which it had in exclusive mode, before it takes the lock in shared mode, so the requests that waited for its fold can pin at the same time. Once a request has the fold lock in shared mode, it pins the manifest of the newest fold that it finds. A compaction unit, an extension's publication, or another process can still replace the manifest before the verification. When that happens, the request folds and pins again, up to eight attempts in all.
+A request that folds for its snapshot releases the fold lock, which it had in exclusive mode, before it takes the lock in shared mode, so the requests that waited for its fold can take their snapshots at the same time. Once a request has the fold lock in shared mode, it takes a snapshot of the manifest of the newest fold that it finds. A compaction unit, an extension's publication, or another process can still replace the manifest before the verification. When that happens, the request folds and takes a snapshot again, up to eight attempts in all.
 
 Before each compaction unit chooses its window, it takes the namespace's "compaction lock", an in-memory lock that one unit of the namespace can have at a time, so two units of the namespace never run at once in one runtime. The compaction path runs units one after another while a unit is due, up to 16 units for each call, and stops early if the caller cancels the call, the namespace's writer session closes, or the namespace is deleted. A unit plans from the position's manifest, which it reads through the segment cache, or from the current manifest when the session has no current position. Either manifest may have been read before the unit took the lock, and the position doesn't show manifests that another process published, such as another process's claim of the compactor epoch. So before a due unit plans, the compaction path sends one HEAD request for the manifest numbered after the unit's manifest (for a position, the same check that a strong read makes). If newer manifests exist, the unit plans from the newest one, and for a position, the path moves the position onto the ones that have the session's writer epoch.
 
@@ -46,7 +46,7 @@ Whether a fold is due depends on what asks for it. For the writer session's own 
 
 Why does one fold serve every request that waited for that fold? If each waiting request folded the tail that it found when it got the fold lock, ten snapshots that waited for one fold would fold ten times on a namespace that takes commits continuously, because each snapshot would find new commits in the tail. Each fold costs segment puts and a manifest put. A fold that took its input after a request arrived already includes every commit that the request has to see, so one fold serves all ten snapshots.
 
-Why does a pin keep the fold lock until its verification? If a fold in the same runtime published a manifest between a pin's write and its verification, the verification would find the pinned manifest replaced, and the request would fold and pin again. Concurrent snapshots and forks of a busy namespace would then replace each other's manifests and use up their attempts. Pins take the fold lock in shared mode, so a pin doesn't wait for another pin.
+Why does a snapshot keep the fold lock until its verification? If a fold in the same runtime published a manifest between a snapshot's write and its verification, the verification would find the snapshot's manifest replaced, and the request would fold and take a snapshot again. Concurrent snapshots and forks of a busy namespace would then replace each other's manifests and use up their attempts. Snapshots take the fold lock in shared mode, so a snapshot doesn't wait for another snapshot.
 
 ## Session state
 
@@ -98,7 +98,7 @@ The pool's size is `max_read_working_bytes` in `ExecutionBudget`, which defaults
 | --- | --- | --- | --- |
 | `max_read_working_bytes` | `ExecutionBudget` | 256 MiB | A memo evicts its own entries, and continues without keeping blocks that don't fit. A scan's refill loads fewer blocks, and always takes its first block, which the pool records even above the limit, so the pool can exceed the limit by one block for each segment that a scan has open until the scan consumes the block. Nothing waits. |
 
-Read, publication, fold, and pin-fold memos reserve memory from this pool, and so does each refill of a scan, for the decoded bytes of its blocks until the scan has consumed them. A memo's reservation covers:
+Read, publication, fold, and snapshot-fold memos reserve memory from this pool, and so does each refill of a scan, for the decoded bytes of its blocks until the scan has consumed them. A memo's reservation covers:
 
 - decoded data blocks,
 - decoded indexes and filters,
@@ -136,7 +136,7 @@ After a restart, each kind of work starts again from durable state:
 | --- | --- |
 | WAL fold | The current manifest and the numbered WAL tail. |
 | Metadata compaction | The current manifest, the selected input descriptors, and a new runtime epoch claim. |
-| Core garbage collection | For a namespace, fresh discovery of the current manifest and a complete listing of pins. For a pool, the pool record, a complete listing of upload sessions, and fresh discovery of each member's current manifest. |
+| Core garbage collection | For a namespace, fresh discovery of the current manifest and a complete listing of snapshots. For a pool, the pool record, a complete listing of upload sessions, and fresh discovery of each member's current manifest. |
 | Grep indexing | Grep's entry in the current manifest, with its build or reorganization cursor. |
 
 A grep build records its progress durably in grep's entry, and steps whose changes hadn't been published when the process stopped run again. A core compaction or garbage collection has no equivalent durable cursor, so the next attempt repeats it from the start.
@@ -149,7 +149,7 @@ Compaction publishes new segment objects only after it has combined the selected
 
 Every core garbage collection call loads fresh roots, builds its live set in memory, and lists each candidate family completely, from the beginning. It doesn't write a durable run object, mark pages, or a progress cursor. An interrupted collection might have deleted some eligible objects already, and another call safely repeats the listings and the remaining cleanup.
 
-Each call uses one clock value for all its age and retirement checks. Pin keys identify the manifests that must be kept for that collection. Upload records keep the evidence needed for cleanup until the content and the provider state have been handled. A retirement tombstone keeps the source pin's identity, so a failed dependency release can be retried.
+Each call uses one clock value for all its age and retirement checks. Snapshot keys identify the manifests that must be kept for that collection. Upload records keep the evidence needed for cleanup until the content and the provider state have been handled. A retirement tombstone keeps the fork snapshot's identity, so a failed dependency release can be retried.
 
 ## Scheduling and correctness
 

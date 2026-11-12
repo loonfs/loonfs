@@ -10,7 +10,7 @@ use crate::entry::{grep_extension_name, GrepEntry, GrepEntryError, GrepIndexStat
 use crate::{GrepError, Result};
 use loonfs::engine::{ExtensionBasis, ExtensionPublication};
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::{NamespaceId, PinId, RunNo};
+use loonfs_types::{NamespaceId, RunNo, SnapshotId};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// How long a run of steps in a host without a maintenance interval of its
@@ -91,12 +91,12 @@ pub(super) struct PendingEntry {
     pub(super) entry: Option<GrepEntry>,
     /// The provisional number of the next run that the change writes.
     next_run_no: RunNo,
-    /// The backfill pins that the change stops referring to, which are
+    /// The backfill snapshots that the change stops referring to, which are
     /// deleted once it publishes.
-    released_pins: Vec<PinId>,
-    /// The backfill pins that the change created, which are deleted if it
+    released_snapshots: Vec<SnapshotId>,
+    /// The backfill snapshots that the change created, which are deleted if it
     /// doesn't publish.
-    created_pins: Vec<PinId>,
+    created_snapshots: Vec<SnapshotId>,
 }
 
 impl PendingEntry {
@@ -154,8 +154,8 @@ impl PendingEntry {
             entry,
             published,
             next_run_no,
-            released_pins: Vec::new(),
-            created_pins: Vec::new(),
+            released_snapshots: Vec::new(),
+            created_snapshots: Vec::new(),
         }
     }
 
@@ -185,7 +185,7 @@ impl PendingEntry {
     /// # Panics
     ///
     /// Panics if `entry` doesn't follow the pending entry: each step keeps
-    /// the build that it follows, or starts a later one from a new pin, and
+    /// the build that it follows, or starts a later one from a new snapshot, and
     /// doesn't move the indexing position back within a build. A change can
     /// hold more than one build, such as a backfill's restart and its
     /// completion, so each step's entry is checked against the one before it.
@@ -199,16 +199,16 @@ impl PendingEntry {
         self.entry = Some(entry);
     }
 
-    /// Records a backfill pin that the change created, which is deleted if
+    /// Records a backfill snapshot that the change created, which is deleted if
     /// the change doesn't publish.
-    pub(super) fn record_created_pin(&mut self, pin_id: PinId) {
-        self.created_pins.push(pin_id);
+    pub(super) fn record_created_snapshot(&mut self, snapshot_id: SnapshotId) {
+        self.created_snapshots.push(snapshot_id);
     }
 
-    /// Records a backfill pin that the change no longer refers to, which is
+    /// Records a backfill snapshot that the change no longer refers to, which is
     /// deleted once the change publishes.
-    pub(super) fn record_released_pin(&mut self, pin_id: PinId) {
-        self.released_pins.push(pin_id);
+    pub(super) fn record_released_snapshot(&mut self, snapshot_id: SnapshotId) {
+        self.released_snapshots.push(snapshot_id);
     }
 
     /// Returns whether the steps changed the entry.
@@ -394,9 +394,9 @@ impl<'w, S: ObjectStore + Clone> GrepSteps<'w, S> {
     /// The change's runs get their numbers when the change is published (see
     /// [`GrepEntry::with_runs_numbered_from`]). After a publication, the next
     /// step starts from the published manifest. After another process
-    /// changed the entry, the change's new backfill pins are deleted, and the
+    /// changed the entry, the change's new backfill snapshots are deleted, and the
     /// next step loads the current manifest. An error drops the change and
-    /// keeps its pins, because a put whose outcome is unknown can still list
+    /// keeps its snapshots, because a put whose outcome is unknown can still list
     /// them. A change that's published or superseded is recorded in
     /// [`GrepWorker::publication_stats`].
     pub async fn publish(&mut self) -> Result<GrepPublishOutcome> {
@@ -426,7 +426,7 @@ impl<'w, S: ObjectStore + Clone> GrepSteps<'w, S> {
                     &counts.rebuilt
                 };
                 outcome.fetch_add(1, Ordering::Relaxed);
-                self.delete_pins(&pending.released_pins).await;
+                self.delete_snapshots(&pending.released_snapshots).await;
                 self.pending = Some(PendingEntry::new(basis)?);
                 Ok(GrepPublishOutcome::Published)
             }
@@ -434,36 +434,36 @@ impl<'w, S: ObjectStore + Clone> GrepSteps<'w, S> {
                 // A put whose response was lost can find its own manifest at
                 // its number, which core counts as superseded unless the
                 // manifest lists a new segment. So the change is published
-                // when the current entry still refers to a pin that the change
+                // when the current entry still refers to a snapshot that the change
                 // created, which no other publisher can create, even after
                 // another process's change over it, or when the current
-                // entry is the change's own, and then the pins that it
+                // entry is the change's own, and then the snapshots that it
                 // released are deleted. (The second test compares
                 // provisional run numbers. A change with a new run but no new
                 // segment, which is rare, fails it after a rebuild over a
                 // manifest with another next run number, and its released
-                // pins stay until they expire.)
+                // snapshots stay until they expire.)
                 let entry = pending
                     .entry
                     .clone()
                     .expect("a changed pending change should have an entry");
-                if !pending.created_pins.is_empty() || !pending.released_pins.is_empty() {
+                if !pending.created_snapshots.is_empty() || !pending.released_snapshots.is_empty() {
                     let current = PendingEntry::new(
                         self.worker
                             .maintenance
                             .load_extension_basis(&self.namespace_id)
                             .await?,
                     )?;
-                    let published = current.published.as_ref().is_some_and(|current| {
-                        *current == entry
-                            || current
-                                .status()
-                                .backfill_pin_id()
-                                .is_some_and(|pin_id| pending.created_pins.contains(pin_id))
-                    });
+                    let published =
+                        current.published.as_ref().is_some_and(|current| {
+                            *current == entry
+                                || current.status().backfill_snapshot_id().is_some_and(
+                                    |snapshot_id| pending.created_snapshots.contains(snapshot_id),
+                                )
+                        });
                     if published {
                         counts.published.fetch_add(1, Ordering::Relaxed);
-                        self.delete_pins(&pending.released_pins).await;
+                        self.delete_snapshots(&pending.released_snapshots).await;
                         self.pending = Some(current);
                         return Ok(GrepPublishOutcome::Published);
                     }
@@ -474,17 +474,17 @@ impl<'w, S: ObjectStore + Clone> GrepSteps<'w, S> {
                     "another process changed the grep entry; the next step plans from the current \
                      manifest"
                 );
-                self.delete_pins(&pending.created_pins).await;
+                self.delete_snapshots(&pending.created_snapshots).await;
                 Ok(GrepPublishOutcome::Superseded)
             }
         }
     }
 
-    /// Deletes each of `pin_ids`, and logs a failed delete.
-    async fn delete_pins(&self, pin_ids: &[PinId]) {
-        for pin_id in pin_ids {
+    /// Deletes each of `snapshot_ids`, and logs a failed delete.
+    async fn delete_snapshots(&self, snapshot_ids: &[SnapshotId]) {
+        for snapshot_id in snapshot_ids {
             self.worker
-                .delete_pin_if_present(&self.namespace_id, pin_id)
+                .delete_snapshot_if_present(&self.namespace_id, snapshot_id)
                 .await;
         }
     }

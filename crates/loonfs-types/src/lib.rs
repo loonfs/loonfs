@@ -150,8 +150,8 @@ pub use ids::{
     BindingVersionValidationError, CommitId, CommitIdValidationError, CommitSeq, CompactorEpoch,
     ContentId, ExtensionName, ExtensionNameValidationError, GeneratedIdValidationError,
     IndexSegmentId, ManifestNo, MetadataCompactionId, MetadataSegmentId, NameKey,
-    NameKeyValidationError, NamespaceId, NamespaceIdValidationError, PinId, PoolId, ProbeId,
-    PublicOrdinalRangeError, RevisionNo, RunNo, UploadId, WalNo, WriterEpoch, WriterId,
+    NameKeyValidationError, NamespaceId, NamespaceIdValidationError, PoolId, ProbeId,
+    PublicOrdinalRangeError, RevisionNo, RunNo, SnapshotId, UploadId, WalNo, WriterEpoch, WriterId,
     WriterIdValidationError, GENERATED_ID_BODY_BYTES, MAX_EXTENSION_NAME_BYTES, MAX_ID_BYTES,
     MAX_NAME_KEY_BYTES, MAX_PUBLIC_INTEGER, MAX_WRITER_ID_BYTES,
 };

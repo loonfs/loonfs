@@ -176,8 +176,8 @@
             "description": "The namespace sequence that the checkpoint captured."
           },
           "checkpoint_id": {
-            "$ref": "#/components/schemas/PinId",
-            "description": "The checkpoint's durable ID. For a user pin, it's also the snapshot's `snapshot_id`."
+            "$ref": "#/components/schemas/SnapshotId",
+            "description": "The checkpoint's durable ID. For a user snapshot, it's also the snapshot's `snapshot_id`."
           },
           "created_at_ms": {
             "description": "The time the checkpoint record was created, in Unix milliseconds.",
@@ -193,7 +193,7 @@
           },
           "manifest_no": {
             "$ref": "#/components/schemas/ManifestNo",
-            "description": "The manifest that the checkpoint pins."
+            "description": "The manifest that the checkpoint keeps."
           },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
@@ -201,7 +201,7 @@
           },
           "owner": {
             "$ref": "#/components/schemas/CheckpointOwner",
-            "description": "The checkpoint's owner. For a user pin, the owner includes the label."
+            "description": "The checkpoint's owner. For a user snapshot, the owner includes the label."
           }
         },
         "required": [
@@ -233,7 +233,7 @@
         ]
       },
       "CheckpointOwnerFork": {
-        "description": "A pin that keeps the source state that one fork attempt starts from.",
+        "description": "A snapshot that keeps the source state that one fork attempt starts from.",
         "properties": {
           "kind": {
             "enum": [
@@ -829,7 +829,7 @@
             "type": "integer"
           },
           "snapshot_id": {
-            "$ref": "#/components/schemas/PinId",
+            "$ref": "#/components/schemas/SnapshotId",
             "description": "A snapshot to read the file from. The download reads the revision that the snapshot\ncaptured."
           },
           "start_offset": {
@@ -901,7 +901,7 @@
             "description": "The revision to read. Omit it to read the path's current revision. It can't be combined with\n`snapshot_id`."
           },
           "snapshot_id": {
-            "$ref": "#/components/schemas/PinId",
+            "$ref": "#/components/schemas/SnapshotId",
             "description": "A snapshot to read the file from. The download reads the revision that the snapshot\ncaptured. It can't be combined with `revision_no`."
           },
           "start_offset": {
@@ -1133,7 +1133,7 @@
             "description": "The namespace that the snapshot belonged to."
           },
           "snapshot_id": {
-            "$ref": "#/components/schemas/PinId",
+            "$ref": "#/components/schemas/SnapshotId",
             "description": "The ID of the deleted snapshot record."
           }
         },
@@ -1147,13 +1147,13 @@
         "description": "The number of checkpoint records that one garbage collection deleted, grouped by owner.",
         "properties": {
           "fork": {
-            "description": "The fork pins that the collection deleted because their target namespaces no longer exist.",
+            "description": "The fork snapshots that the collection deleted because their target namespaces no longer exist.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
           },
           "user": {
-            "description": "The user pins that the collection deleted after they expired or their namespace was deleted.",
+            "description": "The user snapshots that the collection deleted after they expired or their namespace was deleted.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -2754,7 +2754,7 @@
             "description": "The durable ID of the new namespace that the fork creates."
           },
           "snapshot_id": {
-            "$ref": "#/components/schemas/PinId",
+            "$ref": "#/components/schemas/SnapshotId",
             "description": "An unexpired snapshot to fork from. Without it, the fork starts from the current head."
           }
         },
@@ -2831,15 +2831,15 @@
         "type": "object"
       },
       "GrepIndexStatusBackfilling": {
-        "description": "An index that is running its initial scan of a pinned checkpoint and can't be searched yet.",
+        "description": "An index that is running its initial scan of a checkpoint and can't be searched yet.",
         "properties": {
           "captured_seq": {
             "$ref": "#/components/schemas/CommitSeq",
             "description": "The namespace sequence that completes the backfill when the index reaches it."
           },
           "checkpoint_id": {
-            "$ref": "#/components/schemas/PinId",
-            "description": "The checkpoint that pins the state being scanned."
+            "$ref": "#/components/schemas/SnapshotId",
+            "description": "The checkpoint that keeps the state being scanned."
           },
           "cursor_inode_id": {
             "$ref": "#/components/schemas/InodeId",
@@ -3555,15 +3555,15 @@
             "$ref": "#/components/schemas/NamespaceId",
             "description": "The namespace that the fork was taken from."
           },
-          "source_pin_id": {
-            "$ref": "#/components/schemas/PinId",
-            "description": "The fork pin that keeps the source's state at `fork_point_seq` readable. A read of the\nsource namespace accepts it as `snapshot_id`."
+          "source_snapshot_id": {
+            "$ref": "#/components/schemas/SnapshotId",
+            "description": "The fork snapshot that keeps the source's state at `fork_point_seq` readable. A read of the\nsource namespace accepts it as `snapshot_id`."
           }
         },
         "required": [
           "source_namespace_id",
           "fork_point_seq",
-          "source_pin_id"
+          "source_snapshot_id"
         ],
         "type": "object"
       },
@@ -4033,12 +4033,6 @@
         ],
         "type": "object"
       },
-      "PinId": {
-        "description": "The durable ID of one pin.\n\nThe manifest number in the ID determines which namespace manifest the pin protects.",
-        "example": "pin_00000000000000000001-0000000000000002",
-        "pattern": "^pin_[0-9]{20}-[0-9a-f]{16}$",
-        "type": "string"
-      },
       "PoolDeletedObjectCounts": {
         "description": "The number of objects that one garbage collection of a pool deleted, grouped by object\nfamily.",
         "properties": {
@@ -4448,7 +4442,7 @@
             "description": "The namespace that the collection ran against."
           },
           "next_reclamation_at_ms": {
-            "description": "The earliest future retirement deadline or pin deletion time.",
+            "description": "The earliest future retirement deadline or snapshot deletion time.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -4789,7 +4783,7 @@
             "description": "The namespace whose state the snapshot captured."
           },
           "snapshot_id": {
-            "$ref": "#/components/schemas/PinId",
+            "$ref": "#/components/schemas/SnapshotId",
             "description": "The snapshot ID."
           }
         },
@@ -4801,6 +4795,12 @@
           "created_at_ms"
         ],
         "type": "object"
+      },
+      "SnapshotId": {
+        "description": "The durable ID of one snapshot.\n\nThe manifest number in the ID determines which namespace manifest the snapshot protects.",
+        "example": "snp_00000000000000000001-00000000000000000000000002",
+        "pattern": "^snp_[0-9]{20}-[0-7][0-9a-hjkmnp-tv-z]{25}$",
+        "type": "string"
       },
       "StoreProbeCheck": {
         "description": "The result of one contract check.",
@@ -5359,7 +5359,7 @@
     },
     "/v0/maintenance/namespaces/{namespace_id}/checkpoints": {
       "get": {
-        "description": "Lists every pin, snapshots and fork pins, in checkpoint ID order. This is the inventory of what keeps manifests from garbage collection. An expired snapshot stays in the list until garbage collection deletes it, after its expiry plus the grace window. A cursor continues the listing against the current set of pins.",
+        "description": "Lists every snapshot, user snapshots and fork snapshots, in checkpoint ID order. This is the inventory of what keeps manifests from garbage collection. An expired snapshot stays in the list until garbage collection deletes it, after its expiry plus the grace window. A cursor continues the listing against the current set of snapshots.",
         "operationId": "list_checkpoints",
         "parameters": [
           {
@@ -5459,7 +5459,7 @@
     },
     "/v0/maintenance/namespaces/{namespace_id}/checkpoints/{checkpoint_id}": {
       "get": {
-        "description": "Returns one existing pin, as the checkpoint listing returns it, including an expired snapshot that garbage collection hasn't deleted. A missing ID returns `snapshot_not_found`.",
+        "description": "Returns one existing snapshot of any owner, as the checkpoint listing returns it, including an expired snapshot that garbage collection hasn't deleted. A missing ID returns `snapshot_not_found`.",
         "operationId": "get_checkpoint",
         "parameters": [
           {
@@ -5913,7 +5913,7 @@
     },
     "/v0/maintenance/namespaces/{namespace_id}/jobs": {
       "post": {
-        "description": "Runs one maintenance job for the namespace. The body's `kind` selects the job, which is one of `metadata`, `gc`, `retention`, `retention_window`, or `recover_administrator`. The response includes the same `kind` and the job's result. A deleted namespace accepts only `gc`. A `metadata` job folds the WAL tail and compacts metadata until nothing is due, or until it publishes 16 compaction units. A compaction unit can take minutes, so the call can too. When the result's `outcome` is `due`, another `metadata` run continues the work. A `gc` job reads the current manifest, lists the pins, and then sweeps every object family under the namespace's prefix to the end, including the segments of extensions such as the grep index. The collection of the namespace's pool, which deletes content objects, upload records, and temporary objects, is a job of the pool. Each listing starts at the beginning, and the job doesn't keep a position to continue from. A `retention` job advances the retention floor to the folded manifest head, or to the one target that `to_seq` or `cutoff_at_ms` sets. A `retention_window` job sets the namespace's retention window to `retention_window_ms`, or clears it when the body doesn't include that field.",
+        "description": "Runs one maintenance job for the namespace. The body's `kind` selects the job, which is one of `metadata`, `gc`, `retention`, `retention_window`, or `recover_administrator`. The response includes the same `kind` and the job's result. A deleted namespace accepts only `gc`. A `metadata` job folds the WAL tail and compacts metadata until nothing is due, or until it publishes 16 compaction units. A compaction unit can take minutes, so the call can too. When the result's `outcome` is `due`, another `metadata` run continues the work. A `gc` job reads the current manifest, lists the snapshots, and then sweeps every object family under the namespace's prefix to the end, including the segments of extensions such as the grep index. The collection of the namespace's pool, which deletes content objects, upload records, and temporary objects, is a job of the pool. Each listing starts at the beginning, and the job doesn't keep a position to continue from. A `retention` job advances the retention floor to the folded manifest head, or to the one target that `to_seq` or `cutoff_at_ms` sets. A `retention_window` job sets the namespace's retention window to `retention_window_ms`, or clears it when the body doesn't include that field.",
         "operationId": "run_maintenance_job",
         "parameters": [
           {
@@ -6531,7 +6531,7 @@
             "name": "snapshot_id",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/PinId"
+              "$ref": "#/components/schemas/SnapshotId"
             }
           },
           {
@@ -6977,7 +6977,7 @@
             "name": "snapshot_id",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/PinId"
+              "$ref": "#/components/schemas/SnapshotId"
             }
           },
           {
@@ -7322,7 +7322,7 @@
             "name": "snapshot_id",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/PinId"
+              "$ref": "#/components/schemas/SnapshotId"
             }
           },
           {
@@ -7458,7 +7458,7 @@
             "name": "snapshot_id",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/PinId"
+              "$ref": "#/components/schemas/SnapshotId"
             }
           },
           {
@@ -8173,7 +8173,7 @@
             "name": "snapshot_id",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/PinId"
+              "$ref": "#/components/schemas/SnapshotId"
             }
           },
           {
@@ -8338,7 +8338,7 @@
             "name": "snapshot_id",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/PinId"
+              "$ref": "#/components/schemas/SnapshotId"
             }
           },
           {
@@ -8476,7 +8476,7 @@
             "name": "snapshot_id",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/PinId"
+              "$ref": "#/components/schemas/SnapshotId"
             }
           },
           {
@@ -8934,7 +8934,7 @@
     },
     "/v0/namespaces/{namespace_id}/inodes/{inode_id}/revisions/{revision_no}/content": {
       "get": {
-        "description": "Reads and verifies one retained file revision by inode ID and revision number, at the live head or in the state that a snapshot or a fork pin keeps. A `Range` header asks for one byte range of the revision instead.",
+        "description": "Reads and verifies one retained file revision by inode ID and revision number, at the live head or in the state that a snapshot or a fork snapshot keeps. A `Range` header asks for one byte range of the revision instead.",
         "operationId": "get_file_revision_content_by_inode",
         "parameters": [
           {
@@ -8967,12 +8967,12 @@
             }
           },
           {
-            "description": "A snapshot, or one of the namespace's fork pins, whose pinned state to find the revision\nin. The pinned manifest keeps the revision after the namespace's retention floor passes it.",
+            "description": "A snapshot, or one of the namespace's fork snapshots, whose state to find the revision\nin. The snapshot's manifest keeps the revision after the namespace's retention floor passes it.",
             "in": "query",
             "name": "snapshot_id",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/PinId"
+              "$ref": "#/components/schemas/SnapshotId"
             }
           },
           {
@@ -9661,7 +9661,7 @@
     },
     "/v0/namespaces/{namespace_id}/snapshots": {
       "get": {
-        "description": "Lists snapshots in snapshot ID order. An expired snapshot stays in the list until garbage collection deletes it, after its expiry plus the grace window. The list leaves out fork pins, which the maintenance checkpoint inventory lists.",
+        "description": "Lists snapshots in snapshot ID order. An expired snapshot stays in the list until garbage collection deletes it, after its expiry plus the grace window. The list leaves out fork snapshots, which the maintenance checkpoint inventory lists.",
         "operationId": "list_snapshots",
         "parameters": [
           {
@@ -9862,7 +9862,7 @@
     },
     "/v0/namespaces/{namespace_id}/snapshots/{snapshot_id}": {
       "delete": {
-        "description": "Deletes a snapshot. Garbage collection can then reclaim its unreferenced manifest and runs. Deleting a missing snapshot succeeds, so repeating the request has the same result. The ID of a fork pin returns `snapshot_not_found`. Deletion stays available after the namespace is deleted.",
+        "description": "Deletes a snapshot. Garbage collection can then reclaim its unreferenced manifest and runs. Deleting a missing snapshot succeeds, so repeating the request has the same result. The ID of a fork snapshot returns `snapshot_not_found`. Deletion stays available after the namespace is deleted.",
         "operationId": "delete_snapshot",
         "parameters": [
           {
@@ -9880,7 +9880,7 @@
             "name": "snapshot_id",
             "required": true,
             "schema": {
-              "$ref": "#/components/schemas/PinId"
+              "$ref": "#/components/schemas/SnapshotId"
             }
           }
         ],
@@ -9923,7 +9923,7 @@
                 }
               }
             },
-            "description": "Namespace not found, or the ID belongs to a fork pin"
+            "description": "Namespace not found, or the ID belongs to a fork snapshot"
           },
           "503": {
             "$ref": "#/components/responses/UnavailableResponse"
@@ -9941,7 +9941,7 @@
         "x-loonfs-retry": "idempotent"
       },
       "get": {
-        "description": "Returns one snapshot, as the snapshot listing returns it, including an expired snapshot that garbage collection hasn't deleted. A missing ID, or the ID of a fork pin, returns `snapshot_not_found`.",
+        "description": "Returns one snapshot, as the snapshot listing returns it, including an expired snapshot that garbage collection hasn't deleted. A missing ID, or the ID of a fork snapshot, returns `snapshot_not_found`.",
         "operationId": "get_snapshot",
         "parameters": [
           {
@@ -9959,7 +9959,7 @@
             "name": "snapshot_id",
             "required": true,
             "schema": {
-              "$ref": "#/components/schemas/PinId"
+              "$ref": "#/components/schemas/SnapshotId"
             }
           }
         ],
@@ -10040,7 +10040,7 @@
             "name": "snapshot_id",
             "required": true,
             "schema": {
-              "$ref": "#/components/schemas/PinId"
+              "$ref": "#/components/schemas/SnapshotId"
             }
           }
         ],

@@ -59,8 +59,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     ///
     /// This is the latest-state maintenance operation: it absorbs the visible
     /// WAL tail into a new manifest, creating no
-    /// pin. Superseded manifests become garbage-collection
-    /// candidates once nothing pins them. The report includes the manifest
+    /// snapshot. Superseded manifests become garbage-collection
+    /// candidates once nothing keeps them. The report includes the manifest
     /// this call published.
     pub async fn fold_wal(&self) -> Result<PublicationReport<FoldWalResponse>> {
         let folded = self
