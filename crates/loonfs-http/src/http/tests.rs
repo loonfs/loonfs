@@ -98,8 +98,8 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "content_changed",
     "content_objects",
     "content_ref",
-    "content_sweep_pool_budget",
-    "content_sweep_unreadable_member",
+    "content_deletion_pool_budget",
+    "content_deletion_unreadable_member",
     "content_token",
     "content_tokens",
     "copy_by_inode",
@@ -1230,7 +1230,8 @@ async fn http_delete_missing_path_returns_path_not_found() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_put_over_directory_and_move_into_existing_target_return_path_conflict() {
+async fn http_put_over_directory_returns_wrong_kind_and_move_into_existing_target_returns_path_conflict(
+) {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let seeder = bootstrap_namespace(&store, "server-writer", &namespace_id("demo")).await;
@@ -1272,7 +1273,7 @@ async fn http_put_over_directory_and_move_into_existing_target_return_path_confl
             )
             .await,
         409,
-        "path_conflict",
+        "wrong_kind",
         None,
     );
 

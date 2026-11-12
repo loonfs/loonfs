@@ -401,7 +401,7 @@ fn a_collection_counts_what_it_reclaimed_and_retained() {
         },
         listed_bytes: 0,
         next_reclamation_at_ms: None,
-        reclaimable_at_ms: None,
+        retires_at_ms: None,
     };
     let pool_gc = crate::PoolGcResponse {
         deleted: loonfs_types::PoolDeletedObjectCounts {

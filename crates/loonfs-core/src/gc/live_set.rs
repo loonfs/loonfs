@@ -25,7 +25,7 @@ use std::sync::Arc;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RetirementStatus {
     Active,
-    Retained { reclaimable_at_ms: Option<u64> },
+    Retained { retires_at_ms: Option<u64> },
     Eligible,
 }
 
@@ -46,11 +46,11 @@ impl RetirementStatus {
         let deadline_ms = retirement_deadline_ms(tombstone, retirement_grace_window_ms);
         if now_ms < deadline_ms {
             Self::Retained {
-                reclaimable_at_ms: Some(deadline_ms),
+                retires_at_ms: Some(deadline_ms),
             }
         } else if has_snapshots {
             Self::Retained {
-                reclaimable_at_ms: None,
+                retires_at_ms: None,
             }
         } else {
             Self::Eligible

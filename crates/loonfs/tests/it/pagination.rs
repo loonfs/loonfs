@@ -569,7 +569,7 @@ fn inode_children_rejects_files_and_missing_inodes() {
                 .page_limit(page_limit(2))
                 .page(),
         ),
-        ErrorCode::PathConflict,
+        ErrorCode::WrongKind,
     );
     assert_core_error_kind(
         block_on(

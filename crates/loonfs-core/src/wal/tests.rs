@@ -1281,7 +1281,7 @@ async fn a_writer_resuming_after_its_fence_was_collected_does_not_acknowledge_it
             .remove(0)
             .expect_err("reclaimed number must not acknowledge a commit")
             .code(),
-        ErrorCode::CommitOutcomeUnknown,
+        ErrorCode::OutcomeUnknown,
     );
     assert!(blocked
         .inner()

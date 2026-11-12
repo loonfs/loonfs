@@ -190,7 +190,7 @@ async fn a_diff_below_the_floor_returns_its_from_seq_and_the_floor() {
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
     let error: ErrorResponse = serde_json::from_slice(&body).expect("error body");
-    assert_eq!(error.code, ErrorCode::RebootstrapRequired.as_str());
+    assert_eq!(error.code, ErrorCode::BelowRetentionFloor.as_str());
     let details = error.details.expect("error details");
     assert_eq!(
         (

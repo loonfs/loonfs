@@ -43,7 +43,7 @@ A process that has the namespace's writer session creates the floor object as on
 
 The retention floor of a [read view](../specs/glossary.md#read-view), or of a [writer position](../specs/glossary.md#writer-position), is the highest of the manifest's `retention_floor_seq` and the `retention_floor_seq` of every floor object in the view's unfolded WAL tail. When LoonFS replays a floor object, it raises the view's floor to the floor object's `retention_floor_seq` if that value is higher than the current floor. For example, if the manifest's floor is 5 and the tail contains a floor object at WAL number 31 with floor 20, the view's floor is 20. A floor object whose `retention_floor_seq` is above its own `head_seq` is invalid.
 
-Every rule that reads the floor of a view reads this value: restore validation (a restore of a deleted item, and a restore of a file revision), the trash listing's scan start, the change feed's lower bound, the merge floor rule, and the reads that return `rebootstrap_required`.
+Every rule that reads the floor of a view reads this value: restore validation (a restore of a deleted item, and a restore of a file revision), the trash listing's scan start, the change feed's lower bound, the merge floor rule, and the reads that return `below_retention_floor`.
 
 Why does the floor take effect in a view before a manifest records the new floor? Restore validation has to use the new floor from the floor object's WAL number onward. With one definition of a view's floor, the trash listing, the change feed, and restore validation all use the same floor, so a restore refuses every deletion that the trash listing leaves out.
 

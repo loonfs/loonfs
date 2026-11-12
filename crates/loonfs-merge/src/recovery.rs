@@ -76,7 +76,7 @@ impl<M: Mechanics, R: Resolver> MergeSession<M, R> {
                             merge.is_some()
                         }
                         // A merge of this new fork would return
-                        // `rebootstrap_required`, so recovery doesn't
+                        // `below_retention_floor`, so recovery doesn't
                         // continue with it.
                         NextMergeRangeOutcome::ForkPointBelowFloor { .. } => false,
                         NextMergeRangeOutcome::Unknown => {

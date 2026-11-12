@@ -44,7 +44,7 @@ pub struct DiffPage {
 /// `to_seq` defaults to the head of `view`, and `after_seq` to `from_seq`.
 /// The page checks `from_seq` against the retention floor of `view` before
 /// it reads anything, so a page whose basis has a floor above `from_seq`
-/// returns `rebootstrap_required`.
+/// returns `below_retention_floor`.
 pub(crate) async fn diff_page<S: ObjectStore + ?Sized>(
     view: &LoadedMetadataView<'_, S>,
     from_seq: CommitSeq,
@@ -78,7 +78,7 @@ async fn diff_page_within<S: ObjectStore + ?Sized>(
     crate::namespace::control::ensure_namespace_live(&head.namespace_id, head.status)?;
     let retention_floor_seq = view.retention_floor_seq();
     if from_seq < retention_floor_seq {
-        return Err(CoreError::RebootstrapRequired {
+        return Err(CoreError::BelowRetentionFloor {
             below: HistoryPosition::DiffStart { from_seq },
             retention_floor_seq,
         });

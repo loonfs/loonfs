@@ -666,7 +666,7 @@ fn gc_summaries_report_counts_retention_namespace_retirement_and_skipped_pool_wo
         "{summary}"
     );
 
-    pass.reclaimable_at_ms = Some(1_700_000_000_000);
+    pass.retires_at_ms = Some(1_700_000_000_000);
     for next in [
         Some(1_699_999_999_000),
         Some(1_700_000_000_000),
@@ -699,8 +699,8 @@ fn gc_summaries_report_counts_retention_namespace_retirement_and_skipped_pool_wo
     );
     pool.next_reclamation_at_ms = Some(1_700_000_000_000);
     pool.skipped = vec![
-        loonfs_types::GcSkippedWork::ContentSweepPoolBudget,
-        loonfs_types::GcSkippedWork::ContentSweepUnreadableMember,
+        loonfs_types::GcSkippedWork::ContentDeletionPoolBudget,
+        loonfs_types::GcSkippedWork::ContentDeletionUnreadableMember,
     ];
     assert_eq!(
         super::summaries::pool_gc_summary(&pool)

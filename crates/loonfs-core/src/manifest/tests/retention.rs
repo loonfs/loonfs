@@ -1261,7 +1261,7 @@ async fn a_view_reports_a_floor_objects_floor_and_a_fold_publishes_the_higher_fl
             .expect_err("the feed starts below the view's floor");
     assert_matches!(
         error,
-        CoreError::RebootstrapRequired { retention_floor_seq, .. }
+        CoreError::BelowRetentionFloor { retention_floor_seq, .. }
             if retention_floor_seq == deletion_seq
     );
 
@@ -1677,7 +1677,7 @@ async fn snapshot_creation_deletes_its_record_when_the_floor_passed_its_manifest
         .await
         .map(crate::snapshot::snapshot_record_summary)
         .expect_err("floor passed snapshot");
-    assert_eq!(error.code(), ErrorCode::CheckpointUnavailable);
+    assert_eq!(error.code(), ErrorCode::SnapshotUnavailable);
     assert!(store
         .list_prefix(&snapshot_prefix(&namespace_id))
         .await

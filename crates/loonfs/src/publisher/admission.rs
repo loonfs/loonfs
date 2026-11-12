@@ -464,7 +464,7 @@ mod tests {
             .acquire_candidate(&namespace_id, &candidate)
             .err()
             .expect("oversized commit");
-        assert_eq!(error.code(), loonfs_types::ErrorCode::ContentTooLarge);
+        assert_eq!(error.code(), loonfs_types::ErrorCode::CommitTooLarge);
         assert!(error.to_string().contains("too large for one WAL object"));
         assert_matches!(
             error,

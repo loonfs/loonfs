@@ -148,7 +148,7 @@ impl NamespacePublisher {
     /// returns the commits that wait at the write stop.
     ///
     /// This worker is the namespace's only publication path. If publication
-    /// panics, each request in the batch receives `commit_outcome_unknown`
+    /// panics, each request in the batch receives `outcome_unknown`
     /// because the panic may have occurred before or after the WAL put. Callers
     /// can retry with the same commit ID and use the durable receipt to resolve
     /// the outcome. The worker then continues with queued work.
@@ -510,7 +510,7 @@ fn split_write_stop_waiters(
     permits: &[Arc<AdmissionPermit>],
 ) -> (Vec<BatchCandidate>, Vec<CommitId>, Vec<Result<Commit>>) {
     // A commit whose earlier put had an unknown outcome keeps
-    // `commit_outcome_unknown` under the settling rule, so only a commit
+    // `outcome_unknown` under the settling rule, so only a commit
     // whose result is the refusal waits.
     let mut waiting = Vec::new();
     let (mut delivered_ids, mut delivered) = (Vec::new(), Vec::new());

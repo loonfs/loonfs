@@ -49,7 +49,9 @@ impl ContentFilters {
             MemberWalkOutcome::BudgetExceeded => {
                 tracing::info!(pool_id = %pool_id, members, members_read,
                     "the pool's roots weren't all read within the budget; skipped content sweep");
-                report.skipped.push(GcSkippedWork::ContentSweepPoolBudget);
+                report
+                    .skipped
+                    .push(GcSkippedWork::ContentDeletionPoolBudget);
                 return Ok(None);
             }
             MemberWalkOutcome::UnreadableMember => {
@@ -57,7 +59,7 @@ impl ContentFilters {
                     "a pool member's roots couldn't be read; skipped content sweep");
                 report
                     .skipped
-                    .push(GcSkippedWork::ContentSweepUnreadableMember);
+                    .push(GcSkippedWork::ContentDeletionUnreadableMember);
                 return Ok(None);
             }
         }

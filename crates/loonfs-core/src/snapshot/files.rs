@@ -91,7 +91,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// it has not been deleted. An ID that doesn't identify a snapshot, or a
     /// snapshot that expired at or before the current wall-clock time, returns
     /// `snapshot_not_found`, and a snapshot whose manifest is gone returns
-    /// `checkpoint_unavailable`.
+    /// `snapshot_unavailable`.
     pub async fn list_snapshot_files_page(
         &self,
         snapshot_id: &SnapshotId,

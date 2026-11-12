@@ -124,7 +124,7 @@ impl ReadView {
     /// and they check the subject's rights at this view's head, as reads of
     /// a snapshot do. A sequence above the head, or a view of a snapshot,
     /// returns `invalid_request`, and a sequence below the retention floor
-    /// returns `rebootstrap_required`.
+    /// returns `below_retention_floor`.
     pub async fn at_seq(&self, seq: CommitSeq) -> Result<ReadView> {
         if let Some(snapshot_id) = self.snapshot_id() {
             return Err(Error::InvalidRequest {

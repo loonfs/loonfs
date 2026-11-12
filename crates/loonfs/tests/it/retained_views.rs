@@ -551,7 +551,7 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
             );
             expect_code(
                 source_namespace.list_changes(CommitSeq(0)).page().await,
-                ErrorCode::RebootstrapRequired,
+                ErrorCode::BelowRetentionFloor,
             );
         }
     }

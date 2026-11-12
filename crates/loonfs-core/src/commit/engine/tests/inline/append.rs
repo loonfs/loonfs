@@ -378,7 +378,7 @@ async fn appends_name_an_existing_file() {
         (
             "to-directory",
             append("/directory", b"bytes"),
-            ErrorCode::PathConflict,
+            ErrorCode::WrongKind,
         ),
         (
             "missing",

@@ -21,7 +21,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     ///
     /// Every call generates a fresh `SnapshotId`, and `name` is a label, not a
     /// key. A manifest that stopped being current before the snapshot's
-    /// verification returns `checkpoint_unavailable`, so the caller folds
+    /// verification returns `snapshot_unavailable`, so the caller folds
     /// and snapshots again. A snapshot with `expires_at_ms` can't be read
     /// after that time, and it stays listed until collection deletes it.
     /// `None` keeps the snapshot until it's deleted.
@@ -49,7 +49,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// Creates a verified snapshot of `manifest` for `owner`.
     ///
     /// `manifest` is the manifest that the caller's fold published or found
-    /// current. The call returns `checkpoint_unavailable` when the manifest
+    /// current. The call returns `snapshot_unavailable` when the manifest
     /// stopped being current before the snapshot's verification, so the caller
     /// can fold and take a snapshot again.
     pub(crate) async fn create_snapshot_record(
@@ -75,7 +75,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         .await;
         let error = match verification {
             Ok(SnapshotBasisVerification::Verified) => return Ok(record),
-            Ok(SnapshotBasisVerification::Invalid) => CoreError::CheckpointUnavailable(
+            Ok(SnapshotBasisVerification::Invalid) => CoreError::SnapshotUnavailable(
                 "the snapshot's manifest stopped being current before the snapshot record was verified".to_owned(),
             ),
             Err(error) => error,

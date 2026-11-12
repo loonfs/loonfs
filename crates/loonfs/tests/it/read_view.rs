@@ -808,7 +808,7 @@ async fn a_read_view_keeps_one_head_across_later_commits() {
 
 /// Checks that a view at an earlier sequence reads the namespace as it was at
 /// that sequence, refuses a sequence above its head, and returns
-/// `rebootstrap_required` once the retention floor passes the sequence.
+/// `below_retention_floor` once the retention floor passes the sequence.
 #[tokio::test]
 async fn a_view_at_an_earlier_sequence_reads_that_sequence_until_the_floor_passes_it() {
     let temp_dir = tempdir().expect("tempdir");
@@ -899,7 +899,7 @@ async fn a_view_at_an_earlier_sequence_reads_that_sequence_until_the_floor_passe
     let Err(error) = view.at_seq(first.committed_seq).await else {
         panic!("the floor passed the first commit");
     };
-    assert_eq!(error.code(), ErrorCode::RebootstrapRequired);
+    assert_eq!(error.code(), ErrorCode::BelowRetentionFloor);
 }
 
 /// Checks that a view lists every retained file revision, including the

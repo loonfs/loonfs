@@ -95,7 +95,7 @@ impl NamespaceReads {
     /// queries determine visibility.
     ///
     /// A page returns `snapshot_not_found` if the snapshot was deleted,
-    /// expired, or collected, and `checkpoint_unavailable` if its manifest is
+    /// expired, or collected, and `snapshot_unavailable` if its manifest is
     /// gone. The caller must then restart the backfill from a new snapshot.
     pub fn list_snapshot_files(&self, snapshot_id: &SnapshotId) -> SnapshotFilesPager {
         self.namespace.list_snapshot_files_with_options(
@@ -111,7 +111,7 @@ impl NamespaceReads {
     /// In a fork, when `after_seq` is below the fork point, this reads the
     /// source's changes through the fork snapshot (see
     /// [`Self::list_fork_gap_after`]). Otherwise, it returns
-    /// `rebootstrap_required` when `after_seq` is below the retention floor.
+    /// `below_retention_floor` when `after_seq` is below the retention floor.
     /// The page is `strong`, because `after_seq` comes
     /// from the index, which another process may have built past this
     /// process's last confirmation of the head.
@@ -159,7 +159,7 @@ impl NamespaceReads {
     /// each matching file in the fork, as it does for any file of the tail.
     ///
     /// `error` is what the fork's own feed returned for `after_seq`. The gap
-    /// is read only when that's `rebootstrap_required` and `after_seq` is
+    /// is read only when that's `below_retention_floor` and `after_seq` is
     /// below the fork point of a fork, and `error` is returned otherwise.
     /// `error` is also returned when the source can't serve the gap, such as
     /// when the source's retention floor was above `after_seq` when the fork
@@ -172,7 +172,7 @@ impl NamespaceReads {
     ) -> Result<ListChangesResponse> {
         if !matches!(
             error,
-            loonfs::Error::Core(CoreError::RebootstrapRequired { .. })
+            loonfs::Error::Core(CoreError::BelowRetentionFloor { .. })
         ) {
             return Err(error.into());
         }
@@ -202,9 +202,9 @@ impl NamespaceReads {
                 Ok(page)
             }
             Err(loonfs::Error::Core(
-                CoreError::RebootstrapRequired { .. }
+                CoreError::BelowRetentionFloor { .. }
                 | CoreError::SnapshotNotFound { .. }
-                | CoreError::CheckpointUnavailable(_),
+                | CoreError::SnapshotUnavailable(_),
             )) => Err(error.into()),
             Err(other) if other.code().is_namespace_gone() => Err(error.into()),
             Err(other) => Err(other.into()),
@@ -249,7 +249,7 @@ impl NamespaceReadView<'_> {
     }
 
     /// Returns a view of this view's head at `seq`, which checks the
-    /// subject's rights at the head, or `rebootstrap_required` when the
+    /// subject's rights at the head, or `below_retention_floor` when the
     /// retention floor is above `seq`.
     pub(crate) async fn at_seq(&self, seq: CommitSeq) -> Result<Self> {
         Ok(Self {

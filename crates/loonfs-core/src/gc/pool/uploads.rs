@@ -260,8 +260,10 @@ impl<S: ObjectStore> PoolStore<S> {
         let Some(status) = roots.find_retirement_status(&state.session.namespace_id) else {
             return Ok(retain_undated());
         };
-        if let RetirementStatus::Retained { reclaimable_at_ms } = status {
-            return Ok(UploadSessionSweep::Retain { reclaimable_at_ms });
+        if let RetirementStatus::Retained { retires_at_ms } = status {
+            return Ok(UploadSessionSweep::Retain {
+                reclaimable_at_ms: retires_at_ms,
+            });
         }
         match &state.outcome {
             None => {
@@ -386,9 +388,9 @@ pub(super) fn sweep_completed_session(
     completed_at_ms: u64,
 ) -> UploadSessionSweep {
     match status {
-        RetirementStatus::Retained { reclaimable_at_ms } => {
-            UploadSessionSweep::Retain { reclaimable_at_ms }
-        }
+        RetirementStatus::Retained { retires_at_ms } => UploadSessionSweep::Retain {
+            reclaimable_at_ms: retires_at_ms,
+        },
         RetirementStatus::Active
             if now_ms.saturating_sub(completed_at_ms) < CONTENT_RECLAMATION_GRACE_WINDOW_MS =>
         {

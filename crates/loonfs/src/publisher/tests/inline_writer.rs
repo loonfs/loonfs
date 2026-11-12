@@ -165,7 +165,7 @@ async fn check_terminal_reload_failure(include_replay: bool) {
             .used_requests(),
         0
     );
-    assert_eq!(first_error.code(), ErrorCode::CommitOutcomeUnknown);
+    assert_eq!(first_error.code(), ErrorCode::OutcomeUnknown);
 
     unreadable.store(false, Ordering::SeqCst);
     let replay = namespace_writer

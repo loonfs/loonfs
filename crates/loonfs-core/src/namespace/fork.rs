@@ -42,7 +42,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// The fork shares immutable file bytes but gets its own metadata history.
     /// Returns the target's status at the fork point. A manifest that stopped
     /// being current before the fork snapshot's verification returns
-    /// `checkpoint_unavailable`, so the caller folds and forks again.
+    /// `snapshot_unavailable`, so the caller folds and forks again.
     pub async fn fork_namespace(
         &self,
         new_namespace_id: &NamespaceId,
@@ -78,7 +78,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// The new fork's fork basis records `rebased_from`, with the fork
     /// sequence that the fork's next merge into this namespace would start
     /// after, read through the new fork's snapshot. A fork point below the retention
-    /// floor of the snapshot's manifest returns `rebootstrap_required`, and the
+    /// floor of the snapshot's manifest returns `below_retention_floor`, and the
     /// call then deletes the snapshot and creates no namespace.
     pub async fn fork_namespace_for_rebase(
         &self,
@@ -198,7 +198,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// Returns the `rebased_from` of a rebase's new fork whose fork snapshot is
     /// `record`, with the fork sequence that the next merge of `rebase`'s
     /// fork into this namespace starts after in the snapshot's manifest (see
-    /// [`merge_start`]), or `rebootstrap_required` when the fork point is
+    /// [`merge_start`]), or `below_retention_floor` when the fork point is
     /// below the retention floor of the snapshot's manifest.
     ///
     /// The snapshot keeps the manifest that the new fork starts from, so the

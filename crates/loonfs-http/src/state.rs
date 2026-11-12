@@ -255,9 +255,10 @@ pub trait WriterSessions: Send + Sync {
     fn forget(&self, namespace_id: &NamespaceId);
 
     /// Drops the handle after a request through it failed with `error`,
-    /// when the namespace is missing or deleted or the held session is
-    /// fenced. Another writer can delete a namespace, or fence its session,
-    /// after this host opened its handle.
+    /// when its namespace is missing or deleted or the held session is
+    /// fenced. An error about another namespace that the request refers to,
+    /// such as a merge's fork, keeps the handle. Another writer can delete a
+    /// namespace, or fence its session, after this host opened its handle.
     fn forget_after(&self, namespace_id: &NamespaceId, error: &loonfs::Error);
 
     /// Records that the namespace's grep index has work for the host's
@@ -465,7 +466,10 @@ impl<S: HostState> WriterSessions for Namespaces<S> {
     fn forget_after(&self, namespace_id: &NamespaceId, error: &loonfs::Error) {
         let code = error.code();
         if code.is_namespace_gone() {
-            self.forget(namespace_id);
+            let gone_id = error.details().and_then(|details| details.namespace_id);
+            if gone_id.is_none_or(|gone_id| gone_id == *namespace_id) {
+                self.forget(namespace_id);
+            }
             return;
         }
         if code != ErrorCode::WriterFenced {

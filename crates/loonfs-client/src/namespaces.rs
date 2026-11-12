@@ -182,7 +182,7 @@ impl Client {
 
     /// Returns where the fork `source_namespace_id`'s next merge into
     /// `namespace_id` starts, without planning the merge. When a retention
-    /// floor would refuse the merge with `rebootstrap_required`, the
+    /// floor would refuse the merge with `below_retention_floor`, the
     /// response's outcome says which floor.
     pub async fn next_merge_range(
         &self,

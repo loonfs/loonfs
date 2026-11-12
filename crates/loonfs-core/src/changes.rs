@@ -46,7 +46,7 @@ async fn list_changes_within<S: ObjectStore + ?Sized>(
     // A position inside a commit starts with that commit, so the commit has
     // to be above the floor, where the feed returns commits.
     if after_seq < retention_floor_seq || (event_index > 0 && after_seq == retention_floor_seq) {
-        return Err(CoreError::RebootstrapRequired {
+        return Err(CoreError::BelowRetentionFloor {
             below: HistoryPosition::FeedCursor { after_seq },
             retention_floor_seq,
         });

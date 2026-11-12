@@ -195,7 +195,7 @@ async fn stat_inode_preserves_the_nameless_root_and_revision_error_conventions()
         .page()
         .await
         .expect_err("directory has no file revisions");
-    assert_eq!(directory_error.code(), ErrorCode::PathConflict);
+    assert_eq!(directory_error.code(), ErrorCode::WrongKind);
 
     for error in [
         namespace

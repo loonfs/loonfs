@@ -7,8 +7,8 @@ use crate::publish::CommitCandidate;
 use crate::publisher::MergeReservation;
 use crate::trace::{self, operation_span};
 use crate::{
-    ActorId, Commit, CommitId, Consistency, CoreError, Error, MergeForkOptions, Mode, Namespace,
-    NamespaceId, NextMergeRangeResponse, Result, SnapshotId, Writable,
+    ActorId, Commit, CommitId, Consistency, Error, MergeForkOptions, Mode, Namespace, NamespaceId,
+    NextMergeRangeResponse, Result, SnapshotId, Writable,
 };
 use futures::future::BoxFuture;
 use loonfs_core::limits::DIRECT_TRANSFER_URL_TTL_MS;
@@ -63,7 +63,7 @@ impl<M: Mode> Namespace<M> {
     /// namespace is a rebase's new fork for `source_namespace_id`, the start
     /// comes from the new fork's replay commits or its `resume_after_seq`, as
     /// it does for a rebase. When a retention floor would refuse the merge
-    /// with `rebootstrap_required`, the response's outcome says which floor
+    /// with `below_retention_floor`, the response's outcome says which floor
     /// instead of returning the error. A handle with a subject needs an
     /// administrator in both namespaces, as the change feed does. A source
     /// that doesn't exist, was deleted, or isn't a fork of this namespace
@@ -87,8 +87,7 @@ impl<M: Mode> Namespace<M> {
                 let fork = self
                     .core
                     .pinned_read(source_namespace_id, Consistency::Strong)
-                    .await
-                    .map_err(|error| missing_fork(source_namespace_id, error))?;
+                    .await?;
                 fork.engine.ensure_administrator(&fork.context).await?;
                 Ok(main
                     .engine
@@ -268,7 +267,7 @@ impl Namespace<Writable> {
                         }
                         Err(error) => {
                             *lock_reservation(&held) = Some(reservation);
-                            Err(missing_fork(&request.source_namespace_id, error))
+                            Err(error)
                         }
                     }
                 },
@@ -427,32 +426,6 @@ fn lock_reservation(
     // can't panic and poison the lock.
     held.lock()
         .expect("the merge reservation lock should not be poisoned")
-}
-
-/// Returns `invalid_request` for a fork that doesn't exist or was deleted,
-/// as for a namespace that isn't a fork, so the error identifies the
-/// request's field and not a namespace that the caller's session writes.
-/// Every other error, including one about the namespace that the merge
-/// commits into, stays as it is.
-pub(super) fn missing_fork(source_namespace_id: &NamespaceId, error: Error) -> Error {
-    let message = match &error {
-        Error::Core(CoreError::NamespaceNotFound { namespace_id })
-            if namespace_id == source_namespace_id =>
-        {
-            format!("namespace `{source_namespace_id}` doesn't exist")
-        }
-        Error::Core(CoreError::NamespaceDeleted { namespace_id })
-            if namespace_id == source_namespace_id =>
-        {
-            format!("namespace `{source_namespace_id}` was deleted")
-        }
-        _ => return error,
-    };
-    CoreError::InvalidMerge {
-        param: "source_namespace_id",
-        message,
-    }
-    .into()
 }
 
 #[cfg(test)]

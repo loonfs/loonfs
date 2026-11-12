@@ -399,7 +399,7 @@ pub(crate) struct FloorRefusal {
 
 impl From<FloorRefusal> for CoreError {
     fn from(refusal: FloorRefusal) -> Self {
-        CoreError::RebootstrapRequired {
+        CoreError::BelowRetentionFloor {
             below: refusal.below,
             retention_floor_seq: refusal.retention_floor_seq,
         }

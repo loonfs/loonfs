@@ -412,9 +412,9 @@ pub(super) async fn fork_namespace(
             (status = 400, description = "Invalid request, or the namespace isn't a fork of this namespace", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 403, description = "Forbidden", body = ErrorResponse),
-            (status = 404, description = "Namespace not found", body = ErrorResponse),
+            (status = 404, description = "The namespace or the fork doesn't exist, and `details.namespace_id` identifies which", body = ErrorResponse),
             (status = 409, description = "Merge conflict, range conflict, or history below a retention floor", body = ErrorResponse),
-            (status = 410, description = "Namespace deleted", body = ErrorResponse),
+            (status = 410, description = "The namespace or the fork was deleted, and `details.namespace_id` identifies which", body = ErrorResponse),
             (status = 413, description = "The merge is too large, or the JSON body exceeds the 2 MiB limit", body = ErrorResponse),
             (status = 501, description = "Merges are disabled", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
@@ -472,7 +472,7 @@ pub(super) async fn merge_fork(
         path = "/v0/namespaces/{namespace_id}/merges",
         tag = "namespaces",
         summary = "Get a fork's next merge range",
-        description = "Returns where the fork's next merge into the namespace starts, without planning the merge: the fork's newest merge into the namespace, the fork sequence that the next merge starts after, the fork point, and the fork's head. When the namespace is a rebase's new fork for the fork, the range continues the new fork's replay commits. When a retention floor would refuse the merge with `rebootstrap_required`, the response's `outcome` says which floor instead of failing.",
+        description = "Returns where the fork's next merge into the namespace starts, without planning the merge: the fork's newest merge into the namespace, the fork sequence that the next merge starts after, the fork point, and the fork's head. When the namespace is a rebase's new fork for the fork, the range continues the new fork's replay commits. When a retention floor would refuse the merge with `below_retention_floor`, the response's `outcome` says which floor instead of failing.",
         params(
             ("namespace_id" = String, Path, description = "The namespace that the fork merges into."),
             NextMergeRangeQuery
@@ -482,8 +482,8 @@ pub(super) async fn merge_fork(
             (status = 400, description = "Invalid request, or the source isn't a fork of this namespace", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 403, description = "Forbidden", body = ErrorResponse),
-            (status = 404, description = "Namespace not found", body = ErrorResponse),
-            (status = 410, description = "Namespace deleted", body = ErrorResponse),
+            (status = 404, description = "The namespace or the fork doesn't exist, and `details.namespace_id` identifies which", body = ErrorResponse),
+            (status = 410, description = "The namespace or the fork was deleted, and `details.namespace_id` identifies which", body = ErrorResponse),
             (status = 501, description = "Merges are disabled", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
@@ -541,9 +541,9 @@ pub(super) async fn get_next_merge_range(
             (status = 400, description = "Invalid request, the source isn't a fork of this namespace, or the new namespace isn't a rebase of the fork", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 403, description = "Forbidden", body = ErrorResponse),
-            (status = 404, description = "Namespace not found", body = ErrorResponse),
+            (status = 404, description = "The namespace or the fork doesn't exist, and `details.namespace_id` identifies which", body = ErrorResponse),
             (status = 409, description = "Range conflict, or history below a retention floor", body = ErrorResponse),
-            (status = 410, description = "Namespace deleted", body = ErrorResponse),
+            (status = 410, description = "The namespace or the fork was deleted, and `details.namespace_id` identifies which", body = ErrorResponse),
             (status = 413, description = "The replay commit is too large, or the JSON body exceeds the 2 MiB limit", body = ErrorResponse),
             (status = 501, description = "Merges are disabled", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses

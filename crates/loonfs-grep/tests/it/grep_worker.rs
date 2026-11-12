@@ -718,7 +718,7 @@ async fn retention_passing_a_backfill_snapshot_never_serves_a_partial_query() {
     let error = new_query(&store, &namespace_id, &request("handoff needle"))
         .await
         .expect_err("an expired handoff cursor cannot answer a query");
-    assert_eq!(error.code(), ErrorCode::RebootstrapRequired);
+    assert_eq!(error.code(), ErrorCode::BelowRetentionFloor);
 
     let restarted = worker
         .steps(&namespace_id, 0)

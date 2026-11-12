@@ -27,12 +27,12 @@ impl<S: ObjectStore> NamespaceStore<S> {
         validate_gc_options(options)?;
         let mut report = GcResponse::empty(self.namespace_id.clone());
         let live = LiveSet::load(self, options.grace_window_ms, clock).await?;
-        report.reclaimable_at_ms = live
+        report.retires_at_ms = live
             .current_tombstone
             .as_ref()
             .map(|tombstone| live.deadline(tombstone));
         report.next_reclamation_at_ms = match live.retirement_status() {
-            RetirementStatus::Retained { reclaimable_at_ms } => reclaimable_at_ms,
+            RetirementStatus::Retained { retires_at_ms } => retires_at_ms,
             _ => None,
         };
         let sweep = Sweep {

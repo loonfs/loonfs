@@ -901,7 +901,7 @@ async fn restore_revision_by_inode_restores_a_moved_file() {
     )
     .await
     .expect_err("a directory has no revisions");
-    assert_eq!(directory.code(), ErrorCode::PathConflict);
+    assert_eq!(directory.code(), ErrorCode::WrongKind);
 }
 
 #[tokio::test]

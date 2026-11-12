@@ -65,7 +65,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         );
         let retention_floor_seq = head.retention_floor_seq;
         if visible_seq < retention_floor_seq {
-            return Err(CoreError::RebootstrapRequired {
+            return Err(CoreError::BelowRetentionFloor {
                 below: HistoryPosition::ReadSeq {
                     read_seq: visible_seq,
                 },

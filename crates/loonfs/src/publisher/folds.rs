@@ -244,7 +244,7 @@ impl PublisherRegistry {
             let created = create(manifest).await;
             drop(turn);
             match created {
-                Err(CoreError::CheckpointUnavailable(_)) if attempts < MAX_CONTENTION_ATTEMPTS => {
+                Err(CoreError::SnapshotUnavailable(_)) if attempts < MAX_CONTENTION_ATTEMPTS => {
                     attempts += 1;
                 }
                 created => return created.map_err(Error::from),

@@ -207,7 +207,7 @@ pub(super) async fn re_reference_check_fails<S: ObjectStore + ?Sized>(
     };
     let values = match values_since(reads, pruning.filter_seq).await {
         Ok(values) => values,
-        Err(error) if error.code() == ErrorCode::RebootstrapRequired => return Ok(true),
+        Err(error) if error.code() == ErrorCode::BelowRetentionFloor => return Ok(true),
         Err(error) => return Err(error),
     };
     for (run_no, translation) in translations {

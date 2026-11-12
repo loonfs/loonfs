@@ -517,7 +517,7 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
         .gc(&options(), &aged.clock())
         .await
         .expect("retire clone");
-    let deadline = retired.reclaimable_at_ms.expect("clone retired");
+    let deadline = retired.retires_at_ms.expect("clone retired");
 
     let aged = context(deadline);
     crate::test_support::namespace_store(&store, &clone)
@@ -1393,7 +1393,7 @@ async fn retired_targets_release_their_source_snapshots_and_retry_failed_deletes
         .gc(&options(), &aged.clock())
         .await
         .expect("retire materialized target");
-    let deadline = retired.reclaimable_at_ms.expect("target retired");
+    let deadline = retired.retires_at_ms.expect("target retired");
     let waiting = crate::test_support::namespace_store(&store, &source)
         .gc(&options(), &context(deadline - 1).clock())
         .await
@@ -1904,7 +1904,7 @@ async fn retired_content_namespace<S: ObjectStore>(
         .await
         .expect("retire");
     (
-        context(report.reclaimable_at_ms.expect("deadline")),
+        context(report.retires_at_ms.expect("deadline")),
         pool_id,
         keys,
     )
@@ -1980,7 +1980,7 @@ async fn completed_upload_waits_for_namespace_retirement_then_reclaims() {
         let retired = context(
             now_after_newest_object(&store, &namespace_id, GRACE_MS + 1)
                 .await
-                .max(report.reclaimable_at_ms.expect("retired")),
+                .max(report.retires_at_ms.expect("retired")),
         );
         crate::test_support::namespace_store(&store, &namespace_id)
             .gc(&options(), &retired.clock())
@@ -2416,10 +2416,7 @@ async fn expiry_and_creation_grace_delete_snapshots_without_a_released_state() {
             ..Default::default()
         }
     );
-    assert_eq!(
-        retired.reclaimable_at_ms,
-        Some(deleted_at + retirement_ms())
-    );
+    assert_eq!(retired.retires_at_ms, Some(deleted_at + retirement_ms()));
 }
 
 #[tokio::test]

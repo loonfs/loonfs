@@ -5,7 +5,7 @@
 use super::index_rows::IndexRows;
 use super::reorganize::INDEX_GRAMS_DELTA_LEVEL;
 use super::{
-    rebootstrap_required, GramIndexBuildPolicy, GrepBuildOutcome, GrepSteps,
+    below_retention_floor, GramIndexBuildPolicy, GrepBuildOutcome, GrepSteps,
     GREP_WORKER_REQUESTS_IN_FLIGHT,
 };
 use crate::codec::{
@@ -78,7 +78,7 @@ impl<S: ObjectStore + Clone> GrepSteps<'_, S> {
         };
         let planned = match planned {
             Ok(planned) => planned,
-            Err(error) if rebootstrap_required(&error) => {
+            Err(error) if below_retention_floor(&error) => {
                 let Some(snapshot) = self.start_backfill(Some(&entry)).await? else {
                     return Ok(GrepBuildOutcome::Superseded);
                 };

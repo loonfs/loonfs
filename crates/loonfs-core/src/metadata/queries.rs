@@ -53,7 +53,7 @@ impl VisiblePathError {
         match self {
             Self::RootMissing | Self::ParentBindingCycle { .. } => ErrorCode::NamespaceCorrupt,
             Self::PathNotFound { .. } => ErrorCode::PathNotFound,
-            Self::PathComponentNotDirectory { .. } => ErrorCode::PathConflict,
+            Self::PathComponentNotDirectory { .. } => ErrorCode::WrongKind,
         }
     }
 }

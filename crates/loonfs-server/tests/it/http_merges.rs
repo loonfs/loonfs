@@ -322,11 +322,11 @@ async fn a_conflict_returns_the_first_conflict_and_commits_nothing() {
 }
 
 /// Checks that a merge that needs history below a retention floor returns
-/// `rebootstrap_required`, and that the details say which floor: `main`'s
+/// `below_retention_floor`, and that the details say which floor: `main`'s
 /// floor above the fork point, or the fork's own floor above the range's
 /// start.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_merge_below_either_floor_returns_rebootstrap_required() {
+async fn a_merge_below_either_floor_returns_below_retention_floor() {
     let family = Family::new("http-merge-main-floor").await;
     let client = &family.harness.client;
     let fork_point = family.fork_point().await;
@@ -341,7 +341,7 @@ async fn a_merge_below_either_floor_returns_rebootstrap_required() {
     let floor = family.advance_floor(&family.main).await;
     assert!(floor > fork_point);
     let (code, details) = api_error(family.merge("main-floor").await.expect_err("main's floor"));
-    assert_eq!(code, "rebootstrap_required");
+    assert_eq!(code, "below_retention_floor");
     assert_eq!(details.fork_point_seq, Some(fork_point));
     assert_eq!(details.retention_floor_seq, Some(floor));
     family.harness.server.abort();
@@ -358,7 +358,7 @@ async fn a_merge_below_either_floor_returns_rebootstrap_required() {
     let floor = family.advance_floor(&family.fork).await;
     assert!(floor > fork_point);
     let (code, details) = api_error(family.merge("fork-floor").await.expect_err("fork's floor"));
-    assert_eq!(code, "rebootstrap_required");
+    assert_eq!(code, "below_retention_floor");
     assert_eq!(details.source_namespace_id, Some(family.fork.clone()));
     assert_eq!(details.source_after_seq, Some(fork_point));
     assert_eq!(details.actual_after_seq, None);
@@ -465,12 +465,14 @@ async fn a_merge_past_the_fork_head_names_the_through_seq_field() {
     family.harness.server.abort();
 }
 
-/// Checks that a namespace that isn't a fork of `main`, one that doesn't
-/// exist, and a fork that was deleted each return `invalid_request` with
-/// `param` set to the request's field, and not a code that reports `main` as
-/// missing.
+/// Checks that a merge, a next-merge-range query, and a rebase whose source
+/// isn't a fork of `main` return `invalid_request` with `param` set to the
+/// request's field, that a source that doesn't exist returns
+/// `namespace_not_found` and a fork that was deleted returns
+/// `namespace_deleted`, each with `namespace_id` set to the source, and that
+/// `main` keeps its writer session.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_source_that_isnt_a_live_fork_returns_invalid_request() {
+async fn a_source_that_isnt_a_live_fork_returns_the_sources_error() {
     let family = Family::new("http-merge-not-a-fork").await;
     let client = &family.harness.client;
     let other = namespace_id("other");
@@ -482,28 +484,77 @@ async fn a_source_that_isnt_a_live_fork_returns_invalid_request() {
         .delete_namespace(&family.fork)
         .await
         .expect("delete the fork");
-    for source in [&other, &namespace_id("missing"), &family.fork] {
-        let error = client
-            .merge_fork(&family.main, source, &actor())
-            .await
-            .expect_err("not a live fork");
-        match error {
-            ClientError::Api { response, .. } => {
-                assert_eq!(response.code, "invalid_request", "{source}");
-                assert_eq!(
-                    response.param.as_deref(),
-                    Some("/source_namespace_id"),
-                    "{source}"
-                );
+    let main_epoch = writer_epoch(&family).await;
+    let missing = namespace_id("missing");
+    let rebased = namespace_id("rebased");
+    for (source, code) in [
+        (&other, "invalid_request"),
+        (&missing, "namespace_not_found"),
+        (&family.fork, "namespace_deleted"),
+    ] {
+        let errors = [
+            (
+                "/source_namespace_id",
+                client
+                    .merge_fork(&family.main, source, &actor())
+                    .await
+                    .map(|_| ()),
+            ),
+            (
+                "source",
+                client
+                    .next_merge_range(&family.main, source)
+                    .await
+                    .map(|_| ()),
+            ),
+            (
+                "/source_namespace_id",
+                client
+                    .rebase_fork(&family.main, source, &rebased, &actor())
+                    .await
+                    .map(|_| ()),
+            ),
+        ];
+        for (param, result) in errors {
+            match result.expect_err("not a live fork") {
+                ClientError::Api { response, .. } => {
+                    assert_eq!(response.code, code, "{source} {param}");
+                    if source == &other {
+                        assert_eq!(response.param.as_deref(), Some(param), "{source}");
+                    } else {
+                        assert_eq!(
+                            response
+                                .details
+                                .and_then(|details| details.namespace_id)
+                                .as_ref(),
+                            Some(source),
+                            "{source} {param}"
+                        );
+                    }
+                }
+                other => panic!("expected an API error, got {other:?}"),
             }
-            other => panic!("expected an API error, got {other:?}"),
         }
     }
     client
         .put_file(&path(&family.main, "/after.txt"), b"after", &actor())
         .await
         .expect("main still takes writes");
+    assert_eq!(
+        writer_epoch(&family).await,
+        main_epoch,
+        "an error about the fork keeps main's writer session"
+    );
     family.harness.server.abort();
+}
+
+/// Returns the writer epoch that `main`'s current state records.
+async fn writer_epoch(family: &Family) -> loonfs_types::WriterEpoch {
+    loonfs_core::test_support::namespace_store(&family.harness.store, &family.main)
+        .load_read_state()
+        .await
+        .expect("read main's state")
+        .writer_epoch
 }
 
 /// Checks the rebase route: a fork whose merge conflicts rebases into a new

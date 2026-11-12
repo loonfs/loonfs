@@ -231,14 +231,14 @@ pub enum MergeFailure {
     NewForkLimit,
     /// The next-range query returned `range_start_below_floor`: the fork's
     /// next merge starts below the fork's own retention floor, so a merge of
-    /// the fork would return `rebootstrap_required`.
+    /// the fork would return `below_retention_floor`.
     RangeStartBelowFloor {
         /// The fork's retention floor.
         retention_floor_seq: CommitSeq,
     },
     /// The next-range query returned `fork_point_below_floor`: the fork point
     /// is below the retention floor of the namespace that the session merges
-    /// into, so a merge of the fork would return `rebootstrap_required`.
+    /// into, so a merge of the fork would return `below_retention_floor`.
     ForkPointBelowFloor {
         /// The retention floor of the namespace that the session merges into.
         retention_floor_seq: CommitSeq,
