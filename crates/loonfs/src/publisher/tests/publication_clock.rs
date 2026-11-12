@@ -158,6 +158,6 @@ async fn a_first_publish_that_outlasts_a_slow_claim_replans() {
         published
             .expect("an expired attempt re-plans")
             .committed_seq,
-        ChangeSeq(1)
+        CommitSeq(1)
     );
 }

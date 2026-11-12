@@ -23,7 +23,7 @@ use loonfs_types::format::manifest::{
 #[cfg(test)]
 pub(crate) use loonfs_types::format::segment_blocks::DEFAULT_MAX_INLINE_FILTER_BYTES as INLINE_SEGMENT_FILTER_MAX_BYTES;
 use loonfs_types::format::segment_blocks::{BuiltSegmentBlocks, SegmentBlocksBuilder};
-use loonfs_types::{ChangeSeq, ContentId, MetadataSegmentId, NamespaceId};
+use loonfs_types::{CommitSeq, ContentId, MetadataSegmentId, NamespaceId};
 use std::collections::HashMap;
 use std::future::Future;
 
@@ -45,7 +45,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
 
     pub(crate) async fn build_manifest_delta_run_segments(
         &self,
-        after_seq: ChangeSeq,
+        after_seq: CommitSeq,
         metadata_state: &MetadataState,
         layouts: &HashMap<ContentId, ContentLayoutRecord>,
     ) -> Result<Vec<MetadataFamilySegments>> {
@@ -457,7 +457,7 @@ mod tests {
             let row = MetadataRow::Inode(InodeRecord {
                 inode_id: InodeId(u128::from(inode) + 2),
                 inode_kind: InodeKind::File,
-                committed_seq: ChangeSeq(inode + 1),
+                committed_seq: CommitSeq(inode + 1),
                 commit_id: CommitId::generate(),
                 committed_by: ActorId::loonfs(),
                 committed_at_ms: 1_000 + inode,
@@ -507,7 +507,7 @@ mod tests {
         };
         let row = MetadataRow::ContentLayout(ContentLayoutRecord {
             content_id: content_id.clone(),
-            committed_seq: ChangeSeq(1),
+            committed_seq: CommitSeq(1),
             size_bytes: 4,
             layout: ContentLayout {
                 creator_namespace_id: namespace_id.clone(),

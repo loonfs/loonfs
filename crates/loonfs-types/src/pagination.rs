@@ -1,6 +1,6 @@
 //! Page sizes, page envelopes, and opaque cursors for paginated endpoints.
 
-use crate::{ChangeSeq, ContentId, InodeId, NameKey, RevisionNo};
+use crate::{CommitSeq, ContentId, InodeId, NameKey, RevisionNo};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
@@ -264,7 +264,7 @@ impl PagedResponse for crate::GrepResponse {
 pub struct ChangeFeedPosition {
     /// The sequence that the page starts after, or the commit that it
     /// resumes.
-    pub after_seq: ChangeSeq,
+    pub after_seq: CommitSeq,
     /// The index of the first event that the page returns from the commit at
     /// `after_seq`, or 0 to start after that commit.
     pub event_index: u32,
@@ -272,7 +272,7 @@ pub struct ChangeFeedPosition {
 
 impl ChangeFeedPosition {
     /// The position after the commit at `after_seq`.
-    pub fn after(after_seq: ChangeSeq) -> Self {
+    pub fn after(after_seq: CommitSeq) -> Self {
         Self {
             after_seq,
             event_index: 0,
@@ -418,7 +418,7 @@ pub struct Page<T, C> {
 #[serde(deny_unknown_fields)]
 pub struct DirectoryPageCursor {
     /// Head sequence the issuing page was evaluated at.
-    pub head_seq: ChangeSeq,
+    pub head_seq: CommitSeq,
     /// The snapshot whose read issued this cursor, or `None` for a live
     /// read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -442,7 +442,7 @@ impl PageCursor for DirectoryPageCursor {
 #[serde(deny_unknown_fields)]
 pub struct DirectoryTreePageCursor {
     /// Head sequence the issuing page was evaluated at.
-    pub head_seq: ChangeSeq,
+    pub head_seq: CommitSeq,
     /// The snapshot whose read issued this cursor, or `None` for a live
     /// read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -506,7 +506,7 @@ impl ListPageCursor {
     }
 
     /// Returns the head sequence the issuing page was evaluated at.
-    pub fn head_seq(&self) -> ChangeSeq {
+    pub fn head_seq(&self) -> CommitSeq {
         match self {
             Self::Directory(cursor) => cursor.head_seq,
             Self::DirectoryTree(cursor) => cursor.head_seq,
@@ -536,13 +536,13 @@ impl ListPageCursor {
 #[serde(deny_unknown_fields)]
 pub struct FileRevisionsPageCursor {
     /// Head sequence the issuing page was evaluated at.
-    pub head_seq: ChangeSeq,
+    pub head_seq: CommitSeq,
     /// File inode whose revisions are being listed.
     pub inode_id: InodeId,
     /// Last revision number returned to the client.
     pub last_revision_no: RevisionNo,
     /// Namespace sequence that created the last returned revision.
-    pub last_committed_seq: ChangeSeq,
+    pub last_committed_seq: CommitSeq,
     /// WAL delta index that created the last returned revision.
     pub last_revision_delta_index: u32,
 }
@@ -556,9 +556,9 @@ impl PageCursor for FileRevisionsPageCursor {
 #[serde(deny_unknown_fields)]
 pub struct TrashPageCursor {
     /// Head sequence the issuing page was evaluated at.
-    pub head_seq: ChangeSeq,
+    pub head_seq: CommitSeq,
     /// Commit sequence of the deletion the previous page ended on.
-    pub last_deletion_seq: ChangeSeq,
+    pub last_deletion_seq: CommitSeq,
     /// Deleted root inode the previous page ended on.
     pub last_root_inode_id: InodeId,
 }
@@ -574,15 +574,15 @@ impl PageCursor for TrashPageCursor {
 pub struct GrepPageCursor {
     /// Sequence the first page was evaluated at, which every later page of
     /// the search reads at.
-    pub head_seq: ChangeSeq,
+    pub head_seq: CommitSeq,
     /// Sequence that the backfill of the grep index which issued the cursor
     /// captured. It identifies that build of the index, and a page served by
     /// another build rejects the cursor.
-    pub index_captured_seq: ChangeSeq,
+    pub index_captured_seq: CommitSeq,
     /// The newest commit whose `content_revisions` rows the issuing page
     /// used. A later page uses no newer one, so a stale search is one cut
     /// across its pages.
-    pub cut_seq: ChangeSeq,
+    pub cut_seq: CommitSeq,
     /// Content ID of the last candidate's content value.
     pub last_content_id: ContentId,
     /// Size of the last candidate's content value.
@@ -920,7 +920,7 @@ mod tests {
     #[test]
     fn every_cursor_kind_round_trips() {
         assert_cursor_round_trips(DirectoryPageCursor {
-            head_seq: ChangeSeq(11),
+            head_seq: CommitSeq(11),
             pin_id: Some(
                 crate::PinId::parse("pin_00000000000000000001-0000000000000001").expect("pin id"),
             ),
@@ -928,7 +928,7 @@ mod tests {
             last_name_key: NameKey::parse("plan.md").expect("name key"),
         });
         assert_cursor_round_trips(DirectoryTreePageCursor {
-            head_seq: ChangeSeq(11),
+            head_seq: CommitSeq(11),
             pin_id: None,
             frames: vec![
                 DirectoryTreeFrame {
@@ -942,15 +942,15 @@ mod tests {
             ],
         });
         assert_cursor_round_trips(FileRevisionsPageCursor {
-            head_seq: ChangeSeq(11),
+            head_seq: CommitSeq(11),
             inode_id: InodeId(7),
             last_revision_no: RevisionNo(5),
-            last_committed_seq: ChangeSeq(10),
+            last_committed_seq: CommitSeq(10),
             last_revision_delta_index: 3,
         });
         assert_cursor_round_trips(TrashPageCursor {
-            head_seq: ChangeSeq(11),
-            last_deletion_seq: ChangeSeq(10),
+            head_seq: CommitSeq(11),
+            last_deletion_seq: CommitSeq(10),
             last_root_inode_id: InodeId(7),
         });
         for resume in [
@@ -958,9 +958,9 @@ mod tests {
             GrepCursorPosition::AfterFile {},
         ] {
             assert_cursor_round_trips(GrepPageCursor {
-                head_seq: ChangeSeq(11),
-                index_captured_seq: ChangeSeq(5),
-                cut_seq: ChangeSeq(9),
+                head_seq: CommitSeq(11),
+                index_captured_seq: CommitSeq(5),
+                cut_seq: CommitSeq(9),
                 last_content_id: ContentId::parse("con_3s0drmj8em84yb4mnetqkz2j0x")
                     .expect("valid content ID"),
                 last_size_bytes: 13,
@@ -974,7 +974,7 @@ mod tests {
     #[test]
     fn a_live_directory_cursor_omits_the_pin_field_and_rejects_unknown_fields() {
         let cursor = DirectoryPageCursor {
-            head_seq: ChangeSeq(11),
+            head_seq: CommitSeq(11),
             pin_id: None,
             directory_inode_id: InodeId(7),
             last_name_key: NameKey::parse("plan.md").expect("name key"),
@@ -1006,10 +1006,10 @@ mod tests {
     #[test]
     fn cursor_kind_must_match_decoder() {
         let cursor = FileRevisionsPageCursor {
-            head_seq: ChangeSeq(11),
+            head_seq: CommitSeq(11),
             inode_id: InodeId(7),
             last_revision_no: RevisionNo(5),
-            last_committed_seq: ChangeSeq(10),
+            last_committed_seq: CommitSeq(10),
             last_revision_delta_index: 3,
         };
         let encoded = encode_cursor(&cursor).expect("encode cursor");
@@ -1029,13 +1029,13 @@ mod tests {
     #[test]
     fn a_list_cursor_decodes_only_for_the_kind_of_listing_that_issued_it() {
         let directory = ListPageCursor::Directory(DirectoryPageCursor {
-            head_seq: ChangeSeq(11),
+            head_seq: CommitSeq(11),
             pin_id: None,
             directory_inode_id: InodeId(7),
             last_name_key: NameKey::parse("plan.md").expect("name key"),
         });
         let directory_tree = ListPageCursor::DirectoryTree(DirectoryTreePageCursor {
-            head_seq: ChangeSeq(11),
+            head_seq: CommitSeq(11),
             pin_id: None,
             frames: vec![DirectoryTreeFrame {
                 directory_inode_id: InodeId(7),
@@ -1069,7 +1069,7 @@ mod tests {
     #[test]
     fn a_cursor_that_is_not_unpadded_base64url_json_is_invalid_encoding() {
         let cursor = DirectoryPageCursor {
-            head_seq: ChangeSeq(11),
+            head_seq: CommitSeq(11),
             pin_id: None,
             directory_inode_id: InodeId(7),
             last_name_key: NameKey::parse("plan.txt").expect("name key"),
@@ -1095,7 +1095,7 @@ mod tests {
             format_version: PAGE_CURSOR_FORMAT_VERSION + 1,
             kind: <DirectoryPageCursor as PageCursor>::KIND.to_owned(),
             token: DirectoryPageCursor {
-                head_seq: ChangeSeq(11),
+                head_seq: CommitSeq(11),
                 pin_id: None,
                 directory_inode_id: InodeId(7),
                 last_name_key: NameKey::parse("plan.md").expect("name key"),

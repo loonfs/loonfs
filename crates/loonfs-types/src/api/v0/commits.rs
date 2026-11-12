@@ -5,7 +5,7 @@ use super::{ContentToken, EntryInodeKind, FilesystemOperation};
 use crate::options::CommitOptions;
 use crate::{
     AbsolutePath, AccessGrants, AccessRevisionNo, Attributes, AttributesRevisionNo, BindingVersion,
-    ChangeSeq, CommitId, ContentRef, DisplayName, InodeId, NameKey, NamespaceId, RevisionNo,
+    CommitId, CommitSeq, ContentRef, DisplayName, InodeId, NameKey, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -18,7 +18,7 @@ pub struct Commit {
     /// The commit's idempotency key.
     pub commit_id: CommitId,
     /// The sequence at which the commit became visible.
-    pub committed_seq: ChangeSeq,
+    pub committed_seq: CommitSeq,
     /// The actor responsible for the commit, as the application supplied it.
     pub committed_by: crate::ActorId,
     /// The time the commit was made, in Unix milliseconds. Commit order comes from `committed_seq`,
@@ -34,7 +34,7 @@ pub struct Commit {
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub merge: Option<Merge>,
     /// The semantic filesystem changes that the commit applied, in request order.
-    pub events: Vec<FilesystemChange>,
+    pub events: Vec<FilesystemEvent>,
 }
 
 /// The fork and the range of the fork's commits that a merge applied.
@@ -48,9 +48,9 @@ pub struct Merge {
     pub source_namespace_id: NamespaceId,
     /// The fork's commits above this sequence were applied. For a fork's first merge, it's the
     /// sequence that the fork was made at.
-    pub source_after_seq: ChangeSeq,
+    pub source_after_seq: CommitSeq,
     /// The fork's commits at or below this sequence were applied.
-    pub source_through_seq: ChangeSeq,
+    pub source_through_seq: CommitSeq,
 }
 
 /// A directory entry's parent and name.
@@ -75,12 +75,9 @@ pub struct DirectoryBinding {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum FilesystemChange {
+pub enum FilesystemEvent {
     /// A directory was created.
-    #[cfg_attr(
-        feature = "openapi",
-        schema(title = "FilesystemChangeDirectoryCreated")
-    )]
+    #[cfg_attr(feature = "openapi", schema(title = "FilesystemEventDirectoryCreated"))]
     DirectoryCreated {
         /// The new inode, unique within the namespace.
         #[serde(with = "crate::inode_id::public")]
@@ -94,7 +91,7 @@ pub enum FilesystemChange {
         binding_version: BindingVersion,
     },
     /// A file and its first revision were created.
-    #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeFileCreated"))]
+    #[cfg_attr(feature = "openapi", schema(title = "FilesystemEventFileCreated"))]
     FileCreated {
         /// The new inode, unique within the namespace.
         #[serde(with = "crate::inode_id::public")]
@@ -113,7 +110,7 @@ pub enum FilesystemChange {
     },
     /// A file received a new current revision from a put, a copy, an append, or a revision
     /// restore.
-    #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeContentChanged"))]
+    #[cfg_attr(feature = "openapi", schema(title = "FilesystemEventContentChanged"))]
     ContentChanged {
         /// The file inode whose history advanced.
         #[serde(with = "crate::inode_id::public")]
@@ -135,7 +132,7 @@ pub enum FilesystemChange {
         append_offset: Option<u64>,
     },
     /// An inode moved to a new parent directory or name.
-    #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeMoved"))]
+    #[cfg_attr(feature = "openapi", schema(title = "FilesystemEventMoved"))]
     Moved {
         /// The inode whose binding changed.
         #[serde(with = "crate::inode_id::public")]
@@ -154,7 +151,7 @@ pub enum FilesystemChange {
         binding_version: BindingVersion,
     },
     /// A file or directory subtree was deleted.
-    #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeDeleted"))]
+    #[cfg_attr(feature = "openapi", schema(title = "FilesystemEventDeleted"))]
     Deleted {
         /// The inode at the root of the deleted subtree.
         #[serde(with = "crate::inode_id::public")]
@@ -163,8 +160,8 @@ pub enum FilesystemChange {
         deleted_binding: DirectoryBinding,
     },
     /// A deleted inode was recovered and re-bound.
-    #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeUndeleted"))]
-    Undeleted {
+    #[cfg_attr(feature = "openapi", schema(title = "FilesystemEventRestored"))]
+    Restored {
         /// The recovered inode.
         #[serde(with = "crate::inode_id::public")]
         inode_id: InodeId,
@@ -179,7 +176,7 @@ pub enum FilesystemChange {
     /// An inode's attributes changed.
     #[cfg_attr(
         feature = "openapi",
-        schema(title = "FilesystemChangeAttributesChanged")
+        schema(title = "FilesystemEventAttributesChanged")
     )]
     AttributesChanged {
         /// The inode whose attributes changed.
@@ -194,7 +191,7 @@ pub enum FilesystemChange {
     /// An inode's access row was replaced.
     ///
     /// `grants` is the complete direct grant map after the update.
-    #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeAccessChanged"))]
+    #[cfg_attr(feature = "openapi", schema(title = "FilesystemEventAccessChanged"))]
     AccessChanged {
         /// The inode whose access row changed.
         #[serde(with = "crate::inode_id::public")]
@@ -221,14 +218,14 @@ pub struct ListChangesResponse {
     pub namespace_id: NamespaceId,
     /// The exclusive cursor that this page starts after. It's the cursor that the caller supplied,
     /// or the endpoint's initial position.
-    pub after_seq: ChangeSeq,
+    pub after_seq: CommitSeq,
     /// The namespace head sequence that this page was read at.
-    pub head_seq: ChangeSeq,
+    pub head_seq: CommitSeq,
     /// The cursor for the next page, when another page remains. It's absent on the page that
     /// reaches `head_seq`. When the page ends inside a commit, it's that commit's sequence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub next_after_seq: Option<ChangeSeq>,
+    pub next_after_seq: Option<CommitSeq>,
     /// The index of the first event of the commit at `next_after_seq` that the page didn't
     /// return, when the request set `split_commits` and the page ended inside that commit. The
     /// next request passes it as `event_index`. It's absent when the page ended at a commit
@@ -253,19 +250,19 @@ pub struct DiffResponse {
     pub namespace_id: NamespaceId,
     /// The sequence that the diff starts after. Each entry compares an inode's state at this
     /// sequence with its state at `to_seq`.
-    pub from_seq: ChangeSeq,
+    pub from_seq: CommitSeq,
     /// The sequence that the diff ends at, inclusive. When the request leaves out `to_seq`, it's
     /// the head that the page read, and the next page's request passes it back.
-    pub to_seq: ChangeSeq,
+    pub to_seq: CommitSeq,
     /// The sequence that this page's scan starts after. It's the request's `after_seq`, or
     /// `from_seq` when the request leaves `after_seq` out.
-    pub after_seq: ChangeSeq,
+    pub after_seq: CommitSeq,
     /// The `after_seq` of the next page, when commits remain before `to_seq`. It's absent on the
     /// page that reaches `to_seq`. When the page ends inside a commit, it's that commit's
     /// sequence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub next_after_seq: Option<ChangeSeq>,
+    pub next_after_seq: Option<CommitSeq>,
     /// The index of the first event of the commit at `next_after_seq` that the page didn't read,
     /// when the request set `split_commits` and the page ended inside that commit. The next
     /// request passes it as `event_index`. It's absent when the page ended at a commit boundary.
@@ -273,7 +270,7 @@ pub struct DiffResponse {
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub next_event_index: Option<u32>,
     /// The namespace's retention floor when this page was read.
-    pub retention_floor_seq: ChangeSeq,
+    pub retention_floor_seq: CommitSeq,
     /// The inodes whose state differs, in the order of the commits that last changed them. A page
     /// ends at a bound on the commits and on the inodes that it examines, so it can have no
     /// entries and still have a `next_after_seq`, when every inode it examined has a later touch.
@@ -316,7 +313,7 @@ pub struct DiffEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub binding_version: Option<BindingVersion>,
-    /// The file's revision at `to_seq`. A `created` or `undeleted` file has it, and a `changed` or
+    /// The file's revision at `to_seq`. A `created` or `restored` file has it, and a `changed` or
     /// `moved` file has it when its revision differs between the two sequences.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
@@ -344,8 +341,8 @@ pub enum DiffEntryKind {
     /// The inode didn't exist at `from_seq`, and it's visible at `to_seq`.
     Created,
     /// A deletion hid the inode at `from_seq`, and it's visible at `to_seq`. The visible
-    /// descendants of an undeleted directory come back with it, and they aren't entries.
-    Undeleted,
+    /// descendants of a restored directory come back with it, and they aren't entries.
+    Restored,
     /// The inode was visible at `from_seq`, and a deletion hides it at `to_seq`. A deleted
     /// directory deletes everything below it.
     Deleted,
@@ -373,7 +370,7 @@ pub enum CommitPrecondition {
     #[cfg_attr(feature = "openapi", schema(title = "CommitPreconditionNamespaceHead"))]
     NamespaceHead {
         /// The head sequence that the caller observed when it read its inputs.
-        expected_head_seq: ChangeSeq,
+        expected_head_seq: CommitSeq,
     },
     /// A requirement that the inode is visible and has the content revision that the caller read.
     #[cfg_attr(feature = "openapi", schema(title = "CommitPreconditionFileRevision"))]
@@ -509,7 +506,7 @@ impl CommitRequest {
 
 #[cfg(test)]
 mod tests {
-    use super::{Commit, CommitPrecondition, CommitRequest, FilesystemChange, FilesystemOperation};
+    use super::{Commit, CommitPrecondition, CommitRequest, FilesystemEvent, FilesystemOperation};
     use crate::{AccessRevisionNo, ContentId, ContentRef, InodeId, RevisionNo};
     use std::assert_matches;
 
@@ -529,7 +526,7 @@ mod tests {
     fn a_commit_carries_events_at_the_top_level() {
         let response = Commit {
             namespace_id: crate::NamespaceId::parse("demo").expect("valid namespace id"),
-            committed_seq: crate::ChangeSeq(419),
+            committed_seq: crate::CommitSeq(419),
             commit_id: crate::CommitId::parse("example-commit").expect("valid commit id"),
             committed_by: crate::ActorId::loonfs(),
             committed_at_ms: 1_752_624_000_000,
@@ -537,10 +534,10 @@ mod tests {
             merge: Some(super::Merge {
                 source_namespace_id: crate::NamespaceId::parse("demo-fork")
                     .expect("valid namespace id"),
-                source_after_seq: crate::ChangeSeq(12),
-                source_through_seq: crate::ChangeSeq(30),
+                source_after_seq: crate::CommitSeq(12),
+                source_through_seq: crate::CommitSeq(30),
             }),
-            events: vec![FilesystemChange::DirectoryCreated {
+            events: vec![FilesystemEvent::DirectoryCreated {
                 inode_id: InodeId(43),
                 parent_inode_id: crate::ROOT_INODE_ID,
                 display_name: crate::DisplayName::parse("docs").expect("valid display name"),
@@ -578,12 +575,12 @@ mod tests {
         let response = Commit {
             namespace_id: crate::NamespaceId::parse("demo").expect("valid namespace id"),
             commit_id: crate::CommitId::parse("example-commit").expect("valid commit id"),
-            committed_seq: crate::ChangeSeq(419),
+            committed_seq: crate::CommitSeq(419),
             committed_by: crate::ActorId::loonfs(),
             committed_at_ms: 1_752_624_000_000,
             message: None,
             merge: None,
-            events: vec![FilesystemChange::DirectoryCreated {
+            events: vec![FilesystemEvent::DirectoryCreated {
                 inode_id: InodeId(43),
                 parent_inode_id: crate::ROOT_INODE_ID,
                 display_name: crate::DisplayName::parse("docs").expect("valid display name"),
@@ -620,7 +617,7 @@ mod tests {
         let sample_content_ref_json = r#"{"kind":"blob_v1","content_id":"con_014d2pf2dbsqqg28t5cy4tqkff","size_bytes":5,"checksum":{"algorithm":"crc64nvme","value":"3377857006524257"}}"#;
 
         let version = binding_version();
-        let directory_created = FilesystemChange::DirectoryCreated {
+        let directory_created = FilesystemEvent::DirectoryCreated {
             inode_id: InodeId(2),
             parent_inode_id: crate::ROOT_INODE_ID,
             display_name: crate::DisplayName::parse("Docs").expect("valid display name"),
@@ -633,7 +630,7 @@ mod tests {
             )
         );
 
-        let file_created = FilesystemChange::FileCreated {
+        let file_created = FilesystemEvent::FileCreated {
             inode_id: InodeId(2),
             parent_inode_id: crate::ROOT_INODE_ID,
             display_name: crate::DisplayName::parse("a.txt").expect("valid display name"),
@@ -649,10 +646,10 @@ mod tests {
         );
 
         let missing_content_ref = r#"{"kind":"file_created","inode_id":"ino_00000000000000000000000002","parent_inode_id":"ino_00000000000000000000000000","display_name":"a.txt","revision_no":1}"#;
-        serde_json::from_str::<FilesystemChange>(missing_content_ref)
+        serde_json::from_str::<FilesystemEvent>(missing_content_ref)
             .expect_err("an event without its content ref should be rejected");
 
-        let content_changed = FilesystemChange::ContentChanged {
+        let content_changed = FilesystemEvent::ContentChanged {
             inode_id: InodeId(2),
             revision_no: crate::RevisionNo(3),
             content_ref: sample_content_ref.clone(),
@@ -664,7 +661,7 @@ mod tests {
                 r#"{{"kind":"content_changed","inode_id":"ino_00000000000000000000000002","revision_no":3,"content_ref":{sample_content_ref_json}}}"#
             )
         );
-        let appended = FilesystemChange::ContentChanged {
+        let appended = FilesystemEvent::ContentChanged {
             inode_id: InodeId(2),
             revision_no: crate::RevisionNo(4),
             content_ref: sample_content_ref,
@@ -678,12 +675,11 @@ mod tests {
             appended_json
         );
         assert_eq!(
-            serde_json::from_str::<FilesystemChange>(&appended_json)
-                .expect("decode appended event"),
+            serde_json::from_str::<FilesystemEvent>(&appended_json).expect("decode appended event"),
             appended
         );
 
-        let moved = FilesystemChange::Moved {
+        let moved = FilesystemEvent::Moved {
             inode_id: InodeId(2),
             source_parent_inode_id: crate::ROOT_INODE_ID,
             source_display_name: crate::DisplayName::parse("a.txt").expect("valid display name"),
@@ -693,7 +689,7 @@ mod tests {
             binding_version: version.clone(),
         };
         assert_eq!(
-            serde_json::from_value::<FilesystemChange>(serde_json::json!({
+            serde_json::from_value::<FilesystemEvent>(serde_json::json!({
                 "kind": "moved",
                 "inode_id": "ino_00000000000000000000000002",
                 "source_parent_inode_id": "ino_00000000000000000000000000",
@@ -712,7 +708,7 @@ mod tests {
             )
         );
 
-        let deleted = FilesystemChange::Deleted {
+        let deleted = FilesystemEvent::Deleted {
             inode_id: InodeId(2),
             deleted_binding: super::DirectoryBinding {
                 parent_inode_id: crate::ROOT_INODE_ID,
@@ -725,20 +721,20 @@ mod tests {
             r#"{"kind":"deleted","inode_id":"ino_00000000000000000000000002","deleted_binding":{"parent_inode_id":"ino_00000000000000000000000000","name_key":"a.txt","display_name":"a.txt"}}"#
         );
 
-        let undeleted = FilesystemChange::Undeleted {
+        let restored = FilesystemEvent::Restored {
             inode_id: InodeId(2),
             parent_inode_id: crate::ROOT_INODE_ID,
             display_name: crate::DisplayName::parse("a.txt").expect("valid display name"),
             binding_version: version.clone(),
         };
         assert_eq!(
-            serde_json::to_string(&undeleted).expect("serialize undeleted event"),
+            serde_json::to_string(&restored).expect("serialize restored event"),
             format!(
-                r#"{{"kind":"undeleted","inode_id":"ino_00000000000000000000000002","parent_inode_id":"ino_00000000000000000000000000","display_name":"a.txt","binding_version":"{version}"}}"#
+                r#"{{"kind":"restored","inode_id":"ino_00000000000000000000000002","parent_inode_id":"ino_00000000000000000000000000","display_name":"a.txt","binding_version":"{version}"}}"#
             )
         );
 
-        let attributes_changed = FilesystemChange::AttributesChanged {
+        let attributes_changed = FilesystemEvent::AttributesChanged {
             inode_id: InodeId(2),
             attributes_revision_no: crate::AttributesRevisionNo(4),
             attributes: crate::Attributes::new(std::collections::BTreeMap::from([(
@@ -753,7 +749,7 @@ mod tests {
         );
 
         // A clear is a real event carrying the empty map, not an absence.
-        let cleared = FilesystemChange::AttributesChanged {
+        let cleared = FilesystemEvent::AttributesChanged {
             inode_id: InodeId(2),
             attributes_revision_no: crate::AttributesRevisionNo(5),
             attributes: crate::Attributes::default(),
@@ -763,7 +759,7 @@ mod tests {
             r#"{"kind":"attributes_changed","inode_id":"ino_00000000000000000000000002","attributes_revision_no":5,"attributes":{}}"#
         );
 
-        let access_changed = FilesystemChange::AccessChanged {
+        let access_changed = FilesystemEvent::AccessChanged {
             inode_id: InodeId(2),
             access_revision_no: AccessRevisionNo(3),
             boundary: true,

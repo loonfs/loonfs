@@ -42,7 +42,7 @@ pub(crate) use folds::{FoldWhen, NamespaceFold};
 use loonfs_core::publish::{NamespaceCommitEngine, SharedWriterSessionStatus, WriterSessionStatus};
 use loonfs_core::time::Observation;
 use loonfs_core::MetadataCompactionCancellation;
-use loonfs_types::{ChangeSeq, CommitId, ManifestNo, NamespaceId};
+use loonfs_types::{CommitId, CommitSeq, ManifestNo, NamespaceId};
 use queue::{InFlightRequest, WorkItem};
 pub use registry::{CloseNamespaceReport, NamespaceSessionStatus};
 pub(crate) use registry::{MergeReservation, NamespaceChange, NamespaceSession, PublisherRegistry};
@@ -217,7 +217,7 @@ struct NamespacePublisherState {
 /// The newest commit this session published, and when it published it.
 #[derive(Debug, Clone, Copy)]
 struct LastPublish {
-    seq: ChangeSeq,
+    seq: CommitSeq,
     at_ms: u64,
 }
 

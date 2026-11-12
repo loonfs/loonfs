@@ -243,7 +243,7 @@ fn layout(
     manifest: &LoadedManifest,
 ) -> (
     NamespaceManifestPayload,
-    Vec<(RunNo, ChangeSeq, RunTier, usize)>,
+    Vec<(RunNo, CommitSeq, RunTier, usize)>,
 ) {
     let payload = manifest.envelope.payload();
     (

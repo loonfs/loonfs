@@ -557,7 +557,7 @@ async fn a_sweep_drives_a_grep_backfill_to_active() {
         .unwrap_or_else(|| panic!("the next sweep finishes the backfill, found {status:?}"));
     assert_eq!(
         watermark.built_through_seq(),
-        loonfs::ChangeSeq(u64::try_from(files).expect("file count fits"))
+        loonfs::CommitSeq(u64::try_from(files).expect("file count fits"))
     );
 }
 

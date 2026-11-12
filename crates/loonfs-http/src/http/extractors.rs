@@ -70,7 +70,7 @@ impl<S: Send + Sync> FromRequestParts<S> for ActorHeader {
     }
 }
 
-/// `Loonfs-Actor` when the request sends it. Maintenance runs read it this
+/// `Loonfs-Actor` when the request sends it. Maintenance jobs read it this
 /// way because only administrator recovery needs an actor.
 #[derive(Debug)]
 pub(super) struct OptionalActorHeader(pub(super) Option<ActorId>);

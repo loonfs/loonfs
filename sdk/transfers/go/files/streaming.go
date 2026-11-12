@@ -62,7 +62,7 @@ func (c *Client) DownloadStream(ctx context.Context, in DownloadInput) (*Downloa
 			return nil, err
 		}
 		if grant == nil || grant.ContentRef == nil {
-			return nil, fmt.Errorf("download grant has no content reference")
+			return nil, fmt.Errorf("download has no content reference")
 		}
 		if err := validateDownloadRanges(grant.Ranges, grant.ContentRef.SizeBytes); err != nil {
 			return nil, err
@@ -241,21 +241,21 @@ func (r *verifiedReader) Close() error {
 
 func validateDownloadRanges(ranges []*loonfs.DownloadRange, sizeBytes int64) error {
 	if len(ranges) == 0 || (sizeBytes == 0 && len(ranges) != 1) {
-		return fmt.Errorf("download grant has invalid ranges")
+		return fmt.Errorf("download has invalid ranges")
 	}
 	var offset int64
 	for _, part := range ranges {
 		if part == nil || part.StartOffset != offset || part.Length < 0 ||
 			(part.Length == 0 && sizeBytes != 0) || part.Length > sizeBytes-offset {
-			return fmt.Errorf("download grant has invalid ranges")
+			return fmt.Errorf("download has invalid ranges")
 		}
-		if part.Access == nil || part.Access.PresignedURL == nil || part.Access.PresignedURL.Method != http.MethodGet {
-			return fmt.Errorf("download grant must use GET")
+		if part.Transfer == nil || part.Transfer.PresignedURL == nil || part.Transfer.PresignedURL.Method != http.MethodGet {
+			return fmt.Errorf("download presigned URL must use GET")
 		}
 		offset += part.Length
 	}
 	if offset != sizeBytes {
-		return fmt.Errorf("download grant has invalid ranges")
+		return fmt.Errorf("download has invalid ranges")
 	}
 	return nil
 }
@@ -302,7 +302,7 @@ func (r *downloadRangeReader) fill() {
 		r.wait.Add(1)
 		go func() {
 			defer r.wait.Done()
-			response, err := sendPresignedWithClient(r.ctx, r.client, part.Access, http.MethodGet, nil, 0)
+			response, err := sendPresignedWithClient(r.ctx, r.client, part.Transfer, http.MethodGet, nil, 0)
 			opened <- openedRange{response: response, err: err}
 		}()
 	}

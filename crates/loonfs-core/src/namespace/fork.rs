@@ -14,14 +14,14 @@ use crate::time::OperationClock;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::{ForkBasis, ManifestRef, PinOwner, PinPayload, RebasedFrom};
 use loonfs_types::format::manifest::NamespaceManifestPayload;
-use loonfs_types::{ChangeSeq, NamespaceId, NamespaceMetadata, PinId};
+use loonfs_types::{CommitSeq, NamespaceId, NamespaceMetadata, PinId};
 
 /// The fork whose commits a rebase replays into the new fork that it
 /// creates, and the sequence of the forked namespace that the fork was made
 /// at.
 struct Rebase<'a> {
     source_namespace_id: &'a NamespaceId,
-    fork_point_seq: ChangeSeq,
+    fork_point_seq: CommitSeq,
 }
 
 /// The state that a fork pins.
@@ -83,7 +83,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         new_namespace_id: &NamespaceId,
         actor_id: &loonfs_types::ActorId,
         source_namespace_id: &NamespaceId,
-        fork_point_seq: ChangeSeq,
+        fork_point_seq: CommitSeq,
         manifest: ManifestRef,
     ) -> Result<NamespaceMetadata> {
         let rebase = Rebase {

@@ -8,7 +8,7 @@ use crate::config::ServerConfig;
 use crate::scheduler::lock;
 use crate::scheduler::retries::MaintenanceCall;
 use loonfs::{
-    AdvanceRetentionFloorOptions, ChangeSeq, CreateNamespaceOptions, NamespaceDiagnostics,
+    AdvanceRetentionFloorOptions, CommitSeq, CreateNamespaceOptions, NamespaceDiagnostics,
     NamespaceId, RetentionTarget, SharedObjectStore,
 };
 use loonfs_http::WriterSessions as _;
@@ -73,13 +73,13 @@ impl SchedulerServer {
             .expect("create the namespace");
     }
 
-    async fn retention_floor(&self, namespace_id: &NamespaceId) -> ChangeSeq {
+    async fn retention_floor(&self, namespace_id: &NamespaceId) -> CommitSeq {
         self.diagnostics(namespace_id).await.retention_floor_seq
     }
 
     /// Writes one file on the server's clock, and returns its commit's
     /// sequence.
-    pub(super) async fn commit(&self, namespace_id: &NamespaceId, path: &str) -> ChangeSeq {
+    pub(super) async fn commit(&self, namespace_id: &NamespaceId, path: &str) -> CommitSeq {
         self.runtime
             .open_namespace(namespace_id)
             .expect("open the namespace")
@@ -96,7 +96,7 @@ struct History {
     /// A namespace with two commits older than the window and one inside it.
     aged: NamespaceId,
     /// The newest commit of `aged` that is older than the window.
-    aged_cutoff_seq: ChangeSeq,
+    aged_cutoff_seq: CommitSeq,
     /// A namespace whose every commit is inside the window.
     recent: NamespaceId,
 }
@@ -194,7 +194,7 @@ async fn a_sweep_advances_each_floor_to_the_last_commit_before_the_window() {
 async fn seed_two_commits(
     server: &SchedulerServer,
     namespaces: &[&NamespaceId],
-) -> Vec<[ChangeSeq; 2]> {
+) -> Vec<[CommitSeq; 2]> {
     let mut first = Vec::new();
     for namespace_id in namespaces {
         first.push(server.commit(namespace_id, "/old.txt").await);
@@ -240,7 +240,7 @@ async fn a_sweep_advances_a_namespace_by_its_own_window_and_a_sibling_by_the_ser
         );
         let sibling_floor = match server_window_ms {
             Some(_) => seqs[1][0],
-            None => ChangeSeq(0),
+            None => CommitSeq(0),
         };
         assert_eq!(
             server.retention_floor(&sibling).await,
@@ -268,8 +268,8 @@ async fn each_sweep_uses_the_window_that_the_namespace_has_when_the_sweep_runs()
     // floor although the server's 30-day default would pass the first, and a
     // 15-day window passes both.
     for (window_ms, expected_floor) in [
-        (Some(50 * DAY_MS), ChangeSeq(0)),
-        (None, ChangeSeq(0)),
+        (Some(50 * DAY_MS), CommitSeq(0)),
+        (None, CommitSeq(0)),
         (Some(NAMESPACE_WINDOW_MS), second),
     ] {
         server

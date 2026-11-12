@@ -47,7 +47,7 @@ from loonfs.server import (
     FilesystemOperation_PutFile,
     FilesystemOperation_PutFileRevisionByInode,
     FilesystemOperation_RestoreRevisionByInode,
-    FilesystemOperation_Undelete,
+    FilesystemOperation_RestoreDeleted,
     FilesystemOperation_UpdateAccessByInode,
     FilesystemOperation_UpdateAttributesByInode,
     ListPathEntriesResponse,
@@ -1449,19 +1449,19 @@ def test_inode_addressing(cases: dict[str, ConformanceCase], harness: Harness) -
     _apply(
         client,
         namespace_id,
-        "conf-inode-addressing-undelete",
+        "conf-inode-addressing-restore-deleted",
         request.actor_id,
-        FilesystemOperation_Undelete(
+        FilesystemOperation_RestoreDeleted(
             inode_id=copy_entry.inode_id,
             deletion_seq=deletion.committed_seq,
             destination_parent_inode_id=parent_inode_id,
             destination_display_name=request.restored_file_name,
         ),
     )
-    undeleted = client.files.retrieve(
+    restored_deleted = client.files.retrieve(
         namespace_id, path=child_path(request.restored_file_name)
     )
-    assert undeleted.inode_id == copy_entry.inode_id
+    assert restored_deleted.inode_id == copy_entry.inode_id
 
     _apply(
         client,
@@ -1792,7 +1792,7 @@ def test_proxy(
                 "proxy direct-PUT begin response",
             )
         )
-        direct_access = direct_begin.access
+        direct_access = direct_begin.transfer
         assert direct_access is not None
         assert direct_access.method.upper() == "PUT"
         direct_put_response = httpx.request(
@@ -2096,8 +2096,8 @@ def test_upload_direct_put(cases: dict[str, ConformanceCase], harness: Harness) 
     assert begin.mode == expected.mode
     assert begin.checksum_algorithm == expected.checksum_algorithm
 
-    assert begin.access is not None
-    _put_presigned(begin.access, payload)
+    assert begin.transfer is not None
+    _put_presigned(begin.transfer, payload)
     claim = UploadContentClaim(
         size_bytes=len(payload),
         checksum=_checksum(begin.checksum_algorithm, payload),
@@ -2174,7 +2174,7 @@ def test_upload_multipart(cases: dict[str, ConformanceCase], harness: Harness) -
     completed_parts = []
     for signed_part in signed.parts:
         index = signed_part.part_number - 1
-        response = _put_presigned(signed_part.access, chunks[index])
+        response = _put_presigned(signed_part.transfer, chunks[index])
         etag = response.headers.get("etag")
         assert etag is not None, (
             f"part {signed_part.part_number} upload returned no ETag"
@@ -2473,7 +2473,7 @@ def test_append(cases: dict[str, ConformanceCase], harness: Harness) -> None:
     whole_grant = client.files.create_download(request.namespace_id, path=request.path)
     assert len(whole_grant.ranges) == 2
     assert grant.content_ref.size_bytes == expected.previous_size_bytes
-    assert _signed_range(grant.ranges[0].access) == expected.previous_range
+    assert _signed_range(grant.ranges[0].transfer) == expected.previous_range
     previous = client.files.download(
         request.namespace_id, path=request.path, revision_no=previous_revision
     )
@@ -2484,9 +2484,9 @@ def test_append(cases: dict[str, ConformanceCase], harness: Harness) -> None:
         path=request.path,
         start_offset=expected.resume_offset,
     )
-    assert _signed_range(resumed.ranges[0].access) == expected.resumed_range
+    assert _signed_range(resumed.ranges[0].transfer) == expected.resumed_range
     rest = httpx.get(
-        resumed.ranges[0].access.url, headers=resumed.ranges[0].access.headers or {}
+        resumed.ranges[0].transfer.url, headers=resumed.ranges[0].transfer.headers or {}
     )
     rest.raise_for_status()
     assert len(resumed.ranges) == 1
@@ -2528,7 +2528,7 @@ def test_append(cases: dict[str, ConformanceCase], harness: Harness) -> None:
         request.namespace_id, path=request.empty_path
     )
     assert empty_grant.content_ref.size_bytes == 0
-    assert _signed_range(empty_grant.ranges[0].access) is None
+    assert _signed_range(empty_grant.ranges[0].transfer) is None
     empty = client.files.download(request.namespace_id, path=request.empty_path)
     assert empty.content == b""
 

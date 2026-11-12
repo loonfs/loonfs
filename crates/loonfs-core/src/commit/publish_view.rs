@@ -21,7 +21,7 @@ use crate::time::Observation;
 use crate::wal::ProjectedWalTail;
 use crate::PermitPool;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::{ChangeSeq, CommitId};
+use loonfs_types::{CommitId, CommitSeq};
 use std::sync::Arc;
 
 pub(crate) struct PublishMetadataView<'a, S: ObjectStore + ?Sized> {
@@ -103,7 +103,7 @@ impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
 
     /// Returns the retention floor of the manifest that the view replays its
     /// WAL tail above.
-    pub(super) fn manifest_retention_floor_seq(&self) -> ChangeSeq {
+    pub(super) fn manifest_retention_floor_seq(&self) -> CommitSeq {
         self.manifest_segments
             .manifest()
             .payload()
@@ -148,7 +148,7 @@ impl WriterPosition {
     /// Returns the position's retention floor, which restore validation and
     /// the merge floor rule read: the basis manifest's floor, raised by the
     /// floor objects in the position's WAL tail.
-    pub fn retention_floor_seq(&self) -> ChangeSeq {
+    pub fn retention_floor_seq(&self) -> CommitSeq {
         self.read_basis.head.retention_floor_seq
     }
 

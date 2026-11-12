@@ -8,7 +8,7 @@ use crate::metadata_rows::MetadataRowFamily;
 use crate::segment_blocks::BlockHandle;
 use crate::CompactorEpoch;
 use crate::PoolId;
-use crate::{AccessGrants, ActorId, ChangeSeq, ManifestNo, MetadataSegmentId, NamespaceId, RunNo};
+use crate::{AccessGrants, ActorId, CommitSeq, ManifestNo, MetadataSegmentId, NamespaceId, RunNo};
 use crate::{ExtensionName, IndexSegmentId, PrincipalScope, WalNo, WriterEpoch};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -76,7 +76,7 @@ pub struct MetadataRunRef {
     /// Run identity allocated by the manifest.
     pub run_no: RunNo,
     /// Namespace sequence at which this run was produced.
-    pub run_seq: ChangeSeq,
+    pub run_seq: CommitSeq,
     /// Compaction tier used to order overlapping runs.
     pub tier: RunTier,
     /// Segments written as part of this run.
@@ -353,7 +353,7 @@ pub struct NamespaceManifestPayload {
     /// that interval's steps.
     pub compactor_epoch: CompactorEpoch,
     /// Folded head, or the final namespace sequence on deletion.
-    pub head_seq: ChangeSeq,
+    pub head_seq: CommitSeq,
     /// Activity committed in this namespace through `head_seq`.
     pub activity: ManifestActivity,
     /// Current writer fencing epoch.
@@ -361,7 +361,7 @@ pub struct NamespaceManifestPayload {
     /// Run number the next producer allocates. Every run's `run_no` is below it.
     pub next_run_no: RunNo,
     /// Earliest sequence for which retained history remains readable.
-    pub retention_floor_seq: ChangeSeq,
+    pub retention_floor_seq: CommitSeq,
     /// Complete set of metadata runs required to reconstruct the snapshot.
     pub runs: Vec<MetadataRunRef>,
     /// Each extension's entry, under the extension's name. Every publication
@@ -392,7 +392,7 @@ impl std::error::Error for ManifestChainError {}
 
 impl NamespaceManifestPayload {
     /// Returns the oldest non-empty run sequence, or the head when there are none.
-    pub fn base_seq(&self) -> ChangeSeq {
+    pub fn base_seq(&self) -> CommitSeq {
         self.runs
             .iter()
             .filter(|run| !run.segments.is_empty())
@@ -422,12 +422,12 @@ impl NamespaceManifestPayload {
             writer: None,
             manifest_no: ManifestNo(1),
             compactor_epoch: CompactorEpoch(0),
-            head_seq: ChangeSeq(0),
+            head_seq: CommitSeq(0),
             activity: ManifestActivity::default(),
             writer_epoch: WriterEpoch(0),
             next_run_no: RunNo(0),
             folded_wal_no: WalNo(0),
-            retention_floor_seq: ChangeSeq(0),
+            retention_floor_seq: CommitSeq(0),
             runs: Vec::new(),
             extensions: BTreeMap::new(),
         }
@@ -526,7 +526,7 @@ impl NamespaceManifestPayload {
                 if !self.extensions.is_empty() {
                     return invalid("extensions");
                 }
-                if self.head_seq != ChangeSeq(0) || self.retention_floor_seq != ChangeSeq(0) {
+                if self.head_seq != CommitSeq(0) || self.retention_floor_seq != CommitSeq(0) {
                     return invalid("head_seq");
                 }
                 if self.next_run_no != RunNo(0) {
@@ -676,7 +676,7 @@ mod tests {
         MetadataSegmentRef, NamespaceManifestPayload, RunTier,
     };
     use crate::CompactorEpoch;
-    use crate::{ChangeSeq, ManifestNo, MetadataSegmentId, NamespaceId, RunNo, WriterEpoch};
+    use crate::{CommitSeq, ManifestNo, MetadataSegmentId, NamespaceId, RunNo, WriterEpoch};
     use std::assert_matches;
 
     fn pool_id() -> crate::PoolId {
@@ -712,7 +712,7 @@ mod tests {
                 .field,
             "activity"
         );
-        successor.head_seq = ChangeSeq(1);
+        successor.head_seq = CommitSeq(1);
         initial
             .ensure_successor(&successor)
             .expect("folded activity");
@@ -736,7 +736,7 @@ mod tests {
             let mut regression: NamespaceManifestPayload =
                 serde_json::from_value(payload.clone()).expect("regression");
             regression.manifest_no = ManifestNo(3);
-            regression.head_seq = ChangeSeq(2);
+            regression.head_seq = CommitSeq(2);
             successor
                 .ensure_successor(&regression)
                 .expect_err("a successor whose activity totals go backward should be rejected");
@@ -786,7 +786,7 @@ mod tests {
                         manifest: crate::control::ManifestRef {
                             owner_namespace_id: NamespaceId::parse("source").expect("namespace"),
                             manifest_no: ManifestNo(1),
-                            head_seq: ChangeSeq(0),
+                            head_seq: CommitSeq(0),
                             payload_checksum: crate::sha256_digest(b"source"),
                         },
                         source_pin_id: crate::PinId::parse(
@@ -851,7 +851,7 @@ mod tests {
         );
         let mut later = initial.clone();
         later.manifest_no = ManifestNo(4);
-        later.head_seq = ChangeSeq(3);
+        later.head_seq = CommitSeq(3);
         initial
             .ensure_later(&later)
             .expect("a later manifest may skip numbers");
@@ -870,7 +870,7 @@ mod tests {
             "manifest_no"
         );
         let mut regressed = later.clone();
-        regressed.head_seq = ChangeSeq(0);
+        regressed.head_seq = CommitSeq(0);
         assert_eq!(
             later
                 .ensure_later(&NamespaceManifestPayload {
@@ -916,15 +916,15 @@ mod tests {
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
             manifest_no: ManifestNo(10),
 
-            head_seq: ChangeSeq(10),
+            head_seq: CommitSeq(10),
             writer_epoch: WriterEpoch(2),
             next_run_no: RunNo(1),
-            retention_floor_seq: ChangeSeq(0),
+            retention_floor_seq: CommitSeq(0),
             runs: vec![metadata_run_ref(
                 "demo",
                 "seg_00000000000000000000000001",
                 RunNo(0),
-                ChangeSeq(10),
+                CommitSeq(10),
                 RunTier::Base,
             )],
             extensions: Default::default(),
@@ -940,9 +940,9 @@ mod tests {
         let decoded = decode_namespace_manifest_json(&encoded).expect("decode manifest");
 
         assert_eq!(decoded, envelope);
-        assert_eq!(decoded.payload.base_seq(), ChangeSeq(10));
+        assert_eq!(decoded.payload.base_seq(), CommitSeq(10));
         assert_eq!(decoded.payload.runs.len(), 1);
-        assert_eq!(decoded.payload.runs[0].run_seq, ChangeSeq(10));
+        assert_eq!(decoded.payload.runs[0].run_seq, CommitSeq(10));
     }
 
     #[test]
@@ -962,23 +962,23 @@ mod tests {
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
             manifest_no: ManifestNo(12),
 
-            head_seq: ChangeSeq(12),
+            head_seq: CommitSeq(12),
             writer_epoch: WriterEpoch(2),
             next_run_no: RunNo(2),
-            retention_floor_seq: ChangeSeq(0),
+            retention_floor_seq: CommitSeq(0),
             runs: vec![
                 metadata_run_ref(
                     "source",
                     "seg_00000000000000000000000001",
                     RunNo(0),
-                    ChangeSeq(10),
+                    CommitSeq(10),
                     RunTier::Base,
                 ),
                 metadata_run_ref(
                     "demo",
                     "seg_00000000000000000000000002",
                     RunNo(1),
-                    ChangeSeq(12),
+                    CommitSeq(12),
                     RunTier::Delta,
                 ),
             ],
@@ -991,7 +991,7 @@ mod tests {
         assert_eq!(decoded, envelope);
         assert_eq!(decoded.payload.runs[0].tier, RunTier::Base);
         assert_eq!(decoded.payload.runs[1].tier, RunTier::Delta);
-        assert_eq!(decoded.payload.runs[1].run_seq, ChangeSeq(12));
+        assert_eq!(decoded.payload.runs[1].run_seq, CommitSeq(12));
         assert_eq!(
             decoded.payload.runs[0].segments[0].owner_namespace_id,
             NamespaceId::parse("source").expect("valid namespace id")
@@ -1030,7 +1030,7 @@ mod tests {
         owner_namespace_id: &str,
         segment_id: &str,
         run_no: RunNo,
-        run_seq: ChangeSeq,
+        run_seq: CommitSeq,
         tier: RunTier,
     ) -> MetadataRunRef {
         MetadataRunRef {

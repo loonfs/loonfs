@@ -117,7 +117,7 @@ pub(super) struct UploadPathParams {
         path = "/v0/namespaces/{namespace_id}/uploads",
         tag = "uploads",
         summary = "Begin upload",
-        description = "Starts an upload session for content that a later commit can reference. A service-proxied upload sends the bytes through the server, and a direct PUT upload returns a presigned upload capability.",
+        description = "Starts an upload session for content that a later commit can reference. A service-proxied upload sends the bytes through the server, and a direct PUT upload returns a presigned URL for the upload.",
         params(("namespace_id" = String, Path, description = "The namespace ID.")),
         request_body = CreateUploadBody,
         responses(
@@ -209,7 +209,7 @@ async fn fill_direct_put_access(
     object_key: &str,
     session: &mut UploadSession,
 ) -> Result<(), ApiResponseError> {
-    if let UploadSessionStatus::Open { access, .. } = &mut session.status {
+    if let UploadSessionStatus::Open { transfer, .. } = &mut session.status {
         let signed = issuer
             .presign_put(
                 PresignedPutRequest {
@@ -220,7 +220,7 @@ async fn fill_direct_put_access(
             )
             .await
             .map_err(presign_issuer_error)?;
-        *access = Some(signed.into());
+        *transfer = Some(signed.into());
     }
     Ok(())
 }
@@ -269,7 +269,7 @@ async fn begin_direct_multipart_upload(
         path = "/v0/namespaces/{namespace_id}/uploads/{upload_id}/parts",
         tag = "uploads",
         summary = "Sign multipart parts",
-        description = "Returns one short-lived upload capability for each requested part of an open `direct_multipart` session. Each capability is bound to the part's checksum. To retry a part, a client asks for its capability again.",
+        description = "Returns one short-lived presigned URL for each requested part of an open `direct_multipart` session. Each presigned URL is bound to the part's checksum. To retry a part, a client asks for its presigned URL again.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             ("upload_id" = String, Path, description = "The upload session ID.")
@@ -346,7 +346,7 @@ async fn sign_parts(
             .map_err(presign_issuer_error)?;
         signed_parts.push(SignedUploadPart {
             part_number: part.part_number,
-            access: signed.into(),
+            transfer: signed.into(),
         });
     }
     Ok(signed_parts)
@@ -575,7 +575,7 @@ pub(super) async fn complete_upload(
         path = "/v0/namespaces/{namespace_id}/uploads/{upload_id}",
         tag = "uploads",
         summary = "Get upload session",
-        description = "Returns an upload session. An open `direct_put` session includes a newly signed upload capability. A completed session includes a new content token, so the client can retry the commit without uploading the content again.",
+        description = "Returns an upload session. An open `direct_put` session includes a new presigned URL for the upload. A completed session includes a new content token, so the client can retry the commit without uploading the content again.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             ("upload_id" = String, Path, description = "The upload session ID.")

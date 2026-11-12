@@ -19,7 +19,7 @@ use loonfs_test_support::stores::RecordedOperation;
 use loonfs_types::format::control::UploadSessionPayload;
 use loonfs_types::format::manifest::ContentLayoutRecord;
 use loonfs_types::{
-    ChangeSeq, ChecksumAlgorithm, ContentExtent, ContentId, ContentLayout, ExtentObject,
+    ChecksumAlgorithm, CommitSeq, ContentExtent, ContentId, ContentLayout, ExtentObject,
     GcSkippedWork,
 };
 
@@ -83,7 +83,7 @@ async fn publish_layout<S: ObjectStore>(
         .await
         .expect("current manifest");
     let mut head = NamespaceReadState::from(current.payload());
-    head.seq = ChangeSeq(head.seq.0 + 1);
+    head.seq = CommitSeq(head.seq.0 + 1);
     let mut state = MetadataStateBuilder::default();
     state.push_content_layout(ContentLayoutRecord {
         content_id: content_id.clone(),

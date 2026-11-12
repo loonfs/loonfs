@@ -15,8 +15,8 @@ use crate::backend::StepBudget;
 use crate::error::Result;
 use loonfs_client::{GcOptions, ListChangesOptions, ReadAt};
 use loonfs_types::{
-    AdvanceRetentionRequest, ChangeSeq, GrepIndexStatus, MetadataMaintenanceRequest,
-    RunMaintenanceResponse, RunPoolMaintenanceResponse,
+    AdvanceRetentionRequest, CommitSeq, GrepIndexStatus, MetadataMaintenanceRequest,
+    RunMaintenanceJobResponse, RunPoolMaintenanceJobResponse,
 };
 
 pub(crate) async fn run_maintenance_command(
@@ -59,7 +59,10 @@ pub(crate) async fn run_maintenance_command(
     }
 }
 
-fn maintenance_ran(context: &NamespaceContext, response: RunMaintenanceResponse) -> CommandOutput {
+fn maintenance_ran(
+    context: &NamespaceContext,
+    response: RunMaintenanceJobResponse,
+) -> CommandOutput {
     context.output(CommandData::MaintenanceRan(MaintenanceRan::new(response)))
 }
 
@@ -77,7 +80,7 @@ async fn run_maintenance_recover_administrator(
         .map_err(|error| context.fail(error))?;
     Ok(maintenance_ran(
         &context,
-        RunMaintenanceResponse::RecoverAdministrator(response),
+        RunMaintenanceJobResponse::RecoverAdministrator(response),
     ))
 }
 
@@ -123,7 +126,7 @@ async fn maintain_metadata(
         .map_err(|error| context.fail(error))?;
     Ok(maintenance_ran(
         &context,
-        RunMaintenanceResponse::Metadata(response),
+        RunMaintenanceJobResponse::Metadata(response),
     ))
 }
 
@@ -144,7 +147,7 @@ async fn run_maintenance_gc(
     .map_err(|error| context.fail(error))?;
     Ok(maintenance_ran(
         &context,
-        RunMaintenanceResponse::Gc(response),
+        RunMaintenanceJobResponse::Gc(response),
     ))
 }
 
@@ -175,7 +178,7 @@ async fn run_maintenance_pool_gc(
     }
     .map_err(|error| context.fail(error))?;
     Ok(context.output(CommandData::PoolMaintenanceRan(
-        RunPoolMaintenanceResponse::Gc(response),
+        RunPoolMaintenanceJobResponse::Gc(response),
     )))
 }
 
@@ -227,7 +230,7 @@ async fn run_maintenance_retention_advance(
 
     Ok(context.output(CommandData::MaintenanceRan(
         MaintenanceRan::after_retention(
-            RunMaintenanceResponse::Retention(response),
+            RunMaintenanceJobResponse::Retention(response),
             retention_floor_before,
         ),
     )))
@@ -247,7 +250,7 @@ async fn run_maintenance_retention_window(
         .map_err(|error| context.fail(error))?;
     Ok(maintenance_ran(
         &context,
-        RunMaintenanceResponse::RetentionWindow(response),
+        RunMaintenanceJobResponse::RetentionWindow(response),
     ))
 }
 
@@ -272,7 +275,7 @@ pub(crate) async fn run_changes(
     args: ChangesArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = NamespaceContext::resolve(invocation, None).await?;
-    let after_seq = args.after.unwrap_or(ChangeSeq(0));
+    let after_seq = args.after.unwrap_or(CommitSeq(0));
     let listing = collect_or_stream_pages(
         context.profile.target.client.list_changes_with_options(
             context.namespace(),

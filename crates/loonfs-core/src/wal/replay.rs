@@ -6,7 +6,7 @@ use super::{ReplayedWalTail, ValidatedWalTail};
 use crate::error::MetadataProjectionLoadError;
 use crate::namespace::state::NamespaceReadState;
 use loonfs_types::format::wal::WalObjectEnvelope;
-use loonfs_types::ChangeSeq;
+use loonfs_types::CommitSeq;
 
 pub(crate) fn project_validated_wal_tail(
     base_head: &NamespaceReadState,
@@ -31,7 +31,7 @@ pub(crate) fn project_validated_wal_tail(
 }
 
 pub(crate) fn validate_wal_object_for_replay(
-    expected_prior_head_seq: ChangeSeq,
+    expected_prior_head_seq: CommitSeq,
     envelope: &WalObjectEnvelope,
 ) -> Result<(), WalObjectError> {
     if envelope.payload().records.is_empty() {
@@ -63,7 +63,7 @@ pub(crate) fn validate_wal_object_for_replay(
         let expected = expected_first_seq
             .0
             .checked_add(offset as u64)
-            .map(ChangeSeq)
+            .map(CommitSeq)
             .ok_or(WalObjectError::SeqOverflow)?;
         if record.committed_seq != expected {
             return Err(WalObjectError::NonContiguousSeq {

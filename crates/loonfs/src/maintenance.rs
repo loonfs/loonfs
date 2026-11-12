@@ -24,7 +24,7 @@ use loonfs_core::{
     MetadataCompactionCancellation, RetentionPlan,
 };
 use loonfs_types::format::manifest::ExtensionEntry;
-use loonfs_types::{u64_from_usize, ChangeSeq, ExtensionName, PageRequest, RunNo, WriterId};
+use loonfs_types::{u64_from_usize, CommitSeq, ExtensionName, PageRequest, RunNo, WriterId};
 use std::num::NonZeroU64;
 use std::sync::Arc;
 
@@ -625,7 +625,7 @@ impl Maintenance {
     async fn load_retention_view(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<(LoadedManifest, ChangeSeq)> {
+    ) -> Result<(LoadedManifest, CommitSeq)> {
         if let Some(position) = self.publisher.current_position(namespace_id) {
             let basis = loonfs_core::control::load_position_basis(
                 self.core.store(),

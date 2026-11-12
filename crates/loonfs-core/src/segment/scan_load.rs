@@ -14,7 +14,7 @@ use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{MetadataRow, MetadataSegmentRef};
 use loonfs_types::format::segment_blocks::{index_blocks_for_key_range, SegmentIndexEntry};
-use loonfs_types::ChangeSeq;
+use loonfs_types::CommitSeq;
 use std::sync::Arc;
 
 /// One segment of a scan, with the sequence of the run that lists it, which
@@ -22,7 +22,7 @@ use std::sync::Arc;
 #[derive(Clone, Copy)]
 pub(crate) struct ScanDescriptor<'a> {
     pub(crate) descriptor: &'a MetadataSegmentRef,
-    pub(crate) max_seq: ChangeSeq,
+    pub(crate) max_seq: CommitSeq,
 }
 
 pub(super) struct ScanLoader<'a, S: ObjectStore + ?Sized> {

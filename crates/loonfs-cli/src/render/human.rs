@@ -9,7 +9,7 @@ use loonfs_objectstore::gcs::GcpGcsStoreConfig;
 use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
 use loonfs_objectstore::s3_compatible::{AwsS3StoreConfig, CloudflareR2StoreConfig};
 use loonfs_objectstore::StoreConfig;
-use loonfs_types::{ChangeSeq, CommitId, FileRevision, GrepMatch, PathEntry};
+use loonfs_types::{CommitId, CommitSeq, FileRevision, GrepMatch, PathEntry};
 
 use super::human_maintenance::*;
 
@@ -439,7 +439,7 @@ fn human_tree_transfer(
 fn human_file_mutation(
     kind: CommandKind,
     target: &str,
-    committed_seq: ChangeSeq,
+    committed_seq: CommitSeq,
     commit_id: &CommitId,
     recovery_command: Option<&str>,
 ) -> String {
@@ -470,7 +470,7 @@ fn human_path_move(
     kind: CommandKind,
     from: &str,
     to: &str,
-    committed_seq: ChangeSeq,
+    committed_seq: CommitSeq,
     commit_id: &CommitId,
 ) -> String {
     match kind {

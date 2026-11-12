@@ -7,7 +7,7 @@ use crate::storage::inline_content::InlineContent;
 use loonfs_types::format::manifest::DeltaPosition;
 use loonfs_types::format::wal::{MergeRecord, WalCommitDelta, WalInlineContent};
 use loonfs_types::{
-    ActorId, ChangeSeq, CommitId, ContentRef, DisplayName, InodeId, NameKey, NamespaceId,
+    ActorId, CommitId, CommitSeq, ContentRef, DisplayName, InodeId, NameKey, NamespaceId,
     WriterEpoch,
 };
 
@@ -33,8 +33,8 @@ pub(crate) struct CommitPlan {
     pub(crate) message: Option<String>,
     pub(crate) merge: Option<MergeRecord>,
     pub(crate) semantic_identity: CommitFingerprint,
-    pub(crate) apply_after_seq: ChangeSeq,
-    pub(crate) assigned_seq: ChangeSeq,
+    pub(crate) apply_after_seq: CommitSeq,
+    pub(crate) assigned_seq: CommitSeq,
     pub(crate) committed_at_ms: u64,
     pub(crate) deltas: Vec<WalCommitDelta>,
     pub(crate) appended: Vec<WalInlineContent>,

@@ -36,8 +36,8 @@ use loonfs_types::format::wal::{
 use loonfs_types::ROOT_INODE_ID;
 use loonfs_types::{
     sha256_digest, AccessGrants, AccessRevisionNo, AccessRight, ActorId, AttributeKey,
-    AttributeValue, Attributes, AttributesRevisionNo, ChangeSeq, Checksum, ChecksumAlgorithm,
-    ChecksumHex, CommitFingerprint, CommitId, ContentId, ContentRef, ContentRefKind, ExtensionName,
+    AttributeValue, Attributes, AttributesRevisionNo, Checksum, ChecksumAlgorithm, ChecksumHex,
+    CommitFingerprint, CommitId, CommitSeq, ContentId, ContentRef, ContentRefKind, ExtensionName,
     IndexSegmentId, InodeId, InodeKind, ManifestNo, MetadataSegmentId, NameKey, NamespaceId,
     PayloadChecksum, PinId, PrincipalId, PrincipalScope, RevisionNo, RunNo, UploadId, WalNo,
     WriterEpoch,
@@ -256,13 +256,13 @@ fn sample_binding_row(
         child_kind: loonfs_types::InodeKind::File,
         child_created_by: actor(),
         child_created_at_ms: 3_000,
-        committed_seq: ChangeSeq(committed_seq),
+        committed_seq: CommitSeq(committed_seq),
         delta_index,
         commit_id: commit_id(),
         committed_by: actor(),
         committed_at_ms: 1_000 * committed_seq,
         bind_position: loonfs_types::format::manifest::DeltaPosition {
-            seq: ChangeSeq(bind_position.0),
+            seq: CommitSeq(bind_position.0),
             delta_index: bind_position.1,
         },
         state,
@@ -306,7 +306,7 @@ fn sample_wal_payload() -> WalObjectPayload {
                 child_created_by: actor(),
                 child_created_at_ms: 4_000,
                 target: loonfs_types::format::manifest::DeltaPosition {
-                    seq: ChangeSeq(1),
+                    seq: CommitSeq(1),
                     delta_index: 0,
                 },
             },
@@ -320,7 +320,7 @@ fn sample_wal_payload() -> WalObjectPayload {
                 name_key: loonfs_types::NameKey::parse("file.txt").expect("name key"),
                 display_name: loonfs_types::DisplayName::parse("file.txt").expect("display name"),
                 bind_position: loonfs_types::format::manifest::DeltaPosition {
-                    seq: loonfs_types::ChangeSeq(1),
+                    seq: loonfs_types::CommitSeq(1),
                     delta_index: 0,
                 },
                 child_created_by: loonfs_types::ActorId::loonfs(),
@@ -381,7 +381,7 @@ fn sample_wal_payload() -> WalObjectPayload {
                 name_key: loonfs_types::NameKey::parse("file.txt").expect("name key"),
                 display_name: loonfs_types::DisplayName::parse("file.txt").expect("display name"),
                 bind_position: loonfs_types::format::manifest::DeltaPosition {
-                    seq: loonfs_types::ChangeSeq(1),
+                    seq: loonfs_types::CommitSeq(1),
                     delta_index: 0,
                 },
                 child_created_by: loonfs_types::ActorId::loonfs(),
@@ -420,9 +420,9 @@ fn sample_wal_payload() -> WalObjectPayload {
         namespace_id: namespace_id(),
         wal_no: WalNo(2),
         writer_epoch: WriterEpoch(3),
-        head_seq: ChangeSeq(2),
+        head_seq: CommitSeq(2),
         records: vec![WalCommitPayload {
-            committed_seq: ChangeSeq(2),
+            committed_seq: CommitSeq(2),
             commit_id: commit_id(),
             committed_by: actor(),
             semantic_commit_fingerprint: serde_json::from_str(
@@ -442,7 +442,7 @@ fn sample_wal_payload() -> WalObjectPayload {
 fn sample_wal_inline_content_payload() -> WalObjectPayload {
     let mut payload = sample_wal_payload();
     let mut without_inline_content = payload.records[0].clone();
-    without_inline_content.committed_seq = ChangeSeq(3);
+    without_inline_content.committed_seq = CommitSeq(3);
     without_inline_content.commit_id =
         CommitId::parse("c_00000000000000000000000000000043").expect("valid commit id");
     for delta in &mut payload.records[0].deltas {
@@ -482,7 +482,7 @@ fn sample_wal_inline_content_payload() -> WalObjectPayload {
             name_key: loonfs_types::NameKey::parse("file.txt").expect("name key"),
             display_name: loonfs_types::DisplayName::parse("file.txt").expect("display name"),
             bind_position: loonfs_types::format::manifest::DeltaPosition {
-                seq: loonfs_types::ChangeSeq(1),
+                seq: loonfs_types::CommitSeq(1),
                 delta_index: 0,
             },
             child_created_by: loonfs_types::ActorId::loonfs(),
@@ -502,7 +502,7 @@ fn sample_wal_inline_content_payload() -> WalObjectPayload {
             name_key: loonfs_types::NameKey::parse("file.txt").expect("name key"),
             display_name: loonfs_types::DisplayName::parse("file.txt").expect("display name"),
             bind_position: loonfs_types::format::manifest::DeltaPosition {
-                seq: loonfs_types::ChangeSeq(1),
+                seq: loonfs_types::CommitSeq(1),
                 delta_index: 0,
             },
             child_created_by: loonfs_types::ActorId::loonfs(),
@@ -525,7 +525,7 @@ fn sample_wal_inline_content_payload() -> WalObjectPayload {
             append_offset: Some(6),
         },
     });
-    payload.head_seq = ChangeSeq(3);
+    payload.head_seq = CommitSeq(3);
     payload.records.push(without_inline_content);
     payload
 }
@@ -534,8 +534,8 @@ fn sample_wal_inline_content_payload() -> WalObjectPayload {
 fn sample_merge() -> MergeRecord {
     MergeRecord {
         source_namespace_id: NamespaceId::parse("demo-fork").expect("valid namespace id"),
-        source_after_seq: ChangeSeq(12),
-        source_through_seq: ChangeSeq(30),
+        source_after_seq: CommitSeq(12),
+        source_through_seq: CommitSeq(30),
     }
 }
 
@@ -553,7 +553,7 @@ fn sample_wal_floor_payload() -> WalObjectPayload {
     WalObjectPayload {
         wal_no: WalNo(3),
         records: Vec::new(),
-        retention_floor_seq: Some(ChangeSeq(1)),
+        retention_floor_seq: Some(CommitSeq(1)),
         ..sample_wal_payload()
     }
 }
@@ -585,13 +585,13 @@ fn sample_manifest_payload() -> NamespaceManifestPayload {
         namespace_id: namespace_id(),
         manifest_no: ManifestNo(2),
 
-        head_seq: ChangeSeq(2),
+        head_seq: CommitSeq(2),
         writer_epoch: WriterEpoch(3),
         next_run_no: RunNo(1),
-        retention_floor_seq: ChangeSeq(0),
+        retention_floor_seq: CommitSeq(0),
         runs: vec![MetadataRunRef {
             run_no: RunNo(0),
-            run_seq: ChangeSeq(2),
+            run_seq: CommitSeq(2),
             tier: RunTier::Delta,
             segments: vec![MetadataSegmentRef {
                 owner_namespace_id: namespace_id(),
@@ -655,7 +655,7 @@ fn sample_manifest_ref(number: u64) -> ManifestRef {
         owner_namespace_id: namespace_id(),
         manifest_no: ManifestNo(number),
 
-        head_seq: ChangeSeq(number),
+        head_seq: CommitSeq(number),
         payload_checksum: payload_checksum(),
     }
 }
@@ -756,7 +756,7 @@ fn sample_fork_manifest() -> NamespaceManifestPayload {
                 owner_namespace_id: NamespaceId::parse("source").expect("valid namespace id"),
                 manifest_no: ManifestNo(2),
 
-                head_seq: ChangeSeq(2),
+                head_seq: CommitSeq(2),
                 payload_checksum: payload_checksum(),
             },
             source_pin_id: pin_id("pin_00000000000000000002-0000000000000002"),
@@ -774,7 +774,7 @@ fn sample_rebase_manifest() -> NamespaceManifestPayload {
         fork_basis: fork.fork_basis.clone().map(|basis| ForkBasis {
             rebased_from: Some(RebasedFrom {
                 source_namespace_id: NamespaceId::parse("sandbox").expect("valid namespace id"),
-                resume_after_seq: ChangeSeq(1),
+                resume_after_seq: CommitSeq(1),
             }),
             ..basis
         }),
@@ -1447,7 +1447,7 @@ fn control_object_decoders_reject_wrong_format_version_without_fallback() {
             serde_json::to_value(PinPayload {
                 pin_id: pin_id("pin_00000000000000000005-0000000000000005"),
                 namespace_id: namespace_id(),
-                head_seq: ChangeSeq(5),
+                head_seq: CommitSeq(5),
                 payload_checksum: sha256_digest(b"manifest"),
                 created_at_ms: 3_000,
                 owner: PinOwner::User {
@@ -1812,7 +1812,7 @@ fn wal_decode_rejects_unknown_fields_inside_tombstone_deltas() {
                 delta_index: 1,
                 root_inode_id: InodeId(9),
                 target: DeltaPosition {
-                    seq: ChangeSeq(1),
+                    seq: CommitSeq(1),
                     delta_index: 0,
                 },
             },
@@ -2091,7 +2091,7 @@ fn wal_delta_wire_tags_match_spec_names() {
                 child_created_by: actor(),
                 child_created_at_ms: 4_000,
                 target: loonfs_types::format::manifest::DeltaPosition {
-                    seq: ChangeSeq(1),
+                    seq: CommitSeq(1),
                     delta_index: 0,
                 },
             }),
@@ -2105,7 +2105,7 @@ fn wal_delta_wire_tags_match_spec_names() {
                 name_key: loonfs_types::NameKey::parse("file.txt").expect("name key"),
                 display_name: loonfs_types::DisplayName::parse("file.txt").expect("display name"),
                 bind_position: loonfs_types::format::manifest::DeltaPosition {
-                    seq: loonfs_types::ChangeSeq(1),
+                    seq: loonfs_types::CommitSeq(1),
                     delta_index: 0,
                 },
                 child_created_by: loonfs_types::ActorId::loonfs(),
@@ -2136,7 +2136,7 @@ fn wal_delta_wire_tags_match_spec_names() {
                 delta_index: 0,
                 root_inode_id: InodeId(2),
                 target: DeltaPosition {
-                    seq: ChangeSeq(1),
+                    seq: CommitSeq(1),
                     delta_index: 1,
                 },
             }),
@@ -2176,7 +2176,7 @@ fn wal_delta_wire_tags_match_spec_names() {
 fn sample_tombstone_set_row() -> MetadataRow {
     MetadataRow::Tombstone(loonfs_types::format::manifest::SubtreeTombstoneRecord {
         root_inode_id: InodeId(5),
-        committed_seq: ChangeSeq(8),
+        committed_seq: CommitSeq(8),
         delta_index: 0,
         commit_id: commit_id(),
         action: TombstoneRowAction::Set {
@@ -2193,16 +2193,16 @@ fn sample_tombstone_set_row() -> MetadataRow {
     })
 }
 
-/// The undelete that cancels it, naming the exact position it revokes.
+/// The restore that cancels it, naming the exact position it revokes.
 fn sample_tombstone_revoke_row() -> MetadataRow {
     MetadataRow::Tombstone(loonfs_types::format::manifest::SubtreeTombstoneRecord {
         root_inode_id: InodeId(5),
-        committed_seq: ChangeSeq(9),
+        committed_seq: CommitSeq(9),
         delta_index: 0,
         commit_id: commit_id(),
         action: TombstoneRowAction::Revoke {
             target: DeltaPosition {
-                seq: ChangeSeq(8),
+                seq: CommitSeq(8),
                 delta_index: 0,
             },
         },
@@ -2211,11 +2211,11 @@ fn sample_tombstone_revoke_row() -> MetadataRow {
     })
 }
 
-/// A second deletion of the same root, after the undelete above.
+/// A second deletion of the same root, after the restore above.
 fn sample_tombstone_reset_row() -> MetadataRow {
     MetadataRow::Tombstone(loonfs_types::format::manifest::SubtreeTombstoneRecord {
         root_inode_id: InodeId(5),
-        committed_seq: ChangeSeq(10),
+        committed_seq: CommitSeq(10),
         delta_index: 0,
         commit_id: commit_id(),
         action: TombstoneRowAction::Set {
@@ -2247,7 +2247,7 @@ fn sample_tombstone_rows() -> [MetadataRow; 3] {
 fn sample_active_deletion_listed_row() -> MetadataRow {
     MetadataRow::ActiveDeletion(loonfs_types::format::manifest::ActiveDeletionRecord {
         root_inode_id: InodeId(5),
-        deletion_seq: ChangeSeq(8),
+        deletion_seq: CommitSeq(8),
         action: ActiveDeletionRowAction::Listed {
             inode_kind: loonfs_types::InodeKind::Directory,
             deleted_at_ms: 4_000,
@@ -2263,14 +2263,14 @@ fn sample_active_deletion_listed_row() -> MetadataRow {
 }
 
 /// The active-deletion row the materializer derives from the revoke above. It
-/// repeats the deletion's sequence rather than the undelete's, so the two rows
+/// repeats the deletion's sequence rather than the restore's, so the two rows
 /// share a key prefix, and its rank sorts it ahead of the row it removes.
 fn sample_active_deletion_removed_row() -> MetadataRow {
     MetadataRow::ActiveDeletion(loonfs_types::format::manifest::ActiveDeletionRecord {
         root_inode_id: InodeId(5),
-        deletion_seq: ChangeSeq(8),
+        deletion_seq: CommitSeq(8),
         action: ActiveDeletionRowAction::Removed {
-            removed_seq: ChangeSeq(9),
+            removed_seq: CommitSeq(9),
         },
     })
 }
@@ -2281,7 +2281,7 @@ fn sample_cleared_attributes_row() -> MetadataRow {
     MetadataRow::AttributesRevision(loonfs_types::format::manifest::AttributesRevisionRecord {
         inode_id: InodeId(2),
         attributes_revision_no: AttributesRevisionNo(3),
-        committed_seq: ChangeSeq(7),
+        committed_seq: CommitSeq(7),
         commit_id: commit_id(),
         delta_index: 1,
         committed_by: actor(),
@@ -2295,7 +2295,7 @@ fn sample_populated_attributes_row() -> MetadataRow {
     MetadataRow::AttributesRevision(loonfs_types::format::manifest::AttributesRevisionRecord {
         inode_id: InodeId(5),
         attributes_revision_no: AttributesRevisionNo(2),
-        committed_seq: ChangeSeq(5),
+        committed_seq: CommitSeq(5),
         commit_id: commit_id(),
         delta_index: 0,
         committed_by: actor(),
@@ -2308,7 +2308,7 @@ fn sample_cleared_access_row() -> MetadataRow {
     MetadataRow::AccessRevision(loonfs_types::format::manifest::AccessRevisionRecord {
         inode_id: InodeId(2),
         access_revision_no: AccessRevisionNo(3),
-        committed_seq: ChangeSeq(7),
+        committed_seq: CommitSeq(7),
         commit_id: commit_id(),
         delta_index: 1,
         committed_by: actor(),
@@ -2322,7 +2322,7 @@ fn sample_populated_access_row() -> MetadataRow {
     MetadataRow::AccessRevision(loonfs_types::format::manifest::AccessRevisionRecord {
         inode_id: InodeId(5),
         access_revision_no: AccessRevisionNo(2),
-        committed_seq: ChangeSeq(5),
+        committed_seq: CommitSeq(5),
         commit_id: commit_id(),
         delta_index: 0,
         committed_by: actor(),
@@ -2335,13 +2335,13 @@ fn sample_populated_access_row() -> MetadataRow {
 fn sample_commit_receipt_row() -> MetadataRow {
     MetadataRow::CommitReceipt(loonfs_types::format::manifest::CommitReceiptRecord {
         commit_id: commit_id(),
-        committed_seq: ChangeSeq(9),
+        committed_seq: CommitSeq(9),
     })
 }
 
 fn sample_commit_row() -> MetadataRow {
     MetadataRow::Commit(WalCommitPayload {
-        committed_seq: ChangeSeq(9),
+        committed_seq: CommitSeq(9),
         commit_id: commit_id(),
         committed_by: actor(),
         semantic_commit_fingerprint: CommitFingerprint::parse(format!(
@@ -2401,9 +2401,9 @@ fn sample_merge_index_rows() -> [MetadataRow; 3] {
     .map(|(source, committed_seq, after_seq, through_seq)| {
         MetadataRow::Merge(loonfs_types::format::manifest::MergeIndexRecord {
             source_namespace_id: NamespaceId::parse(source).expect("valid namespace id"),
-            committed_seq: ChangeSeq(committed_seq),
-            source_after_seq: ChangeSeq(after_seq),
-            source_through_seq: ChangeSeq(through_seq),
+            committed_seq: CommitSeq(committed_seq),
+            source_after_seq: CommitSeq(after_seq),
+            source_through_seq: CommitSeq(through_seq),
         })
     })
 }
@@ -2413,7 +2413,7 @@ fn sample_inode_rows() -> [MetadataRow; 2] {
         MetadataRow::Inode(loonfs_types::format::manifest::InodeRecord {
             inode_id: ROOT_INODE_ID,
             inode_kind: InodeKind::Directory,
-            committed_seq: ChangeSeq(1),
+            committed_seq: CommitSeq(1),
             commit_id: commit_id(),
             committed_by: actor(),
             committed_at_ms: 1_000,
@@ -2421,7 +2421,7 @@ fn sample_inode_rows() -> [MetadataRow; 2] {
         MetadataRow::Inode(loonfs_types::format::manifest::InodeRecord {
             inode_id: InodeId(2),
             inode_kind: InodeKind::File,
-            committed_seq: ChangeSeq(3),
+            committed_seq: CommitSeq(3),
             commit_id: commit_id(),
             committed_by: actor(),
             committed_at_ms: 3_000,
@@ -2434,7 +2434,7 @@ fn sample_revision_rows() -> [MetadataRow; 2] {
         MetadataRow::FileRevision(loonfs_types::format::manifest::RevisionRecord {
             inode_id: InodeId(2),
             revision_no: RevisionNo(2),
-            committed_seq: ChangeSeq(4),
+            committed_seq: CommitSeq(4),
             commit_id: commit_id(),
             committed_at_ms: 4_000,
             committed_by: actor(),
@@ -2444,7 +2444,7 @@ fn sample_revision_rows() -> [MetadataRow; 2] {
         MetadataRow::FileRevision(loonfs_types::format::manifest::RevisionRecord {
             inode_id: InodeId(2),
             revision_no: RevisionNo(1),
-            committed_seq: ChangeSeq(3),
+            committed_seq: CommitSeq(3),
             commit_id: commit_id(),
             committed_at_ms: 3_000,
             committed_by: actor(),
@@ -2464,7 +2464,7 @@ fn sample_segment_blocks() -> loonfs_types::format::segment_blocks::BuiltSegment
     let mut rows = vec![
         // `active-deletion-` sorts ahead of every other family prefix, so
         // these two rows open the first data block the fixture below pins.
-        // The pair covers both actions: the removal that an undelete writes,
+        // The pair covers both actions: the removal that a restore writes,
         // and the listing it removes.
         sample_active_deletion_removed_row(),
         sample_active_deletion_listed_row(),
@@ -2488,13 +2488,13 @@ fn sample_segment_blocks() -> loonfs_types::format::segment_blocks::BuiltSegment
             child_kind: InodeKind::File,
             child_created_by: actor(),
             child_created_at_ms: 3_000,
-            committed_seq: ChangeSeq(3),
+            committed_seq: CommitSeq(3),
             delta_index: 0,
             commit_id: commit_id(),
             committed_by: actor(),
             committed_at_ms: 3_000,
             bind_position: loonfs_types::format::manifest::DeltaPosition {
-                seq: ChangeSeq(3),
+                seq: CommitSeq(3),
                 delta_index: 0,
             },
         }),
@@ -2510,13 +2510,13 @@ fn sample_segment_blocks() -> loonfs_types::format::segment_blocks::BuiltSegment
             child_kind: loonfs_types::InodeKind::Directory,
             child_created_by: actor(),
             child_created_at_ms: 6_000,
-            committed_seq: ChangeSeq(6),
+            committed_seq: CommitSeq(6),
             delta_index: 0,
             commit_id: commit_id(),
             committed_by: actor(),
             committed_at_ms: 6_000,
             bind_position: loonfs_types::format::manifest::DeltaPosition {
-                seq: ChangeSeq(6),
+                seq: CommitSeq(6),
                 delta_index: 0,
             },
         }),
@@ -2527,13 +2527,13 @@ fn sample_segment_blocks() -> loonfs_types::format::segment_blocks::BuiltSegment
             child_kind: loonfs_types::InodeKind::Directory,
             child_created_by: actor(),
             child_created_at_ms: 6_000,
-            committed_seq: ChangeSeq(8),
+            committed_seq: CommitSeq(8),
             delta_index: 0,
             commit_id: commit_id(),
             committed_by: actor(),
             committed_at_ms: 8_000,
             bind_position: loonfs_types::format::manifest::DeltaPosition {
-                seq: ChangeSeq(6),
+                seq: CommitSeq(6),
                 delta_index: 0,
             },
             state: loonfs_types::format::manifest::DirentryBindingState::Unbound,
@@ -2976,7 +2976,7 @@ fn provenance_rows_reject_every_missing_required_field() {
             MetadataRow::Inode(loonfs_types::format::manifest::InodeRecord {
                 inode_id: InodeId(2),
                 inode_kind: InodeKind::File,
-                committed_seq: ChangeSeq(3),
+                committed_seq: CommitSeq(3),
                 commit_id: commit_id(),
                 committed_by: actor(),
                 committed_at_ms: 3_000,
@@ -2987,7 +2987,7 @@ fn provenance_rows_reject_every_missing_required_field() {
             MetadataRow::FileRevision(loonfs_types::format::manifest::RevisionRecord {
                 inode_id: InodeId(2),
                 revision_no: RevisionNo(1),
-                committed_seq: ChangeSeq(3),
+                committed_seq: CommitSeq(3),
                 commit_id: commit_id(),
                 committed_at_ms: 3_000,
                 committed_by: actor(),
@@ -3049,7 +3049,7 @@ fn attribute_rows_reject_a_map_over_its_limits() {
         loonfs_types::format::manifest::AttributesRevisionRecord {
             inode_id: InodeId(2),
             attributes_revision_no: AttributesRevisionNo(1),
-            committed_seq: ChangeSeq(5),
+            committed_seq: CommitSeq(5),
             commit_id: commit_id(),
             delta_index: 0,
             committed_by: actor(),
@@ -3089,7 +3089,7 @@ fn sst_block_filter_matches_golden_bytes_and_answers() {
         &MetadataRow::Inode(loonfs_types::format::manifest::InodeRecord {
             inode_id: ROOT_INODE_ID,
             inode_kind: InodeKind::Directory,
-            committed_seq: ChangeSeq(1),
+            committed_seq: CommitSeq(1),
             commit_id: commit_id(),
             committed_by: actor(),
             committed_at_ms: 1_000,
@@ -3144,7 +3144,7 @@ fn sample_content_layout_row() -> MetadataRow {
     let reference = sample_content_ref();
     MetadataRow::ContentLayout(loonfs_types::format::manifest::ContentLayoutRecord {
         content_id: reference.content_id.clone(),
-        committed_seq: ChangeSeq(2),
+        committed_seq: CommitSeq(2),
         size_bytes: 12,
         layout: loonfs_types::ContentLayout {
             creator_namespace_id: namespace_id(),
@@ -3280,7 +3280,7 @@ fn commit_precondition_wire_shapes_match_golden() {
     );
     let with_preconditions = request.clone().preconditions(vec![
         CommitPrecondition::NamespaceHead {
-            expected_head_seq: ChangeSeq(42),
+            expected_head_seq: CommitSeq(42),
         },
         CommitPrecondition::FileRevision {
             inode_id: InodeId(42),
@@ -3311,8 +3311,8 @@ fn commit_precondition_wire_shapes_match_golden() {
     ]);
     let details = ErrorDetails {
         precondition_index: Some(0),
-        expected_head_seq: Some(ChangeSeq(42)),
-        actual_head_seq: Some(ChangeSeq(43)),
+        expected_head_seq: Some(CommitSeq(42)),
+        actual_head_seq: Some(CommitSeq(43)),
         expected_binding_version: Some(
             loonfs_types::BindingVersion::parse("aaaa").expect("version"),
         ),

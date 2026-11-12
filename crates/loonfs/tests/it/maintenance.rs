@@ -3,7 +3,7 @@
 use crate::common::*;
 use loonfs::publish::{parse_mutation_path, CommitIntent, FilesystemOperation};
 use loonfs::{
-    ChangeSeq, CommitId, CreateSnapshotOptions, ErrorCode, FoldWalOutcome, FoldWalResponse,
+    CommitId, CommitSeq, CreateSnapshotOptions, ErrorCode, FoldWalOutcome, FoldWalResponse,
     ManifestNo, MetadataCompactionOutcome, NamespaceId, SharedObjectStore,
 };
 use loonfs_objectstore::keys::{hint, metadata_manifest_object};
@@ -33,10 +33,10 @@ fn namespace_diagnostics_reports_wal_tail_objects() {
         .namespace_diagnostics_blocking(&namespace_id)
         .expect("status for new namespace");
     assert_eq!(status.namespace_id, namespace_id);
-    assert_eq!(status.head_seq, ChangeSeq(0));
+    assert_eq!(status.head_seq, CommitSeq(0));
     assert_eq!(status.current_manifest_no, Some(ManifestNo(1)));
     assert_eq!(status.wal_tail_objects, 0);
-    assert_eq!(status.retention_floor_seq, ChangeSeq(0));
+    assert_eq!(status.retention_floor_seq, CommitSeq(0));
 
     fs.put_file_blocking(
         &namespace_id,
@@ -50,10 +50,10 @@ fn namespace_diagnostics_reports_wal_tail_objects() {
     let status = fs
         .namespace_diagnostics_blocking(&namespace_id)
         .expect("status after commit");
-    assert_eq!(status.head_seq, ChangeSeq(1));
+    assert_eq!(status.head_seq, CommitSeq(1));
     assert_eq!(status.current_manifest_no, Some(ManifestNo(2)));
     assert_eq!(status.wal_tail_objects, 2);
-    assert_eq!(status.retention_floor_seq, ChangeSeq(0));
+    assert_eq!(status.retention_floor_seq, CommitSeq(0));
     assert_eq!(store.count(OperationSelector::List), 1);
 }
 
@@ -190,7 +190,7 @@ fn maintenance_step_at_wal_object_threshold_folds_the_wal() {
         response.wal_fold,
         Some(FoldWalResponse {
             outcome: FoldWalOutcome::Published,
-            manifest_head_seq: ChangeSeq(1),
+            manifest_head_seq: CommitSeq(1),
             ..
         })
     );
@@ -236,7 +236,7 @@ fn metadata_run_does_not_advance_retention() {
         response.wal_fold,
         Some(FoldWalResponse {
             outcome: FoldWalOutcome::Published,
-            manifest_head_seq: ChangeSeq(1),
+            manifest_head_seq: CommitSeq(1),
             ..
         })
     );
@@ -244,13 +244,13 @@ fn metadata_run_does_not_advance_retention() {
         fs.namespace_diagnostics_blocking(&namespace_id)
             .expect("status")
             .retention_floor_seq,
-        ChangeSeq(0)
+        CommitSeq(0)
     );
 
     let retention = fs
         .advance_retention_floor_blocking(&namespace_id)
         .expect("step with retention");
-    assert_eq!(retention.retention_floor_seq, ChangeSeq(1));
+    assert_eq!(retention.retention_floor_seq, CommitSeq(1));
 
     // A plan naming retention alone is the same opt-in.
     fs.put_file_blocking(
@@ -265,7 +265,7 @@ fn metadata_run_does_not_advance_retention() {
     let retention = fs
         .advance_retention_floor_blocking(&namespace_id)
         .expect("retention-only step");
-    assert_eq!(retention.retention_floor_seq, ChangeSeq(2));
+    assert_eq!(retention.retention_floor_seq, CommitSeq(2));
 }
 
 #[test]
@@ -301,7 +301,7 @@ fn the_typed_wrappers_are_single_action_steps() {
     let folded = fs.fold_wal_blocking(&namespace_id).expect("fold the tail");
     assert_eq!(
         (folded.outcome, folded.manifest_head_seq),
-        (FoldWalOutcome::Published, ChangeSeq(1))
+        (FoldWalOutcome::Published, CommitSeq(1))
     );
     let compaction = fs
         .maintain_metadata_blocking(&namespace_id, metadata_options(1))
@@ -327,7 +327,7 @@ fn the_typed_wrappers_are_single_action_steps() {
         metadata.wal_fold,
         Some(FoldWalResponse {
             outcome: FoldWalOutcome::Published,
-            manifest_head_seq: ChangeSeq(2),
+            manifest_head_seq: CommitSeq(2),
             ..
         }),
         "the metadata request runs only metadata maintenance"
@@ -391,7 +391,7 @@ fn maintenance_step_after_existing_manifest_writes_delta_manifest() {
         step.wal_fold,
         Some(FoldWalResponse {
             outcome: FoldWalOutcome::Published,
-            manifest_head_seq: ChangeSeq(2),
+            manifest_head_seq: CommitSeq(2),
             ..
         })
     );
@@ -415,7 +415,7 @@ fn maintenance_step_after_existing_manifest_writes_delta_manifest() {
     let manifest = decode_namespace_manifest_json(&manifest_bytes).expect("decode manifest");
     // A WAL fold only appends: the base marker stays where the first
     // published manifest put it until compaction rewrites the delta runs.
-    assert_eq!(manifest.payload().base_seq(), ChangeSeq(1));
+    assert_eq!(manifest.payload().base_seq(), CommitSeq(1));
     let delta_files = manifest
         .payload()
         .runs
@@ -423,7 +423,7 @@ fn maintenance_step_after_existing_manifest_writes_delta_manifest() {
         .filter(|run| run.tier == loonfs_types::format::manifest::RunTier::Delta)
         .collect::<Vec<_>>();
     assert!(!delta_files.is_empty());
-    assert!(delta_files.iter().any(|run| run.run_seq == ChangeSeq(2)));
+    assert!(delta_files.iter().any(|run| run.run_seq == CommitSeq(2)));
 }
 
 #[test]
@@ -591,7 +591,7 @@ fn maintenance_step_counts_wal_objects_not_commits() {
     let status = fs
         .namespace_diagnostics_blocking(&namespace_id)
         .expect("status after first batch");
-    assert_eq!(status.head_seq, ChangeSeq(2));
+    assert_eq!(status.head_seq, CommitSeq(2));
     assert_eq!(status.wal_tail_objects, 2);
 
     let response = fs
@@ -609,7 +609,7 @@ fn maintenance_step_counts_wal_objects_not_commits() {
         response.wal_fold,
         Some(FoldWalResponse {
             outcome: FoldWalOutcome::Published,
-            manifest_head_seq: ChangeSeq(3),
+            manifest_head_seq: CommitSeq(3),
             ..
         })
     );
@@ -661,7 +661,7 @@ async fn maintenance_step_treats_manifest_number_collision_as_benign_race() {
         step.wal_fold,
         Some(FoldWalResponse {
             outcome: FoldWalOutcome::AlreadyCurrent,
-            target_head_seq: ChangeSeq(1),
+            target_head_seq: CommitSeq(1),
             manifest_no: ManifestNo(3),
             ..
         })

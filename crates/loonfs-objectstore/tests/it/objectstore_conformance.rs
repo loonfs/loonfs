@@ -486,14 +486,14 @@ async fn assert_start_after_contract(store: &dyn ObjectStore) {
 }
 
 async fn assert_store_contract_probe_passes(store: &dyn ObjectStore) {
-    let run_id = loonfs_types::ProbeRunId::generate();
-    let report = run_store_contract_probe(store, &run_id).await;
+    let probe_id = loonfs_types::ProbeId::generate();
+    let report = run_store_contract_probe(store, &probe_id).await;
     assert!(
         report
             .checks
             .iter()
             .all(|check| matches!(check.outcome, loonfs_objectstore::StoreProbeOutcome::Passed)),
-        "store contract probe {run_id} did not pass:\n{}",
+        "store contract probe {probe_id} did not pass:\n{}",
         probe_report_lines(&report)
     );
 }

@@ -50,14 +50,14 @@ async fn publish_merge<S: ObjectStore>(
 ) -> Commit {
     let merge = MergeRecord {
         source_namespace_id: fork(fork_name),
-        source_after_seq: ChangeSeq(after_seq),
-        source_through_seq: ChangeSeq(through_seq),
+        source_after_seq: CommitSeq(after_seq),
+        source_through_seq: CommitSeq(through_seq),
     };
     let intent = create_directory(&format!("merge-{fork_name}-{through_seq}"));
-    let fork_inode_id = InodeId::generate(ChangeSeq(through_seq), NonZeroU32::MIN);
+    let fork_inode_id = InodeId::generate(CommitSeq(through_seq), NonZeroU32::MIN);
     let candidate = CommitCandidate::new(intent).with_merge(
         merge,
-        ChangeSeq(fork_point_seq),
+        CommitSeq(fork_point_seq),
         BTreeMap::from([(0, fork_inode_id)]),
     );
     publish(store, namespace_id, candidate).await

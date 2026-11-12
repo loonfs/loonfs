@@ -2,7 +2,7 @@
 
 use crate::common::*;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
-use loonfs::{ChangeSeq, EntryInodeKind, ErrorCode, MetadataCache, NamespaceId, SharedObjectStore};
+use loonfs::{CommitSeq, EntryInodeKind, ErrorCode, MetadataCache, NamespaceId, SharedObjectStore};
 use loonfs_core::limits::FOLD_AT_WAL_OBJECTS;
 use loonfs_objectstore::layout::DurableObjectFamily;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -273,7 +273,7 @@ fn runtime_cache_observes_head_advanced_by_another_runtime() {
         .stat_path_blocking(&namespace_id, "/docs/new")
         .expect("reader should observe external head advance");
     assert_eq!(stat.path, "/docs/new");
-    assert_eq!(stat.head_seq, ChangeSeq(2));
+    assert_eq!(stat.head_seq, CommitSeq(2));
     assert!(raw_store.wal_get_count() > 0);
 }
 
@@ -810,7 +810,7 @@ fn root_stat_and_list_work_immediately_after_namespace_create() {
     assert_eq!(root.path, "/");
     assert_eq!(root.inode_id, ROOT_INODE_ID);
     assert_eq!(root.inode_kind(), EntryInodeKind::Directory);
-    assert_eq!(root.head_seq, ChangeSeq(0));
+    assert_eq!(root.head_seq, CommitSeq(0));
 
     let entries = fs
         .list_path_blocking(&namespace_id, "/")

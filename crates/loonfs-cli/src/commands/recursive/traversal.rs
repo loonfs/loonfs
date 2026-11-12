@@ -12,7 +12,7 @@ use crate::render::write_stderr_warning;
 use futures::Stream;
 use loonfs_client::{ListOptions, ReadAt};
 use loonfs_types::{AbsolutePath, DisplayName, InodeId};
-use loonfs_types::{ChangeSeq, ListPathEntriesResponse, PathEntry, PathEntryKind};
+use loonfs_types::{CommitSeq, ListPathEntriesResponse, PathEntry, PathEntryKind};
 use std::ffi::OsStr;
 use std::fs::ReadDir;
 use std::iter::Peekable;
@@ -22,7 +22,7 @@ pub(super) enum TreeEntry<Source, Destination> {
     File(FileJob<Source, Destination>),
     /// A directory to create, by its destination path.
     Directory(Destination),
-    Head(ChangeSeq),
+    Head(CommitSeq),
     Failure(String, CliError),
 }
 
@@ -164,7 +164,7 @@ impl<Destination> RemoteListing<Destination> {
         }
     }
 
-    fn set_page(&mut self, page: ListPathEntriesResponse) -> ChangeSeq {
+    fn set_page(&mut self, page: ListPathEntriesResponse) -> CommitSeq {
         self.entries = page.entries.into_iter().peekable();
         self.next_cursor = page.next_cursor;
         page.head_seq
@@ -218,7 +218,7 @@ struct RemoteTree<'a, Destination> {
     /// at most `MAX_PATH_DEPTH + 1` listings, with one page each.
     listings: Vec<RemoteListing<Destination>>,
     last_directory: Option<ListedDirectory<Destination>>,
-    first_head: Option<ChangeSeq>,
+    first_head: Option<CommitSeq>,
 }
 
 /// Discovers the tree below `root` with one recursive listing, and lists each

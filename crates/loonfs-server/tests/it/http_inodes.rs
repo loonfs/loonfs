@@ -9,7 +9,7 @@ use loonfs_test_support::http::raw_agent;
 use loonfs_test_support::ids::{attribute_key, attribute_text, namespace_id, page_limit};
 use loonfs_types::ROOT_INODE_ID;
 use loonfs_types::{
-    ChangeSeq, DeleteDirectoryBehavior, DisplayName, EntryInodeKind, ErrorCode, ErrorResponse,
+    CommitSeq, DeleteDirectoryBehavior, DisplayName, EntryInodeKind, ErrorCode, ErrorResponse,
     InodeId, RevisionNo,
 };
 use serde_json::Value;
@@ -273,7 +273,7 @@ async fn http_inode_read_errors_use_identity_codes_and_root_is_nameless() {
             .client
             .stat_by_inode(
                 &namespace,
-                InodeId::generate(ChangeSeq(1_000), NonZeroU32::MIN),
+                InodeId::generate(CommitSeq(1_000), NonZeroU32::MIN),
             )
             .await
             .map(|_| ()),
@@ -281,7 +281,7 @@ async fn http_inode_read_errors_use_identity_codes_and_root_is_nameless() {
             .client
             .read_file_revision_by_inode(
                 &namespace,
-                InodeId::generate(ChangeSeq(1_000), NonZeroU32::MIN),
+                InodeId::generate(CommitSeq(1_000), NonZeroU32::MIN),
                 RevisionNo(1),
             )
             .await
@@ -528,7 +528,7 @@ async fn http_inode_children_errors_use_directory_identity_codes() {
             .client
             .list_by_inode(
                 &namespace,
-                InodeId::generate(ChangeSeq(1_000), NonZeroU32::MIN),
+                InodeId::generate(CommitSeq(1_000), NonZeroU32::MIN),
             )
             .page()
             .await,

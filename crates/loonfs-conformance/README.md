@@ -19,7 +19,7 @@ The nineteen cases cover:
 - mutations by inode (`inode_mutations`)
 - reads, copies, restores, and updates by inode (`inode_addressing`)
 - snapshot creation, reads, extension, and deletion (`snapshots`)
-- a read consistency on the trash and revision listings and the download grants (`read_consistency`)
+- a read consistency on the trash and revision listings and the download requests (`read_consistency`)
 - change feed identity fields
 - change feed events of a kind that the client doesn't define (`unknown_event_kinds`)
 - path entries of an inode kind that the client doesn't define (`unknown_inode_kinds`)

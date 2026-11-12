@@ -139,7 +139,7 @@ async fn snapshot_files(
 }
 
 /// A namespace with the shapes an enumeration has to get right: nested
-/// directories, a replaced file, a deleted subtree, an undeleted file, and a
+/// directories, a replaced file, a deleted subtree, a restored file, and a
 /// directory holding no files at all.
 async fn build_mixed_namespace(fs: &TestRuntime, namespace_id: &NamespaceId) {
     fs.create_namespace(namespace_id, &loonfs_test_support::test_actor())
@@ -198,7 +198,7 @@ async fn build_mixed_namespace(fs: &TestRuntime, namespace_id: &NamespaceId) {
         .await
         .expect("delete subtree");
 
-    // An undeleted file: visible again, at a new path.
+    // A restored file: visible again, at a new path.
     let recovered_inode_id = fs
         .stat(namespace_id, "/notes/recovered.txt")
         .await
@@ -210,14 +210,14 @@ async fn build_mixed_namespace(fs: &TestRuntime, namespace_id: &NamespaceId) {
         .expect("delete file")
         .committed_seq;
     namespace
-        .undelete_with_options(
+        .restore_deleted_with_options(
             recovered_inode_id,
             deletion_seq,
             &loonfs_test_support::test_actor(),
-            &undelete_at("/notes/restored.txt"),
+            &restore_deleted_at("/notes/restored.txt"),
         )
         .await
-        .expect("undelete file");
+        .expect("restore file");
 }
 
 #[tokio::test]
@@ -310,7 +310,7 @@ async fn checkpoint_enumeration_answers_the_state_it_pinned() {
             "/docs/deep/charlie.txt",
             "/notes/restored.txt",
         ]),
-        "the pinned state should hold the undeleted file and neither the \
+        "the pinned state should hold the restored file and neither the \
          deleted subtree nor anything written later"
     );
 
@@ -671,14 +671,14 @@ async fn stat_current_files_by_inode_answers_the_whole_matrix_in_input_order() {
         .expect("delete file")
         .committed_seq;
     namespace_writer
-        .undelete_with_options(
+        .restore_deleted_with_options(
             recovered,
             recovered_deletion_seq,
             &loonfs_test_support::test_actor(),
-            &undelete_at("/m/recovered-again.txt"),
+            &restore_deleted_at("/m/recovered-again.txt"),
         )
         .await
-        .expect("undelete file");
+        .expect("restore file");
 
     let unknown = InodeId(999_999);
     let requested = vec![

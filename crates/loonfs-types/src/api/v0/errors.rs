@@ -4,7 +4,7 @@ use super::merges::{MergeBound, MergeConflict};
 use crate::control::WriterBlock;
 use crate::ErrorCode;
 use crate::{
-    AccessRevisionNo, AttributesRevisionNo, BindingVersion, ChangeSeq, CommitFingerprint, CommitId,
+    AccessRevisionNo, AttributesRevisionNo, BindingVersion, CommitFingerprint, CommitId, CommitSeq,
     InodeId, NamespaceId, RevisionNo, WriterEpoch, WriterId,
 };
 use serde::{Deserialize, Serialize};
@@ -147,30 +147,30 @@ pub struct ErrorDetails {
     /// The `after_seq` value from the change feed request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub after_seq: Option<ChangeSeq>,
+    pub after_seq: Option<CommitSeq>,
     /// The `from_seq` value from the diff request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub from_seq: Option<ChangeSeq>,
+    pub from_seq: Option<CommitSeq>,
     /// The fork point of the fork whose commits a merge applies, which is the sequence of this
     /// namespace that the fork was made at.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub fork_point_seq: Option<ChangeSeq>,
+    pub fork_point_seq: Option<CommitSeq>,
     /// The namespace's retention floor. A change feed request can set `after_seq` to this sequence
     /// or any later one, and the feed returns the changes committed after it. A diff request can
     /// set `from_seq` to this sequence or any later one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub retention_floor_seq: Option<ChangeSeq>,
-    /// The deletion sequence that the undelete expected to be active.
+    pub retention_floor_seq: Option<CommitSeq>,
+    /// The deletion sequence that the restore expected to be active.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub expected_deletion_seq: Option<ChangeSeq>,
+    pub expected_deletion_seq: Option<CommitSeq>,
     /// The deletion sequence that is actually active for the inode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub actual_deletion_seq: Option<ChangeSeq>,
+    pub actual_deletion_seq: Option<CommitSeq>,
     /// The fork of a refused merge: the fork whose range conflicts, or whose range starts below
     /// its own retention floor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -180,16 +180,16 @@ pub struct ErrorDetails {
     /// or the fork point for the fork's first merge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub expected_after_seq: Option<ChangeSeq>,
+    pub expected_after_seq: Option<CommitSeq>,
     /// The fork sequence that the merge started after.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub actual_after_seq: Option<ChangeSeq>,
+    pub actual_after_seq: Option<CommitSeq>,
     /// The fork sequence that a merge's range starts after, when that start is below the fork's
     /// own retention floor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub source_after_seq: Option<ChangeSeq>,
+    pub source_after_seq: Option<CommitSeq>,
     /// The number of inodes whose change a refused merge can't apply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
@@ -206,15 +206,15 @@ pub struct ErrorDetails {
     /// fork's commits through it fits. It's absent when no shorter range fits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub split_at_seq: Option<ChangeSeq>,
+    pub split_at_seq: Option<CommitSeq>,
     /// The head sequence that the request required.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub expected_head_seq: Option<ChangeSeq>,
+    pub expected_head_seq: Option<CommitSeq>,
     /// The namespace's actual head sequence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub actual_head_seq: Option<ChangeSeq>,
+    pub actual_head_seq: Option<CommitSeq>,
     /// For `range_not_satisfiable`, the size in bytes of the file that the range was requested
     /// from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -229,7 +229,7 @@ pub struct CommittedReceipt {
     /// The sequence that `commit_id` was already committed at. The server includes it when a
     /// durable commit receipt records that commit.
     #[cfg_attr(feature = "openapi", schema(required = false))]
-    pub committed_seq: ChangeSeq,
+    pub committed_seq: CommitSeq,
     /// The fingerprint of the mutation that was committed under `commit_id`. This field is present
     /// exactly when `committed_seq` is present.
     #[cfg_attr(feature = "openapi", schema(value_type = String, required = false))]

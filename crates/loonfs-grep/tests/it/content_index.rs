@@ -19,7 +19,7 @@ use loonfs_test_support::ids::{first_page, nonzero_usize};
 use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
 use loonfs_types::format::segment_blocks::{decode_data_block_rows, decode_index_block};
 use loonfs_types::{
-    AbsolutePath, ChangeSeq, FileContent, GrepRequest, GrepScope, InodeId, RevisionNo, RunNo,
+    AbsolutePath, CommitSeq, FileContent, GrepRequest, GrepScope, InodeId, RevisionNo, RunNo,
 };
 use std::assert_matches;
 use std::collections::{BTreeMap, BTreeSet};
@@ -326,7 +326,7 @@ impl ContentFixture {
     /// floor can then pass every commit made so far. Each call moves the
     /// clock another hour, which does no harm because this clock stamps every
     /// commit the fixture makes.
-    pub(crate) async fn advance_retention_floor(&self) -> ChangeSeq {
+    pub(crate) async fn advance_retention_floor(&self) -> CommitSeq {
         self.maintenance
             .maintain_metadata_with_options(
                 &self.namespace_id,

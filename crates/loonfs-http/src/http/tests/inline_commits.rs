@@ -3,7 +3,7 @@
 use super::*;
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_test_support::stores::{RecordedOperation, RecordingStore};
-use loonfs_types::FilesystemChange;
+use loonfs_types::FilesystemEvent;
 use loonfs_types::{
     Commit, ContentRef, FEATURE_COMMIT_INLINE_CONTENT,
     LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES_PER_OPERATION,
@@ -141,7 +141,7 @@ fn inline_request(commit_id: &str, path: &str, encoded: &str) -> Value {
 fn created_content(response: &Value) -> (InodeId, ContentRef) {
     let commit: Commit = serde_json::from_value(response.clone()).expect("commit");
     match &commit.events[0] {
-        FilesystemChange::FileCreated {
+        FilesystemEvent::FileCreated {
             inode_id,
             content_ref,
             ..

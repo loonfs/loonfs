@@ -25,7 +25,7 @@ use loonfs_types::{
     format::manifest::{
         decode_namespace_manifest_json, encode_namespace_manifest_json, MetadataRowFamily,
     },
-    AbsolutePath, ChangeSeq, CommitId, DestinationBehavior, ManifestNo, NamespaceId, PinId,
+    AbsolutePath, CommitId, CommitSeq, DestinationBehavior, ManifestNo, NamespaceId, PinId,
 };
 use std::assert_matches;
 use std::sync::Arc;
@@ -384,8 +384,8 @@ async fn a_created_namespace_reads_manifest_one_before_its_first_fold() {
         .await
         .expect("bootstrap namespace");
     assert_eq!(created.namespace_id, namespace_id);
-    assert_eq!(created.head_seq, ChangeSeq(0));
-    assert_eq!(created.retention_floor_seq, ChangeSeq(0));
+    assert_eq!(created.head_seq, CommitSeq(0));
+    assert_eq!(created.retention_floor_seq, CommitSeq(0));
     assert_eq!(
         namespace_keys(&store, &namespace_id).await,
         vec![
@@ -407,7 +407,7 @@ async fn a_created_namespace_reads_manifest_one_before_its_first_fold() {
         .await
         .expect("status");
     assert_eq!(status.current_manifest_no, ManifestNo(1));
-    assert_eq!(status.retention_floor_seq, ChangeSeq(0));
+    assert_eq!(status.retention_floor_seq, CommitSeq(0));
 
     NamespaceFixture::new(&store, &namespace_id, &context)
         .write_file_bytes("/docs/first.txt", b"hello", Some(&commit_id("first-write")))
@@ -583,15 +583,15 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
         .expect("create source checkpoint before fork");
 
     let source_head = head_state(&store, &source_namespace_id).await;
-    assert_eq!(source_head.seq, ChangeSeq(1));
+    assert_eq!(source_head.seq, CommitSeq(1));
     store.reset();
     store.inner().reset();
     let forked = fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
         .await
         .expect("fork namespace");
     assert_eq!(forked.namespace_id, clone_namespace_id);
-    assert_eq!(forked.head_seq, ChangeSeq(1));
-    assert_eq!(forked.retention_floor_seq, ChangeSeq(1));
+    assert_eq!(forked.head_seq, CommitSeq(1));
+    assert_eq!(forked.retention_floor_seq, CommitSeq(1));
     assert_eq!(
         store.count(OperationSelector::Read),
         0,
@@ -609,26 +609,26 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
 
     let clone_head = head_state(&store, &clone_namespace_id).await;
 
-    assert_eq!(clone_head.seq, ChangeSeq(1));
+    assert_eq!(clone_head.seq, CommitSeq(1));
     let clone_status = namespace_store(&store, &clone_namespace_id)
         .load_diagnostics()
         .await
         .expect("clone status");
     assert_eq!(
         clone_status.retention_floor_seq,
-        ChangeSeq(1),
+        CommitSeq(1),
         "a fork's first manifest starts its retention floor at the fork point"
     );
     let fork_basis = clone_head.fork_basis.clone().expect("fork basis");
     assert_eq!(fork_basis.manifest.owner_namespace_id, source_namespace_id);
-    assert_eq!(fork_basis.manifest.head_seq, ChangeSeq(1));
+    assert_eq!(fork_basis.manifest.head_seq, CommitSeq(1));
     assert_eq!(
         fork_basis.source_pin_id.manifest_no(),
         fork_basis.manifest.manifest_no
     );
 
     let source_record = load_pin(&store, &source_namespace_id, &fork_basis.source_pin_id).await;
-    assert_eq!(source_record.head_seq, ChangeSeq(1));
+    assert_eq!(source_record.head_seq, CommitSeq(1));
     // The fork basis and pin must use the same manifest.
     assert_eq!(source_record.manifest(), fork_basis.manifest);
     assert_matches!(
@@ -680,11 +680,11 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
             &inherited_ref.content_id
         )]
     );
-    let stale_clone_changes = list_changes_after(&store, &clone_namespace_id, ChangeSeq(0))
+    let stale_clone_changes = list_changes_after(&store, &clone_namespace_id, CommitSeq(0))
         .await
         .expect_err("old cursor");
     assert_eq!(stale_clone_changes.code(), ErrorCode::RebootstrapRequired);
-    let empty_clone_changes = list_changes_after(&store, &clone_namespace_id, ChangeSeq(1))
+    let empty_clone_changes = list_changes_after(&store, &clone_namespace_id, CommitSeq(1))
         .await
         .expect("empty changes");
     assert!(empty_clone_changes.changes.is_empty());
@@ -722,7 +722,7 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
     )
     .await
     .expect("clone replace");
-    assert_eq!(clone_write.committed_seq, ChangeSeq(2));
+    assert_eq!(clone_write.committed_seq, CommitSeq(2));
     // An upload in a fork is stored under the prefix of its source's pool,
     // so the fork's own prefix stores no content and no upload records.
     let pool_id = &forked.pool_id;
@@ -750,11 +750,11 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
         b"clone-after-fork"
     );
 
-    let clone_changes = list_changes_after(&store, &clone_namespace_id, ChangeSeq(1))
+    let clone_changes = list_changes_after(&store, &clone_namespace_id, CommitSeq(1))
         .await
         .expect("clone changes");
     assert_eq!(clone_changes.changes.len(), 1);
-    assert_eq!(clone_changes.changes[0].committed_seq, ChangeSeq(2));
+    assert_eq!(clone_changes.changes[0].committed_seq, CommitSeq(2));
 
     // The target's own first fold inherits the source's segments by
     // reference and adds only its own delta run.
@@ -932,7 +932,7 @@ async fn fork_clone_survives_source_delete() {
         .expect("delete source");
 
     let clone_head = head_state(&store, &clone).await;
-    assert_eq!(clone_head.seq, ChangeSeq(1));
+    assert_eq!(clone_head.seq, CommitSeq(1));
     assert_eq!(
         read_file_bytes(&store, &clone, "/docs/shared.txt")
             .await
@@ -1261,7 +1261,7 @@ async fn namespace_delete_blocks_reads_writes_and_forks() {
     let engine = namespace_engine(&store, &namespace_id, &context);
     let stale = engine
         .delete_namespace(loonfs_core::DeleteNamespaceOptions {
-            expected_head_seq: Some(ChangeSeq(0)),
+            expected_head_seq: Some(CommitSeq(0)),
         })
         .await
         .expect_err("stale precondition");
@@ -1271,7 +1271,7 @@ async fn namespace_delete_blocks_reads_writes_and_forks() {
         .delete_namespace(loonfs_core::DeleteNamespaceOptions::default())
         .await
         .expect("delete namespace");
-    assert_eq!(response.head_seq, ChangeSeq(1));
+    assert_eq!(response.head_seq, CommitSeq(1));
 
     // Reads, commits, status, repeat deletes, and forks observe the deleted head.
     let read = resolve_path(&store, &namespace_id, "/")

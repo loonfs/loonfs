@@ -7,12 +7,13 @@ use crate::args::{
 };
 use crate::commands::context::{
     create_directory_tolerating_existing, namespace_path, render_target, shell_quote, Invocation,
-    NamespaceContext, ProfileSource, RemoteDirectoryOutcome, RootPath, UndeleteHint,
+    NamespaceContext, ProfileSource, RemoteDirectoryOutcome, RestoreDeletedHint, RootPath,
 };
 use crate::commands::output::{CommandData, CommandFailure, CommandOutput};
 use crate::error::{CliError, Result};
 use loonfs_client::{
-    CommitOptions, CreateDirectoryOptions, DeleteOptions, UndeleteDestination, UndeleteOptions,
+    CommitOptions, CreateDirectoryOptions, DeleteOptions, RestoreDeletedDestination,
+    RestoreDeletedOptions,
 };
 use loonfs_types::{DeleteDirectoryBehavior, DestinationBehavior, ErrorCode};
 
@@ -82,7 +83,7 @@ pub(crate) async fn run_filesystem_rm(
     // printed command restores in place with no destination — and keeps
     // working even if the enclosing directories are renamed before the
     // paste.
-    let recovery_command = UndeleteHint::new(
+    let recovery_command = RestoreDeletedHint::new(
         &context,
         &invocation.config,
         ProfileSource::from_selectors(&invocation.selectors),
@@ -155,19 +156,21 @@ pub(crate) async fn run_filesystem_undelete(
         .map_err(|error| context.fail(error))?;
     let commit = commit_options(&args.commit);
     let deletion_seq = args.deletion_seq;
-    let destination = spec.as_ref().map_or(UndeleteDestination::Recorded, |spec| {
-        UndeleteDestination::Path(spec.absolute_path().clone())
-    });
+    let destination = spec
+        .as_ref()
+        .map_or(RestoreDeletedDestination::Recorded, |spec| {
+            RestoreDeletedDestination::Path(spec.absolute_path().clone())
+        });
     let result = context
         .profile
         .target
         .client
-        .undelete_with_options(
+        .restore_deleted_with_options(
             context.namespace(),
             args.inode,
             deletion_seq,
             context.actor(),
-            &UndeleteOptions {
+            &RestoreDeletedOptions {
                 commit,
                 destination,
             },

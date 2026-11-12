@@ -31,7 +31,7 @@ use loonfs_types::format::wal::WalDelta;
 use loonfs_types::StdMonotonicTimer;
 use loonfs_types::{
     AbsolutePath, AccessGrants, AccessRevisionNo, ActorId, AttributeKey, AttributeValue,
-    Attributes, AttributesRevisionNo, ChangeSeq, Checksum, CommitId, ContentId, ContentRef,
+    Attributes, AttributesRevisionNo, Checksum, CommitId, CommitSeq, ContentId, ContentRef,
     DisplayName, InodeId, InodeKind, NameKey, PageRequest, RevisionNo, ROOT_INODE_ID,
 };
 use std::collections::{BTreeSet, HashMap};
@@ -53,7 +53,7 @@ struct NormalizedDirectoryBinding {
 struct NormalizedRevision {
     inode_id: InodeId,
     revision_no: RevisionNo,
-    committed_seq: ChangeSeq,
+    committed_seq: CommitSeq,
     commit_id: CommitId,
     committed_at_ms: u64,
     committed_by: ActorId,
@@ -218,7 +218,7 @@ fn content_ref(seed: &str) -> ContentRef {
 
 fn position(seq: u64, delta_index: u32) -> DeltaPosition {
     DeltaPosition {
-        seq: ChangeSeq(seq),
+        seq: CommitSeq(seq),
         delta_index,
     }
 }
@@ -562,9 +562,9 @@ fn update_access(
     }]
 }
 
-/// Undelete as the commit path materializes it: revoke the exact deletion
+/// A restore of a deleted item as the commit path materializes it: revoke the exact deletion
 /// position, then re-bind the recovered inode.
-fn undelete(
+fn restore_deleted(
     delta_index: u32,
     inode_id: InodeId,
     kind: InodeKind,
@@ -769,7 +769,7 @@ fn metadata_apply_matches_model_for_delete_subtree() {
 }
 
 #[test]
-fn metadata_apply_matches_model_for_undelete() {
+fn metadata_apply_matches_model_for_a_restore_of_a_deleted_file() {
     assert_core_matches_model(
         &["/docs", "/docs/Readme.TXT"],
         &[
@@ -793,7 +793,7 @@ fn metadata_apply_matches_model_for_undelete() {
             ),
             // The revoke names the delete's own position — the third commit,
             // second delta — which differs from where the revoke itself is committed.
-            undelete(
+            restore_deleted(
                 0,
                 InodeId(3),
                 InodeKind::File,
@@ -916,7 +916,7 @@ fn metadata_apply_matches_model_for_copy_attribute_inheritance() {
 }
 
 #[test]
-fn metadata_apply_matches_model_for_delete_then_undelete_with_attributes() {
+fn metadata_apply_matches_model_for_delete_then_restore_with_attributes() {
     assert_core_matches_model(
         &["/Readme.TXT"],
         &[
@@ -938,7 +938,7 @@ fn metadata_apply_matches_model_for_delete_then_undelete_with_attributes() {
                 position(1, 1),
                 0,
             ),
-            undelete(
+            restore_deleted(
                 0,
                 InodeId(2),
                 InodeKind::File,
@@ -952,7 +952,7 @@ fn metadata_apply_matches_model_for_delete_then_undelete_with_attributes() {
 }
 
 #[test]
-fn metadata_apply_matches_model_for_slot_reuse_across_renames_delete_and_undelete() {
+fn metadata_apply_matches_model_for_slot_reuse_across_renames_delete_and_restore() {
     let file = InodeKind::File;
     let docs = InodeId(2);
     let model = assert_core_matches_model(
@@ -993,8 +993,8 @@ fn metadata_apply_matches_model_for_slot_reuse_across_renames_delete_and_undelet
                 content_ref("content-2"),
                 5,
             ),
-            // The undelete takes the slot the first rename freed.
-            undelete(0, InodeId(3), file, docs, "report.txt", position(5, 1), 1),
+            // The restore takes the slot the first rename freed.
+            restore_deleted(0, InodeId(3), file, docs, "report.txt", position(5, 1), 1),
             // One commit unbinds `final.txt` and binds it again; the later
             // delta wins.
             vec![
@@ -1009,7 +1009,7 @@ fn metadata_apply_matches_model_for_slot_reuse_across_renames_delete_and_undelet
     let resolved = |path: &str, seq: u64| {
         let path = AbsolutePath::parse(path).expect("valid path");
         match model
-            .resolve_path(&path, ChangeSeq(seq))
+            .resolve_path(&path, CommitSeq(seq))
             .expect("the model should answer for a state it accepted")
         {
             ResolvedPath::Found { inode, .. } => Some(inode.inode_id),
@@ -1058,7 +1058,7 @@ fn metadata_apply_matches_model_for_a_hidden_descendant_addressed_by_inode() {
                 0,
             ),
             create_directory(0, InodeId(5), ROOT_INODE_ID, "projects", 4),
-            undelete(
+            restore_deleted(
                 0,
                 InodeId(2),
                 directory,
@@ -1072,7 +1072,7 @@ fn metadata_apply_matches_model_for_a_hidden_descendant_addressed_by_inode() {
 
     // The descendant keeps its binding under the deleted root, so only the
     // tombstone on its ancestor hides it.
-    for seq in [ChangeSeq(4), ChangeSeq(5)] {
+    for seq in [CommitSeq(4), CommitSeq(5)] {
         let hidden = model
             .visible_inode(notes, seq)
             .expect("the model should answer for a state it accepted");
@@ -1090,7 +1090,7 @@ fn metadata_apply_matches_model_for_a_hidden_descendant_addressed_by_inode() {
         assert!(listing.is_empty(), "listing of inode `3` at seq {seq}");
     }
     let restored = model
-        .visible_inode(notes, ChangeSeq(6))
+        .visible_inode(notes, CommitSeq(6))
         .expect("the model should answer for a state it accepted");
     assert_eq!(restored.map(|inode| inode.inode_id), Some(notes));
 }
@@ -1406,7 +1406,7 @@ const RETENTION_HISTORY: [RetentionStep; 9] = [
 
 /// The scenario's retention floor, at the deletion of `/a`, so that deletion
 /// expires and the later deletion of `/b` stays recoverable.
-const RETENTION_FLOOR: ChangeSeq = ChangeSeq(5);
+const RETENTION_FLOOR: CommitSeq = CommitSeq(5);
 
 /// The rows of `/a` and `/a/one.txt`, which compaction removes once a commit
 /// after the floor advance acknowledges the floor.
@@ -1455,7 +1455,7 @@ async fn reads_at_or_above_the_retention_floor_match_the_model_after_compaction(
             statistics.inode_record_count,
             kept_rows + expired_inodes
         );
-        assert_head_reads_match_model(&store, &namespace_id, ChangeSeq(head_seq)).await;
+        assert_head_reads_match_model(&store, &namespace_id, CommitSeq(head_seq)).await;
     }
 }
 
@@ -1485,7 +1485,7 @@ async fn commit_and_compact_at_the_floor(
     );
     for (index, step) in steps.iter().enumerate() {
         commit_retention_step(store, namespace_id, *step, &context).await;
-        if ChangeSeq(u64::try_from(index + 1).expect("seq")) == RETENTION_FLOOR {
+        if CommitSeq(u64::try_from(index + 1).expect("seq")) == RETENTION_FLOOR {
             maintenance.fold_wal().await.expect("fold to the floor");
             let advanced = maintenance
                 .advance_retention_floor(loonfs_core::RetentionTarget::Seq(RETENTION_FLOOR))
@@ -1569,7 +1569,7 @@ struct EntryAnswer {
 async fn assert_head_reads_match_model(
     store: &LocalFsStore,
     namespace_id: &loonfs_types::NamespaceId,
-    head_seq: ChangeSeq,
+    head_seq: CommitSeq,
 ) {
     const ACCEPTED: &str = "the model should answer for a state it accepted";
     let context = crate::common::read_context(store, namespace_id).await;
@@ -1711,7 +1711,7 @@ fn durable_entry(entry: loonfs_types::PathEntry) -> EntryAnswer {
 fn model_entry(
     model: &ModelMetadataState,
     inode_id: InodeId,
-    seq: ChangeSeq,
+    seq: CommitSeq,
 ) -> Option<EntryAnswer> {
     let inode = model
         .visible_inode(inode_id, seq)
@@ -1745,7 +1745,7 @@ fn model_entry(
 
 fn core_bootstrap_state() -> CoreMetadataState {
     CoreMetadataState::default().apply_committed_wal_deltas(
-        ChangeSeq(0),
+        CommitSeq(0),
         &loonfs_types::format::control::genesis_commit_id(),
         &ActorId::loonfs(),
         4_000,
@@ -1784,7 +1784,7 @@ fn assert_attributed_commits_match_model(
     let mut model_state = model_bootstrap_state();
 
     for (index, (actor, committed_at_ms, deltas)) in commits.iter().enumerate() {
-        let seq = ChangeSeq(u64::try_from(index + 1).expect("seq"));
+        let seq = CommitSeq(u64::try_from(index + 1).expect("seq"));
         let commit_id =
             CommitId::parse(format!("c_differential_{index}")).expect("valid commit id");
         core_state =
@@ -1795,7 +1795,7 @@ fn assert_attributed_commits_match_model(
         assert_answers_match(&core_state, &model_state, &questions, seq);
     }
     for seq in 0..u64::try_from(commits.len()).expect("seq") {
-        assert_answers_match(&core_state, &model_state, &questions, ChangeSeq(seq));
+        assert_answers_match(&core_state, &model_state, &questions, CommitSeq(seq));
     }
 
     let published: BTreeSet<_> = core_state
@@ -1863,7 +1863,7 @@ fn assert_answers_match(
     core: &CoreMetadataState,
     model: &ModelMetadataState,
     questions: &Questions,
-    seq: ChangeSeq,
+    seq: CommitSeq,
 ) {
     const ACCEPTED: &str = "the model should answer for a state it accepted";
     for &inode_id in &questions.inodes {
@@ -1913,7 +1913,7 @@ fn assert_answers_match(
 fn core_listing(
     core: &CoreMetadataState,
     parent_inode_id: InodeId,
-    seq: ChangeSeq,
+    seq: CommitSeq,
 ) -> Vec<ListingEntry> {
     let name_keys: BTreeSet<&NameKey> = core
         .direntry_binds()
@@ -1942,7 +1942,7 @@ fn core_listing(
 fn model_current_revision(
     model: &ModelMetadataState,
     inode_id: InodeId,
-    seq: ChangeSeq,
+    seq: CommitSeq,
 ) -> Option<ListedRevision> {
     model
         .revisions
@@ -1960,7 +1960,7 @@ fn model_current_revision(
 fn model_listing(
     model: &ModelMetadataState,
     parent_inode_id: InodeId,
-    seq: ChangeSeq,
+    seq: CommitSeq,
 ) -> Vec<ListingEntry> {
     model
         .list_directory(parent_inode_id, seq)

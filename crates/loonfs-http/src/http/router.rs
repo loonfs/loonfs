@@ -14,7 +14,7 @@ use super::handlers_inodes::{
     get_file_content_by_inode, get_file_revision_content_by_inode, get_inode,
     list_file_revisions_by_inode, list_inode_children,
 };
-use super::handlers_maintenance::{run_maintenance, run_pool_maintenance};
+use super::handlers_maintenance::{run_maintenance_job, run_pool_maintenance_job};
 use super::handlers_namespace::{
     create_namespace, delete_namespace, fork_namespace, get_capabilities, get_namespace,
     get_namespace_diagnostics, get_next_merge_range, merge_fork, rebase_fork,
@@ -190,8 +190,8 @@ routes! {
     "/v0/maintenance/namespaces/{namespace_id}/checkpoints/{checkpoint_id}" => {
         GET get_checkpoint,
     },
-    "/v0/maintenance/namespaces/{namespace_id}/runs" => { POST run_maintenance [deadline_exempt] },
-    "/v0/maintenance/pools/{pool_id}/runs" => { POST run_pool_maintenance [deadline_exempt] },
+    "/v0/maintenance/namespaces/{namespace_id}/jobs" => { POST run_maintenance_job [deadline_exempt] },
+    "/v0/maintenance/pools/{pool_id}/jobs" => { POST run_pool_maintenance_job [deadline_exempt] },
     // The one maintenance route whose subject is the store rather than a
     // namespace, so it sits beside them rather than under one.
     "/v0/maintenance/store/probe" => { POST probe_store [deadline_exempt] },

@@ -106,7 +106,7 @@ for (const fixture of cases) {
                     expires_at_ms: 2000000000000,
                     checksum_algorithm: fixture.algorithm,
                     ...(fixture.mode === "direct_multipart" ? { part_size_bytes: 4 } : {}),
-                    ...(fixture.mode === "direct_put" ? { access } : {}),
+                    ...(fixture.mode === "direct_put" ? { transfer: access } : {}),
                 };
             } else if (path.endsWith("/parts")) {
                 const { parts } = await request.json();
@@ -114,7 +114,7 @@ for (const fixture of cases) {
                 assert.ok(position <= bodies.length * 4 + 4, "send a part before reading the next");
                 value = {
                     ...session,
-                    parts: [{ part_number: parts[0].part_number, access }],
+                    parts: [{ part_number: parts[0].part_number, transfer: access }],
                 };
             } else if (path === "/object" || path.endsWith("/content")) {
                 counts.payload++;

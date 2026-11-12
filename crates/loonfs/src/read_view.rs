@@ -9,7 +9,7 @@ use crate::pagers::{
 use crate::pinned_read::PinnedRead;
 use crate::runtime_core::{classify_read_result, RuntimeCore};
 use crate::{
-    ChangeSeq, ContentRef, CoreError, CurrentFileState, DownloadOptions, Error, FileBytes,
+    CommitSeq, ContentRef, CoreError, CurrentFileState, DownloadOptions, Error, FileBytes,
     FileContentStream, InodeId, ListInodeChildrenResponse, ListOptions, ListPathEntriesResponse,
     NamespaceId, PathEntry, PinId, ReadAt, ReadFileStreamOptions, Result, RevisionNo,
     SharedObjectStore, StatOptions,
@@ -57,7 +57,7 @@ impl ReadSource {
 /// its head, so the head test does work only for a view of the live head.
 pub(crate) fn validate_view_directory_cursor(
     cursor: Option<&ListPageCursor>,
-    captured_seq: ChangeSeq,
+    captured_seq: CommitSeq,
     pin_id: Option<&PinId>,
 ) -> Result<()> {
     let Some(cursor) = cursor else {
@@ -113,7 +113,7 @@ impl ReadView {
 
     /// Returns the head sequence this view captured, or the sequence that a
     /// view from [`Self::at_seq`] reads at.
-    pub fn head_seq(&self) -> ChangeSeq {
+    pub fn head_seq(&self) -> CommitSeq {
         self.pinned.head_seq()
     }
 
@@ -125,7 +125,7 @@ impl ReadView {
     /// a snapshot do. A sequence above the head, or a view of a snapshot,
     /// returns `invalid_request`, and a sequence below the retention floor
     /// returns `rebootstrap_required`.
-    pub async fn at_seq(&self, seq: ChangeSeq) -> Result<ReadView> {
+    pub async fn at_seq(&self, seq: CommitSeq) -> Result<ReadView> {
         if let Some(snapshot_id) = self.snapshot_id() {
             return Err(Error::InvalidRequest {
                 message: format!(
@@ -218,7 +218,7 @@ impl ReadView {
 
     /// Lists the change feed after `after_seq` through this view's captured
     /// head.
-    pub fn list_changes(&self, after_seq: ChangeSeq) -> ChangesPager {
+    pub fn list_changes(&self, after_seq: CommitSeq) -> ChangesPager {
         loonfs_types::Pager::with_state(
             (self.clone(), after_seq),
             |(view, after_seq), request: PageRequest<ChangeFeedPosition>| async move {

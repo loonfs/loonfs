@@ -29,7 +29,7 @@ pub const FEATURE_UPLOADS_DIRECT_PUT: &str = "filesystem.uploads.direct_put";
 /// Independent of [`FEATURE_UPLOADS_DIRECT_PUT`]: a provider may sign
 /// whole-object writes without having an S3-style multipart API at all.
 pub const FEATURE_UPLOADS_DIRECT_MULTIPART: &str = "filesystem.uploads.direct_multipart";
-/// Gates download grants that are authorized with short-lived presigned URLs.
+/// Gates downloads through short-lived presigned URLs.
 ///
 /// A deployment that offers any direct transfer advertises this one, because
 /// letting a client write an object too large to proxy back means being able to
@@ -84,7 +84,7 @@ limit_keys! {
     /// It is large enough for the maximum number of multipart entries.
     LIMIT_UPLOAD_COMPLETE_MAX_REQUEST_BODY_BYTES = "upload.complete.max_request_body_bytes";
     /// Advisory limit: the largest file content one service-proxied read will stream.
-    /// The check is against the whole file, so a larger file needs a download grant.
+    /// The check is against the whole file, so a larger file needs a presigned URL.
     LIMIT_DOWNLOAD_SERVICE_PROXIED_MAX_CONTENT_BYTES = "download.service_proxied.max_content_bytes";
     /// Advisory limit: how many service-proxied upload requests a serving process
     /// streams at once. The cap is shared by all callers and is not a per-caller

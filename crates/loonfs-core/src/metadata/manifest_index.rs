@@ -19,14 +19,14 @@ use loonfs_types::format::manifest::lookup_keys;
 use loonfs_types::format::manifest::{MergeIndexRecord, MetadataRow, MetadataRowFamily};
 use loonfs_types::format::segment_blocks::string_prefix_upper_bound;
 use loonfs_types::format::wal::WalCommitPayload;
-use loonfs_types::{ChangeSeq, CommitId, InodeId, NameKey, NamespaceId, RevisionNo};
+use loonfs_types::{CommitId, CommitSeq, InodeId, NameKey, NamespaceId, RevisionNo};
 
 /// Returns the inode's row if the inode was created at or below
 /// `visible_seq`.
 pub(super) async fn inode_at_seq<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     inode_id: InodeId,
-    visible_seq: ChangeSeq,
+    visible_seq: CommitSeq,
 ) -> Result<Option<InodeRecord>> {
     let key = lookup_keys::inode_key(inode_id);
     Ok(segments
@@ -39,7 +39,7 @@ pub(super) async fn inode_at_seq<S: ObjectStore + ?Sized>(
 
 pub(super) async fn commit_at_seq<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
-    seq: ChangeSeq,
+    seq: CommitSeq,
 ) -> Result<Option<WalCommitPayload>> {
     let key = lookup_keys::commit_row_key(seq);
     segments
@@ -53,7 +53,7 @@ pub(super) async fn commit_at_seq<S: ObjectStore + ?Sized>(
 /// that takes the records' heap bytes to `max_bytes` or past.
 pub(crate) async fn commits_after_page<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
-    after_seq: ChangeSeq,
+    after_seq: CommitSeq,
     limit: usize,
     max_bytes: usize,
 ) -> Result<Vec<WalCommitPayload>> {
@@ -109,7 +109,7 @@ pub(super) async fn direntry_binds_for_parent_name<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     parent_inode_id: InodeId,
     name_key: &NameKey,
-    visible_seq: ChangeSeq,
+    visible_seq: CommitSeq,
 ) -> Result<Vec<DirentryBindingRecord>> {
     newest_edge_rows(
         segments,
@@ -128,7 +128,7 @@ pub(super) async fn direntry_binds_for_parent_name<S: ObjectStore + ?Sized>(
 pub(super) async fn direntry_binds_for_child<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     child_inode_id: InodeId,
-    visible_seq: ChangeSeq,
+    visible_seq: CommitSeq,
 ) -> Result<Vec<DirentryBindingRecord>> {
     newest_edge_rows(
         segments,
@@ -187,7 +187,7 @@ async fn newest_edge_rows<S: ObjectStore + ?Sized>(
     filter_probe: &str,
     edge_end: fn(&DirentryBindingRecord) -> String,
     blocks_per_refill: BlocksPerRefill,
-    visible_seq: ChangeSeq,
+    visible_seq: CommitSeq,
 ) -> Result<Vec<DirentryBindingRecord>> {
     let newest_run_only = segments.every_row_is_visible_at(visible_seq);
     let upper_bound = string_prefix_upper_bound(prefix);
@@ -259,7 +259,7 @@ async fn newest_edge_rows<S: ObjectStore + ?Sized>(
 pub(super) async fn latest_revision_by_inode<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     inode_id: InodeId,
-    visible_seq: ChangeSeq,
+    visible_seq: CommitSeq,
 ) -> Result<Option<RevisionRecord>> {
     newest_row_under_prefix(
         segments,
@@ -279,7 +279,7 @@ pub(super) async fn revision_by_inode_no<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     inode_id: InodeId,
     revision_no: RevisionNo,
-    visible_seq: ChangeSeq,
+    visible_seq: CommitSeq,
 ) -> Result<Option<RevisionRecord>> {
     let exact_prefix = lookup_keys::revision_no_prefix(inode_id, revision_no);
     let filter_probe = lookup_keys::revision_probe(inode_id);
@@ -370,7 +370,7 @@ pub(crate) async fn active_deletions_page<S: ObjectStore + ?Sized>(
 pub(super) async fn newest_tombstone_for_root<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     root_inode_id: InodeId,
-    visible_seq: ChangeSeq,
+    visible_seq: CommitSeq,
 ) -> Result<Option<SubtreeTombstoneRecord>> {
     newest_row_under_prefix(
         segments,
@@ -433,7 +433,7 @@ async fn first_content_layout<S: ObjectStore + ?Sized>(
 pub(super) async fn commit_receipt<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     commit_id: &CommitId,
-    visible_seq: ChangeSeq,
+    visible_seq: CommitSeq,
 ) -> Result<Option<CommitReceiptRecord>> {
     let filter_probe = lookup_keys::commit_receipt_probe(commit_id);
     let prefix = lookup_keys::commit_receipt_prefix(commit_id);
@@ -461,7 +461,7 @@ pub(super) async fn commit_receipt<S: ObjectStore + ?Sized>(
 pub(super) async fn newest_merge<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     source_namespace_id: &NamespaceId,
-    visible_seq: ChangeSeq,
+    visible_seq: CommitSeq,
 ) -> Result<Option<MergeIndexRecord>> {
     newest_row_under_prefix(
         segments,
@@ -483,7 +483,7 @@ const WHOLE_STATE_RAW_SCAN_LIMIT: usize = 16;
 pub(super) async fn attributes_by_inode<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     inode_id: InodeId,
-    visible_seq: ChangeSeq,
+    visible_seq: CommitSeq,
 ) -> Result<Option<AttributesRevisionRecord>> {
     newest_row_under_prefix(
         segments,
@@ -500,7 +500,7 @@ pub(super) async fn attributes_by_inode<S: ObjectStore + ?Sized>(
 pub(super) async fn access_by_inode<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     inode_id: InodeId,
-    visible_seq: ChangeSeq,
+    visible_seq: CommitSeq,
 ) -> Result<Option<AccessRevisionRecord>> {
     newest_row_under_prefix(
         segments,
@@ -529,9 +529,9 @@ async fn newest_row_under_prefix<S, R>(
     family: MetadataRowFamily,
     prefix: String,
     filter_probe: String,
-    visible_seq: ChangeSeq,
+    visible_seq: CommitSeq,
     decode: fn(MetadataRow) -> Result<R>,
-    committed_seq: fn(&R) -> ChangeSeq,
+    committed_seq: fn(&R) -> CommitSeq,
 ) -> Result<Option<R>>
 where
     S: ObjectStore + ?Sized,

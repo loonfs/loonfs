@@ -154,7 +154,7 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
     .await
     .expect("initial manifest already covers floor zero")
     .response;
-    assert_eq!(unchanged.retention_floor_seq, ChangeSeq(0));
+    assert_eq!(unchanged.retention_floor_seq, CommitSeq(0));
     assert_eq!(
         store.count(OperationSelector::Read),
         0,
@@ -195,7 +195,7 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
     .await
     .expect("load current manifest");
     let head_seq = segments.manifest().payload().head_seq;
-    assert_eq!(head_seq, ChangeSeq(3));
+    assert_eq!(head_seq, CommitSeq(3));
     let referenced = segments
         .manifest()
         .payload()
@@ -300,7 +300,7 @@ async fn a_targeted_advance_stops_at_the_cutoff_or_the_sequence_and_never_lowers
             RetentionTarget::Cutoff {
                 cutoff_at_ms: 1_999,
             },
-            ChangeSeq(0),
+            CommitSeq(0),
         ),
         // Commit 3 is stamped before the cutoff, but the later commit 2
         // ends the scan first.
@@ -308,16 +308,16 @@ async fn a_targeted_advance_stops_at_the_cutoff_or_the_sequence_and_never_lowers
             RetentionTarget::Cutoff {
                 cutoff_at_ms: 2_999,
             },
-            ChangeSeq(1),
+            CommitSeq(1),
         ),
         (
             RetentionTarget::Cutoff {
                 cutoff_at_ms: 3_000,
             },
-            ChangeSeq(3),
+            CommitSeq(3),
         ),
-        (RetentionTarget::Seq(ChangeSeq(2)), ChangeSeq(3)),
-        (RetentionTarget::Seq(ChangeSeq(99)), ChangeSeq(4)),
+        (RetentionTarget::Seq(CommitSeq(2)), CommitSeq(3)),
+        (RetentionTarget::Seq(CommitSeq(99)), CommitSeq(4)),
     ] {
         let before = current_manifest_no(&store, &namespace_id).await;
         let floor = crate::test_support::NamespaceFixture::new(
@@ -336,7 +336,7 @@ async fn a_targeted_advance_stops_at_the_cutoff_or_the_sequence_and_never_lowers
         .retention_floor_seq;
         assert_eq!(floor, expected_floor, "{target:?}");
         assert_eq!(read_floor_seq(&store, &namespace_id).await, expected_floor);
-        if target == RetentionTarget::Seq(ChangeSeq(2)) {
+        if target == RetentionTarget::Seq(CommitSeq(2)) {
             assert_eq!(
                 current_manifest_no(&store, &namespace_id).await,
                 before,
@@ -388,23 +388,23 @@ async fn an_advance_stops_below_the_first_commit_younger_than_the_grace_window()
                 cutoff_at_ms: now_ms - 3 * grace_ms,
             },
             now_ms,
-            ChangeSeq(1),
+            CommitSeq(1),
         ),
         // Commit 3 is two windows old, but commit 2 is half a window old, so
         // the walk stops before commit 2 and the floor stays at 1. A commit
         // dated out of order can only stop the floor earlier.
-        (RetentionTarget::Seq(ChangeSeq(3)), now_ms, ChangeSeq(1)),
+        (RetentionTarget::Seq(CommitSeq(3)), now_ms, CommitSeq(1)),
         // Commit 5 is half a window old, so the floor stops at commit 4.
-        (RetentionTarget::Head, now_ms + grace_ms, ChangeSeq(4)),
+        (RetentionTarget::Head, now_ms + grace_ms, CommitSeq(4)),
         // A sequence above the head targets the head, and commit 6 is still
         // dated after the advance's clock.
         (
-            RetentionTarget::Seq(ChangeSeq(99)),
+            RetentionTarget::Seq(CommitSeq(99)),
             now_ms + 2 * grace_ms,
-            ChangeSeq(5),
+            CommitSeq(5),
         ),
         // Commit 6 is exactly one window old, so the floor reaches the head.
-        (RetentionTarget::Head, now_ms + 4 * grace_ms, ChangeSeq(6)),
+        (RetentionTarget::Head, now_ms + 4 * grace_ms, CommitSeq(6)),
     ] {
         let floor = crate::test_support::NamespaceFixture::new(
             &store,
@@ -545,7 +545,7 @@ impl LongCommitHistory {
         let (segment, index) = commit_segment_with_index(&store, &namespace_id).await;
         assert_eq!(
             index[0].last_row_key,
-            lookup_keys::commit_row_key(ChangeSeq(14)),
+            lookup_keys::commit_row_key(CommitSeq(14)),
             "each data block contains 14 commit rows"
         );
         store.reset();
@@ -578,7 +578,7 @@ impl LongCommitHistory {
     /// next blocks of the commit range up to `MAX_SCAN_REFILL_BYTES` of
     /// stored bytes, from the block of commit `first` through the refill
     /// that reads the block of commit `last`.
-    fn ranges_from_through(&self, first: ChangeSeq, last: ChangeSeq) -> Vec<(u64, u64)> {
+    fn ranges_from_through(&self, first: CommitSeq, last: CommitSeq) -> Vec<(u64, u64)> {
         let block_of = |seq| {
             let key = lookup_keys::commit_row_key(seq);
             self.index.partition_point(|entry| entry.last_row_key < key)
@@ -623,19 +623,19 @@ async fn an_advance_sends_one_get_for_each_refill_of_commit_blocks_up_to_where_i
     for (target, expected_floor, last_read) in [
         // Commit 65 is the first commit younger than the window, so the walk
         // reads commits 1 to 65, and the floor moves to commit 64.
-        (RetentionTarget::Head, ChangeSeq(64), ChangeSeq(65)),
+        (RetentionTarget::Head, CommitSeq(64), CommitSeq(65)),
         // The sequence ends the walk after commit 14, the last row of the
         // first block, so the walk sends no GET after its first refill.
         (
-            RetentionTarget::Seq(ChangeSeq(14)),
-            ChangeSeq(14),
-            ChangeSeq(14),
+            RetentionTarget::Seq(CommitSeq(14)),
+            CommitSeq(14),
+            CommitSeq(14),
         ),
         // Commit 65 ends the walk below the sequence.
         (
-            RetentionTarget::Seq(ChangeSeq(100)),
-            ChangeSeq(64),
-            ChangeSeq(65),
+            RetentionTarget::Seq(CommitSeq(100)),
+            CommitSeq(64),
+            CommitSeq(65),
         ),
     ] {
         // Commits 1 to 64 are two windows old, and commits 65 to 128 are half
@@ -661,7 +661,7 @@ async fn an_advance_sends_one_get_for_each_refill_of_commit_blocks_up_to_where_i
         assert_eq!(floor, expected_floor, "{target:?}");
         assert_eq!(
             history.take_commit_ranges(),
-            history.ranges_from_through(ChangeSeq(1), last_read),
+            history.ranges_from_through(CommitSeq(1), last_read),
             "{target:?}: one GET for the index, then one for each refill through the block of commit {last_read}"
         );
     }
@@ -684,7 +684,7 @@ async fn an_advance_reads_one_commit_row_when_the_first_commit_above_the_floor_i
             (128 - old_commits, now_ms - grace_ms / 2),
         ])
         .await;
-        let floor = ChangeSeq(u64::try_from(old_commits).expect("a count fits a u64"));
+        let floor = CommitSeq(u64::try_from(old_commits).expect("a count fits a u64"));
         for advance in ["first", "second"] {
             history.store.reset();
             let report = {
@@ -712,7 +712,7 @@ async fn an_advance_reads_one_commit_row_when_the_first_commit_above_the_floor_i
         }
         assert_eq!(
             history.take_commit_ranges(),
-            history.ranges_from_through(ChangeSeq(floor.0 + 1), ChangeSeq(floor.0 + 1)),
+            history.ranges_from_through(CommitSeq(floor.0 + 1), CommitSeq(floor.0 + 1)),
             "{old_commits} old commits: one GET for the index and one for the first refill"
         );
     }
@@ -759,12 +759,12 @@ async fn a_cutoff_or_a_window_older_than_the_grace_window_reads_the_commits_once
             .expect("advance the floor")
             .response
             .retention_floor_seq;
-        assert_eq!(floor, ChangeSeq(64), "{target:?}");
+        assert_eq!(floor, CommitSeq(64), "{target:?}");
         // The walk's later refills find the index and the blocks that an
         // earlier one fetched in the block cache.
         assert_eq!(
             history.take_commit_ranges(),
-            history.ranges_from_through(ChangeSeq(1), ChangeSeq(128)),
+            history.ranges_from_through(CommitSeq(1), CommitSeq(128)),
             "{target:?}: one GET for the index and one for each refill"
         );
     }
@@ -812,12 +812,12 @@ async fn a_window_advance_uses_the_namespace_window_and_keeps_the_floor_without_
     // The cutoffs are five hours minus the window, and all three commits are
     // at least an hour old.
     for (namespace_window_ms, expected_floor) in [
-        (None, ChangeSeq(0)),
-        (Some(5 * hour_ms / 2), ChangeSeq(1)),
-        (Some(3 * hour_ms / 2), ChangeSeq(2)),
+        (None, CommitSeq(0)),
+        (Some(5 * hour_ms / 2), CommitSeq(1)),
+        (Some(3 * hour_ms / 2), CommitSeq(2)),
         // Once the window is cleared, the floor stays where it is.
-        (None, ChangeSeq(2)),
-        (Some(hour_ms / 2), ChangeSeq(3)),
+        (None, CommitSeq(2)),
+        (Some(hour_ms / 2), CommitSeq(3)),
     ] {
         let set = set_window(namespace_window_ms)
             .await
@@ -911,7 +911,7 @@ async fn a_cutoff_advance_reads_commits_through_the_given_cache() {
     .expect("advance to the newest commit")
     .response
     .retention_floor_seq;
-    assert_eq!(floor, ChangeSeq(2));
+    assert_eq!(floor, CommitSeq(2));
     assert!(
         peak.0.load(Ordering::SeqCst) > 0,
         "the cutoff scan charges the caller's read budget"
@@ -981,7 +981,7 @@ async fn retention_floor_does_not_advance_past_a_missing_basis_segment() {
     );
     assert_eq!(
         read_floor_seq(&store, &namespace_id).await,
-        ChangeSeq(0),
+        CommitSeq(0),
         "the missing basis remains replayable from the prior floor"
     );
 }
@@ -1060,7 +1060,7 @@ async fn retention_floor_does_not_advance_when_a_basis_segment_cannot_be_checked
     assert_eq!(store.attempts(), 1);
     assert_eq!(
         read_floor_seq(store.inner(), &namespace_id).await,
-        ChangeSeq(0),
+        CommitSeq(0),
         "the failed probe leaves the prior floor in place"
     );
 }
@@ -1099,7 +1099,7 @@ async fn publish_directories<S: ObjectStore>(
 async fn create_and_delete<S: ObjectStore>(
     writer: &mut NamespaceCommitEngine<S>,
     name: &str,
-) -> (InodeId, ChangeSeq) {
+) -> (InodeId, CommitSeq) {
     publish_directories(writer, name, 1).await;
     let deleted = publish_one(
         writer,
@@ -1115,7 +1115,7 @@ async fn create_and_delete<S: ObjectStore>(
         .events
         .iter()
         .find_map(|event| match event {
-            loonfs_types::FilesystemChange::Deleted { inode_id, .. } => Some(*inode_id),
+            loonfs_types::FilesystemEvent::Deleted { inode_id, .. } => Some(*inode_id),
             _ => None,
         })
         .expect("a delete reports its deletion");
@@ -1145,9 +1145,9 @@ async fn publish_one<S: ObjectStore>(
 
 /// Checks the second example of a retention advance in the WAL: a process
 /// without a writer session creates a floor object at the tip, and a writer
-/// session in another process then commits an undelete of a deletion below
+/// session in another process then commits a restore of a deletion below
 /// the new floor. The session's put collides with the floor object, the
-/// session replays the floor object, and the undelete returns
+/// session replays the floor object, and the restore returns
 /// `not_deleted`. The session isn't fenced, and its next commit is written
 /// above the floor object.
 #[tokio::test]
@@ -1175,20 +1175,20 @@ async fn a_session_that_collides_with_a_floor_object_replays_it_and_isnt_fenced(
         .await
         .expect("create the floor object");
     assert_eq!(report.retention_floor_seq, deletion_seq);
-    assert_eq!(report.manifest_retention_floor_seq, ChangeSeq(0));
+    assert_eq!(report.manifest_retention_floor_seq, CommitSeq(0));
     let floor_object = namespace.load_read_state().await.expect("read the head");
-    let undelete = || FilesystemOperation::Undelete {
+    let restore_deleted = || FilesystemOperation::RestoreDeleted {
         inode_id: gone,
         deletion_seq,
-        destination: loonfs_types::options::UndeleteDestination::Recorded,
+        destination: loonfs_types::options::RestoreDeletedDestination::Recorded,
     };
-    let collided = publish_one(&mut writer, undelete())
+    let collided = publish_one(&mut writer, restore_deleted())
         .await
         .expect_err("the put collides with the floor object");
     assert_eq!(collided.code(), ErrorCode::StaleHead, "{collided:?}");
-    let refused = publish_one(&mut writer, undelete())
+    let refused = publish_one(&mut writer, restore_deleted())
         .await
-        .expect_err("the undelete is below the replayed floor");
+        .expect_err("the restore is below the replayed floor");
     assert_eq!(refused.code(), ErrorCode::NotDeleted, "{refused:?}");
     publish_directories(&mut writer, "next", 1).await;
 
@@ -1198,7 +1198,7 @@ async fn a_session_that_collides_with_a_floor_object_replays_it_and_isnt_fenced(
     assert_eq!(head.retention_floor_seq, deletion_seq);
     assert_eq!(
         read_floor_seq(&store, &namespace_id).await,
-        ChangeSeq(0),
+        CommitSeq(0),
         "no manifest records the floor before a fold"
     );
 }
@@ -1240,7 +1240,7 @@ async fn a_view_reports_a_floor_objects_floor_and_a_fold_publishes_the_higher_fl
         .await
         .expect("load the view");
     assert_eq!(anchor.retention_floor_seq(), deletion_seq);
-    assert_eq!(read_floor_seq(&store, &namespace_id).await, ChangeSeq(0));
+    assert_eq!(read_floor_seq(&store, &namespace_id).await, CommitSeq(0));
     let context = crate::RuntimeReadContext {
         read_basis: crate::control::ReadBasis {
             basis: anchor.basis(),
@@ -1252,7 +1252,7 @@ async fn a_view_reports_a_floor_objects_floor_and_a_fold_publishes_the_higher_fl
     let error =
         crate::NamespaceEngine::reader(crate::test_support::namespace_store(&store, &namespace_id))
             .list_changes_after(
-                loonfs_types::ChangeFeedPosition::after(ChangeSeq(0)),
+                loonfs_types::ChangeFeedPosition::after(CommitSeq(0)),
                 EffectiveLimit::new(std::num::NonZeroU32::new(4).expect("nonzero")),
                 loonfs_types::options::CommitSplitting::Whole,
                 &context,
@@ -1274,7 +1274,7 @@ async fn a_view_reports_a_floor_objects_floor_and_a_fold_publishes_the_higher_fl
         writer_epoch: head.writer_epoch,
         head_seq: head.seq,
         records: Vec::new(),
-        retention_floor_seq: Some(ChangeSeq(1)),
+        retention_floor_seq: Some(CommitSeq(1)),
     };
     let key = loonfs_objectstore::keys::wal_object(&namespace_id, &lower.wal_no);
     store
@@ -1301,7 +1301,7 @@ async fn a_view_reports_a_floor_objects_floor_and_a_fold_publishes_the_higher_fl
 /// fold after both advances publishes the higher floor.
 #[tokio::test]
 async fn two_advances_to_different_floors_leave_the_higher_floor() {
-    for (first, second) in [(ChangeSeq(2), ChangeSeq(1)), (ChangeSeq(1), ChangeSeq(2))] {
+    for (first, second) in [(CommitSeq(2), CommitSeq(1)), (CommitSeq(1), CommitSeq(2))] {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1332,12 +1332,12 @@ async fn two_advances_to_different_floors_leave_the_higher_floor() {
             .publish_floor_object(&planned, second)
             .await
             .expect("the second advance");
-        assert_eq!(report.retention_floor_seq, ChangeSeq(2));
+        assert_eq!(report.retention_floor_seq, CommitSeq(2));
         let head = namespace.load_read_state().await.expect("read the head");
         let floor_objects = if first > second { 1 } else { 2 };
         assert_eq!(head.wal_no.0, tip.0 + floor_objects);
         namespace.fold_wal().await.expect("fold");
-        assert_eq!(read_floor_seq(&store, &namespace_id).await, ChangeSeq(2));
+        assert_eq!(read_floor_seq(&store, &namespace_id).await, CommitSeq(2));
     }
 }
 
@@ -1928,7 +1928,7 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
         .expect("load feed view");
     let changes = list_changes_after(
         &view,
-        loonfs_types::ChangeFeedPosition::after(ChangeSeq(0)),
+        loonfs_types::ChangeFeedPosition::after(CommitSeq(0)),
         EffectiveLimit::new(NonZeroU32::new(200).expect("nonzero")),
         loonfs_types::options::CommitSplitting::Whole,
     )
@@ -1936,7 +1936,7 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
     .expect("list changes");
     assert_eq!(
         changes.head_seq,
-        ChangeSeq(u64::try_from(boundary - 1).expect("data WAL objects"))
+        CommitSeq(u64::try_from(boundary - 1).expect("data WAL objects"))
     );
 }
 
@@ -1968,7 +1968,7 @@ async fn checkpoints_append_past_the_threshold_and_compaction_drains() {
     .expect("load appended manifest");
     assert_eq!(delta_runs(&appended.manifest).len(), rounds);
     assert!(delta_runs(&appended.manifest).len() > DEFAULT_MAX_DELTA_RUNS.get());
-    assert_eq!(appended.manifest.payload().base_seq(), ChangeSeq(0));
+    assert_eq!(appended.manifest.payload().base_seq(), CommitSeq(0));
 
     // Compaction rewrites one family group per unit, each publishing its
     // own manifest — the manifest chain is the progress record.
@@ -2023,7 +2023,7 @@ async fn checkpoints_append_past_the_threshold_and_compaction_drains() {
     assert!(delta_runs(&drained.manifest).is_empty());
     assert_eq!(
         drained.manifest.payload().base_seq(),
-        ChangeSeq(u64::try_from(rounds).expect("round count fits"))
+        CommitSeq(u64::try_from(rounds).expect("round count fits"))
     );
     assert!(metadata_states_equivalent(
         &materialization_after.metadata_state,
@@ -2202,7 +2202,7 @@ async fn bounded_compaction_reaches_the_unbounded_state_and_preserves_intermedia
             .iter()
             .map(|run| run.run_seq)
             .collect::<Vec<_>>(),
-        [ChangeSeq(5), ChangeSeq(6)]
+        [CommitSeq(5), CommitSeq(6)]
     );
 
     let later_commit = CommitId::parse("bounded-convergence-later").expect("commit id");

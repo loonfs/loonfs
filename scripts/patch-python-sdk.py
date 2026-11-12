@@ -123,7 +123,7 @@ api_error_path.write_text(source)
 openapi = json.loads(pathlib.Path("../docs/specs/openapi.json").read_text())
 event_kinds = "".join(
     f'    "{kind}",\n'
-    for kind in sorted(openapi["components"]["schemas"]["FilesystemChange"]["discriminator"]["mapping"])
+    for kind in sorted(openapi["components"]["schemas"]["FilesystemEvent"]["discriminator"]["mapping"])
 )
 commit_path = pathlib.Path("generated/python/types/commit.py")
 source = commit_path.read_text()

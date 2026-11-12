@@ -38,7 +38,7 @@ struct ManyRunFixture {
     store: ConcurrencyWatchStore<LocalFsStore>,
     namespace_id: NamespaceId,
     /// The head of the base run and of each delta run, oldest first.
-    run_heads: Vec<ChangeSeq>,
+    run_heads: Vec<CommitSeq>,
     docs: InodeId,
     /// Every name ever bound under `/docs`, and one that never was.
     names: Vec<NameKey>,
@@ -49,7 +49,7 @@ struct ManyRunFixture {
 }
 
 impl ManyRunFixture {
-    fn head(&self) -> ChangeSeq {
+    fn head(&self) -> CommitSeq {
         *self.run_heads.last().expect("the fixture folds three runs")
     }
 
@@ -80,7 +80,7 @@ impl ManyRunFixture {
     }
 }
 
-async fn head_seq<S: ObjectStore + ?Sized>(store: &S, namespace_id: &NamespaceId) -> ChangeSeq {
+async fn head_seq<S: ObjectStore + ?Sized>(store: &S, namespace_id: &NamespaceId) -> CommitSeq {
     crate::test_support::namespace_store(store, namespace_id)
         .load_read_state()
         .await
@@ -260,7 +260,7 @@ async fn many_run_fixture() -> ManyRunFixture {
 fn newest_revision(
     combined: &MetadataState,
     inode_id: InodeId,
-    visible_seq: ChangeSeq,
+    visible_seq: CommitSeq,
 ) -> Option<RevisionRecord> {
     combined
         .revisions()
@@ -273,7 +273,7 @@ fn newest_revision(
 fn newest_attributes(
     combined: &MetadataState,
     inode_id: InodeId,
-    visible_seq: ChangeSeq,
+    visible_seq: CommitSeq,
 ) -> Option<AttributesRevisionRecord> {
     combined
         .attributes_revisions()
@@ -292,7 +292,7 @@ fn newest_attributes(
 fn newest_access(
     combined: &MetadataState,
     inode_id: InodeId,
-    visible_seq: ChangeSeq,
+    visible_seq: CommitSeq,
 ) -> Option<AccessRevisionRecord> {
     combined
         .access_revisions()

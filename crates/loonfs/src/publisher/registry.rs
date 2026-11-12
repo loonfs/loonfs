@@ -15,7 +15,7 @@ use loonfs_core::control::LoadedManifest;
 use loonfs_core::publish::{NamespaceCommitEngine, WriterPosition};
 use loonfs_core::{FloorObjectReport, Phase, PublicationReport, PublishedManifest};
 use loonfs_types::Commit;
-use loonfs_types::{ChangeSeq, ManifestNo, NamespaceId};
+use loonfs_types::{CommitSeq, ManifestNo, NamespaceId};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -172,7 +172,7 @@ impl NamespaceSession {
         self.publisher.session_status()
     }
 
-    pub(crate) fn last_published_seq(&self) -> Option<ChangeSeq> {
+    pub(crate) fn last_published_seq(&self) -> Option<CommitSeq> {
         self.publisher
             .lock_state()
             .last_published
@@ -505,7 +505,7 @@ impl PublisherRegistry {
         &self,
         namespace_id: &NamespaceId,
         planned: LoadedManifest,
-        target: ChangeSeq,
+        target: CommitSeq,
     ) -> Option<Result<FloorObjectReport>> {
         let publisher = self.live_publisher(namespace_id)?;
         publisher.submit_retention_advance(planned, target).await

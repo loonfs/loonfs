@@ -3,7 +3,7 @@
 
 use crate::wal::WalCommitPayload;
 use crate::{
-    AccessGrants, AccessRevisionNo, Attributes, AttributesRevisionNo, ChangeSeq, CommitId,
+    AccessGrants, AccessRevisionNo, Attributes, AttributesRevisionNo, CommitId, CommitSeq,
     ContentId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
@@ -29,7 +29,7 @@ pub enum MetadataRowFamily {
     /// Stores set and revoke events used to determine active subtree
     /// tombstones, newest first within each root.
     Tombstones,
-    /// Lists the deletions that no undelete has cancelled, derived from the
+    /// Lists the deletions that no restore has cancelled, derived from the
     /// tombstone family and ordered by deletion sequence. The trash listing
     /// reads the rows above the retention floor.
     ActiveDeletions,
@@ -225,7 +225,7 @@ pub struct InodeRecord {
     /// Classification fixed when the inode was created.
     pub inode_kind: InodeKind,
     /// Commit sequence that created the inode.
-    pub committed_seq: ChangeSeq,
+    pub committed_seq: CommitSeq,
     /// Commit ID associated with this row.
     pub commit_id: CommitId,
     /// Actor of the creating commit, as supplied by the application.
@@ -254,7 +254,7 @@ pub struct DirentryBindingRecord {
     /// Unix milliseconds of the child's creating commit.
     pub child_created_at_ms: u64,
     /// Commit that wrote this row.
-    pub committed_seq: ChangeSeq,
+    pub committed_seq: CommitSeq,
     /// Order within the commit.
     pub delta_index: u32,
     /// Commit ID of the commit that wrote this row.
@@ -354,7 +354,7 @@ pub struct RevisionRecord {
     /// Monotonic revision number within that file's history.
     pub revision_no: RevisionNo,
     /// Namespace sequence that published the revision.
-    pub committed_seq: ChangeSeq,
+    pub committed_seq: CommitSeq,
     /// Commit ID associated with this row.
     pub commit_id: CommitId,
     /// Actor that committed this revision, as supplied by the application.
@@ -374,7 +374,7 @@ pub struct SubtreeTombstoneRecord {
     /// Inode whose rooted subtree the event governs.
     pub root_inode_id: InodeId,
     /// Namespace sequence that published the event.
-    pub committed_seq: ChangeSeq,
+    pub committed_seq: CommitSeq,
     /// Position within the owning commit.
     pub delta_index: u32,
     /// Commit ID associated with this row.
@@ -404,7 +404,7 @@ pub struct ActiveDeletionRecord {
     /// Subtree root the deletion covers.
     pub root_inode_id: InodeId,
     /// Commit sequence of the deletion.
-    pub deletion_seq: ChangeSeq,
+    pub deletion_seq: CommitSeq,
     /// Current listing state for the deletion.
     pub action: ActiveDeletionRowAction,
 }
@@ -416,7 +416,7 @@ pub struct ContentLayoutRecord {
     /// Chain whose bytes the layout lists.
     pub content_id: ContentId,
     /// Newest commit whose bytes the layout covers.
-    pub committed_seq: ChangeSeq,
+    pub committed_seq: CommitSeq,
     /// Total length covered by the extents.
     pub size_bytes: u64,
     /// Objects in chain order, and the chain's creator.
@@ -430,7 +430,7 @@ pub struct CommitReceiptRecord {
     /// Caller idempotency key whose later reuse is checked against this row.
     pub commit_id: CommitId,
     /// Namespace sequence assigned to the accepted commit.
-    pub committed_seq: ChangeSeq,
+    pub committed_seq: CommitSeq,
 }
 
 /// Indexes one merge by the fork whose commits it applied.
@@ -442,11 +442,11 @@ pub struct MergeIndexRecord {
     /// The fork whose commits the merge applied.
     pub source_namespace_id: NamespaceId,
     /// Namespace sequence assigned to the merge.
-    pub committed_seq: ChangeSeq,
+    pub committed_seq: CommitSeq,
     /// The fork's commits above this sequence were applied.
-    pub source_after_seq: ChangeSeq,
+    pub source_after_seq: CommitSeq,
     /// The fork's commits at or below this sequence were applied.
-    pub source_through_seq: ChangeSeq,
+    pub source_through_seq: CommitSeq,
 }
 
 impl MergeIndexRecord {
@@ -471,7 +471,7 @@ pub struct AttributesRevisionRecord {
     /// Monotonic per-inode attribute revision.
     pub attributes_revision_no: AttributesRevisionNo,
     /// Namespace sequence that published the revision.
-    pub committed_seq: ChangeSeq,
+    pub committed_seq: CommitSeq,
     /// Commit ID associated with this row.
     pub commit_id: CommitId,
     /// Delta position that disambiguates the revision within `committed_seq`.
@@ -493,7 +493,7 @@ pub struct AccessRevisionRecord {
     /// Monotonic per-inode access revision.
     pub access_revision_no: AccessRevisionNo,
     /// Namespace sequence that published the revision.
-    pub committed_seq: ChangeSeq,
+    pub committed_seq: CommitSeq,
     /// Commit ID associated with this row.
     pub commit_id: CommitId,
     /// Delta position that disambiguates the revision within `committed_seq`.
@@ -515,14 +515,14 @@ pub struct AccessRevisionRecord {
 #[serde(deny_unknown_fields)]
 pub struct DeltaPosition {
     /// Commit sequence that published the event.
-    pub seq: ChangeSeq,
+    pub seq: CommitSeq,
     /// Position that disambiguates the event within `seq`.
     pub delta_index: u32,
 }
 
 /// Directory binding removed by a path deletion.
 ///
-/// Tombstones retain this binding after old slot versions are collected. Undelete uses it to restore the original parent and name.
+/// Tombstones retain this binding after old slot versions are collected. A restore of the deletion uses it to bind the original parent and name again.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeletedBinding {
@@ -568,7 +568,7 @@ impl TombstoneRowAction {
 
 /// Current-state rows for deletions.
 ///
-/// `Listed` exposes a deletion in trash; `Removed` hides it after an undelete.
+/// `Listed` exposes a deletion in trash; `Removed` hides it after a restore.
 /// Both rows share a key prefix, with `Removed` sorting first, so scans can
 /// suppress cancelled entries. Compaction later removes the cancelled pair,
 /// and the `Listed` row of a deletion at or below the retention floor.
@@ -590,9 +590,9 @@ pub enum ActiveDeletionRowAction {
         /// this row derives from.
         deleted_binding: DeletedBinding,
     },
-    /// The deletion was cancelled by an undelete at `removed_seq`.
+    /// The deletion was cancelled by a restore at `removed_seq`.
     Removed {
-        /// Commit sequence of the undelete that cancelled the deletion.
-        removed_seq: ChangeSeq,
+        /// Commit sequence of the restore that cancelled the deletion.
+        removed_seq: CommitSeq,
     },
 }

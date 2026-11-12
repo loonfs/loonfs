@@ -4,7 +4,7 @@
 use crate::error::{CliError, Result};
 use crate::state_file::{keyed_path, OwnedStateFile};
 use loonfs_merge::MergeSessionState;
-use loonfs_types::{ActorId, ChangeSeq, NamespaceId, Subject};
+use loonfs_types::{ActorId, CommitSeq, NamespaceId, Subject};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -20,7 +20,7 @@ pub(crate) struct MergeAttempt {
     /// token holder.
     pub subject: Option<Subject>,
     /// The fork sequence that the command asked to merge the fork through.
-    pub through_seq: Option<ChangeSeq>,
+    pub through_seq: Option<CommitSeq>,
 }
 
 /// What a merge record file stores.

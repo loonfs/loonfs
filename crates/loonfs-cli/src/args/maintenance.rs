@@ -3,7 +3,7 @@
 use super::flags::{ActorSelectorArgs, PaginationArgs};
 use super::parse::parse_change_seq;
 use clap::{Args, Subcommand, ValueHint};
-use loonfs_types::{ChangeSeq, PoolId, PrincipalId};
+use loonfs_types::{CommitSeq, PoolId, PrincipalId};
 use std::num::NonZeroU64;
 
 #[derive(Debug, Subcommand)]
@@ -132,7 +132,7 @@ pub(crate) struct MaintenanceRetentionAdvanceArgs {
     /// Advance the floor to this sequence, or to the folded manifest head
     /// when that's lower.
     #[arg(long, conflicts_with = "before", value_parser = parse_change_seq)]
-    pub to_seq: Option<ChangeSeq>,
+    pub to_seq: Option<CommitSeq>,
     /// Advance the floor to the last commit made at or before this Unix
     /// time, in milliseconds.
     #[arg(long, value_name = "UNIX_MS")]

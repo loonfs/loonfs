@@ -146,8 +146,8 @@ func (c *Client) PrepareStream(ctx context.Context, namespaceID loonfs.Namespace
 			option.WithHTTPHeader(http.Header{"Content-Type": {"application/octet-stream"}}), option.WithMaxAttempts(1))
 		completion = &loonfs.CompleteUploadBody{ServiceProxied: &loonfs.CompleteUploadBodyServiceProxied{}}
 	case loonfs.UploadModeDirectPut:
-		if session.Access == nil {
-			err = fmt.Errorf("direct_put session lacks access")
+		if session.Transfer == nil {
+			err = fmt.Errorf("direct_put session lacks a presigned URL")
 			break
 		}
 		reader.digest, err = newChecksum(session.ChecksumAlgorithm)
@@ -156,7 +156,7 @@ func (c *Client) PrepareStream(ctx context.Context, namespaceID loonfs.Namespace
 			if sizeBytes != nil {
 				length = *sizeBytes
 			}
-			_, err = c.putStream(ctx, session.Access, reader, length)
+			_, err = c.putStream(ctx, session.Transfer, reader, length)
 		}
 		if err == nil {
 			completion = &loonfs.CompleteUploadBody{DirectPut: &loonfs.CompleteUploadBodyDirectPut{Content: reader.claim(session.ChecksumAlgorithm)}}
@@ -193,7 +193,7 @@ func (c *Client) PrepareStream(ctx context.Context, namespaceID loonfs.Namespace
 	return &PreparedContent{ContentRef: status.ContentRef, ContentToken: status.ContentToken}, nil
 }
 
-func (c *Client) putStream(ctx context.Context, access *loonfs.ObjectTransferAccess, source io.Reader, length int64) (string, error) {
+func (c *Client) putStream(ctx context.Context, access *loonfs.ObjectTransfer, source io.Reader, length int64) (string, error) {
 	response, err := sendPresignedWithClient(ctx, c.transferHTTPClient(), access, http.MethodPut, source, length)
 	if err != nil {
 		return "", err
@@ -250,7 +250,7 @@ func (c *Client) streamMultipart(ctx context.Context, client *uploads.Client, na
 		if signed == nil || len(signed.Parts) != 1 || signed.Parts[0].PartNumber != number {
 			return nil, fmt.Errorf("server did not sign requested part %d", number)
 		}
-		etag, err := c.putStream(ctx, signed.Parts[0].Access, bytes.NewReader(part), int64(n))
+		etag, err := c.putStream(ctx, signed.Parts[0].Transfer, bytes.NewReader(part), int64(n))
 		if err != nil {
 			return nil, err
 		}

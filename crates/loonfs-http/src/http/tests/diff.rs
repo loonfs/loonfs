@@ -9,7 +9,7 @@ use loonfs::{DestinationBehavior, PutFileOptions, SharedObjectStore};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::{namespace_id, test_actor, writer_id};
-use loonfs_types::{ChangeSeq, DiffEntryKind, DiffResponse, ErrorCode, ErrorResponse, RevisionNo};
+use loonfs_types::{CommitSeq, DiffEntryKind, DiffResponse, ErrorCode, ErrorResponse, RevisionNo};
 use serde_json::Value;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -22,7 +22,7 @@ struct Fixture {
     directory: TempDir,
     store: SharedObjectStore,
     /// The sequence of the first write, which the diffs start after.
-    from_seq: ChangeSeq,
+    from_seq: CommitSeq,
 }
 
 async fn fixture() -> Fixture {

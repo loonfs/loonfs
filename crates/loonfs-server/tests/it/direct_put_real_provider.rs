@@ -13,9 +13,9 @@ use loonfs_objectstore::{
 use loonfs_server::{ServerConfig, StoreConfig};
 use loonfs_test_support::http::raw_agent;
 use loonfs_types::{
-    ChangeSeq, Checksum, ChecksumAlgorithm, Commit, CommitId, CommitRequest, CompleteUploadBody,
-    DestinationBehavior, FilesystemOperation, NamespaceId, ObjectTransferAccess,
-    UploadContentClaim, UploadMode, UploadPartChecksumClaim, UploadSession, UploadSessionStatus,
+    Checksum, ChecksumAlgorithm, Commit, CommitId, CommitRequest, CommitSeq, CompleteUploadBody,
+    DestinationBehavior, FilesystemOperation, NamespaceId, ObjectTransfer, UploadContentClaim,
+    UploadMode, UploadPartChecksumClaim, UploadSession, UploadSessionStatus,
 };
 use std::fmt;
 use std::io::Read as _;
@@ -58,11 +58,11 @@ fn direct_put_claim(bytes: &[u8], algorithm: ChecksumAlgorithm) -> UploadContent
 }
 
 /// Extracts the checksum algorithm and write access from a direct PUT response.
-fn direct_put_of(begin: &UploadSession) -> (ChecksumAlgorithm, &ObjectTransferAccess) {
+fn direct_put_of(begin: &UploadSession) -> (ChecksumAlgorithm, &ObjectTransfer) {
     match &begin.status {
         UploadSessionStatus::Open {
             checksum_algorithm,
-            access: Some(access),
+            transfer: Some(access),
             ..
         } => (*checksum_algorithm, access),
         other => panic!("a direct_put begin answered as {:?}", other),
@@ -213,7 +213,7 @@ async fn direct_put_round_trip(signed_write: SignedWriteHeaders, config: ServerC
             }],
         },
     );
-    assert_eq!(response.committed_seq, ChangeSeq(1));
+    assert_eq!(response.committed_seq, CommitSeq(1));
 
     let loaded = harness.client.read_file(&target).await.expect("read file");
     assert_eq!(loaded, bytes);
@@ -241,7 +241,7 @@ async fn assert_direct_get_returns_the_written_bytes(
         .create_download(target)
         .await
         .expect("begin download");
-    let ObjectTransferAccess::PresignedUrl { method, .. } = &grant.ranges[0].access else {
+    let ObjectTransfer::PresignedUrl { method, .. } = &grant.ranges[0].transfer else {
         panic!("expected a presigned URL");
     };
     assert_eq!(method, "GET");
@@ -272,7 +272,7 @@ async fn assert_direct_get_capability_serves_only_its_range(
         .create_download(target)
         .await
         .expect("begin download");
-    let ObjectTransferAccess::PresignedUrl { url, headers, .. } = &grant.ranges[0].access else {
+    let ObjectTransfer::PresignedUrl { url, headers, .. } = &grant.ranges[0].transfer else {
         panic!("expected a presigned URL");
     };
     let whole = format!("bytes=0-{}", bytes.len() - 1);
@@ -295,7 +295,7 @@ async fn assert_direct_get_capability_serves_only_its_range(
         )
         .await
         .expect("a grant from the resume offset");
-    let ObjectTransferAccess::PresignedUrl { url, .. } = &rest.ranges[0].access else {
+    let ObjectTransfer::PresignedUrl { url, .. } = &rest.ranges[0].transfer else {
         panic!("expected a presigned URL");
     };
     assert_eq!(fetch_range(url, split, bytes.len() - 1), &bytes[split..]);
@@ -460,8 +460,8 @@ enum Meddle {
 }
 
 impl Meddle {
-    fn apply(&self, access: &ObjectTransferAccess) -> ObjectTransferAccess {
-        let ObjectTransferAccess::PresignedUrl {
+    fn apply(&self, access: &ObjectTransfer) -> ObjectTransfer {
+        let ObjectTransfer::PresignedUrl {
             method,
             url,
             headers,
@@ -486,7 +486,7 @@ impl Meddle {
                 );
             }
         }
-        ObjectTransferAccess::PresignedUrl {
+        ObjectTransfer::PresignedUrl {
             method: method.clone(),
             url: url.clone(),
             headers,
@@ -726,7 +726,7 @@ async fn gcp_gcs_append_keeps_crc32c_after_checkpoint() {
         .client
         .create_download(&target)
         .await
-        .expect("download grant");
+        .expect("download");
     assert_eq!(&grant.content_ref, appended);
     let mut downloaded = Vec::new();
     let written = harness
@@ -839,7 +839,7 @@ async fn assert_gcs_signed_writes_stay_under_the_configured_prefix(
         .await
         .expect("begin direct put");
     let (_, access) = direct_put_of(&begin);
-    let ObjectTransferAccess::PresignedUrl { url, .. } = access else {
+    let ObjectTransfer::PresignedUrl { url, .. } = access else {
         panic!("expected a presigned URL");
     };
     let StoreConfig::GcpGcs(GcpGcsStoreConfig {
@@ -889,7 +889,7 @@ async fn assert_gcs_expired_capability_is_refused(client: &Client, namespace_id:
         .await
         .expect("begin direct put");
     let (_, access) = direct_put_of(&begin);
-    let ObjectTransferAccess::PresignedUrl { url, .. } = access else {
+    let ObjectTransfer::PresignedUrl { url, .. } = access else {
         panic!("expected a presigned URL");
     };
 
@@ -1082,7 +1082,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
         let chunk = Bytes::copy_from_slice(chunks[index]);
         in_flight.spawn(async move {
             client
-                .upload_part_via_presigned_url(part.part_number, &part.access, checksum, chunk)
+                .upload_part_via_presigned_url(part.part_number, &part.transfer, checksum, chunk)
                 .await
         });
     }
@@ -1095,7 +1095,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
         .client
         .upload_part_via_presigned_url(
             repeated.part_number,
-            &repeated.access,
+            &repeated.transfer,
             claims[1].checksum.clone(),
             Bytes::copy_from_slice(chunks[1]),
         )
@@ -1174,7 +1174,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
             }],
         },
     );
-    assert_eq!(response.committed_seq, ChangeSeq(1));
+    assert_eq!(response.committed_seq, CommitSeq(1));
 
     // Reading it back is what proves the crc-only reference is a first-class
     // one: the read verifies by that crc, because nothing else describes

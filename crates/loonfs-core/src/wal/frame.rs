@@ -3,7 +3,7 @@
 
 use crate::namespace::state::NamespaceReadState;
 use loonfs_types::format::wal::{WalObjectEnvelope, WalObjectPayload};
-use loonfs_types::{ChangeSeq, NamespaceId, WalNo, WriterEpoch};
+use loonfs_types::{CommitSeq, NamespaceId, WalNo, WriterEpoch};
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -20,8 +20,8 @@ pub enum WalObjectError {
     },
     #[error("non-contiguous WAL seq: expected `{expected}`, actual `{actual}`")]
     NonContiguousSeq {
-        expected: ChangeSeq,
-        actual: ChangeSeq,
+        expected: CommitSeq,
+        actual: CommitSeq,
     },
     #[error("WAL codec error for `{object_key}`: {message}")]
     Codec { object_key: String, message: String },
@@ -43,8 +43,8 @@ pub enum WalObjectError {
 #[derive(Debug, Clone)]
 pub(super) struct WalTailLoadRequest<'a> {
     pub(crate) namespace_id: &'a NamespaceId,
-    pub(crate) base_seq: ChangeSeq,
-    pub(crate) head_seq: ChangeSeq,
+    pub(crate) base_seq: CommitSeq,
+    pub(crate) head_seq: CommitSeq,
     pub(crate) base_wal_no: WalNo,
     pub(crate) tip_wal_no: WalNo,
     pub(crate) writer_epoch: WriterEpoch,
@@ -148,8 +148,8 @@ pub enum WalTailLoadError {
     )]
     HeadSeqMismatch {
         object_key: String,
-        expected: ChangeSeq,
-        actual: ChangeSeq,
+        expected: CommitSeq,
+        actual: CommitSeq,
     },
     #[error("WAL object `{object_key}` failed replay validation: {error}")]
     Replay {

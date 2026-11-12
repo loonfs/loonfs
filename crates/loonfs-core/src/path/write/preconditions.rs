@@ -7,9 +7,9 @@ use crate::error::{CoreError, Result};
 use crate::metadata::{ResolvedVisiblePath, VisiblePathError};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{
-    AbsolutePath, AccessRevisionNo, AccessRight, AttributesRevisionNo, BindingVersion, ChangeSeq,
-    CommitPrecondition, DestinationBehavior, DisplayName, InodeId, InodeKind, NameKey, RevisionNo,
-    ROOT_INODE_ID,
+    AbsolutePath, AccessRevisionNo, AccessRight, AttributesRevisionNo, BindingVersion,
+    CommitPrecondition, CommitSeq, DestinationBehavior, DisplayName, InodeId, InodeKind, NameKey,
+    RevisionNo, ROOT_INODE_ID,
 };
 use std::future::Future;
 
@@ -22,7 +22,7 @@ impl<S: ObjectStore + ?Sized> PlanningView<'_, S> {
     pub(super) async fn evaluate_preconditions(
         &self,
         preconditions: &[CommitPrecondition],
-        head_seq: ChangeSeq,
+        head_seq: CommitSeq,
     ) -> Result<()> {
         for (index, precondition) in preconditions.iter().enumerate() {
             if let Some(mismatch) = self
@@ -38,7 +38,7 @@ impl<S: ObjectStore + ?Sized> PlanningView<'_, S> {
     async fn find_precondition_mismatch(
         &self,
         precondition: &CommitPrecondition,
-        head_seq: ChangeSeq,
+        head_seq: CommitSeq,
     ) -> Result<Option<CoreError>> {
         match precondition {
             CommitPrecondition::NamespaceHead { expected_head_seq } => Ok((*expected_head_seq

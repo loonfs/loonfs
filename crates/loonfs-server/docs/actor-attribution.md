@@ -18,6 +18,6 @@ LoonFS can discard change history below a namespace's [retention floor](../../..
 
 Key each change by `(namespace_id, committed_seq)`. Identify files and directories by `inode_id`, because paths can change. Store `commit_id` only for correlation, because a commit ID is unique only while its [commit receipt](../../../docs/specs/glossary.md#commit-receipt) is kept in LoonFS.
 
-For a `deleted` event, the enclosing change's `committed_seq` is the `deletion_seq` that trash and undelete use with the event's `inode_id`. The event doesn't repeat that sequence number in its payload.
+For a `deleted` event, the enclosing change's `committed_seq` is the `deletion_seq` that trash and restore use with the event's `inode_id`. The event doesn't repeat that sequence number in its payload.
 
 If LoonFS returns `rebootstrap_required`, you can rebuild the current filesystem state from a snapshot, but you can't recover activity history that was already discarded.

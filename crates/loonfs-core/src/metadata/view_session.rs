@@ -13,7 +13,7 @@ use crate::error::{CoreError, Result};
 use crate::metadata::children_page::VisibleChildEntry;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{
-    AbsolutePath, AttributesProjection, ChangeSeq, InodeId, NameKey, ROOT_INODE_ID,
+    AbsolutePath, AttributesProjection, CommitSeq, InodeId, NameKey, ROOT_INODE_ID,
 };
 use std::collections::HashMap;
 use std::future::Future;
@@ -541,7 +541,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         Ok(tombstone)
     }
 
-    /// One page of the namespace's deletions in `range` that no undelete has
+    /// One page of the namespace's deletions in `range` that no restore has
     /// cancelled, oldest deletion first. Uncached: one call serves one trash
     /// listing page.
     pub(crate) async fn active_deletions_page(
@@ -595,7 +595,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
 impl<S: ObjectStore + ?Sized> MetadataVisibilityReads for MetadataViewSession<'_, '_, S> {
     type Error = CoreError;
 
-    fn retention_floor_seq(&self) -> ChangeSeq {
+    fn retention_floor_seq(&self) -> CommitSeq {
         self.base.retention_floor_seq()
     }
 

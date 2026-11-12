@@ -11,8 +11,8 @@ use loonfs_client::{ClientError, NamespacePath};
 use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_types::{
-    AbsolutePath, ChangeSeq, Commit, CommitId, CommitRequest, ContentRef, DeleteDirectoryBehavior,
-    DestinationBehavior, ErrorCode, ErrorResponse, FilesystemChange, FilesystemOperation,
+    AbsolutePath, Commit, CommitId, CommitRequest, CommitSeq, ContentRef, DeleteDirectoryBehavior,
+    DestinationBehavior, ErrorCode, ErrorResponse, FilesystemEvent, FilesystemOperation,
     RevisionNo, ROOT_INODE_ID,
 };
 use tempfile::tempdir;
@@ -34,7 +34,7 @@ fn commit_id(value: &str) -> CommitId {
 
 /// Returns the fields that must match across transports. It omits timestamps
 /// and normalizes namespace-specific identifiers while preserving content checksums and sizes.
-fn change_identity(change: &Commit) -> (ChangeSeq, String, Option<String>, String) {
+fn change_identity(change: &Commit) -> (CommitSeq, String, Option<String>, String) {
     let mut events = serde_json::to_value(&change.events).expect("serialize events");
     // Each transport generates its own inode IDs, so every generated ID is
     // replaced by its order of first appearance.
@@ -138,12 +138,12 @@ async fn a_batch_commits_once_and_matches_the_same_batch_embedded() {
         .await
         .expect("batch commits");
     // Three operations, one commit: the namespace advanced exactly once.
-    assert_eq!(committed.committed_seq, ChangeSeq(1));
+    assert_eq!(committed.committed_seq, CommitSeq(1));
     assert_eq!(committed.commit_id.as_str(), "batch-one");
 
     let remote_changes = harness
         .client
-        .list_changes(&remote_ns, ChangeSeq(0))
+        .list_changes(&remote_ns, CommitSeq(0))
         .page()
         .await
         .expect("remote changes");
@@ -207,7 +207,7 @@ async fn a_batch_commits_once_and_matches_the_same_batch_embedded() {
     assert_eq!(embedded_committed.committed_seq, committed.committed_seq);
 
     let embedded_changes = namespace
-        .list_changes(ChangeSeq(0))
+        .list_changes(CommitSeq(0))
         .page()
         .await
         .expect("embedded changes");
@@ -274,7 +274,7 @@ async fn a_commit_returns_the_change_it_committed_and_replays_it() {
     assert_eq!(committed.message.as_deref(), Some("the first report"));
     let events = committed.events.clone();
     let created_inode_id = match events.as_slice() {
-        [FilesystemChange::FileCreated {
+        [FilesystemEvent::FileCreated {
             inode_id,
             parent_inode_id,
             display_name,
@@ -299,7 +299,7 @@ async fn a_commit_returns_the_change_it_committed_and_replays_it() {
     // The response is the feed's row for that commit, field for field.
     let feed = harness
         .client
-        .list_changes(&namespace, ChangeSeq(0))
+        .list_changes(&namespace, CommitSeq(0))
         .page()
         .await
         .expect("changes");
@@ -500,7 +500,7 @@ async fn a_failing_operation_names_its_position_and_commits_nothing() {
             .await
             .expect("status")
             .head_seq,
-        ChangeSeq(0)
+        CommitSeq(0)
     );
 
     harness.server.abort();
@@ -554,7 +554,7 @@ async fn an_empty_operation_list_is_rejected() {
             .await
             .expect("status")
             .head_seq,
-        ChangeSeq(0)
+        CommitSeq(0)
     );
 
     harness.server.abort();
@@ -798,7 +798,7 @@ async fn the_root_path_is_rejected_as_a_mutation_target() {
             .await
             .expect("status")
             .head_seq,
-        ChangeSeq(0)
+        CommitSeq(0)
     );
 
     // The rule is the planners', so it is answered where every other path

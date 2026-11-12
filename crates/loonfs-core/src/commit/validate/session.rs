@@ -8,7 +8,7 @@ use crate::error::Result;
 use crate::metadata::{MetadataState, MetadataView};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::{WalCommitDelta, WalDelta};
-use loonfs_types::{ActorId, ChangeSeq, CommitId, ContentLayout, ContentRef};
+use loonfs_types::{ActorId, CommitId, CommitSeq, ContentLayout, ContentRef};
 
 /// One commit's validation: the loaded [`MetadataView`], the rows the
 /// batch's earlier commits and this commit's earlier operations would
@@ -16,7 +16,7 @@ use loonfs_types::{ActorId, ChangeSeq, CommitId, ContentLayout, ContentRef};
 pub(crate) struct CommitValidationSession<'a, S: ObjectStore + ?Sized> {
     base_view: MetadataView<'a, 'a, S>,
     batch_accepted: &'a MetadataState,
-    pub(super) committed_seq: ChangeSeq,
+    pub(super) committed_seq: CommitSeq,
     overlay: MetadataState,
     pub(super) numbering: CommitNumbering,
     commit_id: &'a CommitId,
@@ -28,7 +28,7 @@ impl<'a, S: ObjectStore + ?Sized> CommitValidationSession<'a, S> {
     pub(crate) fn new(
         base_view: MetadataView<'a, 'a, S>,
         batch_accepted: &'a MetadataState,
-        committed_seq: ChangeSeq,
+        committed_seq: CommitSeq,
         commit_id: &'a CommitId,
         actor_id: &'a ActorId,
         committed_at_ms: u64,

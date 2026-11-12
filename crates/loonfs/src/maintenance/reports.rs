@@ -34,7 +34,7 @@ pub struct MaintainMetadataReport {
 /// What one metadata compaction unit did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataCompactionReport {
-    /// The namespace that this run compacted.
+    /// The namespace that this job compacted.
     pub namespace_id: NamespaceId,
     /// The outcome of the compaction.
     pub compaction: MetadataCompactionOutcome,

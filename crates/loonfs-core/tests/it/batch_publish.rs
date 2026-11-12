@@ -20,8 +20,8 @@ use loonfs_test_support::stores::{
 use loonfs_types::ROOT_INODE_ID;
 use loonfs_types::{
     format::wal::{decode_wal_object_envelope_zstd, WalDelta},
-    AbsolutePath, ActorId, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior,
-    FilesystemChange, InodeId, NamespaceId,
+    AbsolutePath, ActorId, CommitId, CommitSeq, DeleteDirectoryBehavior, DestinationBehavior,
+    FilesystemEvent, InodeId, NamespaceId,
 };
 use std::assert_matches;
 use std::path::Path;
@@ -237,8 +237,8 @@ async fn batch_commit_writes_one_wal_object_and_expands_change_feed() {
     .await;
     let first = responses[0].as_ref().expect("first commit");
     let second = responses[1].as_ref().expect("second commit");
-    assert_eq!(first.committed_seq, ChangeSeq(1));
-    assert_eq!(second.committed_seq, ChangeSeq(2));
+    assert_eq!(first.committed_seq, CommitSeq(1));
+    assert_eq!(second.committed_seq, CommitSeq(2));
 
     let wal_keys = data_wal_keys(&store).await;
     assert_eq!(wal_keys.len(), 1);
@@ -248,8 +248,8 @@ async fn batch_commit_writes_one_wal_object_and_expands_change_feed() {
         .expect("read wal")
         .expect("wal exists");
     let wal_object = decode_wal_object_envelope_zstd(&wal_bytes).expect("decode WAL object");
-    assert_eq!(wal_object.payload().records[0].committed_seq, ChangeSeq(1));
-    assert_eq!(wal_object.payload().head_seq, ChangeSeq(2));
+    assert_eq!(wal_object.payload().records[0].committed_seq, CommitSeq(1));
+    assert_eq!(wal_object.payload().head_seq, CommitSeq(2));
     assert_eq!(wal_object.payload().records.len(), 2);
     assert_eq!(wal_object.payload().records[0].deltas.len(), 2);
     assert_eq!(
@@ -271,7 +271,7 @@ async fn batch_commit_writes_one_wal_object_and_expands_change_feed() {
         }
         delta => panic!("expected bind delta, got {delta:?}"),
     }
-    let changes = list_changes_after(&store, &namespace_id, ChangeSeq(0))
+    let changes = list_changes_after(&store, &namespace_id, CommitSeq(0))
         .await
         .expect("changes");
     assert_eq!(changes.changes.len(), 2);
@@ -287,7 +287,7 @@ async fn batch_commit_writes_one_wal_object_and_expands_change_feed() {
     assert_eq!(changes.changes[0].events.len(), 1);
     assert_matches!(
         &changes.changes[0].events[0],
-        FilesystemChange::DirectoryCreated {
+        FilesystemEvent::DirectoryCreated {
             parent_inode_id: ROOT_INODE_ID,
             display_name,
             ..
@@ -325,11 +325,11 @@ async fn change_feed_does_not_read_folded_wal_before_current_manifest() {
     resolve_path(&store, &namespace_id, "/docs")
         .await
         .expect("checkpoint-backed read should not read pre-checkpoint wal");
-    let changes = list_changes_after(&store, &namespace_id, ChangeSeq(0))
+    let changes = list_changes_after(&store, &namespace_id, CommitSeq(0))
         .await
         .expect("read folded commit metadata");
     assert_eq!(changes.changes.len(), 1);
-    assert_eq!(changes.changes[0].committed_seq, ChangeSeq(1));
+    assert_eq!(changes.changes[0].committed_seq, CommitSeq(1));
 }
 
 #[tokio::test]
@@ -368,7 +368,7 @@ async fn an_ack_lost_wal_put_commits_once_and_the_one_shot_publish_returns_the_c
         .pop()
         .expect("one result")
         .expect("the retry replays the original commit from its receipt");
-    assert_eq!(committed.committed_seq, ChangeSeq(1));
+    assert_eq!(committed.committed_seq, CommitSeq(1));
     assert!(store.injected_ack_loss());
     assert_eq!(data_wal_keys(&store).await.len(), 1);
 }
@@ -555,7 +555,7 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
         .load_read_state()
         .await
         .expect("load head");
-    assert_eq!(head.seq, ChangeSeq(0));
+    assert_eq!(head.seq, CommitSeq(0));
 
     let retried = NamespaceFixture::new(&store, &namespace_id, &context)
         .publish_candidates(batch().await)
@@ -565,7 +565,7 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
         ErrorCode::PathNotFound
     );
     let committed = retried[1].as_ref().expect("create commits on retry");
-    assert_eq!(committed.committed_seq, ChangeSeq(1));
+    assert_eq!(committed.committed_seq, CommitSeq(1));
     assert_eq!(
         retried[2]
             .as_ref()
@@ -682,7 +682,7 @@ async fn batch_commit_aliases_duplicate_commit_id_with_same_fingerprint() {
     let wal_object = decode_wal_object_envelope_zstd(&wal_bytes).expect("decode WAL object");
     assert_eq!(wal_object.payload().records.len(), 1);
 
-    let changes = list_changes_after(&store, &namespace_id, ChangeSeq(0))
+    let changes = list_changes_after(&store, &namespace_id, CommitSeq(0))
         .await
         .expect("changes");
     assert_eq!(changes.changes.len(), 1);
@@ -1064,7 +1064,7 @@ async fn batch_commit_rejects_duplicate_commit_id_with_different_fingerprint() {
     let wal_object = decode_wal_object_envelope_zstd(&wal_bytes).expect("decode WAL object");
     assert_eq!(wal_object.payload().records.len(), 1);
 
-    let changes = list_changes_after(&store, &namespace_id, ChangeSeq(0))
+    let changes = list_changes_after(&store, &namespace_id, CommitSeq(0))
         .await
         .expect("changes");
     assert_eq!(changes.changes.len(), 1);
@@ -1259,7 +1259,7 @@ async fn delete_path_commit_id_reuse_includes_expected_inode_id() {
         .load_read_state()
         .await
         .expect("load head");
-    assert_eq!(head.seq, ChangeSeq(8));
+    assert_eq!(head.seq, CommitSeq(8));
 }
 
 #[tokio::test]
@@ -1419,7 +1419,7 @@ async fn idempotent_path_retry_returns_receipt_before_content_validation() {
 fn directory_with_preconditions(
     commit_id: &str,
     path: &str,
-    expected_head_seq: ChangeSeq,
+    expected_head_seq: CommitSeq,
 ) -> CommitIntent {
     commit_request(
         commit_id,
@@ -1435,7 +1435,7 @@ fn directory_with_preconditions(
 
 #[tokio::test]
 async fn head_preconditions_use_admitted_pre_state_and_receipts_resolve_first() {
-    for second_expected in [ChangeSeq(0), ChangeSeq(1)] {
+    for second_expected in [CommitSeq(0), CommitSeq(1)] {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = namespace_id("demo");
@@ -1444,9 +1444,9 @@ async fn head_preconditions_use_admitted_pre_state_and_receipts_resolve_first() 
             .create()
             .await
             .expect("bootstrap");
-        let first = directory_with_preconditions("first", "/first", ChangeSeq(0));
+        let first = directory_with_preconditions("first", "/first", CommitSeq(0));
         let second = directory_with_preconditions("second", "/second", second_expected);
-        let next_seq = if second_expected == ChangeSeq(0) {
+        let next_seq = if second_expected == CommitSeq(0) {
             2
         } else {
             3
@@ -1458,38 +1458,38 @@ async fn head_preconditions_use_admitted_pre_state_and_receipts_resolve_first() 
                 CommitCandidate::new(directory_with_preconditions(
                     "next",
                     "/next",
-                    ChangeSeq(next_seq - 1),
+                    CommitSeq(next_seq - 1),
                 )),
             ])
             .await;
         let published = results[0].as_ref().expect("first commit");
-        assert_eq!(published.committed_seq, ChangeSeq(1));
-        if second_expected == ChangeSeq(0) {
+        assert_eq!(published.committed_seq, CommitSeq(1));
+        if second_expected == CommitSeq(0) {
             let error = results[1]
                 .as_ref()
                 .expect_err("second precondition is stale");
             assert_eq!(error.code(), ErrorCode::StaleHead);
             let details = error.details().expect("precondition details");
-            assert_eq!(details.expected_head_seq, Some(ChangeSeq(0)));
-            assert_eq!(details.actual_head_seq, Some(ChangeSeq(1)));
+            assert_eq!(details.expected_head_seq, Some(CommitSeq(0)));
+            assert_eq!(details.actual_head_seq, Some(CommitSeq(1)));
             assert_eq!(details.precondition_index, Some(0));
             assert_eq!(details.operation_index, None);
         } else {
             assert_eq!(
                 results[1].as_ref().expect("second commit").committed_seq,
-                ChangeSeq(2)
+                CommitSeq(2)
             );
         }
         assert_eq!(
             results[2].as_ref().expect("next commit").committed_seq,
-            ChangeSeq(next_seq)
+            CommitSeq(next_seq)
         );
         let replay = submit_commit(&store, &namespace_id, first.clone(), &context)
             .await
             .expect("receipt resolves despite stale precondition");
         assert_eq!(&replay, published);
         let changed = first.preconditions(vec![loonfs_types::CommitPrecondition::NamespaceHead {
-            expected_head_seq: ChangeSeq(next_seq),
+            expected_head_seq: CommitSeq(next_seq),
         }]);
         let conflict = submit_commit(&store, &namespace_id, changed, &context)
             .await
@@ -1605,7 +1605,7 @@ async fn file_revision_preconditions_ignore_unrelated_commits_and_reject_rewrite
     assert_eq!(deleted.actual_revision_no, None);
     assert_eq!(
         results[6].as_ref().expect("later").committed_seq,
-        ChangeSeq(6)
+        CommitSeq(6)
     );
 }
 
@@ -1828,14 +1828,14 @@ async fn mixed_preconditions_report_the_first_failure_and_write_nothing() {
         .remove(0)
         .expect("seed");
     let head = CommitPrecondition::NamespaceHead {
-        expected_head_seq: ChangeSeq(0),
+        expected_head_seq: CommitSeq(0),
     };
     let scoped = CommitPrecondition::FileRevision {
         inode_id: InodeId(99),
         expected_revision_no: RevisionNo(1),
     };
     let valid = CommitPrecondition::NamespaceHead {
-        expected_head_seq: ChangeSeq(1),
+        expected_head_seq: CommitSeq(1),
     };
     store.take();
     for (index, (preconditions, code, failed_index)) in [
@@ -1889,7 +1889,7 @@ async fn precondition_limit_rejects_before_planning_and_writes_nothing() {
             vec![CommitCandidate::new(directory_with_preconditions(
                 "seed",
                 "/seed",
-                ChangeSeq(0),
+                CommitSeq(0),
             ))],
             &context.clock(),
         )
@@ -1898,10 +1898,10 @@ async fn precondition_limit_rejects_before_planning_and_writes_nothing() {
         .remove(0)
         .expect("seed commit");
     store.take();
-    let request = directory_with_preconditions("over-limit", "/missing/child", ChangeSeq(0))
+    let request = directory_with_preconditions("over-limit", "/missing/child", CommitSeq(0))
         .preconditions(vec![
             loonfs_types::CommitPrecondition::NamespaceHead {
-                expected_head_seq: ChangeSeq(0),
+                expected_head_seq: CommitSeq(0),
             };
             loonfs_core::limits::MAX_COMMIT_PRECONDITIONS + 1
         ]);

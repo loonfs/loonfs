@@ -3,7 +3,7 @@
 use super::flags::{ActorSelectorArgs, PaginationArgs};
 use super::parse::parse_change_seq;
 use clap::{Args, Subcommand, ValueEnum, ValueHint};
-use loonfs_types::{ChangeSeq, NamespaceId, PinId, PrincipalId};
+use loonfs_types::{CommitSeq, NamespaceId, PinId, PrincipalId};
 use std::num::NonZeroU64;
 use std::path::PathBuf;
 
@@ -71,7 +71,7 @@ pub(crate) struct NamespaceDeleteArgs {
     pub namespace_id: NamespaceId,
     /// Delete only if the namespace head is still at this sequence.
     #[arg(long, value_parser = parse_change_seq)]
-    pub expected_head_seq: Option<ChangeSeq>,
+    pub expected_head_seq: Option<CommitSeq>,
     /// Skip the interactive confirmation.
     #[arg(long)]
     pub yes: bool,
@@ -103,7 +103,7 @@ pub(crate) struct MergeArgs {
     /// Merge the fork's commits through this sequence instead of the fork's
     /// head when the session starts.
     #[arg(long = "through", value_name = "seq", value_parser = parse_change_seq)]
-    pub through_seq: Option<ChangeSeq>,
+    pub through_seq: Option<CommitSeq>,
     /// Record file that keeps the session between runs. Defaults to a file
     /// under $XDG_STATE_HOME/loonfs/merges for this profile, namespace, and
     /// fork.

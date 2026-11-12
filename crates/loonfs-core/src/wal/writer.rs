@@ -8,7 +8,7 @@ use crate::namespace::state::NamespaceReadState;
 use loonfs_types::format::wal::{
     encode_wal_object_envelope_zstd, WalCommitPayload, WalObjectPayload,
 };
-use loonfs_types::{ChangeSeq, NamespaceId, WriterEpoch};
+use loonfs_types::{CommitSeq, NamespaceId, WriterEpoch};
 
 /// Builds a WAL object for `records` after `head`, or a fence when
 /// `records` is empty.
@@ -54,7 +54,7 @@ pub(crate) fn prepare_floor_object(
     namespace_id: NamespaceId,
     writer_epoch: WriterEpoch,
     head: &NamespaceReadState,
-    retention_floor_seq: ChangeSeq,
+    retention_floor_seq: CommitSeq,
 ) -> Result<PreparedWalObject> {
     assert!(
         retention_floor_seq <= head.seq,
@@ -74,7 +74,7 @@ fn prepare_payload(
     writer_epoch: WriterEpoch,
     head: &NamespaceReadState,
     payload_records: Vec<WalCommitPayload>,
-    retention_floor_seq: Option<ChangeSeq>,
+    retention_floor_seq: Option<CommitSeq>,
 ) -> Result<PreparedWalObject> {
     let payload = WalObjectPayload {
         namespace_id,

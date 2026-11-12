@@ -3,7 +3,7 @@
 use loonfs::publish::{CommitCandidate, CommitIntent};
 use loonfs::test_support::maintenance_past_the_grace_window;
 use loonfs::{
-    ActorId, AdvanceRetentionFloorOptions, AdvanceRetentionResponse, ChangeSeq, Commit,
+    ActorId, AdvanceRetentionFloorOptions, AdvanceRetentionResponse, Commit, CommitSeq,
     CompleteUploadBody, DeleteOptions, DirectoryPageCursor, Error, ErrorCode, FileBytes,
     FileRevisionsPager, FoldWalResponse, InodeChildrenPager, ListChangesResponse, LoonFs,
     LoonFsBuilder, MaintainMetadataOptions, MaintainMetadataReport, Maintenance, Namespace,
@@ -657,7 +657,7 @@ impl TestRuntime {
     pub(crate) fn list_changes_blocking(
         &self,
         namespace_id: &NamespaceId,
-        after_seq: ChangeSeq,
+        after_seq: CommitSeq,
     ) -> loonfs::Result<ListChangesResponse> {
         let namespace = self.reader.namespace(namespace_id);
         block_on(namespace.list_changes(after_seq).page())
@@ -765,11 +765,11 @@ impl RuntimeStoreProbe {
     }
 }
 
-/// Undelete options that restore the entry at `path`.
-pub(crate) fn undelete_at(path: &str) -> loonfs::UndeleteOptions {
-    loonfs::UndeleteOptions {
-        destination: loonfs::UndeleteDestination::Path(
-            loonfs::AbsolutePath::parse(path).expect("valid undelete destination"),
+/// Restore options that restore the entry at `path`.
+pub(crate) fn restore_deleted_at(path: &str) -> loonfs::RestoreDeletedOptions {
+    loonfs::RestoreDeletedOptions {
+        destination: loonfs::RestoreDeletedDestination::Path(
+            loonfs::AbsolutePath::parse(path).expect("valid restore destination"),
         ),
         ..Default::default()
     }

@@ -14,7 +14,7 @@ use crate::scheduler::MAX_GREP_STEPS_PER_INDEX_STEP;
 use futures::FutureExt as _;
 use loonfs::SharedObjectStore;
 use loonfs::{
-    AdvanceRetentionFloorOptions, ChangeSeq, ErrorCode, GcOptions, MetadataMaintenanceOutcome,
+    AdvanceRetentionFloorOptions, CommitSeq, ErrorCode, GcOptions, MetadataMaintenanceOutcome,
     NamespaceId, PoolId, RetentionTarget,
 };
 use loonfs_grep::{
@@ -118,7 +118,7 @@ impl Scheduler {
         grep: &GrepIndexing,
         namespace_id: &NamespaceId,
         entry: Option<&Mutex<HeldNamespace<SchedulerState>>>,
-        seq: Option<ChangeSeq>,
+        seq: Option<CommitSeq>,
     ) -> bool {
         if let Some(entry) = entry {
             lock(entry).index_dirty = false;
@@ -205,7 +205,7 @@ impl Scheduler {
         &self,
         namespace_id: &NamespaceId,
         entry: Option<&Mutex<HeldNamespace<SchedulerState>>>,
-        seq: Option<ChangeSeq>,
+        seq: Option<CommitSeq>,
     ) -> bool {
         let inner = &self.inner;
         if inner.stop.is_cancelled() {

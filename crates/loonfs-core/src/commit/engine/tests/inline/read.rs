@@ -492,7 +492,7 @@ async fn inline_checksum_failures_match_object_validation() {
         .expect("decode")
         .into_payload();
     payload.wal_no = WalNo(input.read_basis.head.wal_no.0 + 1);
-    payload.head_seq = ChangeSeq(input.read_basis.head.seq.0 + 1);
+    payload.head_seq = CommitSeq(input.read_basis.head.seq.0 + 1);
     let mut corrupt_ref = value.content_ref().clone();
     corrupt_ref.content_id = ContentId::generate();
     let record = &mut payload.records[0];

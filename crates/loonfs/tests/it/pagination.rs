@@ -264,7 +264,7 @@ fn directory_cursor_from_the_future_is_rejected() {
     .expect("first directory page");
     let mut cursor =
         decode_directory_page_cursor(first.next_cursor.as_deref().expect("next cursor"));
-    cursor.head_seq = loonfs::ChangeSeq(cursor.head_seq.0 + 1000);
+    cursor.head_seq = loonfs::CommitSeq(cursor.head_seq.0 + 1000);
 
     assert_core_error_kind(
         block_on(
@@ -716,7 +716,7 @@ fn inode_children_cursor_from_the_future_is_rejected() {
     .expect("first directory page");
     let mut cursor =
         decode_directory_page_cursor(first.next_cursor.as_deref().expect("next cursor"));
-    cursor.head_seq = loonfs::ChangeSeq(cursor.head_seq.0 + 1000);
+    cursor.head_seq = loonfs::CommitSeq(cursor.head_seq.0 + 1000);
 
     assert_core_error_kind(
         block_on(

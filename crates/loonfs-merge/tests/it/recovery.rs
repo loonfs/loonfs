@@ -6,7 +6,7 @@ use crate::scripted_mechanics::{
 };
 use loonfs_merge::{DefaultResolver, MergeFailure, MergeSessionStatus};
 use loonfs_test_support::ids::namespace_id;
-use loonfs_types::{ChangeSeq, NextMergeRangeOutcome};
+use loonfs_types::{CommitSeq, NextMergeRangeOutcome};
 
 #[tokio::test]
 async fn a_lost_state_recovers_the_new_fork_that_was_merging_and_merges_the_rest() {
@@ -38,7 +38,7 @@ async fn a_lost_state_recovers_the_new_fork_that_was_merging_and_merges_the_rest
     assert_eq!(session.state().new_fork_ids, std::slice::from_ref(&rebased));
     assert!(matches!(
         &session.state().status,
-        MergeSessionStatus::Merging { fork_id, through_seq: ChangeSeq(40), .. } if *fork_id == rebased
+        MergeSessionStatus::Merging { fork_id, through_seq: CommitSeq(40), .. } if *fork_id == rebased
     ));
     let (_, state) = run_to_end(&mechanics, &DefaultResolver, session).await;
     assert_eq!(state.status, MergeSessionStatus::Merged);
@@ -83,7 +83,7 @@ async fn a_lost_state_rebases_again_when_the_new_fork_never_merged() {
         );
     };
     assert_eq!(*fork_id, sandbox());
-    assert_eq!(*through_seq, ChangeSeq(20));
+    assert_eq!(*through_seq, CommitSeq(20));
     assert_ne!(*new_fork_id, rebased);
     assert!(reports.is_empty());
     assert_eq!(

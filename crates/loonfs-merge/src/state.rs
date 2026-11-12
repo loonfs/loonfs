@@ -1,7 +1,7 @@
 //! The state of a merge session, which the caller saves after every step.
 
 use loonfs_types::options::MergeForkOptions;
-use loonfs_types::{ActorId, ChangeSeq, CommitId, ErrorResponse, MergeConflict, NamespaceId};
+use loonfs_types::{ActorId, CommitId, CommitSeq, ErrorResponse, MergeConflict, NamespaceId};
 use serde::{Deserialize, Serialize};
 
 /// The state of one fork's merge session: the namespaces that the session
@@ -80,7 +80,7 @@ pub enum MergeSessionStatus {
         /// new fork.
         fork_id: NamespaceId,
         /// The fork sequence that the session merges the fork through.
-        through_seq: ChangeSeq,
+        through_seq: CommitSeq,
         /// The merge request that the next step sends. It goes through
         /// `through_seq`, or through a split hint below it.
         merge: PendingCommit,
@@ -93,7 +93,7 @@ pub enum MergeSessionStatus {
         fork_id: NamespaceId,
         /// The fork sequence that the session replays the fork's commits
         /// through.
-        through_seq: ChangeSeq,
+        through_seq: CommitSeq,
         /// The new fork that the replay commits go into.
         new_fork_id: NamespaceId,
         /// The rebase request that the next step sends.
@@ -160,7 +160,7 @@ pub struct PendingCommit {
     /// after its commit was committed returns the original commit.
     pub commit_id: CommitId,
     /// The fork sequence that the request goes through.
-    pub through_seq: ChangeSeq,
+    pub through_seq: CommitSeq,
     /// The number of times that the request failed with a transient error,
     /// which is less than [`MAX_MERGE_ATTEMPTS`](crate::MAX_MERGE_ATTEMPTS).
     pub failed_attempts: u64,
@@ -168,7 +168,7 @@ pub struct PendingCommit {
 
 impl PendingCommit {
     /// Builds a request through `through_seq` under a new commit ID.
-    pub(crate) fn new(through_seq: ChangeSeq) -> Self {
+    pub(crate) fn new(through_seq: CommitSeq) -> Self {
         Self {
             commit_id: CommitId::generate(),
             through_seq,
@@ -204,7 +204,7 @@ impl PendingCommit {
 pub struct ConflictReport {
     /// The fork sequence that the replay commit replayed the fork's commits
     /// through.
-    pub through_seq: ChangeSeq,
+    pub through_seq: CommitSeq,
     /// One entry for each inode whose change the replay commit left out.
     pub conflicts: Vec<MergeConflict>,
 }
@@ -234,14 +234,14 @@ pub enum MergeFailure {
     /// the fork would return `rebootstrap_required`.
     RangeStartBelowFloor {
         /// The fork's retention floor.
-        retention_floor_seq: ChangeSeq,
+        retention_floor_seq: CommitSeq,
     },
     /// The next-range query returned `fork_point_below_floor`: the fork point
     /// is below the retention floor of the namespace that the session merges
     /// into, so a merge of the fork would return `rebootstrap_required`.
     ForkPointBelowFloor {
         /// The retention floor of the namespace that the session merges into.
-        retention_floor_seq: ChangeSeq,
+        retention_floor_seq: CommitSeq,
     },
     /// The next-range query returned an outcome from a newer server, which
     /// this crate doesn't know.

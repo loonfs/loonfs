@@ -11,7 +11,7 @@ use loonfs::{CreateNamespaceOptions, DeleteNamespaceOptions, MergeForkOptions};
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
 use loonfs_types::{
-    CapabilityDocument, ChangeSeq, Commit, CreateNamespaceRequest, ForkNamespaceRequest,
+    CapabilityDocument, Commit, CommitSeq, CreateNamespaceRequest, ForkNamespaceRequest,
     MergeForkRequest, NamespaceId, NextMergeRangeResponse, RebaseForkRequest, RebaseForkResponse,
     API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0, API_GROUP_QUERY_V0,
     FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_MAINTENANCE_GREP_INDEX, FEATURE_QUERY_GREP,
@@ -48,7 +48,7 @@ fn set_feature(capabilities: &mut CapabilityDocument, feature: &str, supported: 
 #[serde(deny_unknown_fields)]
 pub(super) struct DeleteNamespaceQuery {
     /// The head sequence that the namespace must still have for the delete to succeed.
-    expected_head_seq: Option<ChangeSeq>,
+    expected_head_seq: Option<CommitSeq>,
 }
 
 /// The query of the next-range query.

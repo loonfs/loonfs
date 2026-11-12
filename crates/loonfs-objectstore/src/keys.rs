@@ -5,7 +5,7 @@
 use loonfs_types::format::manifest::{ExtensionSegmentRef, MetadataSegmentRef};
 use loonfs_types::{
     ContentId, ExtensionName, IndexSegmentId, ManifestNo, MetadataSegmentId, NamespaceId, PinId,
-    PoolId, ProbeRunId, UploadId, WalNo,
+    PoolId, ProbeId, UploadId, WalNo,
 };
 
 /// Prefix for objects created by store probes.
@@ -235,8 +235,8 @@ pub fn probe_runs_prefix() -> String {
 
 /// Builds the listing prefix containing the objects one store probe run writes
 /// and deletes.
-pub fn probe_run_prefix(run_id: &ProbeRunId) -> String {
-    format!("{PROBE_RUN_PREFIX}/{run_id}/")
+pub fn probe_run_prefix(probe_id: &ProbeId) -> String {
+    format!("{PROBE_RUN_PREFIX}/{probe_id}/")
 }
 
 #[cfg(test)]
@@ -257,7 +257,7 @@ mod tests {
     use loonfs_types::format::segment_blocks::BlockHandle;
     use loonfs_types::{
         ContentId, ExtensionName, IndexSegmentId, ManifestNo, MetadataSegmentId, NamespaceId,
-        PinId, PoolId, ProbeRunId, UploadId, WalNo,
+        PinId, PoolId, ProbeId, UploadId, WalNo,
     };
 
     const CONTENT_ID: &str = "con_5bsqqg28t5cy4tqkff04hmasw9";
@@ -411,8 +411,8 @@ mod tests {
         assert_eq!(wal_prefix(&namespace_id()), "namespaces/ns-1/wal/");
         assert!(wal_object(&namespace_id(), &WalNo(42)).starts_with(&wal_prefix(&namespace_id())));
         assert_eq!(probe_runs_prefix(), "probe-runs/");
-        let run_id = ProbeRunId::parse(PROBE_RUN_ID).expect("valid probe run id");
-        assert!(probe_run_prefix(&run_id).starts_with(&probe_runs_prefix()));
+        let probe_id = ProbeId::parse(PROBE_RUN_ID).expect("valid probe run id");
+        assert!(probe_run_prefix(&probe_id).starts_with(&probe_runs_prefix()));
     }
 
     #[test]

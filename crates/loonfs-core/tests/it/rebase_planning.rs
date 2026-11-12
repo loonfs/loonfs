@@ -10,7 +10,7 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_types::options::StatOptions;
 use loonfs_types::{
-    ChangeSeq, Commit, CommitId, InodeId, Merge, MergeConflict, MergeConflictKind,
+    Commit, CommitId, CommitSeq, InodeId, Merge, MergeConflict, MergeConflictKind,
     MergeConflictRevision, MergeConflictVersion, NamespaceId, NamespaceRebasedFrom,
     NextMergeRangeOutcome, NextMergeRangeResponse, PathEntry, PathEntryKind,
 };
@@ -109,7 +109,7 @@ impl Family {
         .expect("the rebase's new fork")
     }
 
-    fn request(&self, commit_id: &str, through_seq: Option<ChangeSeq>) -> MergeRequest {
+    fn request(&self, commit_id: &str, through_seq: Option<CommitSeq>) -> MergeRequest {
         MergeRequest {
             source_namespace_id: self.fork.clone(),
             through_seq,
@@ -145,7 +145,7 @@ impl Family {
     async fn replay(
         &self,
         commit_id: &str,
-        through_seq: Option<ChangeSeq>,
+        through_seq: Option<CommitSeq>,
     ) -> Result<Replay, CoreError> {
         let request = self.request(commit_id, through_seq);
         let rebase = namespace_engine(&self.store, &self.rebase, &self.writer);
@@ -313,12 +313,12 @@ async fn a_rebase_whose_changes_all_apply_replays_them_into_the_new_fork() {
     // The fork was made at main's sequence 2, after main's two seeding
     // commits, and the rebase forks main's head after `/other.txt`.
     let basis = created.fork_basis.expect("the new fork's basis");
-    assert_eq!(basis.source_head_seq, ChangeSeq(3));
+    assert_eq!(basis.fork_point_seq, CommitSeq(3));
     assert_eq!(
         basis.rebased_from,
         Some(NamespaceRebasedFrom {
             source_namespace_id: family.fork.clone(),
-            resume_after_seq: ChangeSeq(2),
+            resume_after_seq: CommitSeq(2),
         })
     );
 
@@ -326,7 +326,7 @@ async fn a_rebase_whose_changes_all_apply_replays_them_into_the_new_fork() {
     assert_eq!(replay.conflicts, Some(Vec::new()));
     let merge = replay.commit.merge.expect("a replay commit is a merge");
     assert_eq!(merge.source_namespace_id, family.fork);
-    assert_eq!(merge.source_after_seq, ChangeSeq(2));
+    assert_eq!(merge.source_after_seq, CommitSeq(2));
     for path in ["/new", "/new/c.txt"] {
         assert_eq!(
             family
@@ -512,11 +512,11 @@ async fn a_rebase_in_two_pieces_continues_into_the_same_new_fork() {
     assert_eq!(
         family.next_range().await,
         NextMergeRangeResponse {
-            fork_point_seq: ChangeSeq(2),
+            fork_point_seq: CommitSeq(2),
             source_head_seq: last.committed_seq,
             outcome: NextMergeRangeOutcome::Open {
                 merge: None,
-                next_after_seq: ChangeSeq(2),
+                next_after_seq: CommitSeq(2),
             },
         }
     );
@@ -531,7 +531,7 @@ async fn a_rebase_in_two_pieces_continues_into_the_same_new_fork() {
         NextMergeRangeOutcome::Open {
             merge: Some(Merge {
                 source_namespace_id: family.fork.clone(),
-                source_after_seq: ChangeSeq(2),
+                source_after_seq: CommitSeq(2),
                 source_through_seq: first.committed_seq,
             }),
             next_after_seq: first.committed_seq,

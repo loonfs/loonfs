@@ -1,8 +1,8 @@
-//! Undelete validation against the retention floor of a writer session's
+//! Validation of restores of deleted items against the retention floor of a writer session's
 //! position, around a floor object that the session creates itself.
 
 use super::*;
-use loonfs_types::FilesystemChange;
+use loonfs_types::FilesystemEvent;
 use loonfs_types::{AbsolutePath, DeleteDirectoryBehavior, InodeId};
 
 fn operation(commit_id: &str, operation: FilesystemOperation) -> CommitCandidate {
@@ -18,13 +18,13 @@ fn path(absolute_path: &str) -> AbsolutePath {
     AbsolutePath::parse(absolute_path).expect("path")
 }
 
-fn undelete(commit_id: &str, inode_id: InodeId, deletion_seq: ChangeSeq) -> CommitCandidate {
+fn restore_deleted(commit_id: &str, inode_id: InodeId, deletion_seq: CommitSeq) -> CommitCandidate {
     operation(
         commit_id,
-        FilesystemOperation::Undelete {
+        FilesystemOperation::RestoreDeleted {
             inode_id,
             deletion_seq,
-            destination: loonfs_types::options::UndeleteDestination::Recorded,
+            destination: loonfs_types::options::RestoreDeletedDestination::Recorded,
         },
     )
 }
@@ -46,7 +46,7 @@ async fn publish<S: ObjectStore>(
 async fn delete<S: ObjectStore>(
     engine: &mut NamespaceCommitEngine<S>,
     name: &str,
-) -> (InodeId, ChangeSeq) {
+) -> (InodeId, CommitSeq) {
     publish(
         engine,
         operation(
@@ -76,25 +76,25 @@ async fn delete<S: ObjectStore>(
         .events
         .iter()
         .find_map(|event| match event {
-            FilesystemChange::Deleted { inode_id, .. } => Some(*inode_id),
+            FilesystemEvent::Deleted { inode_id, .. } => Some(*inode_id),
             _ => None,
         })
         .expect("a delete reports its deletion");
     (inode_id, deleted.committed_seq)
 }
 
-/// Checks that a session's own floor object orders the session's undeletes
+/// Checks that a session's own floor object orders the session's restores
 /// around the new floor. The floor object follows the session's tip, the
-/// position's floor rises at once, so an undelete of a deletion at the new
+/// position's floor rises at once, so a restore of a deletion at the new
 /// floor returns `not_deleted` before any manifest records the floor, and
 /// one above it succeeds. The fold that covers the floor object records the
-/// floor, and it contains the undelete made before the advance. The session
+/// floor, and it contains the restore made before the advance. The session
 /// claims no epoch for the advance.
 #[tokio::test]
-async fn a_sessions_floor_object_orders_its_undeletes_around_the_floor() {
+async fn a_sessions_floor_object_orders_its_restores_around_the_floor() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("undelete-floor").expect("valid namespace id");
+    let namespace_id = NamespaceId::parse("restore-floor").expect("valid namespace id");
     crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context("writer"))
         .create()
         .await
@@ -107,10 +107,10 @@ async fn a_sessions_floor_object_orders_its_undeletes_around_the_floor() {
     let (expired, expired_seq) = delete(&mut engine, "expired").await;
     let restored_commit = publish(
         &mut engine,
-        undelete("undelete-before", restored, restored_seq),
+        restore_deleted("restore-before", restored, restored_seq),
     )
     .await
-    .expect("an undelete before the advance");
+    .expect("a restore before the advance");
     let before = engine.writer_position().expect("a position");
     let planned = engine
         .namespace
@@ -124,7 +124,7 @@ async fn a_sessions_floor_object_orders_its_undeletes_around_the_floor() {
         .expect("create the floor object");
     let after = engine.writer_position().expect("the position moves");
     assert_eq!(report.retention_floor_seq, expired_seq);
-    assert_eq!(report.manifest_retention_floor_seq, ChangeSeq(0));
+    assert_eq!(report.manifest_retention_floor_seq, CommitSeq(0));
     assert_eq!(
         after.read_basis.head.wal_no.0,
         before.read_basis.head.wal_no.0 + 1
@@ -138,10 +138,10 @@ async fn a_sessions_floor_object_orders_its_undeletes_around_the_floor() {
 
     let error = publish(
         &mut engine,
-        undelete("undelete-expired", expired, expired_seq),
+        restore_deleted("restore-expired", expired, expired_seq),
     )
     .await
-    .expect_err("an undelete at the new floor");
+    .expect_err("a restore at the new floor");
     assert_eq!(error.code(), ErrorCode::NotDeleted, "{error:?}");
     let folded = engine
         .namespace
@@ -153,7 +153,10 @@ async fn a_sessions_floor_object_orders_its_undeletes_around_the_floor() {
     assert!(folded.manifest.head_seq >= restored_commit.committed_seq);
     engine.record_manifest_published(folded);
     let (above, above_seq) = delete(&mut engine, "above").await;
-    publish(&mut engine, undelete("undelete-above", above, above_seq))
-        .await
-        .expect("an undelete above the new floor");
+    publish(
+        &mut engine,
+        restore_deleted("restore-above", above, above_seq),
+    )
+    .await
+    .expect("a restore above the new floor");
 }

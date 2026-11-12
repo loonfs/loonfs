@@ -334,7 +334,7 @@ async fn assert_expired_content_stays_rejected_on_retry(elapsed_ms: u64) {
             .as_ref()
             .expect("valid peer")
             .committed_seq,
-        ChangeSeq(2)
+        CommitSeq(2)
     );
     assert_eq!(
         result.results[2]
@@ -348,7 +348,7 @@ async fn assert_expired_content_stays_rejected_on_retry(elapsed_ms: u64) {
         .load_read_state()
         .await
         .expect("head");
-    assert_eq!(head_after.seq, ChangeSeq(2));
+    assert_eq!(head_after.seq, CommitSeq(2));
     assert_eq!(
         head_after.wal_no,
         head_before.wal_no.successor().expect("next")
@@ -444,7 +444,7 @@ async fn content_expiring_after_the_put_starts_does_not_undo_the_commit() {
     let (result, ()) = futures::join!(publish, advance);
     assert_eq!(
         result.results[0].as_ref().expect("primary").committed_seq,
-        ChangeSeq(2)
+        CommitSeq(2)
     );
     assert_eq!(
         result.results[0].as_ref().expect("primary"),
@@ -452,7 +452,7 @@ async fn content_expiring_after_the_put_starts_does_not_undo_the_commit() {
     );
     assert_eq!(
         result.results[2].as_ref().expect("later").committed_seq,
-        ChangeSeq(3)
+        CommitSeq(3)
     );
     assert_eq!(
         result.results[3].as_ref().expect("independent replay"),
@@ -462,7 +462,7 @@ async fn content_expiring_after_the_put_starts_does_not_undo_the_commit() {
         .load_read_state()
         .await
         .expect("head");
-    assert_eq!(head_after.seq, ChangeSeq(3));
+    assert_eq!(head_after.seq, CommitSeq(3));
     assert_eq!(
         head_after.wal_no,
         head_before.wal_no.successor().expect("next")

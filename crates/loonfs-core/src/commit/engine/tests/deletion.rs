@@ -192,9 +192,9 @@ async fn rejected_deletion_writes_nothing_before_folding_inline_content() {
         .session_writer_epoch(&engine.namespace, &context.writer_id)
         .await
         .expect("acquired writer");
-    for expected_head_seq in [ChangeSeq(0), ChangeSeq(1)] {
+    for expected_head_seq in [CommitSeq(0), CommitSeq(1)] {
         let deadline = OperationClock::start(context.now_ms, clock.clone());
-        if expected_head_seq == ChangeSeq(1) {
+        if expected_head_seq == CommitSeq(1) {
             clock.advance_ms(crate::limits::METADATA_PUBLICATION_BUDGET_MS + 1);
         }
         store.reset();
@@ -209,12 +209,12 @@ async fn rejected_deletion_writes_nothing_before_folding_inline_content() {
             )
             .await
             .expect_err("deletion rejected before folding");
-        if expected_head_seq == ChangeSeq(0) {
+        if expected_head_seq == CommitSeq(0) {
             assert_matches!(
                 error,
                 CoreError::StaleHeadPrecondition {
-                    expected: ChangeSeq(0),
-                    actual: ChangeSeq(1),
+                    expected: CommitSeq(0),
+                    actual: CommitSeq(1),
                     ..
                 }
             );

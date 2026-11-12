@@ -7,7 +7,7 @@
 //! outside this crate constructs them.
 
 use loonfs_types::{
-    AccessGrants, AccessRevisionNo, Attributes, AttributesRevisionNo, ChangeSeq, ContentRef,
+    AccessGrants, AccessRevisionNo, Attributes, AttributesRevisionNo, CommitSeq, ContentRef,
     DisplayName, InodeId, RevisionNo,
 };
 
@@ -108,12 +108,12 @@ pub(crate) enum CommitOperation {
     /// delete and by the change feed) and re-bind the inode under a visible
     /// parent directory. Scoping recovery to the observed position keeps
     /// a stale request from cancelling a later deletion of the same inode.
-    Undelete {
+    RestoreDeleted {
         /// Deleted inode to make reachable again.
         inode_id: InodeId,
         /// Observed deletion sequence, which prevents cancelling a newer
         /// tombstone position.
-        deletion_seq: ChangeSeq,
+        deletion_seq: CommitSeq,
         /// Visible directory that will own the recovered binding.
         parent_inode_id: InodeId,
         /// Recovered child spelling, whose derived key must be absent.

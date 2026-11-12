@@ -17,7 +17,7 @@ use loonfs_test_support::test_actor;
 use loonfs_types::format::manifest::{MetadataRow, MetadataRowFamily, RunTier};
 use loonfs_types::format::segment_blocks::{decode_data_block, decode_index_block};
 use loonfs_types::{
-    AccessGrants, AccessRevisionNo, AccessRight, Attributes, AttributesRevisionNo, ChangeSeq,
+    AccessGrants, AccessRevisionNo, AccessRight, Attributes, AttributesRevisionNo, CommitSeq,
     ErrorCode, NamespaceAccess, PathEntry, PrincipalId, PrincipalScope, PrincipalSet, RevisionNo,
     Subject, SubjectId,
 };
@@ -177,11 +177,11 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
         .await
         .expect("delete file before recovery");
     let restored = namespace_writer
-        .undelete_with_options(
+        .restore_deleted_with_options(
             restored_inode,
             recover.committed_seq,
             &test_actor(),
-            &undelete_at("/docs/restored.txt"),
+            &restore_deleted_at("/docs/restored.txt"),
         )
         .await
         .expect("restore file at a new name");
@@ -550,7 +550,7 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                 ErrorCode::PathNotFound,
             );
             expect_code(
-                source_namespace.list_changes(ChangeSeq(0)).page().await,
+                source_namespace.list_changes(CommitSeq(0)).page().await,
                 ErrorCode::RebootstrapRequired,
             );
         }

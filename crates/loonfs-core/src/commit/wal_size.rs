@@ -400,7 +400,7 @@ fn operation_bytes(operation: &FilesystemOperation) -> usize {
         FilesystemOperation::CopyPath { .. } | FilesystemOperation::CopyByInode { .. } => {
             CREATE_INODE_BYTES + FILE_BIND_BYTES + NAMES_BYTES + REVISION_BYTES + ATTRIBUTES_BYTES
         }
-        FilesystemOperation::Undelete { .. } => REVOKE_BYTES + FILE_BIND_BYTES + NAMES_BYTES,
+        FilesystemOperation::RestoreDeleted { .. } => REVOKE_BYTES + FILE_BIND_BYTES + NAMES_BYTES,
         FilesystemOperation::UpdateAttributes { .. }
         | FilesystemOperation::UpdateAttributesByInode { .. } => ATTRIBUTES_BYTES,
         FilesystemOperation::UpdateAccess { .. }

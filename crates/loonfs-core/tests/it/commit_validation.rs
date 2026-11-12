@@ -14,7 +14,7 @@ use loonfs_test_support::ids::{commit_id, namespace_id};
 use loonfs_test_support::stores::{KeyPredicate, OperationSelector, RecordingStore};
 use loonfs_types::CompleteUploadBody;
 use loonfs_types::{
-    AbsolutePath, ChangeSeq, DeleteDirectoryBehavior, DestinationBehavior, FilesystemChange,
+    AbsolutePath, CommitSeq, DeleteDirectoryBehavior, DestinationBehavior, FilesystemEvent,
     NamespaceId, RevisionNo, UploadSessionStatus, ROOT_INODE_ID,
 };
 use std::assert_matches;
@@ -364,7 +364,7 @@ async fn a_later_batch_candidate_observes_the_earlier_one() {
 
     assert_eq!(
         responses[0].as_ref().expect("rename").committed_seq,
-        ChangeSeq(2)
+        CommitSeq(2)
     );
     let error = responses[1]
         .as_ref()
@@ -419,7 +419,7 @@ async fn a_directory_delete_observes_an_earlier_batch_candidate() {
 
     assert_eq!(
         responses[0].as_ref().expect("create child").committed_seq,
-        ChangeSeq(2)
+        CommitSeq(2)
     );
     let error = responses[1]
         .as_ref()
@@ -555,7 +555,7 @@ async fn restore_revision_does_not_revalidate_retained_content_before_publish() 
     )
     .await
     .expect("restore trusts retained content metadata");
-    assert_eq!(response.committed_seq, ChangeSeq(3));
+    assert_eq!(response.committed_seq, CommitSeq(3));
 }
 
 #[tokio::test]
@@ -590,7 +590,7 @@ async fn metadata_only_mutation_does_not_validate_content_refs() {
     .await
     .expect("metadata-only delete should not perform content validation");
 
-    assert_eq!(response.committed_seq, ChangeSeq(2));
+    assert_eq!(response.committed_seq, CommitSeq(2));
     assert_eq!(
         guarded_store.count(OperationSelector::Read),
         0,
@@ -724,7 +724,7 @@ async fn a_batch_creates_a_directory_and_writes_into_it_in_one_commit() {
     )
     .await
     .expect("the batch commits");
-    assert_eq!(response.committed_seq, ChangeSeq(1));
+    assert_eq!(response.committed_seq, CommitSeq(1));
 
     for path in ["/reports", "/reports/a.txt", "/reports/b.txt"] {
         resolve_path(&store, &namespace_id, path)
@@ -732,7 +732,7 @@ async fn a_batch_creates_a_directory_and_writes_into_it_in_one_commit() {
             .expect("every operation of the batch is visible");
     }
 
-    let changes = list_changes_after(&store, &namespace_id, ChangeSeq(0))
+    let changes = list_changes_after(&store, &namespace_id, CommitSeq(0))
         .await
         .expect("read the change feed");
     assert_eq!(changes.changes.len(), 1, "the batch is one logical commit");
@@ -743,10 +743,8 @@ async fn a_batch_creates_a_directory_and_writes_into_it_in_one_commit() {
         .events
         .iter()
         .map(|event| match event {
-            FilesystemChange::DirectoryCreated { display_name, .. }
-            | FilesystemChange::FileCreated { display_name, .. } => {
-                display_name.as_str().to_owned()
-            }
+            FilesystemEvent::DirectoryCreated { display_name, .. }
+            | FilesystemEvent::FileCreated { display_name, .. } => display_name.as_str().to_owned(),
             other => panic!("unexpected event: {other:?}"),
         })
         .collect::<Vec<_>>();
@@ -813,7 +811,7 @@ async fn a_batch_that_stops_commits_nothing_and_names_the_operation() {
     )
     .await
     .expect("a corrected batch commits under the same commit id");
-    assert_eq!(response.committed_seq, ChangeSeq(1));
+    assert_eq!(response.committed_seq, CommitSeq(1));
 }
 
 #[tokio::test]

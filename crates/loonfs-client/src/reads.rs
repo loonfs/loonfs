@@ -10,7 +10,7 @@ use loonfs_types::options::{
 };
 use loonfs_types::{ChangeFeedPosition, DiffResponse, ListChangesResponse};
 use loonfs_types::{
-    ChangeSeq, EffectiveLimit, InodeId, ListFileRevisionsResponse, ListInodeChildrenResponse,
+    CommitSeq, EffectiveLimit, InodeId, ListFileRevisionsResponse, ListInodeChildrenResponse,
     ListPathEntriesResponse, ListTrashResponse, NamespaceId, PageRequest, Pager, PathEntry,
     RevisionNo,
 };
@@ -306,7 +306,7 @@ impl Client {
     }
 
     /// Lists committed changes after `after_seq`.
-    pub fn list_changes(&self, namespace_id: &NamespaceId, after_seq: ChangeSeq) -> ChangesPager {
+    pub fn list_changes(&self, namespace_id: &NamespaceId, after_seq: CommitSeq) -> ChangesPager {
         self.list_changes_with_options(namespace_id, after_seq, &ListChangesOptions::default())
     }
 
@@ -315,7 +315,7 @@ impl Client {
     pub fn list_changes_with_options(
         &self,
         namespace_id: &NamespaceId,
-        after_seq: ChangeSeq,
+        after_seq: CommitSeq,
         options: &ListChangesOptions,
     ) -> ChangesPager {
         let start = ChangeFeedPosition {
@@ -358,7 +358,7 @@ impl Client {
     pub async fn diff(
         &self,
         namespace_id: &NamespaceId,
-        from_seq: ChangeSeq,
+        from_seq: CommitSeq,
     ) -> Result<DiffResponse> {
         self.diff_with_options(namespace_id, from_seq, &DiffOptions::default())
             .await
@@ -370,7 +370,7 @@ impl Client {
     pub async fn diff_with_options(
         &self,
         namespace_id: &NamespaceId,
-        from_seq: ChangeSeq,
+        from_seq: CommitSeq,
         options: &DiffOptions,
     ) -> Result<DiffResponse> {
         let mut query = QueryBuilder::new(self.namespace_url(namespace_id, "/diff"));
@@ -656,7 +656,7 @@ mod tests {
     use crate::scripted_transport::{self, Outcome};
     use crate::ClientConfig;
     use loonfs_types::options::Consistency;
-    use loonfs_types::FilesystemChange;
+    use loonfs_types::FilesystemEvent;
     use loonfs_types::PinId;
     use loonfs_types::{ContentId, ContentRef, EntryInodeKind, PathEntryKind};
 
@@ -942,13 +942,13 @@ mod tests {
             scripted_transport::script([Outcome::Success(feed.to_string().into_bytes())]);
 
         let page = client_for(&transport)
-            .list_changes(&namespace_id, ChangeSeq(418))
+            .list_changes(&namespace_id, CommitSeq(418))
             .next()
             .await
             .expect("one page")
             .expect("decoded feed");
         let events = &page.changes[0].events;
-        assert_eq!(events[0], FilesystemChange::Unknown);
+        assert_eq!(events[0], FilesystemEvent::Unknown);
         assert_eq!(
             serde_json::to_value(&events[1]).expect("serialize known event"),
             feed["changes"][0]["events"][1]

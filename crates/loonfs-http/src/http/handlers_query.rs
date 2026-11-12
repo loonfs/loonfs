@@ -171,7 +171,7 @@ pub(super) async fn grep_index_not_maintained() -> ApiResponseError {
         path = "/v0/maintenance/namespaces/{namespace_id}/grep/index/enable",
         tag = "maintenance",
         summary = "Enable the grep index",
-        description = "Enables the namespace's grep index. A deployment that runs maintenance starts the backfill on its next session tick and continues until the index is active. The response reports the index state read after the change. A new enable reports `backfilling`, with the sequence that its checkpoint captured, and an index that was already enabled reports its current status. Repeating the request has the same result. A deployment that doesn't maintain the grep index returns `not_supported`.",
+        description = "Enables the namespace's grep index. A deployment that runs maintenance starts the backfill at the next maintenance interval and continues until the index is active. The response reports the index state read after the change. A new enable reports `backfilling`, with the sequence that its checkpoint captured, and an index that was already enabled reports its current status. Repeating the request has the same result. A deployment that doesn't maintain the grep index returns `not_supported`.",
         params(("namespace_id" = String, Path, description = "The namespace ID.")),
         responses(
             (status = 200, description = "Grep index enabled or already enabled", body = GrepIndex),

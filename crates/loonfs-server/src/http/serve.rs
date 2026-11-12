@@ -272,8 +272,8 @@ pub async fn check_config(config: &ValidatedServerConfig) -> Result<()> {
 /// Runs the object-store contract probe against the store this config builds.
 pub async fn probe_store(config: &ValidatedServerConfig) -> Result<StoreProbeReport> {
     let store = config.config.object_store()?.into_shared();
-    let run_id = loonfs_types::ProbeRunId::generate();
-    Ok(run_store_contract_probe(store.as_ref(), &run_id).await)
+    let probe_id = loonfs_types::ProbeId::generate();
+    Ok(run_store_contract_probe(store.as_ref(), &probe_id).await)
 }
 
 /// Serves on the configured address until ctrl-c or SIGTERM, then shuts down

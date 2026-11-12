@@ -33,7 +33,7 @@ async fn compact_and_check_pair(
     store: &RecordingStore<LocalFsStore>,
     namespace_id: &NamespaceId,
     commit_id: &CommitId,
-    seq: ChangeSeq,
+    seq: CommitSeq,
 ) {
     let mut fixture = crate::test_support::NamespaceFixture::new(
         store,
@@ -205,7 +205,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
     let reused = publish(&mut engine, &context, replace(b"after"))
         .await
         .expect("a pruned ID can identify a new mutation");
-    assert_eq!(reused.committed_seq, ChangeSeq(later.committed_seq.0 + 1));
+    assert_eq!(reused.committed_seq, CommitSeq(later.committed_seq.0 + 1));
     assert_ne!(reused.events, original.events);
     crate::test_support::namespace_store(&store, &namespace_id)
         .fold_wal()

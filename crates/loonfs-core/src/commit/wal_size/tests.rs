@@ -19,7 +19,7 @@ use loonfs_types::format::wal::{
 };
 use loonfs_types::ROOT_INODE_ID;
 use loonfs_types::{
-    ActorId, AttributeKey, Attributes, AttributesRevisionNo, ChangeSeq, Checksum, CommitId,
+    ActorId, AttributeKey, Attributes, AttributesRevisionNo, Checksum, CommitId, CommitSeq,
     ContentId, ContentRef, ContentRefKind, DestinationBehavior, DestinationPrecondition,
     DisplayName, InodeId, InodeKind, NameKey, NamespaceId, RevisionNo, WalNo, WriterEpoch,
     MAX_ATTRIBUTE_KEY_BYTES, MAX_ATTRIBUTE_VALUE_BYTES, MAX_PUBLIC_INTEGER,
@@ -53,7 +53,7 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
     let actor = ActorId::parse("a".repeat(256)).expect("actor");
     let mut head =
         NamespaceReadState::initial(namespace_id.clone(), 0, loonfs_test_support::test_actor());
-    head.seq = ChangeSeq(MAX_PUBLIC_INTEGER - 1);
+    head.seq = CommitSeq(MAX_PUBLIC_INTEGER - 1);
     head.wal_no = WalNo(MAX_PUBLIC_INTEGER - 1);
     head.writer_epoch = WriterEpoch(MAX_PUBLIC_INTEGER);
     let content_ref = ContentRef {
@@ -252,13 +252,13 @@ async fn maximum_requests_encode_within_the_admitted_estimate() {
                 MergeRecord {
                     source_namespace_id: NamespaceId::parse("s".repeat(MAX_ID_BYTES))
                         .expect("namespace"),
-                    source_after_seq: ChangeSeq(MAX_PUBLIC_INTEGER - 1),
-                    source_through_seq: ChangeSeq(MAX_PUBLIC_INTEGER),
+                    source_after_seq: CommitSeq(MAX_PUBLIC_INTEGER - 1),
+                    source_through_seq: CommitSeq(MAX_PUBLIC_INTEGER),
                 },
-                ChangeSeq(MAX_PUBLIC_INTEGER - 1),
+                CommitSeq(MAX_PUBLIC_INTEGER - 1),
                 (0..operation_count)
                     .map(|index| {
-                        let id = InodeId::generate(ChangeSeq(1), std::num::NonZeroU32::MIN);
+                        let id = InodeId::generate(CommitSeq(1), std::num::NonZeroU32::MIN);
                         (index, id)
                     })
                     .collect(),
@@ -369,13 +369,13 @@ fn a_merges_bound_includes_the_layouts_of_its_proofs() {
         CommitCandidate::prepared(intent.clone(), proofs).with_merge(
             MergeRecord {
                 source_namespace_id: fork.clone(),
-                source_after_seq: ChangeSeq(3),
-                source_through_seq: ChangeSeq(7),
+                source_after_seq: CommitSeq(3),
+                source_through_seq: CommitSeq(7),
             },
-            ChangeSeq(3),
+            CommitSeq(3),
             BTreeMap::from([(
                 0,
-                InodeId::generate(ChangeSeq(4), std::num::NonZeroU32::MIN),
+                InodeId::generate(CommitSeq(4), std::num::NonZeroU32::MIN),
             )]),
         )
     };

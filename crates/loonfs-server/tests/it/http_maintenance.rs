@@ -12,7 +12,7 @@ use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::replace_object;
 use loonfs_types::{
-    ChangeSeq, Checkpoint, CheckpointOwner, DeleteSnapshotResponse, ErrorCode, ErrorResponse,
+    Checkpoint, CheckpointOwner, CommitSeq, DeleteSnapshotResponse, ErrorCode, ErrorResponse,
     ManifestNo, PinId, PoolId, Snapshot,
 };
 use tempfile::tempdir;
@@ -62,9 +62,9 @@ fn post_gc(server_url: &str, namespace: &str) -> ApiResult<loonfs_types::GcRespo
 }
 
 fn upkeep(
-    response: &loonfs_types::RunMaintenanceResponse,
+    response: &loonfs_types::RunMaintenanceJobResponse,
 ) -> &loonfs_types::MetadataMaintenanceResponse {
-    let loonfs_types::RunMaintenanceResponse::Metadata(metadata) = response else {
+    let loonfs_types::RunMaintenanceJobResponse::Metadata(metadata) = response else {
         panic!("metadata request returned a different response")
     };
     metadata
@@ -81,8 +81,8 @@ async fn wal_tail_objects(
         .wal_tail_objects
 }
 
-fn retention_floor(response: loonfs_types::RunMaintenanceResponse) -> ChangeSeq {
-    let loonfs_types::RunMaintenanceResponse::Retention(retention) = response else {
+fn retention_floor(response: loonfs_types::RunMaintenanceJobResponse) -> CommitSeq {
+    let loonfs_types::RunMaintenanceJobResponse::Retention(retention) = response else {
         panic!("retention request returned a different response")
     };
     retention.retention_floor_seq
@@ -98,13 +98,13 @@ fn post_gc_with(
         .as_object_mut()
         .expect("GC options are an object")
         .insert("kind".to_owned(), serde_json::json!("gc"));
-    let response: ApiResult<loonfs_types::RunMaintenanceResponse> = post_maintenance_json_body(
-        &format!("{server_url}/v0/maintenance/namespaces/{namespace}/runs"),
+    let response: ApiResult<loonfs_types::RunMaintenanceJobResponse> = post_maintenance_json_body(
+        &format!("{server_url}/v0/maintenance/namespaces/{namespace}/jobs"),
         "test-token",
         request,
     );
     response.map(|response| {
-        let loonfs_types::RunMaintenanceResponse::Gc(gc) = response else {
+        let loonfs_types::RunMaintenanceJobResponse::Gc(gc) = response else {
             panic!("GC request returned a different response")
         };
         gc
@@ -114,9 +114,9 @@ fn post_gc_with(
 fn post_metadata_run(
     server_url: &str,
     namespace: &str,
-) -> ApiResult<loonfs_types::RunMaintenanceResponse> {
+) -> ApiResult<loonfs_types::RunMaintenanceJobResponse> {
     post_maintenance_json_body(
-        &format!("{server_url}/v0/maintenance/namespaces/{namespace}/runs"),
+        &format!("{server_url}/v0/maintenance/namespaces/{namespace}/jobs"),
         "test-token",
         serde_json::json!({ "kind": "metadata" }),
     )
@@ -125,9 +125,9 @@ fn post_metadata_run(
 fn post_missing_maintenance_body(
     server_url: &str,
     namespace: &str,
-) -> ApiResult<loonfs_types::RunMaintenanceResponse> {
+) -> ApiResult<loonfs_types::RunMaintenanceJobResponse> {
     post_maintenance_json(
-        &format!("{server_url}/v0/maintenance/namespaces/{namespace}/runs"),
+        &format!("{server_url}/v0/maintenance/namespaces/{namespace}/jobs"),
         "test-token",
     )
 }
@@ -135,7 +135,7 @@ fn post_missing_maintenance_body(
 fn post_retention_advance(
     server_url: &str,
     namespace: &str,
-) -> ApiResult<loonfs_types::RunMaintenanceResponse> {
+) -> ApiResult<loonfs_types::RunMaintenanceJobResponse> {
     post_retention_advance_with(server_url, namespace, serde_json::json!({}))
 }
 
@@ -143,14 +143,14 @@ fn post_retention_advance_with(
     server_url: &str,
     namespace: &str,
     target: serde_json::Value,
-) -> ApiResult<loonfs_types::RunMaintenanceResponse> {
+) -> ApiResult<loonfs_types::RunMaintenanceJobResponse> {
     let mut request = target;
     request
         .as_object_mut()
         .expect("retention targets are an object")
         .insert("kind".to_owned(), serde_json::json!("retention"));
     post_maintenance_json_body(
-        &format!("{server_url}/v0/maintenance/namespaces/{namespace}/runs"),
+        &format!("{server_url}/v0/maintenance/namespaces/{namespace}/jobs"),
         "test-token",
         request,
     )
@@ -290,7 +290,7 @@ async fn http_maintenance_checkpoint_and_retention_are_idempotent_and_soft() {
             name: "nightly".to_owned()
         }
     );
-    assert_eq!(first.captured_seq, ChangeSeq(1));
+    assert_eq!(first.captured_seq, CommitSeq(1));
     assert_eq!(first.manifest_no, ManifestNo(3));
     let listed = collect_checkpoints(&client, &namespace)
         .await
@@ -369,12 +369,12 @@ async fn http_maintenance_checkpoint_and_retention_are_idempotent_and_soft() {
         serde_json::json!({ "cutoff_at_ms": 0 }),
     )
     .expect("advance retention to a cutoff");
-    assert_eq!(retention_floor(unmoved), ChangeSeq(0));
+    assert_eq!(retention_floor(unmoved), CommitSeq(0));
 
     let advanced = retention_floor(
         post_retention_advance(&server_url, namespace.as_str()).expect("advance retention"),
     );
-    assert_eq!(advanced, ChangeSeq(1));
+    assert_eq!(advanced, CommitSeq(1));
 
     // Both calls reach the same floor, and a target below it moves nothing.
     let repeated =
@@ -391,13 +391,13 @@ async fn http_maintenance_checkpoint_and_retention_are_idempotent_and_soft() {
     let bytes = client.read_file(&target).await.expect("read file");
     assert_eq!(bytes, b"hello maintenance\n");
 
-    match client.list_changes(&namespace, ChangeSeq(0)).page().await {
+    match client.list_changes(&namespace, CommitSeq(0)).page().await {
         Err(ClientError::Api { response, .. }) => assert_eq!(response.code, "rebootstrap_required"),
         other => panic!("expected rebootstrap_required, got {other:?}"),
     }
 
     let empty = client
-        .list_changes(&namespace, ChangeSeq(1))
+        .list_changes(&namespace, CommitSeq(1))
         .page()
         .await
         .expect("changes after floor");
@@ -539,9 +539,9 @@ async fn http_metadata_run_reports_outcomes_not_errors() {
     );
 
     let forced = client
-        .run_maintenance(
+        .run_maintenance_job(
             &namespace,
-            &loonfs_types::RunMaintenanceRequest::Metadata(
+            &loonfs_types::RunMaintenanceJobRequest::Metadata(
                 loonfs_types::MetadataMaintenanceRequest {
                     max_wal_tail_objects: Some(std::num::NonZeroU64::MIN),
                 },
@@ -556,17 +556,17 @@ async fn http_metadata_run_reports_outcomes_not_errors() {
     assert_eq!(upkeep(&forced).compaction_units, 0);
     assert_eq!(wal_tail_objects(&client, &namespace).await, 0);
     let retention = client
-        .run_maintenance(
+        .run_maintenance_job(
             &namespace,
-            &loonfs_types::RunMaintenanceRequest::Retention(
+            &loonfs_types::RunMaintenanceJobRequest::Retention(
                 loonfs_types::AdvanceRetentionRequest::default(),
             ),
         )
         .await
         .expect("advance retention");
     // The commit is seconds old, so the floor stays below it.
-    assert_eq!(retention_floor(retention), ChangeSeq(0));
-    let gc = post_gc(&server_url, namespace.as_str()).expect("GC run");
+    assert_eq!(retention_floor(retention), CommitSeq(0));
+    let gc = post_gc(&server_url, namespace.as_str()).expect("GC job");
     assert_eq!(gc.deleted.wal_objects, 0);
 
     let bytes = client.read_file(&target).await.expect("read file");
@@ -601,14 +601,14 @@ async fn http_metadata_run_folds_an_idle_tail_unless_the_server_turns_the_idle_r
         .await;
         let response = harness
             .client
-            .run_maintenance(
+            .run_maintenance_job(
                 &namespace,
-                &loonfs_types::RunMaintenanceRequest::Metadata(
+                &loonfs_types::RunMaintenanceJobRequest::Metadata(
                     loonfs_types::MetadataMaintenanceRequest::default(),
                 ),
             )
             .await
-            .expect("metadata run");
+            .expect("metadata job");
         assert_eq!(
             upkeep(&response).outcome,
             loonfs_types::MetadataMaintenanceOutcome::CaughtUp,
@@ -644,7 +644,7 @@ async fn http_maintenance_retention_advance_uses_initial_manifest_after_create()
     let advanced = retention_floor(
         post_retention_advance(&server_url, namespace.as_str()).expect("advance retention"),
     );
-    assert_eq!(advanced, ChangeSeq(0));
+    assert_eq!(advanced, CommitSeq(0));
 
     harness.server.abort();
 }
@@ -746,7 +746,7 @@ async fn http_maintenance_store_probe_reports_unique_successes_from_the_configur
     )
     .expect("probe the configured store");
 
-    assert!(probe.run_id.as_str().starts_with("probe_"));
+    assert!(probe.probe_id.as_str().starts_with("probe_"));
     assert!(!probe.checks.is_empty(), "the probe must report its work");
     let names: std::collections::BTreeSet<&str> = probe
         .checks

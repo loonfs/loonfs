@@ -6,14 +6,14 @@ use loonfs_grep::{
     GramIndexBuildPolicy, GrepBuildOutcome, GrepProgress, GrepReorganizeOutcome,
     DEFAULT_GREP_PUBLISH_INTERVAL_MS,
 };
-use loonfs_types::{ChangeSeq, GrepIndexStatus, MonotonicTimer, NamespaceId, StdMonotonicTimer};
+use loonfs_types::{CommitSeq, GrepIndexStatus, MonotonicTimer, NamespaceId, StdMonotonicTimer};
 use std::future::Future;
 
 impl ResolvedTarget {
     pub(crate) async fn wait_for_grep_index(
         &self,
         namespace_id: &NamespaceId,
-        target_seq: ChangeSeq,
+        target_seq: CommitSeq,
         budget: StepBudget,
     ) -> Result<GrepWaitProgress> {
         let read_published =
@@ -127,7 +127,7 @@ pub(super) enum GrepWaitOutcome {
 
 /// Waits until the grep index reaches the target, stops, or exhausts the budget.
 pub(super) async fn wait_for_grep_index<Read, ReadTurn, Step, StepTurn>(
-    target_seq: ChangeSeq,
+    target_seq: CommitSeq,
     budget: StepBudget,
     read: Read,
     step: Step,
@@ -176,14 +176,14 @@ pub(super) async fn rest_between_status_checks() {
 #[cfg(test)]
 mod tests {
     use super::{wait_for_grep_index, GrepWaitOutcome, GrepWaitProgress, StepBudget};
-    use loonfs_types::{ChangeSeq, GrepIndexStatus};
+    use loonfs_types::{CommitSeq, GrepIndexStatus};
     use std::cell::Cell;
 
     #[tokio::test]
     async fn an_unbudgeted_wait_stops_where_the_index_stops() {
         let turns = Cell::new(0u64);
         let disabled = wait_for_grep_index(
-            ChangeSeq(3),
+            CommitSeq(3),
             StepBudget::default(),
             || async { Ok(GrepIndexStatus::Disabled) },
             || async {
@@ -203,11 +203,11 @@ mod tests {
         );
 
         let backfilling = wait_for_grep_index(
-            ChangeSeq(3),
+            CommitSeq(3),
             StepBudget::default(),
             || async {
                 Ok(GrepIndexStatus::Backfilling {
-                    captured_seq: ChangeSeq(3),
+                    captured_seq: CommitSeq(3),
                     cursor_inode_id: None,
                     checkpoint_id: loonfs_types::PinId::parse(
                         "pin_00000000000000000001-0123456789abcdef",

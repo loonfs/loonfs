@@ -230,7 +230,7 @@ mod cursor_tests {
     fn every_cursor_kind_matches_its_golden_bytes() {
         use crate::test_support::assert_matches_golden_token;
         use loonfs_types::{
-            ChangeSeq, ContentId, FileRevisionsPageCursor, GrepCursorPosition, GrepPageCursor,
+            CommitSeq, ContentId, FileRevisionsPageCursor, GrepCursorPosition, GrepPageCursor,
             InodeId, RevisionNo, TrashPageCursor,
         };
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -243,7 +243,7 @@ mod cursor_tests {
             (
                 "directory.txt",
                 encode_cursor(&DirectoryPageCursor {
-                    head_seq: ChangeSeq(12),
+                    head_seq: CommitSeq(12),
                     pin_id: None,
                     directory_inode_id: InodeId(1),
                     last_name_key: NameKey::parse("report.txt").expect("name key"),
@@ -252,27 +252,27 @@ mod cursor_tests {
             (
                 "file_revisions.txt",
                 encode_cursor(&FileRevisionsPageCursor {
-                    head_seq: ChangeSeq(12),
+                    head_seq: CommitSeq(12),
                     inode_id: InodeId(42),
                     last_revision_no: RevisionNo(3),
-                    last_committed_seq: ChangeSeq(9),
+                    last_committed_seq: CommitSeq(9),
                     last_revision_delta_index: 2,
                 }),
             ),
             (
                 "trash.txt",
                 encode_cursor(&TrashPageCursor {
-                    head_seq: ChangeSeq(12),
-                    last_deletion_seq: ChangeSeq(8),
+                    head_seq: CommitSeq(12),
+                    last_deletion_seq: CommitSeq(8),
                     last_root_inode_id: InodeId(42),
                 }),
             ),
             (
                 "grep.txt",
                 encode_cursor(&GrepPageCursor {
-                    head_seq: ChangeSeq(12),
-                    index_captured_seq: ChangeSeq(10),
-                    cut_seq: ChangeSeq(11),
+                    head_seq: CommitSeq(12),
+                    index_captured_seq: CommitSeq(10),
+                    cut_seq: CommitSeq(11),
                     last_content_id: ContentId::parse("con_3s0drmj8em84yb4mnetqkz2j0x")
                         .expect("content id"),
                     last_size_bytes: 4096,
@@ -295,7 +295,7 @@ mod cursor_tests {
     #[test]
     fn cursor_is_operation_bound() {
         let directory = DirectoryPageCursor {
-            head_seq: loonfs_types::ChangeSeq(1),
+            head_seq: loonfs_types::CommitSeq(1),
             pin_id: None,
             directory_inode_id: loonfs_types::InodeId(1),
             last_name_key: NameKey::parse("entry").expect("name key"),

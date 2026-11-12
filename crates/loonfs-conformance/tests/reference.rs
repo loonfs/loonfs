@@ -7,7 +7,7 @@ use loonfs_client::{
     AccessState, AppendFileOptions, AttributeChanges, Client, ClientConfig, ClientError,
     CommitOptions, Consistency, CreateDirectoryOptions, DeleteOptions, DownloadOptions,
     ListFileRevisionsOptions, ListTrashOptions, MoveOptions, NamespacePath, PutFileOptions, ReadAt,
-    UndeleteDestination, UndeleteOptions, UpdateAttributesByInodeOptions,
+    RestoreDeletedDestination, RestoreDeletedOptions, UpdateAttributesByInodeOptions,
 };
 use loonfs_conformance::server::{start_server, ConformanceServer, StoreShape, AUTH_TOKEN};
 use loonfs_conformance::{byte_pattern, load_cases, validate_page_walk, Case};
@@ -15,15 +15,15 @@ use loonfs_test_support::ids::page_limit;
 use loonfs_types::options::DirectMultipartUploadOptions;
 use loonfs_types::{
     AccessGrants, ActorId, AttributeKey, AttributeValue, AttributesRevisionNo, BindingVersion,
-    ChangeSeq, Checksum, ChecksumAlgorithm, CommitId, CommitPrecondition, CommitRequest,
+    Checksum, ChecksumAlgorithm, CommitId, CommitPrecondition, CommitRequest, CommitSeq,
     ContentRef, DeleteDirectoryBehavior, DestinationBehavior, DestinationPrecondition, DisplayName,
     ErrorResponse, FilesystemOperation, NamespaceId, PathEntry, PathEntryKind, RevisionNo,
     FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, ROOT_INODE_ID,
 };
 use loonfs_types::{
     CompleteUploadBody, ContentToken, CreateSnapshotRequest, CreateUploadBody,
-    DeleteSnapshotResponse, ExtendSnapshotRequest, FilesystemChange, ListChangesResponse,
-    ListSnapshotsResponse, ObjectTransferAccess, Snapshot, UploadContentClaim, UploadMode,
+    DeleteSnapshotResponse, ExtendSnapshotRequest, FilesystemEvent, ListChangesResponse,
+    ListSnapshotsResponse, ObjectTransfer, Snapshot, UploadContentClaim, UploadMode,
     UploadPartChecksumClaim, UploadSessionStatus,
 };
 use serde::de::DeserializeOwned;
@@ -244,7 +244,7 @@ async fn run_upload_modes(harness: &Harness, case: &Case) {
         match begin.status {
             UploadSessionStatus::Open {
                 checksum_algorithm,
-                access,
+                transfer: access,
                 part_size_bytes,
                 ..
             } => {
@@ -461,7 +461,7 @@ async fn run_direct_put(harness: &Harness, case: &Case) {
     let (checksum_algorithm, access) = match begin.status {
         UploadSessionStatus::Open {
             checksum_algorithm,
-            access: Some(access),
+            transfer: Some(access),
             ..
         } => (checksum_algorithm, access),
         other => panic!("expected direct_put, found {other:?}"),
@@ -621,7 +621,7 @@ async fn run_multipart(harness: &Harness, case: &Case) {
                 .client
                 .upload_part_via_presigned_url(
                     signed_part.part_number,
-                    &signed_part.access,
+                    &signed_part.transfer,
                     claims[index].checksum.clone(),
                     Bytes::copy_from_slice(chunks[index]),
                 )
@@ -1040,8 +1040,8 @@ fn append_options(id: &str) -> AppendFileOptions {
     }
 }
 
-fn signed_range(access: &ObjectTransferAccess) -> Option<&str> {
-    let ObjectTransferAccess::PresignedUrl { headers, .. } = access else {
+fn signed_range(access: &ObjectTransfer) -> Option<&str> {
+    let ObjectTransfer::PresignedUrl { headers, .. } = access else {
         panic!("expected a presigned URL");
     };
     headers
@@ -1111,7 +1111,7 @@ async fn run_append(harness: &Harness, case: &Case) {
         expected.previous_size_bytes
     );
     assert_eq!(
-        signed_range(&previous.ranges[0].access),
+        signed_range(&previous.ranges[0].transfer),
         Some(expected.previous_range.as_str())
     );
     assert_eq!(stream_grant(client, &previous).await, content);
@@ -1127,7 +1127,7 @@ async fn run_append(harness: &Harness, case: &Case) {
         .await
         .expect("grant the appended bytes");
     assert_eq!(
-        signed_range(&resumed.ranges[0].access),
+        signed_range(&resumed.ranges[0].transfer),
         Some(expected.resumed_range.as_str())
     );
     assert_eq!(resumed.ranges.len(), 1);
@@ -1182,7 +1182,7 @@ async fn run_append(harness: &Harness, case: &Case) {
         .await
         .expect("grant the empty file");
     assert_eq!(empty.content_ref.size_bytes, 0);
-    assert_eq!(signed_range(&empty.ranges[0].access), None);
+    assert_eq!(signed_range(&empty.ranges[0].transfer), None);
     assert!(stream_grant(client, &empty).await.is_empty());
 
     let append_to_empty = client
@@ -1209,7 +1209,7 @@ async fn run_append(harness: &Harness, case: &Case) {
         .await
         .expect("grant the empty revision");
     assert_eq!(still_empty.content_ref, empty.content_ref);
-    assert_eq!(signed_range(&still_empty.ranges[0].access), None);
+    assert_eq!(signed_range(&still_empty.ranges[0].transfer), None);
     assert!(stream_grant(client, &still_empty).await.is_empty());
 }
 
@@ -1658,7 +1658,7 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
 
     let feed = harness
         .client
-        .list_changes(&namespace, ChangeSeq(expected.moved_committed_seq - 1))
+        .list_changes(&namespace, CommitSeq(expected.moved_committed_seq - 1))
         .page_limit(page_limit(1))
         .page()
         .await
@@ -1670,7 +1670,7 @@ async fn run_inode_mutations(harness: &Harness, case: &Case) {
         .events
         .as_slice()
     {
-        [FilesystemChange::Moved {
+        [FilesystemEvent::Moved {
             binding_version, ..
         }] => assert_eq!(binding_version, &moved_version),
         other => panic!("expected one moved event, found {other:?}"),
@@ -1997,27 +1997,27 @@ async fn run_inode_addressing(harness: &Harness, case: &Case) {
         .expect("delete copy");
     harness
         .client
-        .undelete_with_options(
+        .restore_deleted_with_options(
             &namespace,
             copy_entry.inode_id,
             deletion.committed_seq,
             actor,
-            &UndeleteOptions {
-                commit: commit_options("conf-inode-addressing-undelete"),
-                destination: UndeleteDestination::Name {
+            &RestoreDeletedOptions {
+                commit: commit_options("conf-inode-addressing-restore-deleted"),
+                destination: RestoreDeletedDestination::Name {
                     parent_inode_id,
                     display_name: display_name(&request.restored_file_name),
                 },
             },
         )
         .await
-        .expect("undelete under a parent inode");
+        .expect("restore under a parent inode");
     assert_eq!(
         harness
             .client
             .stat(&child_path(&request.restored_file_name))
             .await
-            .expect("stat undeleted copy")
+            .expect("stat restored copy")
             .inode_id,
         copy_entry.inode_id
     );
@@ -2689,7 +2689,7 @@ async fn run_changes(harness: &Harness, case: &Case) {
     assert_eq!(committed.committed_seq.0, expected.committed_seq);
     let feed = harness
         .client
-        .list_changes(&namespace, ChangeSeq(request.after_seq))
+        .list_changes(&namespace, CommitSeq(request.after_seq))
         .page()
         .await
         .expect("list changes");
@@ -2699,7 +2699,7 @@ async fn run_changes(harness: &Harness, case: &Case) {
     assert_eq!(change.committed_by, request.actor_id);
     assert_matches!(
         change.events.as_slice(),
-        [FilesystemChange::DirectoryCreated { .. }]
+        [FilesystemEvent::DirectoryCreated { .. }]
     );
 }
 
@@ -2744,7 +2744,7 @@ async fn run_unknown_event_kinds(case: &Case) {
     let feed = configured_client(&stub_url, None)
         .list_changes(
             &namespace_id(&request.namespace_id),
-            ChangeSeq(request.after_seq),
+            CommitSeq(request.after_seq),
         )
         .page()
         .await
@@ -2759,9 +2759,9 @@ async fn run_unknown_event_kinds(case: &Case) {
     assert_eq!(committed_seqs, expected.committed_seqs);
     assert_eq!(
         feed.next_after_seq,
-        Some(ChangeSeq(expected.next_after_seq))
+        Some(CommitSeq(expected.next_after_seq))
     );
-    // The client decodes an event whose kind it doesn't define as `FilesystemChange::Unknown`.
+    // The client decodes an event whose kind it doesn't define as `FilesystemEvent::Unknown`.
     let known_events: Vec<Vec<serde_json::Value>> = feed
         .changes
         .iter()
@@ -2769,7 +2769,7 @@ async fn run_unknown_event_kinds(case: &Case) {
             change
                 .events
                 .iter()
-                .filter(|event| **event != FilesystemChange::Unknown)
+                .filter(|event| **event != FilesystemEvent::Unknown)
                 .map(|event| serde_json::to_value(event).expect("encode known event"))
                 .collect()
         })
@@ -2786,7 +2786,7 @@ async fn run_unknown_event_kinds(case: &Case) {
         .changes
         .iter()
         .flat_map(|change| &change.events)
-        .filter(|event| **event == FilesystemChange::Unknown)
+        .filter(|event| **event == FilesystemEvent::Unknown)
         .count();
     assert_eq!(decoded_unknown_count, page_unknown_count);
 }
@@ -3008,7 +3008,7 @@ async fn run_end_to_end(harness: &Harness, case: &Case) {
 
     let changes = harness
         .client
-        .list_changes(&namespace, ChangeSeq(0))
+        .list_changes(&namespace, CommitSeq(0))
         .page()
         .await
         .expect("list end-to-end changes before remove");
@@ -3026,7 +3026,7 @@ async fn run_end_to_end(harness: &Harness, case: &Case) {
 
     let changes = harness
         .client
-        .list_changes(&namespace, ChangeSeq(0))
+        .list_changes(&namespace, CommitSeq(0))
         .page()
         .await
         .expect("list complete end-to-end changes");

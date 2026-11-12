@@ -1263,7 +1263,7 @@ fn embedded_profile_namespace_fork_reads_shared_content_and_diverges() {
             "created_by": "loonfs-cli",
             "fork_basis": {
                 "source_namespace_id": "demo",
-                "source_head_seq": 1,
+                "fork_point_seq": 1,
                 "source_pin_id": json_data(&fork)["fork_basis"]["source_pin_id"]
             },
             "pool_id": json_data(&fork)["pool_id"],
@@ -1542,7 +1542,7 @@ fn stat_inode_has_embedded_and_remote_parity_and_tracks_renames() {
             "demo",
             "--inode",
             &loonfs_types::InodeId::generate(
-                loonfs_types::ChangeSeq(1_000),
+                loonfs_types::CommitSeq(1_000),
                 std::num::NonZeroU32::MIN,
             )
             .to_string(),

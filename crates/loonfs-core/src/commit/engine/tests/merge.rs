@@ -15,7 +15,7 @@ use loonfs_types::{AbsolutePath, CompactorEpoch, DisplayName, EffectiveLimit, In
 use std::collections::BTreeMap;
 
 /// The sequence of `main` that the tests' fork was made at.
-const FORK_POINT: ChangeSeq = ChangeSeq(3);
+const FORK_POINT: CommitSeq = CommitSeq(3);
 
 fn fork() -> NamespaceId {
     NamespaceId::parse("main-fork").expect("namespace")
@@ -25,8 +25,8 @@ fn fork() -> NamespaceId {
 fn merge(after_seq: u64, through_seq: u64) -> MergeRecord {
     MergeRecord {
         source_namespace_id: fork(),
-        source_after_seq: ChangeSeq(after_seq),
-        source_through_seq: ChangeSeq(through_seq),
+        source_after_seq: CommitSeq(after_seq),
+        source_through_seq: CommitSeq(through_seq),
     }
 }
 
@@ -40,7 +40,7 @@ fn reported(merge: &MergeRecord) -> Merge {
 
 /// An ID that an inode created in the fork has.
 fn fork_inode_id() -> InodeId {
-    InodeId::generate(ChangeSeq(FORK_POINT.0 + 1), std::num::NonZeroU32::MIN)
+    InodeId::generate(CommitSeq(FORK_POINT.0 + 1), std::num::NonZeroU32::MIN)
 }
 
 /// A merge of `merge` under `commit_id` that creates `/{name}` under an inode
@@ -86,7 +86,7 @@ async fn feed(store: &LocalFsStore, namespace_id: &NamespaceId) -> Vec<Commit> {
         .expect("read view");
     list_changes_after(
         &view,
-        loonfs_types::ChangeFeedPosition::after(ChangeSeq(0)),
+        loonfs_types::ChangeFeedPosition::after(CommitSeq(0)),
         EffectiveLimit::MAX,
         loonfs_types::options::CommitSplitting::Whole,
     )
@@ -194,9 +194,9 @@ fn assert_range_conflict(error: CoreError, expected_after_seq: u64, actual_after
     assert_eq!(details.source_namespace_id, Some(fork()));
     assert_eq!(
         details.expected_after_seq,
-        Some(ChangeSeq(expected_after_seq))
+        Some(CommitSeq(expected_after_seq))
     );
-    assert_eq!(details.actual_after_seq, Some(ChangeSeq(actual_after_seq)));
+    assert_eq!(details.actual_after_seq, Some(CommitSeq(actual_after_seq)));
     assert_matches!(
         error,
         CoreError::MergeRangeConflict { source_namespace_id, .. } if source_namespace_id == fork()
@@ -376,7 +376,7 @@ async fn a_merge_of_ten_thousand_creates_is_admitted_where_an_explicit_commit_is
         .events
         .iter()
         .map(|event| match event {
-            loonfs_types::FilesystemChange::DirectoryCreated { inode_id, .. } => *inode_id,
+            loonfs_types::FilesystemEvent::DirectoryCreated { inode_id, .. } => *inode_id,
             other => panic!("expected a directory creation, got {other:?}"),
         })
         .collect();
@@ -402,7 +402,7 @@ async fn a_merge_over_the_wal_object_bound_fails_with_merge_too_large_and_writes
         .pop()
         .expect("one result")
         .expect("create a directory");
-    let loonfs_types::FilesystemChange::DirectoryCreated { inode_id, .. } = directory.events[0]
+    let loonfs_types::FilesystemEvent::DirectoryCreated { inode_id, .. } = directory.events[0]
     else {
         panic!("expected a directory creation");
     };
@@ -555,7 +555,7 @@ async fn merge_a_forks_file() -> (tempfile::TempDir, MergedFile) {
         )
         .await
         .expect("write the fork's file");
-    let loonfs_types::FilesystemChange::FileCreated {
+    let loonfs_types::FilesystemEvent::FileCreated {
         inode_id,
         content_ref,
         ..
@@ -684,7 +684,7 @@ async fn advance_floor_and_compact(
     store: &LocalFsStore,
     namespace_id: &NamespaceId,
     target: RetentionTarget,
-) -> ChangeSeq {
+) -> CommitSeq {
     crate::test_support::namespace_store(store, namespace_id)
         .fold_wal()
         .await
@@ -732,7 +732,7 @@ async fn advance_floor_and_compact(
 #[tokio::test]
 async fn a_merge_whose_fork_point_is_below_the_retention_floor_is_refused() {
     let (_directory, store, namespace_id, writer) = setup().await;
-    let mut head = ChangeSeq(0);
+    let mut head = CommitSeq(0);
     while head < FORK_POINT {
         let name = format!("before-{}", head.0);
         let candidate = CommitCandidate::new(create_dir_request(&name, &name));
@@ -794,7 +794,7 @@ async fn a_merge_whose_fork_point_is_below_the_retention_floor_is_refused() {
 /// The inode that a commit's first event created.
 fn created_inode(commit: &Commit) -> InodeId {
     match &commit.events[0] {
-        loonfs_types::FilesystemChange::DirectoryCreated { inode_id, .. } => *inode_id,
+        loonfs_types::FilesystemEvent::DirectoryCreated { inode_id, .. } => *inode_id,
         other => panic!("expected a directory creation, got {other:?}"),
     }
 }

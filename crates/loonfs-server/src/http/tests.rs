@@ -485,7 +485,7 @@ async fn every_route_except_health_and_readiness_requires_authorization() {
             "GET",
             "/v0/maintenance/namespaces/demo/checkpoints/pin_test",
         ),
-        ("POST", "/v0/maintenance/namespaces/demo/runs"),
+        ("POST", "/v0/maintenance/namespaces/demo/jobs"),
         ("POST", "/v0/maintenance/store/probe"),
     ];
 

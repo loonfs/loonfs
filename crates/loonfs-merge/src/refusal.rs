@@ -2,7 +2,7 @@
 
 use crate::{PendingCommit, Result};
 use loonfs_client::ClientError;
-use loonfs_types::{u64_from_usize, ChangeSeq, ErrorCode, ErrorKind, ErrorResponse};
+use loonfs_types::{u64_from_usize, CommitSeq, ErrorCode, ErrorKind, ErrorResponse};
 
 /// The attempts that one merge or rebase request gets when it fails with a
 /// transient error: the first attempt and three more.
@@ -28,7 +28,7 @@ pub(crate) enum Refusal {
 pub(crate) enum NextRequest {
     /// The request was too large, and the next request goes through the
     /// error's split hint.
-    Split(ChangeSeq),
+    Split(CommitSeq),
     /// The request failed with a transient error, and the same request goes
     /// again.
     Retry,

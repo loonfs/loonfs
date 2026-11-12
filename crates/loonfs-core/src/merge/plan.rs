@@ -20,7 +20,7 @@ use crate::path::read::LoadedMetadataView;
 use crate::storage::content_admission::PreparedContent;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::MergeRecord;
-use loonfs_types::{u64_from_usize, ChangeSeq, CommitPrecondition, InodeKind, MergeConflict};
+use loonfs_types::{u64_from_usize, CommitPrecondition, CommitSeq, InodeKind, MergeConflict};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -66,7 +66,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         pinned: Option<&'v LoadedMetadataView<'v, S>>,
         fork: &NamespaceEngine<S, F>,
         fork_view: &'v LoadedMetadataView<'v, S>,
-        (fork_point_seq, source_after_seq): (ChangeSeq, ChangeSeq),
+        (fork_point_seq, source_after_seq): (CommitSeq, CommitSeq),
         request: &MergeRequest,
         prepared_at_ms: u64,
         allowance: &MergeAllowance,

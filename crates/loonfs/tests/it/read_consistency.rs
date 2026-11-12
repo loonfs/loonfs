@@ -7,7 +7,7 @@ use crate::writer_position_reads::{self, Parked};
 use loonfs::engine::READ_REVALIDATION_BOUND_MS;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
 use loonfs::{
-    ChangeSeq, Consistency, DownloadOptions, Error, ListChangesOptions, ListFileRevisionsOptions,
+    CommitSeq, Consistency, DownloadOptions, Error, ListChangesOptions, ListFileRevisionsOptions,
     ListOptions, ListTrashOptions, LoonFs, MetadataCache, Namespace, NamespaceId, ReadAt,
     ReadConsistency, ReadFileOptions, ReadFileStreamOptions, ReadOnly, SharedObjectStore,
     StatOptions, Writable,
@@ -218,7 +218,7 @@ async fn a_maximum_staleness_above_the_revalidation_bound_is_rejected_before_any
             .err(),
         reader
             .list_changes_with_options(
-                ChangeSeq(0),
+                CommitSeq(0),
                 &ListChangesOptions {
                     at: ReadAt::Live(consistency),
                     ..ListChangesOptions::default()

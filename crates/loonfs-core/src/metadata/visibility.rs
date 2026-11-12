@@ -9,7 +9,7 @@ use super::{
     AccessRevisionRecord, DirentryBindingRecord, InodeRecord, MetadataState, SubtreeTombstoneRecord,
 };
 use futures::FutureExt;
-use loonfs_types::{AbsolutePath, ChangeSeq, InodeId, InodeKind, NameKey, ROOT_INODE_ID};
+use loonfs_types::{AbsolutePath, CommitSeq, InodeId, InodeKind, NameKey, ROOT_INODE_ID};
 use std::collections::BTreeSet;
 use std::future::Future;
 
@@ -24,7 +24,7 @@ pub(crate) trait MetadataVisibilityReads {
     /// The view's retention floor. A deletion at or below it has expired in
     /// the view
     /// ([format section 1.6](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#16-file-and-subtree-deletion)).
-    fn retention_floor_seq(&self) -> ChangeSeq;
+    fn retention_floor_seq(&self) -> CommitSeq;
 
     /// The inode record created at or before the read seq, if any.
     async fn find_inode(&mut self, inode_id: InodeId) -> Result<Option<InodeRecord>, Self::Error>;
@@ -529,11 +529,11 @@ pub(crate) fn resolve_in_memory_read<T>(future: impl Future<Output = T>) -> T {
 /// [`MetadataState`] reads scoped to `base_seq`.
 pub(crate) struct MetadataStateReads<'a> {
     state: &'a MetadataState,
-    base_seq: ChangeSeq,
+    base_seq: CommitSeq,
 }
 
 impl MetadataState {
-    pub(crate) fn reads_at_seq(&self, base_seq: ChangeSeq) -> MetadataStateReads<'_> {
+    pub(crate) fn reads_at_seq(&self, base_seq: CommitSeq) -> MetadataStateReads<'_> {
         MetadataStateReads {
             state: self,
             base_seq,
@@ -547,8 +547,8 @@ impl MetadataVisibilityReads for MetadataStateReads<'_> {
     /// In-memory state has no manifest and no floor object, so like a new
     /// namespace's first manifest, it has a floor of 0 and no deletion in it
     /// has expired.
-    fn retention_floor_seq(&self) -> ChangeSeq {
-        ChangeSeq(0)
+    fn retention_floor_seq(&self) -> CommitSeq {
+        CommitSeq(0)
     }
 
     async fn find_inode(&mut self, inode_id: InodeId) -> Result<Option<InodeRecord>, Self::Error> {

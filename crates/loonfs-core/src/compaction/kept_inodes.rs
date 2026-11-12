@@ -4,7 +4,7 @@
 //! A deletion has expired in a compaction's basis when its latest tombstone
 //! event is a `set` and its deletion sequence is at or below the basis
 //! manifest's retention floor. Its tombstone hides its subtree at every
-//! sequence that a compaction preserves, and no undelete of it can be
+//! sequence that a compaction preserves, and no restore of it can be
 //! committed, so a base compaction of a group that stores rows by inode
 //! removes every row of the inodes that an expired deletion hides
 //! ([format section 10.3](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#103-row-retention-during-a-base-compaction)).
@@ -24,7 +24,7 @@ use crate::segment::scan::VerifiedMetadataSegments;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{lookup_keys, ActiveDeletionRowAction, MetadataRow};
 use loonfs_types::format::segment_blocks::string_prefix_upper_bound;
-use loonfs_types::{ChangeSeq, InodeId, InodeKind, NamespaceId, ROOT_INODE_ID};
+use loonfs_types::{CommitSeq, InodeId, InodeKind, NamespaceId, ROOT_INODE_ID};
 use std::collections::VecDeque;
 use std::ops::ControlFlow;
 
@@ -123,7 +123,7 @@ pub(crate) async fn load_kept_inode_filter<S: ObjectStore + ?Sized>(
     }
     let manifest = basis.manifest().payload();
     let retention_floor_seq = manifest.retention_floor_seq;
-    if retention_floor_seq == ChangeSeq(0) {
+    if retention_floor_seq == CommitSeq(0) {
         return Ok(Ok(KeptInodeFilter::EveryInode));
     }
     let expected_inodes = basis
@@ -187,12 +187,12 @@ struct ListedDeletions {
     scanned_to_end: bool,
     /// The last removal read. A removal sorts just before the listed row it
     /// cancels, so a listed row can only match the last removal read.
-    removed: Option<(ChangeSeq, InodeId)>,
+    removed: Option<(CommitSeq, InodeId)>,
 }
 
 impl ListedDeletions {
     /// The deletions above `after_seq`.
-    fn above(after_seq: ChangeSeq) -> Self {
+    fn above(after_seq: CommitSeq) -> Self {
         Self {
             lower_bound: lookup_keys::active_deletion_key_after_seq(after_seq),
             upper_bound: string_prefix_upper_bound(lookup_keys::ACTIVE_DELETION_ROW_PREFIX),
@@ -254,8 +254,8 @@ struct KeptInodeWalk<'a, 'c, S: ObjectStore + ?Sized> {
     segments: VerifiedMetadataSegments<'a, S>,
     filter: BloomFilter,
     /// The basis manifest's retention floor. A deletion at or below it that
-    /// no undelete cancelled has expired.
-    retention_floor_seq: ChangeSeq,
+    /// no restore cancelled has expired.
+    retention_floor_seq: CommitSeq,
     cancellation: &'c MetadataCompactionCancellation,
 }
 

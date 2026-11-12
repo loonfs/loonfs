@@ -26,15 +26,15 @@ use loonfs_types::format::segment_blocks::{DecodedDataBlock, SegmentIndexEntry};
 use loonfs_types::format::wal::{
     MergeRecord, WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent,
 };
-use loonfs_types::options::UndeleteDestination;
+use loonfs_types::options::RestoreDeletedDestination;
 use loonfs_types::{
     AbsolutePath, AccessGrants, ActorId, AttributeKey, AttributeValue, Attributes, BindingVersion,
-    ChangeSeq, Checksum, ChecksumHex, CommitFingerprint, CommitId, CommitPrecondition, ContentId,
+    Checksum, ChecksumHex, CommitFingerprint, CommitId, CommitPrecondition, CommitSeq, ContentId,
     ContentRef, DisplayName, ExtensionName, FileContent, IndexSegmentId, InodeId,
     MetadataSegmentId, NameKey, NamespaceId, PathComponent, PayloadChecksum, PinId, PoolId,
     PrincipalId, PrincipalScope, Subject, SubjectId, UploadId, WriterId,
 };
-use loonfs_types::{DiffEntry, FilesystemChange};
+use loonfs_types::{DiffEntry, FilesystemEvent};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::mem::size_of;
 
@@ -189,7 +189,7 @@ impl HeapBytes for InodeId {
     }
 }
 
-impl HeapBytes for ChangeSeq {
+impl HeapBytes for CommitSeq {
     fn heap_bytes(&self) -> usize {
         0
     }
@@ -336,10 +336,10 @@ impl HeapBytes for FilesystemOperation {
                 destination_display_name,
                 ..
             } => destination_display_name.heap_bytes(),
-            Self::Undelete { destination, .. } => match destination {
-                UndeleteDestination::Recorded => 0,
-                UndeleteDestination::Path(path) => path.heap_bytes(),
-                UndeleteDestination::Name { display_name, .. } => display_name.heap_bytes(),
+            Self::RestoreDeleted { destination, .. } => match destination {
+                RestoreDeletedDestination::Recorded => 0,
+                RestoreDeletedDestination::Path(path) => path.heap_bytes(),
+                RestoreDeletedDestination::Name { display_name, .. } => display_name.heap_bytes(),
             },
             Self::RestoreRevisionByInode { .. } => 0,
             Self::UpdateAttributes {
@@ -361,7 +361,7 @@ fn attribute_set_heap_bytes(set: &BTreeMap<AttributeKey, AttributeValue>) -> usi
         .fold(btree_map_node_bytes(set), usize::saturating_add)
 }
 
-impl HeapBytes for FilesystemChange {
+impl HeapBytes for FilesystemEvent {
     fn heap_bytes(&self) -> usize {
         match self {
             Self::DirectoryCreated {
@@ -369,7 +369,7 @@ impl HeapBytes for FilesystemChange {
                 binding_version,
                 ..
             }
-            | Self::Undeleted {
+            | Self::Restored {
                 display_name,
                 binding_version,
                 ..

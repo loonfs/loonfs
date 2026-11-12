@@ -7,8 +7,8 @@ use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval
 use loonfs_test_support::ids::{namespace_id, page_limit};
 use loonfs_types::options::{CommitSplitting, DiffOptions, ListChangesOptions};
 use loonfs_types::{
-    AbsolutePath, ChangeSeq, CommitId, CommitRequest, DestinationBehavior, ErrorCode,
-    ErrorResponse, FilesystemChange, FilesystemOperation, ListCheckpointsResponse,
+    AbsolutePath, CommitId, CommitRequest, CommitSeq, DestinationBehavior, ErrorCode,
+    ErrorResponse, FilesystemEvent, FilesystemOperation, ListCheckpointsResponse,
     ListPathEntriesResponse, RevisionNo, MAX_PAGE_LIMIT,
 };
 use std::assert_matches;
@@ -580,7 +580,7 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
         )
         .await
         .expect("replace file");
-    assert_eq!(replace.committed_seq, ChangeSeq(2));
+    assert_eq!(replace.committed_seq, CommitSeq(2));
 
     let restore = harness
         .client
@@ -596,7 +596,7 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
         )
         .await
         .expect("restore revision");
-    assert_eq!(restore.committed_seq, ChangeSeq(3));
+    assert_eq!(restore.committed_seq, CommitSeq(3));
 
     let entry = harness
         .client
@@ -614,7 +614,7 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
 
     let changes = harness
         .client
-        .list_changes(&namespace, ChangeSeq(0))
+        .list_changes(&namespace, CommitSeq(0))
         .page()
         .await
         .expect("list changes");
@@ -627,7 +627,7 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
     assert_eq!(changes.changes[2].events.len(), 1);
     assert_matches!(
         &changes.changes[2].events[0],
-        FilesystemChange::ContentChanged {
+        FilesystemEvent::ContentChanged {
             inode_id: event_inode,
             revision_no,
             content_ref,
@@ -639,14 +639,14 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
 
     let first_page = harness
         .client
-        .list_changes(&namespace, ChangeSeq(0))
+        .list_changes(&namespace, CommitSeq(0))
         .page_limit(page_limit(2))
         .page()
         .await
         .expect("list first changes page");
-    assert_eq!(first_page.after_seq, ChangeSeq(0));
-    assert_eq!(first_page.head_seq, ChangeSeq(3));
-    assert_eq!(first_page.next_after_seq, Some(ChangeSeq(2)));
+    assert_eq!(first_page.after_seq, CommitSeq(0));
+    assert_eq!(first_page.head_seq, CommitSeq(3));
+    assert_eq!(first_page.next_after_seq, Some(CommitSeq(2)));
     assert_eq!(first_page.changes.len(), 2);
 
     let second_page = harness
@@ -656,8 +656,8 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
         .page()
         .await
         .expect("list second changes page");
-    assert_eq!(second_page.after_seq, ChangeSeq(2));
-    assert_eq!(second_page.head_seq, ChangeSeq(3));
+    assert_eq!(second_page.after_seq, CommitSeq(2));
+    assert_eq!(second_page.head_seq, CommitSeq(3));
     assert_eq!(second_page.next_after_seq, None);
     assert_eq!(
         second_page
@@ -665,7 +665,7 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
             .iter()
             .map(|change| change.committed_seq)
             .collect::<Vec<_>>(),
-        vec![ChangeSeq(3)]
+        vec![CommitSeq(3)]
     );
 
     harness.server.abort();
@@ -873,7 +873,7 @@ async fn http_change_feed_and_diff_resume_a_commit_at_an_event_index() {
 
     let whole = harness
         .client
-        .list_changes(&namespace, ChangeSeq(0))
+        .list_changes(&namespace, CommitSeq(0))
         .page()
         .await
         .expect("list the whole commit");
@@ -889,7 +889,7 @@ async fn http_change_feed_and_diff_resume_a_commit_at_an_event_index() {
     // returns it whole.
     let from_start = harness
         .client
-        .list_changes_with_options(&namespace, ChangeSeq(0), &split_at(0))
+        .list_changes_with_options(&namespace, CommitSeq(0), &split_at(0))
         .page()
         .await
         .expect("list with split_commits");
@@ -941,14 +941,14 @@ async fn http_change_feed_and_diff_resume_a_commit_at_an_event_index() {
 
     let whole_diff = harness
         .client
-        .diff(&namespace, ChangeSeq(0))
+        .diff(&namespace, CommitSeq(0))
         .await
         .expect("diff the whole commit");
     let resumed_diff = harness
         .client
         .diff_with_options(
             &namespace,
-            ChangeSeq(0),
+            CommitSeq(0),
             &DiffOptions {
                 after_seq: Some(commit_seq),
                 event_index: 1,
@@ -986,7 +986,7 @@ async fn http_change_feed_and_diff_resume_a_commit_at_an_event_index() {
                 .client
                 .diff_with_options(
                     &namespace,
-                    ChangeSeq(0),
+                    CommitSeq(0),
                     &DiffOptions {
                         after_seq: Some(commit_seq),
                         event_index: 1,

@@ -737,7 +737,7 @@ mod tests {
 
     fn probe_response(outcomes: &[StoreProbeCheckOutcome]) -> StoreProbeResponse {
         StoreProbeResponse {
-            run_id: loonfs_types::ProbeRunId::parse("probe_00000000000000000000000001")
+            probe_id: loonfs_types::ProbeId::parse("probe_00000000000000000000000001")
                 .expect("probe run id"),
             checks: outcomes
                 .iter()

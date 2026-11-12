@@ -491,8 +491,8 @@ fn crc32_from_u64(value: u64) -> u32 {
 pub struct ContentRef {
     /// The kind of content reference. The format defines one kind, `blob_v1`.
     pub kind: ContentRefKind,
-    /// The immutable identity of the content. The content ID and the reading namespace's family
-    /// root together determine the object key.
+    /// The immutable identity of the content. The content ID and the reading namespace's pool
+    /// together determine the object key.
     pub content_id: ContentId,
     /// The length of the referenced bytes, which are a prefix of the content object.
     pub size_bytes: u64,

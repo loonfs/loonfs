@@ -13,7 +13,7 @@ use loonfs_test_support::stores::{
 use loonfs_types::format::manifest::{ActivityCounter, ManifestActivity, MetadataRowFamily};
 use loonfs_types::StdMonotonicTimer;
 use loonfs_types::{
-    AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior,
+    AbsolutePath, CommitId, CommitSeq, DeleteDirectoryBehavior, DestinationBehavior,
 };
 use std::collections::BTreeMap;
 use tempfile::tempdir;
@@ -135,7 +135,7 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
             .await
             .expect("folded activity");
         assert_eq!(folded.activity, expected);
-        assert_eq!(folded.manifest.head_seq, ChangeSeq(4));
+        assert_eq!(folded.manifest.head_seq, CommitSeq(4));
         assert_eq!(folded.inode_record_count, 5); // Root, two directories, two files.
                                                   // A stale cached fold and a fresh engine both see already-covered activity.
         namespace_store(&store, &ns)
@@ -368,7 +368,7 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
 }
 
 #[tokio::test]
-async fn deleting_and_undeleting_a_subtree_preserves_retained_inodes() {
+async fn deleting_and_restoring_a_subtree_preserves_retained_inodes() {
     let dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(dir.path()).expect("store");
     let ns = namespace_id("activity");
@@ -417,17 +417,17 @@ async fn deleting_and_undeleting_a_subtree_preserves_retained_inodes() {
     submit_operation(
         &store,
         &ns,
-        CommitId::parse("undelete").expect("id"),
-        FilesystemOperation::Undelete {
+        CommitId::parse("restore_deleted").expect("id"),
+        FilesystemOperation::RestoreDeleted {
             inode_id: inode,
             deletion_seq: deleted.committed_seq,
-            destination: loonfs_types::options::UndeleteDestination::Recorded,
+            destination: loonfs_types::options::RestoreDeletedDestination::Recorded,
         },
         &context,
     )
     .await
-    .expect("undelete");
-    engine.fold_wal().await.expect("fold undelete");
+    .expect("restore_deleted");
+    engine.fold_wal().await.expect("fold restore");
     let after = namespace_store(&store, &ns)
         .load_statistics()
         .await
@@ -510,7 +510,7 @@ async fn namespace_deletion_requires_a_successful_final_fold() {
             mutations: ActivityCounter::parse(1).expect("activity")
         }
     );
-    assert_eq!(final_manifest.payload().head_seq, ChangeSeq(1));
+    assert_eq!(final_manifest.payload().head_seq, CommitSeq(1));
     assert!(!final_manifest.payload().runs.is_empty());
 }
 

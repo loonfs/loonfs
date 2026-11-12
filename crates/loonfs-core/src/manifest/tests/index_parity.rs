@@ -12,7 +12,7 @@ enum PreCommitIdMetadataRow {
     Inode {
         inode_id: InodeId,
         inode_kind: loonfs_types::InodeKind,
-        committed_seq: ChangeSeq,
+        committed_seq: CommitSeq,
         committed_by: loonfs_types::ActorId,
         committed_at_ms: u64,
     },
@@ -21,7 +21,7 @@ enum PreCommitIdMetadataRow {
 pub(super) async fn rewrite_manifest_segment(
     store: &LocalFsStore,
     _namespace_id: &NamespaceId,
-    _run_seq: ChangeSeq,
+    _run_seq: CommitSeq,
     family: ApiMetadataRowFamily,
     descriptor: &mut MetadataSegmentRef,
     rows: Vec<MetadataRow>,
@@ -240,7 +240,7 @@ async fn a_base_rebuild_drops_what_the_floor_covers_and_keeps_what_it_does_not()
     let floor = advanced.retention_floor_seq;
     assert_eq!(
         floor,
-        ChangeSeq(6),
+        CommitSeq(6),
         "every seeded commit sits at or below the floor"
     );
 
@@ -370,13 +370,13 @@ fn drop_pass_keeps_the_floor_visible_binding_across_a_later_rename() {
             child_kind: loonfs_types::InodeKind::Directory,
             child_created_by: loonfs_types::ActorId::loonfs(),
             child_created_at_ms: 4_200,
-            committed_seq: ChangeSeq(seq),
+            committed_seq: CommitSeq(seq),
             delta_index: delta,
             commit_id: crate::test_support::binding_commit_id(),
             committed_by: loonfs_types::ActorId::loonfs(),
             committed_at_ms: 0,
             bind_position: loonfs_types::format::manifest::DeltaPosition {
-                seq: ChangeSeq(seq),
+                seq: CommitSeq(seq),
                 delta_index: delta,
             },
         })
@@ -389,13 +389,13 @@ fn drop_pass_keeps_the_floor_visible_binding_across_a_later_rename() {
             child_kind: loonfs_types::InodeKind::Directory,
             child_created_by: loonfs_types::ActorId::loonfs(),
             child_created_at_ms: 4_200,
-            committed_seq: ChangeSeq(unbind_seq),
+            committed_seq: CommitSeq(unbind_seq),
             delta_index: 0,
             commit_id: crate::test_support::binding_commit_id(),
             committed_by: loonfs_types::ActorId::loonfs(),
             committed_at_ms: 0,
             bind_position: loonfs_types::format::manifest::DeltaPosition {
-                seq: ChangeSeq(unbind_seq),
+                seq: CommitSeq(unbind_seq),
                 delta_index: 0,
             },
             state: loonfs_types::format::manifest::DirentryBindingState::Unbound,
@@ -413,7 +413,7 @@ fn drop_pass_keeps_the_floor_visible_binding_across_a_later_rename() {
         vec![bind(1, 0), unbind(2), bind(2, 1)],
     );
 
-    compact_rows_with_retention(MetadataFamilyGroup::Bindings, &mut rows, ChangeSeq(1))
+    compact_rows_with_retention(MetadataFamilyGroup::Bindings, &mut rows, CommitSeq(1))
         .expect("drop");
 
     assert_eq!(rows[&ApiMetadataRowFamily::DirentryBinds].len(), 3);
@@ -435,13 +435,13 @@ fn drop_pass_resolves_same_seq_rebinds_by_delta_index() {
             child_kind: loonfs_types::InodeKind::Directory,
             child_created_by: loonfs_types::ActorId::loonfs(),
             child_created_at_ms: 4_200,
-            committed_seq: ChangeSeq(1),
+            committed_seq: CommitSeq(1),
             delta_index: delta,
             commit_id: crate::test_support::binding_commit_id(),
             committed_by: loonfs_types::ActorId::loonfs(),
             committed_at_ms: 0,
             bind_position: loonfs_types::format::manifest::DeltaPosition {
-                seq: ChangeSeq(1),
+                seq: CommitSeq(1),
                 delta_index: delta,
             },
         })
@@ -453,13 +453,13 @@ fn drop_pass_resolves_same_seq_rebinds_by_delta_index() {
         child_kind: loonfs_types::InodeKind::Directory,
         child_created_by: loonfs_types::ActorId::loonfs(),
         child_created_at_ms: 4_200,
-        committed_seq: ChangeSeq(1),
+        committed_seq: CommitSeq(1),
         delta_index: 1,
         commit_id: crate::test_support::binding_commit_id(),
         committed_by: loonfs_types::ActorId::loonfs(),
         committed_at_ms: 0,
         bind_position: loonfs_types::format::manifest::DeltaPosition {
-            seq: ChangeSeq(1),
+            seq: CommitSeq(1),
             delta_index: 1,
         },
         state: loonfs_types::format::manifest::DirentryBindingState::Unbound,
@@ -474,7 +474,7 @@ fn drop_pass_resolves_same_seq_rebinds_by_delta_index() {
         vec![bind(0), unbind.clone(), bind(2)],
     );
 
-    compact_rows_with_retention(MetadataFamilyGroup::Bindings, &mut rows, ChangeSeq(1))
+    compact_rows_with_retention(MetadataFamilyGroup::Bindings, &mut rows, CommitSeq(1))
         .expect("drop");
 
     // Only the delta-2 rebind (the slot's latest) survives; the superseded
@@ -703,7 +703,7 @@ async fn manifest_load_names_the_segment_codec_for_a_pre_commit_id_row() {
             &PreCommitIdMetadataRow::Inode {
                 inode_id: loonfs_types::ROOT_INODE_ID,
                 inode_kind: loonfs_types::InodeKind::Directory,
-                committed_seq: ChangeSeq(0),
+                committed_seq: CommitSeq(0),
                 committed_by: loonfs_types::ActorId::loonfs(),
                 committed_at_ms: context.now_ms,
             },

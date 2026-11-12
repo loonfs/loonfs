@@ -2,7 +2,7 @@
 //! validation.
 
 use loonfs_types::{
-    AccessRevisionNo, AttributesRevisionNo, ChangeSeq, ErrorCode, ErrorDetails, InodeId, InodeKind,
+    AccessRevisionNo, AttributesRevisionNo, CommitSeq, ErrorCode, ErrorDetails, InodeId, InodeKind,
     NameKey, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
@@ -20,7 +20,7 @@ pub enum CommitOperand {
     SubtreeRoot,
     AttributeTarget,
     AccessTarget,
-    UndeleteTarget,
+    RestoreDeletedTarget,
     EmptyDirectoryTarget,
 }
 
@@ -36,7 +36,7 @@ impl fmt::Display for CommitOperand {
             Self::SubtreeRoot => "delete subtree root",
             Self::AttributeTarget => "attribute update target",
             Self::AccessTarget => "access update target",
-            Self::UndeleteTarget => "undelete target",
+            Self::RestoreDeletedTarget => "restore target",
             Self::EmptyDirectoryTarget => "empty directory target",
         })
     }
@@ -75,7 +75,7 @@ pub enum CommitValidationError {
         operand: CommitOperand,
         inode_id: InodeId,
         root_inode_id: InodeId,
-        tombstone_seq: ChangeSeq,
+        tombstone_seq: CommitSeq,
     },
     #[error(
         "base revision mismatch for inode `{inode_id}`: {}",
@@ -115,19 +115,19 @@ pub enum CommitValidationError {
         inode_id: InodeId,
         new_parent_inode_id: InodeId,
     },
-    #[error("undelete target inode `{inode_id}` is not the root of a recoverable deletion")]
-    UndeleteTargetNotDeleted { inode_id: InodeId },
+    #[error("restore target inode `{inode_id}` is not the root of a recoverable deletion")]
+    RestoreDeletedTargetNotDeleted { inode_id: InodeId },
     #[error(
-        "undelete of inode `{inode_id}` targets a deletion made in the same commit, not an earlier one"
+        "restore of inode `{inode_id}` targets a deletion made in the same commit, not an earlier one"
     )]
-    UndeleteTargetsCurrentCommit { inode_id: InodeId },
+    RestoreDeletedTargetsCurrentCommit { inode_id: InodeId },
     #[error(
-        "undelete of inode `{inode_id}` targets the deletion at seq `{requested_seq}`, but the recoverable deletion is at seq `{active_seq}`"
+        "restore of inode `{inode_id}` targets the deletion at seq `{requested_seq}`, but the recoverable deletion is at seq `{active_seq}`"
     )]
-    UndeleteSequenceMismatch {
+    RestoreDeletedSequenceMismatch {
         inode_id: InodeId,
-        requested_seq: ChangeSeq,
-        active_seq: ChangeSeq,
+        requested_seq: CommitSeq,
+        active_seq: CommitSeq,
     },
     #[error(
         "cannot add a revision to inode `{inode_id}` because revision `{base_revision_no}` is already at the maximum 9007199254740991"
@@ -188,9 +188,9 @@ impl CommitValidationError {
             | Self::BindingPreconditionMismatch { .. } => ErrorCode::PathConflict,
             Self::DirectoryNotEmpty { .. } => ErrorCode::DirectoryNotEmpty,
             Self::InodeMissing { .. } => ErrorCode::PathNotFound,
-            Self::UndeleteTargetNotDeleted { .. }
-            | Self::UndeleteTargetsCurrentCommit { .. }
-            | Self::UndeleteSequenceMismatch { .. } => ErrorCode::NotDeleted,
+            Self::RestoreDeletedTargetNotDeleted { .. }
+            | Self::RestoreDeletedTargetsCurrentCommit { .. }
+            | Self::RestoreDeletedSequenceMismatch { .. } => ErrorCode::NotDeleted,
             Self::RenameWouldCycleDirectory { .. } => ErrorCode::WouldCycle,
             Self::RevisionOverflow { .. }
             | Self::OperationIndexOverflow
@@ -220,15 +220,15 @@ impl CommitValidationError {
                 ..ErrorDetails::default()
             }),
             Self::InodeMissing {
-                operand: CommitOperand::UndeleteTarget,
+                operand: CommitOperand::RestoreDeletedTarget,
                 inode_id,
             }
-            | Self::UndeleteTargetNotDeleted { inode_id }
-            | Self::UndeleteTargetsCurrentCommit { inode_id } => Some(ErrorDetails {
+            | Self::RestoreDeletedTargetNotDeleted { inode_id }
+            | Self::RestoreDeletedTargetsCurrentCommit { inode_id } => Some(ErrorDetails {
                 inode_id: Some(*inode_id),
                 ..ErrorDetails::default()
             }),
-            Self::UndeleteSequenceMismatch {
+            Self::RestoreDeletedSequenceMismatch {
                 inode_id,
                 requested_seq,
                 active_seq,

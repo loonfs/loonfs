@@ -438,9 +438,9 @@ async function stageStream(
             await response.body?.cancel();
             completion = { mode: "service_proxied" };
         } else if (begin.mode === "direct_put") {
-            if (!begin.access) throw new Error("direct_put session lacks access");
+            if (!begin.transfer) throw new Error("direct_put session lacks a presigned URL");
             source.digest = new IncrementalChecksum(begin.checksum_algorithm);
-            await putStream(send, begin.access, await uploadBody(source), scope);
+            await putStream(send, begin.transfer, await uploadBody(source), scope);
             completion = {
                 mode: "direct_put",
                 content: { size_bytes: source.count, checksum: source.digest.finish() },
@@ -479,7 +479,7 @@ async function stageStream(
                 );
                 if (signed.parts.length !== 1 || signed.parts[0]!.part_number !== partNumber)
                     throw new Error(`server did not sign requested part ${partNumber}`);
-                const etag = await putStream(send, signed.parts[0]!.access, part, scope);
+                const etag = await putStream(send, signed.parts[0]!.transfer, part, scope);
                 if (!etag) throw new Error(`part ${partNumber} returned no ETag`);
                 parts.push({ part_number: partNumber, checksum, etag });
             }
@@ -520,11 +520,11 @@ async function stageStream(
 
 async function putStream(
     send: typeof fetch,
-    access: LoonFS.ObjectTransferAccess,
+    access: LoonFS.ObjectTransfer,
     body: BodyInit,
     scope: TransferScope,
 ): Promise<string | null> {
-    if (access.method !== "PUT") throw new Error("upload grant must use PUT");
+    if (access.method !== "PUT") throw new Error("upload presigned URL must use PUT");
     scope.check();
     const response = await send(access.url, {
         redirect: "error",

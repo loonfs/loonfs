@@ -5,7 +5,7 @@
 use crate::downloads::{DirectDownloadByInodeTarget, DirectDownloadTarget};
 use crate::pagers::encode_next_list_cursor;
 use crate::{
-    ChangeSeq, ContentRef, CoreError, CurrentFileState, DiffOptions, DownloadOptions, Error,
+    CommitSeq, ContentRef, CoreError, CurrentFileState, DiffOptions, DownloadOptions, Error,
     FileBytes, FileContentStream, InodeId, ListChangesResponse, ListInodeChildrenResponse,
     ListOptions, ListPathEntriesResponse, NamespaceId, PathEntry, PinId, ReadFileStreamOptions,
     Result, RevisionNo, SharedObjectStore, StatOptions,
@@ -31,7 +31,7 @@ impl PinnedRead {
 
     /// Returns the sequence that this read reads at: the head, or the
     /// retained sequence below the head that the read's context sets.
-    pub(crate) fn head_seq(&self) -> ChangeSeq {
+    pub(crate) fn head_seq(&self) -> CommitSeq {
         self.context.visible_seq()
     }
 
@@ -60,7 +60,7 @@ impl PinnedRead {
     /// requires an administrator, as the change feed does.
     pub(crate) async fn diff_page(
         &self,
-        from_seq: ChangeSeq,
+        from_seq: CommitSeq,
         options: &DiffOptions,
     ) -> Result<DiffPage> {
         self.engine.ensure_administrator(&self.context).await?;

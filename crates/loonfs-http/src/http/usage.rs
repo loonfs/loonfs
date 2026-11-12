@@ -31,7 +31,7 @@ pub struct UsageReport {
     /// The response body bytes that the server wrote before the body ended or
     /// the client went away.
     pub response_bytes: u64,
-    /// The bytes that the download grants in the response signed URLs for,
+    /// The bytes that the presigned URLs in the response read,
     /// zero for every other operation.
     pub grant_bytes: u64,
 }

@@ -6,7 +6,7 @@ use super::retries::MaintenanceCall;
 use super::{index_pending, lock, RunningScheduler, Scheduler, SchedulerState};
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt as _, StreamExt as _};
-use loonfs::{ChangeSeq, MetadataMaintenanceOutcome, NamespaceId, NamespaceSessionStatus};
+use loonfs::{CommitSeq, MetadataMaintenanceOutcome, NamespaceId, NamespaceSessionStatus};
 use loonfs_http::{panic_message, HeldNamespace};
 use std::collections::HashSet;
 use std::panic::AssertUnwindSafe;
@@ -169,7 +169,7 @@ impl Scheduler {
     async fn close_session(
         &self,
         namespace_id: &NamespaceId,
-        seq: Option<ChangeSeq>,
+        seq: Option<CommitSeq>,
         close: Close,
     ) {
         let inner = &self.inner;

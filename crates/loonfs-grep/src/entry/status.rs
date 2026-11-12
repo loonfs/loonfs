@@ -1,7 +1,7 @@
 //! The lifecycle of grep's index and its in-progress reorganization, as
 //! grep's entry records them.
 
-use loonfs_types::{ChangeSeq, IndexSegmentId, InodeId, PinId, RunNo};
+use loonfs_types::{CommitSeq, IndexSegmentId, InodeId, PinId, RunNo};
 use serde::{Deserialize, Serialize};
 
 /// Durable status of grep indexing for one namespace.
@@ -22,7 +22,7 @@ pub enum GrepIndexStatus {
     Backfilling {
         /// Namespace sequence the pinned checkpoint captured. The walk ends
         /// at exactly this state however far the namespace has moved since.
-        captured_seq: ChangeSeq,
+        captured_seq: CommitSeq,
         /// Inode the next backfill step resumes strictly after; absent means
         /// the start. Checkpoint file enumeration is ordered by ascending
         /// inode id, so one id is the whole resume position.
@@ -37,10 +37,10 @@ pub enum GrepIndexStatus {
         /// captured. It identifies the build: a rebootstrap rebuilds the
         /// index from a later backfill, and a query cursor that refers
         /// to another build is invalid.
-        captured_seq: ChangeSeq,
+        captured_seq: CommitSeq,
         /// Sequence of the commit at the index cursor. Everything at or
         /// below it is indexed, subject to `next_event_index`.
-        built_through_seq: ChangeSeq,
+        built_through_seq: CommitSeq,
         /// Offset of the next change event within `built_through_seq`, or
         /// zero when the cursor is at the commit boundary and the whole
         /// commit is represented.
@@ -75,7 +75,7 @@ impl GrepIndexStatus {
 
     /// Returns the sequence that the active index's backfill captured,
     /// which identifies the build of the index.
-    pub fn active_captured_seq(&self) -> Option<ChangeSeq> {
+    pub fn active_captured_seq(&self) -> Option<CommitSeq> {
         match self {
             Self::Active { captured_seq, .. } => Some(*captured_seq),
             Self::Backfilling { .. } | Self::Disabled {} => None,
@@ -152,10 +152,10 @@ pub struct GrepReorganizeState {
 pub struct GrepPruning {
     /// The sequence that the filters describe, the head when the first step
     /// built them.
-    pub filter_seq: ChangeSeq,
+    pub filter_seq: CommitSeq,
     /// The retention floor when the first step built the filters, at or
     /// below `filter_seq`.
-    pub retention_floor_seq: ChangeSeq,
+    pub retention_floor_seq: CommitSeq,
 }
 
 /// Change-feed resume point derived from the grep watermark pair.
@@ -166,31 +166,31 @@ pub struct GrepPruning {
 /// selection complementary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChangeFeedResume {
-    built_through_seq: ChangeSeq,
+    built_through_seq: CommitSeq,
     next_event_index: u32,
 }
 
 impl ChangeFeedResume {
-    pub fn new(built_through_seq: ChangeSeq, next_event_index: u32) -> Self {
+    pub fn new(built_through_seq: CommitSeq, next_event_index: u32) -> Self {
         Self {
             built_through_seq,
             next_event_index,
         }
     }
 
-    pub fn after_seq(self) -> ChangeSeq {
+    pub fn after_seq(self) -> CommitSeq {
         if self.next_event_index == 0 {
             self.built_through_seq
         } else {
-            ChangeSeq(self.built_through_seq.0.saturating_sub(1))
+            CommitSeq(self.built_through_seq.0.saturating_sub(1))
         }
     }
 
-    pub fn built_through_seq(self) -> ChangeSeq {
+    pub fn built_through_seq(self) -> CommitSeq {
         self.built_through_seq
     }
 
-    pub(crate) fn start_event_index(self, change_seq: ChangeSeq) -> usize {
+    pub(crate) fn start_event_index(self, change_seq: CommitSeq) -> usize {
         if change_seq == self.built_through_seq {
             self.next_event_index as usize
         } else {

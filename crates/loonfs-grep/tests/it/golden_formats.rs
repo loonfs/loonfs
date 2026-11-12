@@ -27,7 +27,7 @@ use loonfs_types::format::segment_blocks::{
     decode_data_block_rows, decode_index_block, BlockHandle, BuiltSegmentBlocks, DecodedDataBlock,
     SegmentBlocksBuilder, SegmentFilter, SegmentFilterBuilder,
 };
-use loonfs_types::{ChangeSeq, ContentId, IndexSegmentId, InodeId, PinId, RevisionNo, RunNo};
+use loonfs_types::{CommitSeq, ContentId, IndexSegmentId, InodeId, PinId, RevisionNo, RunNo};
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
@@ -97,7 +97,7 @@ fn unzstd(bytes: &[u8]) -> Vec<u8> {
 /// level-2 run, so every id the reorganize state lists is a segment this
 /// entry lists, and it records the revisions its pruning keeps.
 pub(crate) fn sample_active_entry(
-    built_through_seq: ChangeSeq,
+    built_through_seq: CommitSeq,
     next_event_index: u32,
 ) -> GrepEntry {
     let reorganize = GrepReorganizeState {
@@ -107,13 +107,13 @@ pub(crate) fn sample_active_entry(
         output_level: 2,
         run_no: RunNo(3),
         pruning: Some(GrepPruning {
-            filter_seq: ChangeSeq(9),
-            retention_floor_seq: ChangeSeq(4),
+            filter_seq: CommitSeq(9),
+            retention_floor_seq: CommitSeq(4),
         }),
     };
     GrepEntry::new(
         GrepIndexStatus::Active {
-            captured_seq: ChangeSeq(3),
+            captured_seq: CommitSeq(3),
             built_through_seq,
             next_event_index,
         },
@@ -133,7 +133,7 @@ pub(crate) fn sample_active_entry(
 pub(crate) fn sample_backfilling_entry() -> GrepEntry {
     GrepEntry::new(
         GrepIndexStatus::Backfilling {
-            captured_seq: ChangeSeq(7),
+            captured_seq: CommitSeq(7),
             cursor_inode_id: Some(InodeId(7)),
             pin_id: PinId::parse("pin_00000000000000000001-0000000000000009")
                 .expect("valid pin id"),
@@ -253,7 +253,7 @@ fn sample_content_revision_rows() -> Vec<IndexRow> {
                 &ContentValue::new(&content_id, size_bytes),
                 InodeId(inode_id),
                 RevisionNo(revision_no),
-                ChangeSeq(committed_seq),
+                CommitSeq(committed_seq),
             )
         })
         .collect()
@@ -321,12 +321,12 @@ fn assert_entry_golden_decodes(fixture: &str, entry: &GrepEntry) {
 
 #[test]
 fn grep_entry_matches_golden_bytes() {
-    assert_entry_matches_golden(ACTIVE_ENTRY_FIXTURE, &sample_active_entry(ChangeSeq(11), 5));
+    assert_entry_matches_golden(ACTIVE_ENTRY_FIXTURE, &sample_active_entry(CommitSeq(11), 5));
 }
 
 #[test]
 fn grep_entry_golden_decodes_to_sample() {
-    assert_entry_golden_decodes(ACTIVE_ENTRY_FIXTURE, &sample_active_entry(ChangeSeq(11), 5));
+    assert_entry_golden_decodes(ACTIVE_ENTRY_FIXTURE, &sample_active_entry(CommitSeq(11), 5));
 }
 
 #[test]

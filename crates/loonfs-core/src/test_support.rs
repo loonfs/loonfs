@@ -50,7 +50,7 @@ pub(crate) fn binding_row(
     seq: u64,
 ) -> loonfs_types::format::manifest::DirentryBindingRecord {
     let position = loonfs_types::format::manifest::DeltaPosition {
-        seq: loonfs_types::ChangeSeq(seq),
+        seq: loonfs_types::CommitSeq(seq),
         delta_index: 0,
     };
     loonfs_types::format::manifest::DirentryBindingRecord {
@@ -483,7 +483,7 @@ pub async fn drain_compaction<S: ObjectStore + ?Sized>(
 pub fn merge_candidate(
     candidate: crate::commit::engine::CommitCandidate,
     record: loonfs_types::format::wal::MergeRecord,
-    fork_point_seq: loonfs_types::ChangeSeq,
+    fork_point_seq: loonfs_types::CommitSeq,
     created_inode_ids: std::collections::BTreeMap<usize, loonfs_types::InodeId>,
 ) -> crate::commit::engine::CommitCandidate {
     candidate.with_merge(record, fork_point_seq, created_inode_ids)

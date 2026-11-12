@@ -4,7 +4,7 @@
 
 use super::queue::PendingRetentionAdvance;
 use super::NamespacePublisher;
-use crate::{ChangeSeq, CoreError, Error, Result};
+use crate::{CommitSeq, CoreError, Error, Result};
 use futures::FutureExt;
 use loonfs_core::control::LoadedManifest;
 use loonfs_core::time::OperationClock;
@@ -52,7 +52,7 @@ impl NamespacePublisher {
     async fn publish_floor_object(
         &self,
         planned: &LoadedManifest,
-        target: ChangeSeq,
+        target: CommitSeq,
     ) -> Result<FloorObjectReport> {
         let Some(writer) = self.context.writer.upgrade() else {
             return Err(CoreError::ShuttingDown.into());

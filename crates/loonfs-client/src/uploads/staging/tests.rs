@@ -14,11 +14,11 @@ use futures::stream::StreamExt;
 use loonfs_test_support::ids::content_ref;
 use loonfs_types::options::PutFileOptions;
 use loonfs_types::SignedUploadPart;
+use loonfs_types::{Commit, SignUploadPartsResponse};
 use loonfs_types::{
-    ChangeSeq, CommitId, ContentId, ContentRefKind, FilesystemOperation, API_GROUP_FILESYSTEM_V0,
+    CommitId, CommitSeq, ContentId, ContentRefKind, FilesystemOperation, API_GROUP_FILESYSTEM_V0,
     PROTOCOL_VERSION,
 };
-use loonfs_types::{Commit, SignUploadPartsResponse};
 use std::assert_matches;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -215,7 +215,7 @@ fn create_direct_put_upload(checksum_algorithm: ChecksumAlgorithm) -> Outcome {
             checksum_algorithm,
             part_size_bytes: None,
             content_ref: None,
-            access: Some(ObjectTransferAccess::PresignedUrl {
+            transfer: Some(ObjectTransfer::PresignedUrl {
                 method: "PUT".to_owned(),
                 url: "http://object.invalid/content".to_owned(),
                 headers: std::collections::BTreeMap::new(),
@@ -234,7 +234,7 @@ fn begin_multipart() -> Outcome {
             expires_at_ms: 1000,
             checksum_algorithm: ChecksumAlgorithm::Crc64nvme,
             part_size_bytes: Some(TEST_PART_BYTES),
-            access: None,
+            transfer: None,
             content_ref: None,
         },
     })
@@ -249,7 +249,7 @@ fn begin_proxied() -> Outcome {
             expires_at_ms: 1000,
             checksum_algorithm: loonfs_types::ChecksumAlgorithm::Crc64nvme,
             part_size_bytes: None,
-            access: None,
+            transfer: None,
             content_ref: None,
         },
     })
@@ -264,7 +264,7 @@ fn signed_parts(first: u32, count: u32) -> Outcome {
         parts: (first..first + count)
             .map(|part_number| SignedUploadPart {
                 part_number,
-                access: ObjectTransferAccess::PresignedUrl {
+                transfer: ObjectTransfer::PresignedUrl {
                     method: "PUT".to_owned(),
                     url: format!("http://provider.invalid/part/{part_number}"),
                     headers: std::collections::BTreeMap::new(),
@@ -315,7 +315,7 @@ fn commit_succeeded() -> Outcome {
     json(&Commit {
         namespace_id: namespace_id(),
         commit_id: CommitId::parse("c_00000000000000000000000000000001").expect("valid commit id"),
-        committed_seq: ChangeSeq(1),
+        committed_seq: CommitSeq(1),
         committed_by: loonfs_test_support::test_actor(),
         committed_at_ms: 1_752_624_000_000,
         message: None,
@@ -607,7 +607,7 @@ async fn a_proxied_put_streams_its_body() {
                 expires_at_ms: 1000,
                 checksum_algorithm: loonfs_types::ChecksumAlgorithm::Crc64nvme,
                 part_size_bytes: None,
-                access: None,
+                transfer: None,
                 content_ref: Some(uploaded.clone()),
             },
         }),
@@ -651,7 +651,7 @@ async fn a_small_streamed_source_proxies_against_the_advertised_cap() {
                 expires_at_ms: 1000,
                 checksum_algorithm: loonfs_types::ChecksumAlgorithm::Crc64nvme,
                 part_size_bytes: None,
-                access: None,
+                transfer: None,
                 content_ref: Some(uploaded.clone()),
             },
         }),
@@ -1139,7 +1139,7 @@ async fn a_lost_commit_ack_replays_the_saved_request_without_reopening_the_uploa
                 expires_at_ms: 1000,
                 checksum_algorithm: loonfs_types::ChecksumAlgorithm::Crc64nvme,
                 part_size_bytes: None,
-                access: None,
+                transfer: None,
                 content_ref: Some(uploaded.clone()),
             },
         }),
@@ -1355,7 +1355,7 @@ async fn staging_rejects_a_non_completed_completion_response() {
                 expires_at_ms: 1_000,
                 checksum_algorithm: loonfs_types::ChecksumAlgorithm::Crc64nvme,
                 part_size_bytes: None,
-                access: None,
+                transfer: None,
                 content_ref: None,
             },
         ),

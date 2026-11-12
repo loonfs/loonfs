@@ -206,7 +206,7 @@ mod tests {
     };
     use loonfs_types::format::manifest::DeletedBinding;
     use loonfs_types::{
-        AccessGrants, AccessRevisionNo, ActorId, ChangeSeq, CommitId, DisplayName, InodeKind,
+        AccessGrants, AccessRevisionNo, ActorId, CommitId, CommitSeq, DisplayName, InodeKind,
         NameKey, PrincipalId,
     };
     use std::assert_matches;
@@ -243,7 +243,7 @@ mod tests {
                 } else {
                     InodeKind::Directory
                 },
-                committed_seq: ChangeSeq(1),
+                committed_seq: CommitSeq(1),
                 commit_id: commit_id.clone(),
                 committed_by: ActorId::loonfs(),
                 committed_at_ms: 1_000,
@@ -274,13 +274,13 @@ mod tests {
                 },
                 child_created_by: loonfs_types::ActorId::loonfs(),
                 child_created_at_ms: 1_000,
-                committed_seq: ChangeSeq(1),
+                committed_seq: CommitSeq(1),
                 delta_index: 0,
                 commit_id: crate::test_support::binding_commit_id(),
                 committed_by: loonfs_types::ActorId::loonfs(),
                 committed_at_ms: 0,
                 bind_position: loonfs_types::format::manifest::DeltaPosition {
-                    seq: ChangeSeq(1),
+                    seq: CommitSeq(1),
                     delta_index: 0,
                 },
             });
@@ -288,7 +288,7 @@ mod tests {
         let display_name = DisplayName::parse("old").expect("display name");
         builder.push_subtree_tombstone(SubtreeTombstoneRecord {
             root_inode_id: InodeId(6),
-            committed_seq: ChangeSeq(3),
+            committed_seq: CommitSeq(3),
             delta_index: 0,
             commit_id: commit_id.clone(),
             action: TombstoneRowAction::Set {
@@ -316,7 +316,7 @@ mod tests {
             builder.push_access_revision(AccessRevisionRecord {
                 inode_id: InodeId(inode),
                 access_revision_no: AccessRevisionNo(1),
-                committed_seq: ChangeSeq(2),
+                committed_seq: CommitSeq(2),
                 commit_id: commit_id.clone(),
                 delta_index: 0,
                 committed_by: ActorId::loonfs(),
@@ -355,7 +355,7 @@ mod tests {
     #[tokio::test]
     async fn effective_rights_follow_the_chain_to_the_nearest_boundary() {
         let state = access_fixture_state();
-        let mut reads = state.reads_at_seq(ChangeSeq(10));
+        let mut reads = state.reads_at_seq(CommitSeq(10));
         for (principals, inode_id, expected) in access_fixture_cases() {
             assert_eq!(
                 effective_rights(&mut reads, &principals, inode_id)
@@ -383,7 +383,7 @@ mod tests {
     #[tokio::test]
     async fn a_memo_resolves_the_same_rights_in_any_order() {
         let state = access_fixture_state();
-        let mut reads = state.reads_at_seq(ChangeSeq(10));
+        let mut reads = state.reads_at_seq(CommitSeq(10));
         let inode_ids: Vec<_> = [0, 2, 3, 4, 5, 6, 7, 8].into_iter().map(InodeId).collect();
         for (principals, _, _) in access_fixture_cases() {
             let mut expected = Vec::new();
@@ -421,7 +421,7 @@ mod tests {
             builder.push_inode(InodeRecord {
                 inode_id,
                 inode_kind: InodeKind::Directory,
-                committed_seq: ChangeSeq(1),
+                committed_seq: CommitSeq(1),
                 commit_id: commit_id.clone(),
                 committed_by: ActorId::loonfs(),
                 committed_at_ms: 1_000,
@@ -443,20 +443,20 @@ mod tests {
                 child_kind: InodeKind::Directory,
                 child_created_by: ActorId::loonfs(),
                 child_created_at_ms: 1_000,
-                committed_seq: ChangeSeq(1),
+                committed_seq: CommitSeq(1),
                 delta_index: 0,
                 commit_id: crate::test_support::binding_commit_id(),
                 committed_by: loonfs_types::ActorId::loonfs(),
                 committed_at_ms: 0,
                 bind_position: loonfs_types::format::manifest::DeltaPosition {
-                    seq: ChangeSeq(1),
+                    seq: CommitSeq(1),
                     delta_index: 0,
                 },
             });
         }
         let state = builder.build();
         let error = effective_rights(
-            &mut state.reads_at_seq(ChangeSeq(1)),
+            &mut state.reads_at_seq(CommitSeq(1)),
             &principals(&["viewer"]),
             InodeId(2),
         )

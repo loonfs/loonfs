@@ -4,8 +4,8 @@ use crate::args::{
     FilesystemLsArgs, FilesystemRevisionsArgs, FilesystemStatArgs, PaginationArgs, TrashArgs,
 };
 use crate::commands::context::{
-    namespace_path, render_target, Invocation, NamespaceContext, ProfileSource, RootPath,
-    UndeleteHint,
+    namespace_path, render_target, Invocation, NamespaceContext, ProfileSource, RestoreDeletedHint,
+    RootPath,
 };
 use crate::commands::output::{
     CommandData, CommandFailure, CommandOutput, ListingHeadDrift, ListingHeadObservation,
@@ -15,12 +15,12 @@ use crate::commands::pagination::{collect_or_stream_pages, visit_pages, PagedLis
 use crate::error::{CliError, Result};
 use crate::render::OutputFormat;
 use loonfs_client::{ListOptions, NamespacePath, ReadAt, StatOptions};
-use loonfs_types::{AbsolutePath, ChangeSeq, ListPathEntriesResponse, NamespaceId};
+use loonfs_types::{AbsolutePath, CommitSeq, ListPathEntriesResponse, NamespaceId};
 
 struct FollowedPathEntryPages {
     namespace_id: NamespaceId,
     path: AbsolutePath,
-    head_seq: ChangeSeq,
+    head_seq: CommitSeq,
     head_drift: Option<ListingHeadDrift>,
     next_cursor: Option<String>,
 }
@@ -169,7 +169,7 @@ pub(crate) async fn run_filesystem_trash(
     let PagedListing::Collected(response) = listing else {
         return Ok(context.output(CommandData::StreamedToStdout));
     };
-    let hint = UndeleteHint::new(
+    let hint = RestoreDeletedHint::new(
         &context,
         &invocation.config,
         ProfileSource::from_selectors(&invocation.selectors),

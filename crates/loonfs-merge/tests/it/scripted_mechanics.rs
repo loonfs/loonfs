@@ -11,7 +11,7 @@ use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::test_actor;
 use loonfs_types::options::MergeForkOptions;
 use loonfs_types::{
-    ActorId, ChangeSeq, Commit, DeleteNamespaceResponse, ErrorCode, ErrorDetails, ErrorResponse,
+    ActorId, Commit, CommitSeq, DeleteNamespaceResponse, ErrorCode, ErrorDetails, ErrorResponse,
     ListCheckpointsResponse, Merge, MergeConflict, NamespaceId, NamespaceMetadata,
     NextMergeRangeOutcome, NextMergeRangeResponse, Pager, RebaseForkResponse,
 };
@@ -92,7 +92,7 @@ impl Answer {
         Self::Refused(
             ErrorCode::MergeTooLarge,
             Box::new(ErrorDetails {
-                split_at_seq: Some(ChangeSeq(split_at_seq)),
+                split_at_seq: Some(CommitSeq(split_at_seq)),
                 ..ErrorDetails::default()
             }),
         )
@@ -160,13 +160,13 @@ impl Mechanics for ScriptedMechanics {
             Answer::Committed(committed_seq) => Ok(Commit {
                 namespace_id: namespace_id.clone(),
                 commit_id: options.commit_id.clone().expect("a merge has a commit ID"),
-                committed_seq: ChangeSeq(committed_seq),
+                committed_seq: CommitSeq(committed_seq),
                 committed_by: actor.clone(),
                 committed_at_ms: 0,
                 message: None,
                 merge: Some(Merge {
                     source_namespace_id: source_namespace_id.clone(),
-                    source_after_seq: ChangeSeq(0),
+                    source_after_seq: CommitSeq(0),
                     source_through_seq: options.through_seq.expect("a merge has a sequence"),
                 }),
                 events: Vec::new(),
@@ -213,23 +213,23 @@ impl Mechanics for ScriptedMechanics {
                 source_head_seq,
                 merged,
             } => Ok(NextMergeRangeResponse {
-                fork_point_seq: ChangeSeq(0),
-                source_head_seq: ChangeSeq(source_head_seq),
+                fork_point_seq: CommitSeq(0),
+                source_head_seq: CommitSeq(source_head_seq),
                 outcome: NextMergeRangeOutcome::Open {
                     merge: merged.then(|| Merge {
                         source_namespace_id: source_namespace_id.clone(),
-                        source_after_seq: ChangeSeq(0),
-                        source_through_seq: ChangeSeq(next_after_seq),
+                        source_after_seq: CommitSeq(0),
+                        source_through_seq: CommitSeq(next_after_seq),
                     }),
-                    next_after_seq: ChangeSeq(next_after_seq),
+                    next_after_seq: CommitSeq(next_after_seq),
                 },
             }),
             Answer::RangeOutcome {
                 source_head_seq,
                 outcome,
             } => Ok(NextMergeRangeResponse {
-                fork_point_seq: ChangeSeq(0),
-                source_head_seq: ChangeSeq(source_head_seq),
+                fork_point_seq: CommitSeq(0),
+                source_head_seq: CommitSeq(source_head_seq),
                 outcome,
             }),
             Answer::Refused(code, details) => Err(refused(code, details)),
@@ -247,7 +247,7 @@ impl Mechanics for ScriptedMechanics {
         match self.answer(sent) {
             Answer::Deleted => Ok(DeleteNamespaceResponse {
                 namespace_id: namespace_id.clone(),
-                head_seq: ChangeSeq(0),
+                head_seq: CommitSeq(0),
             }),
             Answer::Refused(code, details) => Err(refused(code, details)),
             answer => panic!("a delete can't answer {answer:?}"),
@@ -421,7 +421,7 @@ fn namespace(
 ) -> NamespaceMetadata {
     let mut basis = json!({
         "source_namespace_id": source_namespace_id,
-        "source_head_seq": 10,
+        "fork_point_seq": 10,
         "source_pin_id": "pin_00000000000000000001-0000000000000001",
     });
     if let Some(rebased_from) = rebased_from {

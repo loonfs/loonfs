@@ -198,7 +198,7 @@ async fn a_retention_advance_from_a_live_session_folds_on_its_basis_and_reads_no
     .await
     .expect("the advance returns")
     .expect("advance the floor");
-    assert!(advanced.retention_floor_seq > ChangeSeq(0));
+    assert!(advanced.retention_floor_seq > CommitSeq(0));
     assert_eq!(
         fixture.manifest_requests(),
         vec![("put", fixture.manifest(next))]

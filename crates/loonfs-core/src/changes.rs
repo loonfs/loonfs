@@ -11,8 +11,8 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::DeltaPosition;
 use loonfs_types::format::wal::{WalCommitDelta, WalCommitPayload, WalDelta};
 use loonfs_types::options::CommitSplitting;
-use loonfs_types::{ChangeFeedPosition, ChangeSeq, EffectiveLimit, NamespaceId};
-use loonfs_types::{Commit, FilesystemChange, ListChangesResponse, Merge};
+use loonfs_types::{ChangeFeedPosition, CommitSeq, EffectiveLimit, NamespaceId};
+use loonfs_types::{Commit, FilesystemEvent, ListChangesResponse, Merge};
 use std::collections::VecDeque;
 
 pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
@@ -161,7 +161,7 @@ pub(crate) struct CommitScan<'a, 'store, S: ObjectStore + ?Sized> {
     splitting: CommitSplitting,
     max_page_bytes: usize,
     /// The last commit on the page, or the page's start before the first.
-    through_seq: ChangeSeq,
+    through_seq: CommitSeq,
     /// The commits after `through_seq` that the scan read and hasn't
     /// returned yet, in sequence order.
     fetched: VecDeque<WalCommitPayload>,
@@ -262,7 +262,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> CommitScan<'a, 'store, S> {
     /// Puts the commit at `committed_seq` on the page if `heap_bytes` more
     /// fit, and returns whether they did. A commit that doesn't fit ends the
     /// page, and the next page starts with it.
-    pub(crate) fn admit(&mut self, committed_seq: ChangeSeq, heap_bytes: usize) -> bool {
+    pub(crate) fn admit(&mut self, committed_seq: CommitSeq, heap_bytes: usize) -> bool {
         let page_bytes = self.page_bytes.saturating_add(heap_bytes);
         if self.commits > 0 && page_bytes > self.max_page_bytes {
             self.full = true;
@@ -281,7 +281,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> CommitScan<'a, 'store, S> {
     /// exceeds the budget is returned in parts.
     pub(crate) fn admit_part(
         &mut self,
-        committed_seq: ChangeSeq,
+        committed_seq: CommitSeq,
         heap_bytes: usize,
         next_event_index: u32,
     ) {
@@ -305,7 +305,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> CommitScan<'a, 'store, S> {
 
     /// Returns the sequence that the next page starts after, or resumes,
     /// or `None` when this page reached the view's sequence.
-    pub(crate) fn next_after_seq(&self) -> Option<ChangeSeq> {
+    pub(crate) fn next_after_seq(&self) -> Option<CommitSeq> {
         (self.next_event_index.is_some() || self.through_seq < self.view.visible_seq())
             .then_some(self.through_seq)
     }
@@ -331,7 +331,7 @@ pub(super) fn committed_change_from_wal_record(
 fn committed_change_with_events(
     namespace_id: &NamespaceId,
     record: &WalCommitPayload,
-    events: Vec<FilesystemChange>,
+    events: Vec<FilesystemEvent>,
 ) -> Commit {
     Commit {
         namespace_id: namespace_id.clone(),
@@ -365,15 +365,15 @@ fn committed_change_with_events(
 /// commit.
 pub(crate) fn events_from_wal_deltas(
     namespace_id: &NamespaceId,
-    committed_seq: ChangeSeq,
+    committed_seq: CommitSeq,
     deltas: &[WalCommitDelta],
-) -> Result<Vec<FilesystemChange>> {
+) -> Result<Vec<FilesystemEvent>> {
     Ok(events_from_wal_deltas_within(namespace_id, committed_seq, deltas, 0, None)?.events)
 }
 
 /// The events of one commit that one page returns.
 pub(crate) struct CommitEvents {
-    pub(crate) events: Vec<FilesystemChange>,
+    pub(crate) events: Vec<FilesystemEvent>,
     /// The index of the first event that the page didn't build, or `None`
     /// when the events reach the end of the commit.
     pub(crate) next_event_index: Option<u32>,
@@ -388,7 +388,7 @@ pub(crate) struct CommitEvents {
 /// groups before it are skipped without building their events.
 pub(crate) fn events_from_wal_deltas_within(
     namespace_id: &NamespaceId,
-    committed_seq: ChangeSeq,
+    committed_seq: CommitSeq,
     deltas: &[WalCommitDelta],
     first_event_index: u32,
     max_heap_bytes: Option<usize>,
@@ -415,7 +415,7 @@ pub(crate) fn events_from_wal_deltas_within(
         group.clear();
         group.extend(deltas.iter().map(|delta| &delta.delta));
         let event = event_from_op_deltas(namespace_id, committed_seq, &group)?;
-        let event_bytes = std::mem::size_of::<FilesystemChange>() + event.heap_bytes();
+        let event_bytes = std::mem::size_of::<FilesystemEvent>() + event.heap_bytes();
         if max_heap_bytes
             .is_some_and(|max| !events.is_empty() && heap_bytes.saturating_add(event_bytes) > max)
         {
@@ -438,9 +438,9 @@ pub(crate) fn events_from_wal_deltas_within(
 
 fn event_from_op_deltas(
     namespace_id: &NamespaceId,
-    committed_seq: ChangeSeq,
+    committed_seq: CommitSeq,
     deltas: &[&WalDelta],
-) -> Result<FilesystemChange> {
+) -> Result<FilesystemEvent> {
     Ok(match deltas {
         [WalDelta::CreateInode {
             inode_id,
@@ -452,7 +452,7 @@ fn event_from_op_deltas(
             display_name,
             child_inode_id,
             ..
-        }] if child_inode_id == inode_id => FilesystemChange::DirectoryCreated {
+        }] if child_inode_id == inode_id => FilesystemEvent::DirectoryCreated {
             inode_id: *inode_id,
             parent_inode_id: *parent_inode_id,
             display_name: display_name.clone(),
@@ -475,7 +475,7 @@ fn event_from_op_deltas(
             content_ref,
             ..
         }] if child_inode_id == inode_id && revision_inode_id == inode_id => {
-            FilesystemChange::FileCreated {
+            FilesystemEvent::FileCreated {
                 inode_id: *inode_id,
                 parent_inode_id: *parent_inode_id,
                 display_name: display_name.clone(),
@@ -493,7 +493,7 @@ fn event_from_op_deltas(
             content_ref,
             append_offset,
             ..
-        }] => FilesystemChange::ContentChanged {
+        }] => FilesystemEvent::ContentChanged {
             inode_id: *inode_id,
             revision_no: *revision_no,
             content_ref: content_ref.clone(),
@@ -511,7 +511,7 @@ fn event_from_op_deltas(
             display_name: to_name,
             child_inode_id: bound_inode_id,
             ..
-        }] if child_inode_id == bound_inode_id => FilesystemChange::Moved {
+        }] if child_inode_id == bound_inode_id => FilesystemEvent::Moved {
             inode_id: *child_inode_id,
             source_parent_inode_id: *source_parent_inode_id,
             source_display_name: from_name.clone(),
@@ -524,7 +524,7 @@ fn event_from_op_deltas(
             root_inode_id,
             deleted_binding,
             ..
-        }] if child_inode_id == root_inode_id => FilesystemChange::Deleted {
+        }] if child_inode_id == root_inode_id => FilesystemEvent::Deleted {
             inode_id: *root_inode_id,
             deleted_binding: loonfs_types::DirectoryBinding {
                 parent_inode_id: deleted_binding.parent_inode_id,
@@ -532,14 +532,14 @@ fn event_from_op_deltas(
                 display_name: deleted_binding.display_name.clone(),
             },
         },
-        // Undelete: revoke the exact deletion position, re-bind the root.
+        // Restore of a deleted item: revoke the exact deletion position, re-bind the root.
         [WalDelta::RevokeSubtreeTombstone { root_inode_id, .. }, WalDelta::BindDirentry {
             delta_index,
             parent_inode_id,
             display_name,
             child_inode_id,
             ..
-        }] if root_inode_id == child_inode_id => FilesystemChange::Undeleted {
+        }] if root_inode_id == child_inode_id => FilesystemEvent::Restored {
             inode_id: *root_inode_id,
             parent_inode_id: *parent_inode_id,
             display_name: display_name.clone(),
@@ -553,7 +553,7 @@ fn event_from_op_deltas(
             attributes_revision_no,
             attributes,
             ..
-        }] => FilesystemChange::AttributesChanged {
+        }] => FilesystemEvent::AttributesChanged {
             inode_id: *inode_id,
             attributes_revision_no: *attributes_revision_no,
             attributes: attributes.clone(),
@@ -564,7 +564,7 @@ fn event_from_op_deltas(
             boundary,
             grants,
             ..
-        }] => FilesystemChange::AccessChanged {
+        }] => FilesystemEvent::AccessChanged {
             inode_id: *inode_id,
             access_revision_no: *access_revision_no,
             boundary: *boundary,
@@ -582,7 +582,7 @@ fn event_from_op_deltas(
 
 fn binding_version(
     namespace_id: &NamespaceId,
-    committed_seq: ChangeSeq,
+    committed_seq: CommitSeq,
     delta_index: u32,
 ) -> loonfs_types::BindingVersion {
     crate::binding_version::encode(
@@ -606,9 +606,9 @@ mod tests {
     use crate::{NamespaceEngine, RuntimeReadContext};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_types::format::wal::WalDelta;
-    use loonfs_types::FilesystemChange;
+    use loonfs_types::FilesystemEvent;
     use loonfs_types::{
-        AttributeKey, AttributeValue, Attributes, AttributesRevisionNo, ChangeSeq, EffectiveLimit,
+        AttributeKey, AttributeValue, Attributes, AttributesRevisionNo, CommitSeq, EffectiveLimit,
         InodeId, NamespaceId,
     };
     use std::assert_matches;
@@ -671,7 +671,7 @@ mod tests {
 
         let caught_up = engine
             .list_changes_after(
-                loonfs_types::ChangeFeedPosition::after(ChangeSeq(0)),
+                loonfs_types::ChangeFeedPosition::after(CommitSeq(0)),
                 limit,
                 loonfs_types::options::CommitSplitting::Whole,
                 &context,
@@ -679,11 +679,11 @@ mod tests {
             .await
             .expect("the head is a valid cursor");
         assert!(caught_up.changes.is_empty());
-        assert_eq!(caught_up.head_seq, ChangeSeq(0));
+        assert_eq!(caught_up.head_seq, CommitSeq(0));
 
         let error = engine
             .list_changes_after(
-                loonfs_types::ChangeFeedPosition::after(ChangeSeq(1)),
+                loonfs_types::ChangeFeedPosition::after(CommitSeq(1)),
                 limit,
                 loonfs_types::options::CommitSplitting::Whole,
                 &context,
@@ -767,7 +767,7 @@ mod tests {
                 .expect("read view");
             for commit_limit in [1000, 1] {
                 let limit = EffectiveLimit::new(NonZeroU32::new(commit_limit).expect("limit"));
-                let mut after_seq = ChangeSeq(0);
+                let mut after_seq = CommitSeq(0);
                 let mut actual = Vec::new();
                 loop {
                     let page = super::list_changes_after(
@@ -787,9 +787,9 @@ mod tests {
                         .sum();
                     if bytes > CHANGE_FEED_PAGE_BYTES {
                         assert_eq!(page.changes.len(), 1);
-                        assert_eq!(page.changes[0].committed_seq, ChangeSeq(4));
+                        assert_eq!(page.changes[0].committed_seq, CommitSeq(4));
                     }
-                    if after_seq == ChangeSeq(0) && commit_limit == 1000 {
+                    if after_seq == CommitSeq(0) && commit_limit == 1000 {
                         assert!(page.changes.len() < limit.as_usize());
                         assert!(bytes <= CHANGE_FEED_PAGE_BYTES);
                         assert!(page.next_after_seq.is_some());
@@ -819,7 +819,7 @@ mod tests {
             .segments
             .scan_range(
                 loonfs_types::format::manifest::MetadataRowFamily::Commits,
-                &loonfs_types::format::manifest::lookup_keys::commit_row_key(ChangeSeq(2)),
+                &loonfs_types::format::manifest::lookup_keys::commit_row_key(CommitSeq(2)),
                 None,
                 2,
                 None,
@@ -835,7 +835,7 @@ mod tests {
                 .map(|(row_key, _)| row_key)
                 .collect::<Vec<_>>(),
             [2, 3].map(|seq| {
-                loonfs_types::format::manifest::lookup_keys::commit_row_key(ChangeSeq(seq))
+                loonfs_types::format::manifest::lookup_keys::commit_row_key(CommitSeq(seq))
             })
         );
         // A byte bound ends the page with the row that reaches the bytes,
@@ -846,7 +846,7 @@ mod tests {
                 .segments
                 .scan_range_bounded(
                     loonfs_types::format::manifest::MetadataRowFamily::Commits,
-                    &loonfs_types::format::manifest::lookup_keys::commit_row_key(ChangeSeq(2)),
+                    &loonfs_types::format::manifest::lookup_keys::commit_row_key(CommitSeq(2)),
                     None,
                     crate::segment::PageBounds {
                         max_rows: 1000,
@@ -866,7 +866,7 @@ mod tests {
                     .collect::<Vec<_>>(),
                 (2..2 + page_rows as u64)
                     .map(|seq| {
-                        loonfs_types::format::manifest::lookup_keys::commit_row_key(ChangeSeq(seq))
+                        loonfs_types::format::manifest::lookup_keys::commit_row_key(CommitSeq(seq))
                     })
                     .collect::<Vec<_>>()
             );
@@ -966,9 +966,9 @@ mod tests {
         let delta = append_attributes(0);
 
         assert_eq!(
-            event_from_op_deltas(&namespace_id(), ChangeSeq(7), &[&delta])
+            event_from_op_deltas(&namespace_id(), CommitSeq(7), &[&delta])
                 .expect("map the operation"),
-            FilesystemChange::AttributesChanged {
+            FilesystemEvent::AttributesChanged {
                 inode_id: InodeId(7),
                 attributes_revision_no: AttributesRevisionNo(3),
                 attributes: attributes(),
@@ -981,7 +981,7 @@ mod tests {
         let first = append_attributes(0);
         let second = append_attributes(1);
 
-        let error = event_from_op_deltas(&namespace_id(), ChangeSeq(7), &[&first, &second])
+        let error = event_from_op_deltas(&namespace_id(), CommitSeq(7), &[&first, &second])
             .expect_err("two attribute deltas are not one operation");
         assert_eq!(error.code(), loonfs_types::ErrorCode::NamespaceCorrupt);
     }

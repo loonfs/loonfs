@@ -86,16 +86,13 @@ impl CreateUploadBody {
     }
 }
 
-/// A capability that lets a client transfer bytes directly to or from object storage.
+/// How a client transfers bytes directly to or from object storage.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ObjectTransferAccess {
+pub enum ObjectTransfer {
     /// A short-lived URL, with the headers that one object store read or write requires.
-    #[cfg_attr(
-        feature = "openapi",
-        schema(title = "ObjectTransferAccessPresignedUrl")
-    )]
+    #[cfg_attr(feature = "openapi", schema(title = "ObjectTransferPresignedUrl"))]
     PresignedUrl {
         /// The HTTP method that the client must use.
         method: String,
@@ -106,7 +103,7 @@ pub enum ObjectTransferAccess {
         /// The time the URL expires, in Unix milliseconds.
         expires_at_ms: u64,
     },
-    /// A capability kind from a newer server. This variant doesn't include the kind's own fields.
+    /// A transfer kind from a newer server. This variant doesn't include the kind's own fields.
     #[serde(other)]
     Unknown,
 }
@@ -136,13 +133,13 @@ pub struct SignUploadPartsRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct SignedUploadPart {
-    /// The part number that this capability writes.
+    /// The part number that this presigned URL writes.
     pub part_number: u32,
-    /// A short-lived write capability for this part.
-    pub access: ObjectTransferAccess,
+    /// A short-lived presigned URL that writes this part.
+    pub transfer: ObjectTransfer,
 }
 
-/// One capability for each requested part.
+/// One presigned URL for each requested part.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct SignUploadPartsResponse {
@@ -239,11 +236,11 @@ pub enum UploadSessionStatus {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         part_size_bytes: Option<u64>,
-        /// The capability for the direct PUT. It's present for `direct_put` sessions, and the
+        /// The presigned URL for the direct PUT. It's present for `direct_put` sessions, and the
         /// server creates a new one on every read.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
-        access: Option<ObjectTransferAccess>,
+        transfer: Option<ObjectTransfer>,
         /// The staged content. It's present after content is staged in a `service_proxied` session.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
@@ -312,8 +309,8 @@ impl UploadSession {
 #[cfg(test)]
 mod tests {
     use super::{
-        CompleteUploadBody, ContentToken, CreateUploadBody, ObjectTransferAccess,
-        UploadContentClaim, UploadMode, UploadSession, UploadSessionStatus,
+        CompleteUploadBody, ContentToken, CreateUploadBody, ObjectTransfer, UploadContentClaim,
+        UploadMode, UploadSession, UploadSessionStatus,
     };
     use crate::{Checksum, ChecksumAlgorithm, ContentId, ContentRef, NamespaceId, UploadId};
     use std::collections::BTreeMap;
@@ -454,7 +451,7 @@ mod tests {
             b"hello",
             crate::ChecksumAlgorithm::Crc64nvme,
         );
-        let access = ObjectTransferAccess::PresignedUrl {
+        let access = ObjectTransfer::PresignedUrl {
             method: "PUT".to_owned(),
             url: "https://bucket.example/object".to_owned(),
             headers: BTreeMap::new(),
@@ -467,7 +464,7 @@ mod tests {
                 None,
                 Some(access.clone()),
                 None,
-                serde_json::json!({"checksum_algorithm": "crc64nvme", "access": access}),
+                serde_json::json!({"checksum_algorithm": "crc64nvme", "transfer": access}),
             ),
             (
                 UploadMode::DirectMultipart,
@@ -502,7 +499,7 @@ mod tests {
                     expires_at_ms: 1000,
                     checksum_algorithm,
                     part_size_bytes,
-                    access,
+                    transfer: access,
                     content_ref,
                 },
             };

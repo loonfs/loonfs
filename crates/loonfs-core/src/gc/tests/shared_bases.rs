@@ -14,7 +14,7 @@ use loonfs_types::format::manifest::{
     ContentLayoutRecord, MetadataRowFamily, NamespaceManifestPayload,
 };
 use loonfs_types::format::segment_blocks::decode_filter_block;
-use loonfs_types::{ChangeSeq, ContentExtent, ContentId, ContentLayout, ExtentObject};
+use loonfs_types::{CommitSeq, ContentExtent, ContentId, ContentLayout, ExtentObject};
 
 /// Returns a layout whose chain reads one byte of another chain's object (a
 /// shared base) before one byte of its own object.
@@ -24,7 +24,7 @@ fn shared_layout(namespace_id: &NamespaceId, index: usize) -> ContentLayoutRecor
     ContentLayoutRecord {
         content_id: content_id.clone(),
         size_bytes: 2,
-        committed_seq: ChangeSeq(1),
+        committed_seq: CommitSeq(1),
         layout: ContentLayout {
             creator_namespace_id: namespace_id.clone(),
             extents: [base_id, content_id]
@@ -60,7 +60,7 @@ async fn layout_manifest(
 ) -> (NamespaceManifestPayload, BTreeSet<String>) {
     let mut head =
         NamespaceReadState::initial(namespace_id.clone(), 0, loonfs_test_support::test_actor());
-    head.seq = ChangeSeq(1);
+    head.seq = CommitSeq(1);
     let mut state = MetadataStateBuilder::default();
     let mut keys = BTreeSet::new();
     for row in rows {
@@ -259,7 +259,7 @@ async fn a_false_match_of_an_extent_filter_stays_until_no_root_lists_its_segment
     let rows = (0..8_u64).map(|chain| ContentLayoutRecord {
         content_id: ContentId::parse(format!("con_1{chain:025}")).expect("chain id"),
         size_bytes: 25,
-        committed_seq: ChangeSeq(1),
+        committed_seq: CommitSeq(1),
         layout: ContentLayout {
             creator_namespace_id: namespace_id.clone(),
             extents: (0..25)
@@ -342,7 +342,7 @@ async fn an_extent_of_a_superseded_layout_row_stays_until_no_root_lists_its_segm
     let layout = |object, size_bytes, committed_seq| ContentLayoutRecord {
         content_id: chain.clone(),
         size_bytes,
-        committed_seq: ChangeSeq(committed_seq),
+        committed_seq: CommitSeq(committed_seq),
         layout: ContentLayout {
             creator_namespace_id: namespace_id.clone(),
             extents: vec![ContentExtent {
@@ -365,11 +365,11 @@ async fn an_extent_of_a_superseded_layout_row_stays_until_no_root_lists_its_segm
     .await;
     let longer_run = |tier| MetadataRunRef {
         run_no: RunNo(1),
-        run_seq: ChangeSeq(2),
+        run_seq: CommitSeq(2),
         tier,
         segments: longer.runs[0].segments.clone(),
     };
-    first.head_seq = ChangeSeq(2);
+    first.head_seq = CommitSeq(2);
     first.next_run_no = RunNo(2);
     let mut compacted = first.clone();
     first.runs.push(longer_run(RunTier::Delta));

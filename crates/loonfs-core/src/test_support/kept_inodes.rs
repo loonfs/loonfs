@@ -15,7 +15,7 @@ use crate::time::OperationClock;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{MetadataRow, NamespaceManifestEnvelope, RunTier};
 use loonfs_types::{
-    ChangeSeq, CommitId, InodeId, InodeKind, MetadataFamilyGroup, NamespaceId, RunNo,
+    CommitId, CommitSeq, InodeId, InodeKind, MetadataFamilyGroup, NamespaceId, RunNo,
 };
 use std::assert_matches;
 use std::sync::Arc;
@@ -122,7 +122,7 @@ fn inode_probe(inode_id: InodeId) -> MetadataRow {
     MetadataRow::Inode(InodeRecord {
         inode_id,
         inode_kind: InodeKind::File,
-        committed_seq: ChangeSeq(1),
+        committed_seq: CommitSeq(1),
         commit_id: CommitId::parse("c_probe").expect("commit id"),
         committed_by: loonfs_types::ActorId::loonfs(),
         committed_at_ms: 1_000,
@@ -210,7 +210,7 @@ pub(crate) async fn seeded_kept_inode_filter<S: ObjectStore + ?Sized>(
             CompactionPlacement::Base {
                 output_seq: current.payload().head_seq,
             },
-            ChangeSeq(0),
+            CommitSeq(0),
         ),
         &MetadataCompactionCancellation::default(),
     )

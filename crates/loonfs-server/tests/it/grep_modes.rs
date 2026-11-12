@@ -13,9 +13,9 @@ use loonfs_objectstore::SharedObjectStore;
 use loonfs_server::{app, AppConfig, JobMode, ServerConfig, StoreConfig};
 use loonfs_types::GrepIndex;
 use loonfs_types::{
-    CapabilityDocument, ChangeSeq, ErrorResponse, GrepResponse, NamespaceId,
-    RunMaintenanceResponse, API_GROUP_QUERY_V0, FEATURE_MAINTENANCE_GREP_INDEX, FEATURE_QUERY_GREP,
-    LIMIT_QUERY_GREP_SCAN_BUDGET_FILES, LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
+    CapabilityDocument, CommitSeq, ErrorResponse, GrepResponse, NamespaceId,
+    RunMaintenanceJobResponse, API_GROUP_QUERY_V0, FEATURE_MAINTENANCE_GREP_INDEX,
+    FEATURE_QUERY_GREP, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES, LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
 };
 use serde::de::DeserializeOwned;
 use std::assert_matches;
@@ -108,7 +108,7 @@ async fn gc_reports_only_the_core_counts_where_the_deployment_maintains_no_index
         let response = send(
             &router,
             Method::POST,
-            &format!("/v0/maintenance/namespaces/{namespace_id}/runs"),
+            &format!("/v0/maintenance/namespaces/{namespace_id}/jobs"),
             Some(br#"{"kind":"gc"}"#.to_vec()),
         )
         .await;
@@ -242,7 +242,7 @@ async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
     assert_matches!(
         &enabled.status,
         loonfs_types::GrepIndexStatus::Backfilling {
-            captured_seq: ChangeSeq(0),
+            captured_seq: CommitSeq(0),
             cursor_inode_id: None,
             ..
         }
@@ -255,12 +255,12 @@ async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
         .expect("scheduler")
         .run_due_steps()
         .await;
-    assert_eq!(watermark(&store, &namespace_id).await, ChangeSeq(0));
+    assert_eq!(watermark(&store, &namespace_id).await, CommitSeq(0));
     let active = index_status(&router, &namespace_id).await;
     assert_eq!(
         active.status,
         loonfs_types::GrepIndexStatus::Active {
-            built_through_seq: ChangeSeq(0),
+            built_through_seq: CommitSeq(0),
             next_event_index: 0,
         }
     );
@@ -290,7 +290,7 @@ async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
         )
         .await
         .expect("write file");
-    assert_eq!(watermark(&store, &namespace_id).await, ChangeSeq(0));
+    assert_eq!(watermark(&store, &namespace_id).await, CommitSeq(0));
 
     let capabilities = capabilities(&router).await;
     assert!(capabilities.supports(FEATURE_QUERY_GREP));
@@ -313,7 +313,7 @@ async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
     assert_eq!(response.matches.len(), 1);
     assert_eq!(response.matches[0].path, "/note.txt");
     sweep(&server).await;
-    assert_eq!(watermark(&store, &namespace_id).await, ChangeSeq(1));
+    assert_eq!(watermark(&store, &namespace_id).await, CommitSeq(1));
     let caught_up = grep(&router, &namespace_id, "automatic needle").await;
     assert_eq!(caught_up.matches.len(), 1);
     assert_eq!(caught_up.built_through_seq, caught_up.head_seq);
@@ -339,13 +339,13 @@ async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
     let response = send(
         &router,
         Method::POST,
-        &format!("/v0/maintenance/namespaces/{namespace_id}/runs"),
+        &format!("/v0/maintenance/namespaces/{namespace_id}/jobs"),
         Some(br#"{"kind":"gc"}"#.to_vec()),
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
-    let gc: RunMaintenanceResponse = response_json(response).await;
-    let RunMaintenanceResponse::Gc(collected) = gc else {
+    let gc: RunMaintenanceJobResponse = response_json(response).await;
+    let RunMaintenanceJobResponse::Gc(collected) = gc else {
         panic!("expected garbage collection, got {gc:?}");
     };
     assert_eq!(collected.namespace_id, namespace_id);
@@ -362,7 +362,7 @@ async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
 
     assert_eq!(enable_grep(&router, &namespace_id).await, StatusCode::OK);
     sweep(&server).await;
-    assert_eq!(watermark(&store, &namespace_id).await, ChangeSeq(1));
+    assert_eq!(watermark(&store, &namespace_id).await, CommitSeq(1));
     let reenabled = grep(&router, &namespace_id, "automatic needle").await;
     assert_eq!(reenabled.matches.len(), 1);
     server
@@ -469,8 +469,8 @@ async fn one_sweep_after_restart_resumes_stale_and_mid_backfill_namespaces() {
 
     sweep(&server).await;
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
-    assert_eq!(watermark(&store, &stale).await, ChangeSeq(2));
-    assert_eq!(watermark(&store, &backfill).await, ChangeSeq(3));
+    assert_eq!(watermark(&store, &stale).await, CommitSeq(2));
+    assert_eq!(watermark(&store, &backfill).await, CommitSeq(3));
     let resumed = grep(&router, &backfill, "mid-backfill needle").await;
     assert_eq!(resumed.matches.len(), 3);
     server
@@ -567,7 +567,7 @@ async fn serve_only_answers_searches_over_an_index_it_refuses_to_maintain() {
     drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
     let response = grep(&router, &namespace_id, "external needle").await;
     assert_eq!(response.matches.len(), 1);
-    assert_eq!(response.built_through_seq, ChangeSeq(1));
+    assert_eq!(response.built_through_seq, CommitSeq(1));
     server
         .http
         .runtime
@@ -676,7 +676,7 @@ async fn maintain_only_keeps_the_index_built_without_serving_searches() {
         .expect("write file");
     assert_eq!(enable_grep(&router, &namespace_id).await, StatusCode::OK);
     sweep(&server).await;
-    assert_eq!(watermark(&store, &namespace_id).await, ChangeSeq(1));
+    assert_eq!(watermark(&store, &namespace_id).await, CommitSeq(1));
     let manifest = entry_of(&store, &namespace_id).await;
     assert_matches!(manifest.status(), GrepIndexStatus::Active { .. });
     assert!(
@@ -744,7 +744,7 @@ async fn serve_only_maintenance_serves_the_index_routes_without_a_sweep() {
     // And an assigned host — or an operator — carries it the rest of the way.
     let worker = grep_worker(&store, "assigned-grep-host").await;
     drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
-    assert_eq!(watermark(&store, &namespace_id).await, ChangeSeq(1));
+    assert_eq!(watermark(&store, &namespace_id).await, CommitSeq(1));
     assert_eq!(
         grep(&router, &namespace_id, "unscheduled needle")
             .await
@@ -817,7 +817,7 @@ fn maintains_grep_index(server: &loonfs_server::AppState) -> bool {
 }
 
 /// The sequence this namespace's index is built through.
-async fn watermark(store: &SharedObjectStore, namespace_id: &NamespaceId) -> ChangeSeq {
+async fn watermark(store: &SharedObjectStore, namespace_id: &NamespaceId) -> CommitSeq {
     lifecycle_of(store, namespace_id)
         .await
         .active_watermark()

@@ -20,8 +20,8 @@ use loonfs_types::format::{
 use loonfs_types::ChecksumAlgorithm;
 use loonfs_types::ROOT_INODE_ID;
 use loonfs_types::{
-    next_public_ordinal, AttributeKey, AttributeValue, Attributes, AttributesRevisionNo, ChangeSeq,
-    CommitId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, NamespaceId, RevisionNo,
+    next_public_ordinal, AttributeKey, AttributeValue, Attributes, AttributesRevisionNo, CommitId,
+    CommitSeq, ContentRef, DisplayName, InodeId, InodeKind, NameKey, NamespaceId, RevisionNo,
     WriterEpoch, MAX_PUBLIC_INTEGER,
 };
 use std::assert_matches;
@@ -34,7 +34,7 @@ fn content_ref(seed: &str) -> ContentRef {
     loonfs_test_support::ids::content_ref(seed.as_bytes())
 }
 
-fn commit_id_for_seq(seq: ChangeSeq) -> CommitId {
+fn commit_id_for_seq(seq: CommitSeq) -> CommitId {
     CommitId::parse(format!("c_validation_{}", seq.0)).expect("commit id")
 }
 
@@ -134,7 +134,7 @@ fn wal_create_file(
             name_key: loonfs_types::NameKey::parse("file.txt").expect("name key"),
             display_name: loonfs_types::DisplayName::parse("file.txt").expect("display name"),
             bind_position: loonfs_types::format::manifest::DeltaPosition {
-                seq: loonfs_types::ChangeSeq(1),
+                seq: loonfs_types::CommitSeq(1),
                 delta_index: 0,
             },
             child_created_by: loonfs_types::ActorId::loonfs(),
@@ -160,7 +160,7 @@ fn wal_append_revision(
         name_key: loonfs_types::NameKey::parse("file.txt").expect("name key"),
         display_name: loonfs_types::DisplayName::parse("file.txt").expect("display name"),
         bind_position: loonfs_types::format::manifest::DeltaPosition {
-            seq: loonfs_types::ChangeSeq(1),
+            seq: loonfs_types::CommitSeq(1),
             delta_index: 0,
         },
         child_created_by: loonfs_types::ActorId::loonfs(),
@@ -187,8 +187,8 @@ fn wal_tombstone(delta_index: u32, root_inode_id: InodeId) -> Vec<WalDelta> {
 
 fn metadata_state_after(sequences: &[Vec<WalDelta>]) -> MetadataState {
     let mut state = MetadataState::default().apply_committed_wal_deltas(
-        ChangeSeq(0),
-        &commit_id_for_seq(ChangeSeq(0)),
+        CommitSeq(0),
+        &commit_id_for_seq(CommitSeq(0)),
         &loonfs_test_support::test_actor(),
         4_200,
         &[WalDelta::CreateInode {
@@ -199,7 +199,7 @@ fn metadata_state_after(sequences: &[Vec<WalDelta>]) -> MetadataState {
     );
 
     for (index, deltas) in sequences.iter().enumerate() {
-        let seq = ChangeSeq(u64::try_from(index + 1).expect("seq"));
+        let seq = CommitSeq(u64::try_from(index + 1).expect("seq"));
         state = state.apply_committed_wal_deltas(
             seq,
             &commit_id_for_seq(seq),
@@ -217,7 +217,7 @@ struct TestValidationContext<'a> {
     metadata_state: &'a MetadataState,
 }
 
-fn validation_context(metadata_state: &MetadataState, seq: ChangeSeq) -> TestValidationContext<'_> {
+fn validation_context(metadata_state: &MetadataState, seq: CommitSeq) -> TestValidationContext<'_> {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let head = NamespaceReadState {
         created_at_ms: 1_000,
@@ -234,7 +234,7 @@ fn validation_context(metadata_state: &MetadataState, seq: ChangeSeq) -> TestVal
         }),
         wal_no: loonfs_types::WalNo(0),
         folded_wal_no: loonfs_types::WalNo(0),
-        retention_floor_seq: ChangeSeq(0),
+        retention_floor_seq: CommitSeq(0),
         status: NamespaceStatus::Active {},
     };
     TestValidationContext {
@@ -243,9 +243,9 @@ fn validation_context(metadata_state: &MetadataState, seq: ChangeSeq) -> TestVal
     }
 }
 
-fn committed_seq(context: &TestValidationContext<'_>) -> ChangeSeq {
+fn committed_seq(context: &TestValidationContext<'_>) -> CommitSeq {
     next_public_ordinal(context.head.seq.0)
-        .map(ChangeSeq)
+        .map(CommitSeq)
         .expect("test heads stay under the sequence cap")
 }
 
@@ -311,7 +311,7 @@ async fn a_stale_attribute_base_revision_is_rejected_by_the_updates_own_precondi
         wal_append_attributes(0, InodeId(2), 1, &[("owner", "ada")]),
         wal_append_attributes(0, InodeId(2), 2, &[("owner", "grace")]),
     ]);
-    let context = validation_context(&metadata_state, ChangeSeq(3));
+    let context = validation_context(&metadata_state, CommitSeq(3));
     let request = planned(vec![CommitOperation::UpdateAttributes {
         inode_id: InodeId(2),
         base_attributes_revision_no: AttributesRevisionNo(1),
@@ -344,7 +344,7 @@ async fn a_first_attribute_write_states_revision_zero() {
         ROOT_INODE_ID,
         "docs".to_owned(),
     )]);
-    let context = validation_context(&metadata_state, ChangeSeq(1));
+    let context = validation_context(&metadata_state, CommitSeq(1));
     let request = |base: u64| {
         planned(vec![CommitOperation::UpdateAttributes {
             inode_id: InodeId(2),
@@ -372,7 +372,7 @@ async fn a_first_attribute_write_states_revision_zero() {
 #[tokio::test]
 async fn an_attribute_update_of_a_missing_inode_is_rejected() {
     let metadata_state = metadata_state_after(&[]);
-    let context = validation_context(&metadata_state, ChangeSeq(0));
+    let context = validation_context(&metadata_state, CommitSeq(0));
     let request = planned(vec![CommitOperation::UpdateAttributes {
         inode_id: InodeId(9),
         base_attributes_revision_no: AttributesRevisionNo(0),
@@ -404,7 +404,7 @@ async fn stale_revision_precondition_is_rejected() {
         ),
         wal_append_revision(0, InodeId(3), RevisionNo(2), content_ref("content-2")),
     ]);
-    let context = validation_context(&metadata_state, ChangeSeq(3));
+    let context = validation_context(&metadata_state, CommitSeq(3));
     let request = planned(vec![CommitOperation::ReplaceFile {
         inode_id: InodeId(3),
         base_revision_no: RevisionNo(1),
@@ -433,7 +433,7 @@ async fn a_create_for_a_bound_name_is_rejected() {
         ROOT_INODE_ID,
         "docs".to_owned(),
     )]);
-    let context = validation_context(&metadata_state, ChangeSeq(1));
+    let context = validation_context(&metadata_state, CommitSeq(1));
     let request = planned(vec![CommitOperation::CreateDirectory {
         child_inode_id: InodeId(3),
         parent_inode_id: ROOT_INODE_ID,
@@ -466,14 +466,14 @@ async fn a_bind_for_an_already_bound_child_is_refused_as_corruption() {
             content_ref("content-1"),
         ),
     ]);
-    let context = validation_context(&metadata_state, ChangeSeq(2));
+    let context = validation_context(&metadata_state, CommitSeq(2));
     let docs_binding = ResolvedBinding {
         parent_inode_id: ROOT_INODE_ID,
         name_key: NameKey::parse("docs").expect("valid name key"),
         display_name: test_display_name("docs"),
         child_inode_id: InodeId(2),
         bind_position: loonfs_types::format::manifest::DeltaPosition {
-            seq: ChangeSeq(1),
+            seq: CommitSeq(1),
             delta_index: 1,
         },
     };
@@ -515,7 +515,7 @@ async fn a_binding_precondition_for_an_unbound_name_is_rejected() {
         ROOT_INODE_ID,
         "docs".to_owned(),
     )]);
-    let context = validation_context(&metadata_state, ChangeSeq(1));
+    let context = validation_context(&metadata_state, CommitSeq(1));
     let request = vec![CommitOperation::Rename {
         source_binding: ResolvedBinding {
             parent_inode_id: ROOT_INODE_ID,
@@ -523,7 +523,7 @@ async fn a_binding_precondition_for_an_unbound_name_is_rejected() {
             display_name: test_display_name("missing.txt"),
             child_inode_id: InodeId(9),
             bind_position: loonfs_types::format::manifest::DeltaPosition {
-                seq: ChangeSeq(1),
+                seq: CommitSeq(1),
                 delta_index: 0,
             },
         },
@@ -557,7 +557,7 @@ async fn create_and_replace_under_ancestor_tombstone_report_corruption() {
         ),
         wal_tombstone(0, InodeId(2)),
     ]);
-    let context = validation_context(&metadata_state, ChangeSeq(3));
+    let context = validation_context(&metadata_state, CommitSeq(3));
 
     let create_error = build_commit_plan(
         &planned(vec![CommitOperation::CreateFile {
@@ -618,7 +618,7 @@ async fn restore_revision_validation_rejects_missing_inode() {
         ROOT_INODE_ID,
         "docs".to_owned(),
     )]);
-    let context = validation_context(&metadata_state, ChangeSeq(1));
+    let context = validation_context(&metadata_state, CommitSeq(1));
     let request = planned(vec![CommitOperation::RestoreRevision {
         inode_id: InodeId(99),
         source_revision_no: RevisionNo(1),
@@ -645,7 +645,7 @@ async fn restore_revision_validation_rejects_non_file_target() {
         ROOT_INODE_ID,
         "docs".to_owned(),
     )]);
-    let context = validation_context(&metadata_state, ChangeSeq(1));
+    let context = validation_context(&metadata_state, CommitSeq(1));
     let request = planned(vec![CommitOperation::RestoreRevision {
         inode_id: InodeId(2),
         source_revision_no: RevisionNo(1),
@@ -679,7 +679,7 @@ async fn restore_revision_validation_rejects_stale_or_missing_source_revision() 
         ),
         wal_append_revision(0, InodeId(3), RevisionNo(2), content_ref("content-2")),
     ]);
-    let context = validation_context(&metadata_state, ChangeSeq(3));
+    let context = validation_context(&metadata_state, CommitSeq(3));
 
     let stale_base = build_commit_plan(
         &planned(vec![CommitOperation::RestoreRevision {
@@ -740,7 +740,7 @@ async fn restore_revision_can_reference_revision_created_earlier_in_same_request
             content_ref("content-1"),
         ),
     ]);
-    let context = validation_context(&metadata_state, ChangeSeq(2));
+    let context = validation_context(&metadata_state, CommitSeq(2));
 
     // The restore must resolve to the very object the replace attached, so
     // the expectation is that reference itself.
@@ -786,7 +786,7 @@ async fn restore_revision_can_reference_restore_created_earlier_in_same_request(
         ),
         wal_append_revision(0, InodeId(3), RevisionNo(2), content_ref("content-2")),
     ]);
-    let context = validation_context(&metadata_state, ChangeSeq(3));
+    let context = validation_context(&metadata_state, CommitSeq(3));
 
     let request = planned(vec![
         CommitOperation::RestoreRevision {
@@ -832,7 +832,7 @@ async fn restore_revision_under_tombstoned_ancestor_reports_corruption() {
         ),
         wal_tombstone(0, InodeId(2)),
     ]);
-    let context = validation_context(&metadata_state, ChangeSeq(3));
+    let context = validation_context(&metadata_state, CommitSeq(3));
 
     let error = build_commit_plan(
         &planned(vec![CommitOperation::RestoreRevision {
@@ -872,7 +872,7 @@ async fn restore_revision_overflow_is_rejected() {
         name_key: loonfs_types::NameKey::parse("file.txt").expect("name key"),
         display_name: loonfs_types::DisplayName::parse("file.txt").expect("display name"),
         bind_position: loonfs_types::format::manifest::DeltaPosition {
-            seq: loonfs_types::ChangeSeq(1),
+            seq: loonfs_types::CommitSeq(1),
             delta_index: 0,
         },
         child_created_by: loonfs_types::ActorId::loonfs(),
@@ -884,8 +884,8 @@ async fn restore_revision_overflow_is_rejected() {
     };
     let metadata_state = MetadataState::default()
         .apply_committed_wal_deltas(
-            ChangeSeq(0),
-            &commit_id_for_seq(ChangeSeq(0)),
+            CommitSeq(0),
+            &commit_id_for_seq(CommitSeq(0)),
             &loonfs_test_support::test_actor(),
             4_200,
             &[WalDelta::CreateInode {
@@ -895,13 +895,13 @@ async fn restore_revision_overflow_is_rejected() {
             }],
         )
         .apply_committed_wal_deltas(
-            ChangeSeq(1),
-            &commit_id_for_seq(ChangeSeq(1)),
+            CommitSeq(1),
+            &commit_id_for_seq(CommitSeq(1)),
             &loonfs_test_support::test_actor(),
             4_200,
             &deltas,
         );
-    let context = validation_context(&metadata_state, ChangeSeq(1));
+    let context = validation_context(&metadata_state, CommitSeq(1));
     let request = planned(vec![CommitOperation::RestoreRevision {
         inode_id: InodeId(2),
         source_revision_no: RevisionNo(MAX_PUBLIC_INTEGER),
@@ -938,56 +938,56 @@ fn wal_delete_docs(bound_at: DeltaPosition) -> Vec<WalDelta> {
     deltas
 }
 
-/// An undelete applies only while the deletion it names is its root's
+/// A restore of a deleted item applies only while the deletion it names is its root's
 /// latest tombstone event, so a stale request can't cancel a later deletion.
 #[tokio::test]
-async fn an_undelete_applies_only_while_its_deletion_is_the_roots_latest_event() {
+async fn a_restore_of_a_deleted_item_applies_only_while_its_deletion_is_the_roots_latest_event() {
     let position = |seq, delta_index| DeltaPosition {
-        seq: ChangeSeq(seq),
+        seq: CommitSeq(seq),
         delta_index,
     };
     let deletion = position(2, 1);
-    let undelete_at = |seq| CommitOperation::Undelete {
+    let restore_deleted_at = |seq| CommitOperation::RestoreDeleted {
         inode_id: InodeId(2),
-        deletion_seq: ChangeSeq(seq),
+        deletion_seq: CommitSeq(seq),
         parent_inode_id: ROOT_INODE_ID,
         display_name: test_display_name("docs"),
     };
-    // An undelete at sequence 3: the revoke, then the binding at delta 1.
-    let mut undeleted = vec![WalDelta::RevokeSubtreeTombstone {
+    // A restore at sequence 3: the revoke, then the binding at delta 1.
+    let mut restored = vec![WalDelta::RevokeSubtreeTombstone {
         delta_index: 0,
         root_inode_id: InodeId(2),
         target: deletion,
     }];
-    undeleted.extend(
+    restored.extend(
         wal_create_directory(0, InodeId(2), ROOT_INODE_ID, "docs".to_owned())
             .into_iter()
             .skip(1),
     );
-    let not_deleted = CommitValidationError::UndeleteTargetNotDeleted {
+    let not_deleted = CommitValidationError::RestoreDeletedTargetNotDeleted {
         inode_id: InodeId(2),
     };
     let cases = [
         (
-            "undeleted twice in one commit",
+            "restored twice in one commit",
             Vec::new(),
-            vec![undelete_at(2), undelete_at(2)],
+            vec![restore_deleted_at(2), restore_deleted_at(2)],
             not_deleted.clone(),
         ),
         (
-            "already undeleted",
-            vec![undeleted.clone()],
-            vec![undelete_at(2)],
+            "already restored",
+            vec![restored.clone()],
+            vec![restore_deleted_at(2)],
             not_deleted,
         ),
         (
             "deleted again since",
-            vec![undeleted, wal_delete_docs(position(3, 1))],
-            vec![undelete_at(2)],
-            CommitValidationError::UndeleteSequenceMismatch {
+            vec![restored, wal_delete_docs(position(3, 1))],
+            vec![restore_deleted_at(2)],
+            CommitValidationError::RestoreDeletedSequenceMismatch {
                 inode_id: InodeId(2),
-                requested_seq: ChangeSeq(2),
-                active_seq: ChangeSeq(4),
+                requested_seq: CommitSeq(2),
+                active_seq: CommitSeq(4),
             },
         ),
     ];
@@ -1002,7 +1002,7 @@ async fn an_undelete_applies_only_while_its_deletion_is_the_roots_latest_event()
     for (name, later, ops, expected) in cases {
         let history = history(later);
         let metadata_state = metadata_state_after(&history);
-        let head_seq = ChangeSeq(u64::try_from(history.len()).expect("seq"));
+        let head_seq = CommitSeq(u64::try_from(history.len()).expect("seq"));
         let context = validation_context(&metadata_state, head_seq);
         let error = build_commit_plan(&ops, 4_200, &context)
             .await
@@ -1016,10 +1016,10 @@ async fn an_undelete_applies_only_while_its_deletion_is_the_roots_latest_event()
     }
 
     let metadata_state = metadata_state_after(&history(Vec::new()));
-    let context = validation_context(&metadata_state, ChangeSeq(2));
-    let plan = build_commit_plan(&[undelete_at(2)], 4_200, &context)
+    let context = validation_context(&metadata_state, CommitSeq(2));
+    let plan = build_commit_plan(&[restore_deleted_at(2)], 4_200, &context)
         .await
-        .expect("undelete the latest deletion");
+        .expect("restore the latest deletion");
     assert_matches!(
         plan.deltas.as_slice(),
         [

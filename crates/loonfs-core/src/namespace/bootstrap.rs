@@ -8,7 +8,7 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::PoolRecordPayload;
 use loonfs_types::format::manifest::{NamespaceAccess, NamespaceManifestPayload};
 use loonfs_types::{
-    AccessRevisionNo, AccessRight, ActorId, ChangeSeq, InodeKind, NamespaceMetadata, PoolId,
+    AccessRevisionNo, AccessRight, ActorId, CommitSeq, InodeKind, NamespaceMetadata, PoolId,
     ROOT_INODE_ID,
 };
 
@@ -84,7 +84,7 @@ pub(crate) fn bootstrap_metadata_state(
             vec![AccessRevisionRecord {
                 inode_id: ROOT_INODE_ID,
                 access_revision_no: AccessRevisionNo(0),
-                committed_seq: ChangeSeq(0),
+                committed_seq: CommitSeq(0),
                 commit_id: loonfs_types::format::control::genesis_commit_id(),
                 delta_index: 0,
                 committed_by: ActorId::loonfs(),
@@ -99,7 +99,7 @@ pub(crate) fn bootstrap_metadata_state(
         vec![InodeRecord {
             inode_id: ROOT_INODE_ID,
             inode_kind: InodeKind::Directory,
-            committed_seq: ChangeSeq(0),
+            committed_seq: CommitSeq(0),
             commit_id: loonfs_types::format::control::genesis_commit_id(),
             committed_by: loonfs_types::ActorId::loonfs(),
             committed_at_ms: created_at_ms,

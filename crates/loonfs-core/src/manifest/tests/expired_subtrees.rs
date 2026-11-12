@@ -23,7 +23,7 @@ const KEEP: InodeId = InodeId(4);
 const KEPT_FILE: InodeId = InodeId(5);
 /// The retention floor, between the deletion of `/old` and the deletion of
 /// `/keep`.
-const FLOOR: ChangeSeq = ChangeSeq(4);
+const FLOOR: CommitSeq = CommitSeq(4);
 
 fn commit_id() -> CommitId {
     CommitId::parse("c_expired_subtrees").expect("commit id")
@@ -47,13 +47,13 @@ fn binding(parent: InodeId, child: InodeId, name: &str, seq: u64) -> DirentryBin
         },
         child_created_by: ActorId::loonfs(),
         child_created_at_ms: 1_000,
-        committed_seq: ChangeSeq(seq),
+        committed_seq: CommitSeq(seq),
         delta_index: 0,
         commit_id: crate::test_support::binding_commit_id(),
         committed_by: loonfs_types::ActorId::loonfs(),
         committed_at_ms: 0,
         bind_position: loonfs_types::format::manifest::DeltaPosition {
-            seq: ChangeSeq(seq),
+            seq: CommitSeq(seq),
             delta_index: 0,
         },
     }
@@ -63,7 +63,7 @@ fn grants(principal: &str, rights: &[AccessRight]) -> AccessRevisionRecord {
     AccessRevisionRecord {
         inode_id: ROOT,
         access_revision_no: AccessRevisionNo(1),
-        committed_seq: ChangeSeq(1),
+        committed_seq: CommitSeq(1),
         commit_id: commit_id(),
         delta_index: 0,
         committed_by: ActorId::loonfs(),
@@ -93,7 +93,7 @@ fn compacted_bindings_state() -> MetadataState {
             } else {
                 InodeKind::Directory
             },
-            committed_seq: ChangeSeq(u64::from(inode_id != ROOT)),
+            committed_seq: CommitSeq(u64::from(inode_id != ROOT)),
             commit_id: commit_id(),
             committed_by: ActorId::loonfs(),
             committed_at_ms: 1_000,
@@ -115,7 +115,7 @@ fn compacted_bindings_state() -> MetadataState {
         builder.push_revision(RevisionRecord {
             inode_id,
             revision_no: RevisionNo(1),
-            committed_seq: ChangeSeq(1),
+            committed_seq: CommitSeq(1),
             commit_id: commit_id(),
             committed_at_ms: 1_000,
             committed_by: ActorId::loonfs(),
@@ -150,7 +150,7 @@ async fn a_read_by_inode_whose_ancestry_was_compacted_away_is_refused_for_every_
         .await
         .expect("current projection");
     let mut head = current.head.clone();
-    head.seq = ChangeSeq(5);
+    head.seq = CommitSeq(5);
     let manifest = build_namespace_manifest_from_metadata_state(
         &store,
         &namespace_id,

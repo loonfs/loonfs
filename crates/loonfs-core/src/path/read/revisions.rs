@@ -14,7 +14,7 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::lookup_keys;
 use loonfs_types::options::AttributeInclusion;
 use loonfs_types::{
-    AccessRight, ChangeSeq, FileRevision, FileRevisionsPageCursor, InodeId, InodeKind, Page,
+    AccessRight, CommitSeq, FileRevision, FileRevisionsPageCursor, InodeId, InodeKind, Page,
     PageRequest, PagedResponse, PathEntryKind, RevisionNo,
 };
 use std::collections::HashMap;
@@ -364,7 +364,7 @@ async fn ensure_ancestry_allows_read<S: ObjectStore + ?Sized>(
 
 fn validate_file_revisions_cursor(
     cursor: &FileRevisionsPageCursor,
-    head_seq: ChangeSeq,
+    head_seq: CommitSeq,
     inode_id: InodeId,
 ) -> Result<()> {
     validate_cursor_head(head_seq, Some(cursor.head_seq))?;

@@ -2,7 +2,7 @@
 //! use.
 
 use crate::{
-    ChangeSeq, CoreError, Error, InodeId, ListChangesResponse, ListCheckpointsResponse,
+    CommitSeq, CoreError, Error, InodeId, ListChangesResponse, ListCheckpointsResponse,
     ListFileRevisionsResponse, ListInodeChildrenResponse, ListOptions, ListPathEntriesResponse,
     ListSnapshotsResponse, NamespaceId, SnapshotFilesPage,
 };
@@ -85,7 +85,7 @@ pub(crate) fn encode_next_cursor<C: PageCursor>(
 
 pub(crate) fn file_revisions_page_response(
     namespace_id: NamespaceId,
-    head_seq: ChangeSeq,
+    head_seq: CommitSeq,
     page: Page<FileRevision, FileRevisionsPageCursor>,
     inode_id: InodeId,
 ) -> std::result::Result<ListFileRevisionsResponse, CoreError> {

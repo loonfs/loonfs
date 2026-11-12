@@ -9,7 +9,7 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::ForkBasis;
 use loonfs_types::format::manifest::NamespaceManifestPayload;
 use loonfs_types::{
-    ActorId, ChangeSeq, ManifestNo, NamespaceForkBasis, NamespaceId, NamespaceMetadata,
+    ActorId, CommitSeq, ManifestNo, NamespaceForkBasis, NamespaceId, NamespaceMetadata,
     NamespaceRebasedFrom,
 };
 use std::num::NonZeroU64;
@@ -19,7 +19,7 @@ use std::sync::Arc;
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NamespaceWalTailUsage {
-    pub head_seq: ChangeSeq,
+    pub head_seq: CommitSeq,
     pub wal_tail_objects: u64,
     pub wal_tail_inline_bytes: usize,
     pub wal_tail_bytes: usize,
@@ -72,8 +72,8 @@ pub struct NamespaceStorageDiagnostics {
     pub created_at_ms: u64,
     pub created_by: ActorId,
     pub fork_basis: Option<NamespaceForkBasis>,
-    pub head_seq: ChangeSeq,
-    pub retention_floor_seq: ChangeSeq,
+    pub head_seq: CommitSeq,
+    pub retention_floor_seq: CommitSeq,
     pub current_manifest_no: ManifestNo,
     pub wal_tail_objects: u64,
     pub wal_tail_newest_commit_at_ms: Option<u64>,
@@ -82,7 +82,7 @@ pub struct NamespaceStorageDiagnostics {
 fn fork_basis(basis: Option<ForkBasis>) -> Option<NamespaceForkBasis> {
     basis.map(|basis| NamespaceForkBasis {
         source_namespace_id: basis.manifest.owner_namespace_id,
-        source_head_seq: basis.manifest.head_seq,
+        fork_point_seq: basis.manifest.head_seq,
         source_pin_id: basis.source_pin_id,
         rebased_from: basis.rebased_from.map(|rebased_from| NamespaceRebasedFrom {
             source_namespace_id: rebased_from.source_namespace_id,

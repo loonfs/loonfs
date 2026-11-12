@@ -180,7 +180,7 @@ mod tests {
     use loonfs_objectstore::keys::hint;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_test_support::stores::replace_object;
-    use loonfs_types::ChangeSeq;
+    use loonfs_types::CommitSeq;
     use std::assert_matches;
     use tempfile::{tempdir, TempDir};
 
@@ -202,7 +202,7 @@ mod tests {
         PinPayload {
             pin_id,
             namespace_id: namespace_id.clone(),
-            head_seq: ChangeSeq(1),
+            head_seq: CommitSeq(1),
             payload_checksum: loonfs_types::sha256_digest(b"test"),
             created_at_ms: 1,
             owner: PinOwner::User {

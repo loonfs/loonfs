@@ -154,27 +154,27 @@
     "fingerprint": "v1:sha256:ca2d2bf98d1bb50969980f9f433615730925ee81c38f9a70727ae73015e68d18"
   },
   {
-    "name": "undelete_11",
+    "name": "restore_deleted_11",
     "operation": {
-      "kind": "undelete",
+      "kind": "restore_deleted",
       "inode_id": "ino_0000000000000000000000001a",
       "deletion_seq": 17,
       "destination_path": "/docs/report.txt"
     },
     "preconditions": [],
-    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v1\",\"namespace_id\":\"demo\",\"actor_id\":\"test-actor\",\"subject_id\":null,\"operations\":[{\"kind\":\"undelete\",\"inode_id\":\"0000000000000000000000001a\",\"deletion_seq\":17,\"destination_path\":\"/docs/report.txt\",\"destination_parent_inode_id\":null,\"destination_display_name\":null}],\"message\":null,\"preconditions\":[]}",
-    "fingerprint": "v1:sha256:9067176f23577da81b29ffa4bf6b743e8945d7c05ab99adcf9a6c0a4cd179865"
+    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v1\",\"namespace_id\":\"demo\",\"actor_id\":\"test-actor\",\"subject_id\":null,\"operations\":[{\"kind\":\"restore_deleted\",\"inode_id\":\"0000000000000000000000001a\",\"deletion_seq\":17,\"destination_path\":\"/docs/report.txt\",\"destination_parent_inode_id\":null,\"destination_display_name\":null}],\"message\":null,\"preconditions\":[]}",
+    "fingerprint": "v1:sha256:510a722a2f2ef215796bed204a34257389aa93097e9e2440d2ddc13c83727b96"
   },
   {
-    "name": "undelete_12",
+    "name": "restore_deleted_12",
     "operation": {
-      "kind": "undelete",
+      "kind": "restore_deleted",
       "inode_id": "ino_0000000000000000000000001a",
       "deletion_seq": 17
     },
     "preconditions": [],
-    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v1\",\"namespace_id\":\"demo\",\"actor_id\":\"test-actor\",\"subject_id\":null,\"operations\":[{\"kind\":\"undelete\",\"inode_id\":\"0000000000000000000000001a\",\"deletion_seq\":17,\"destination_path\":null,\"destination_parent_inode_id\":null,\"destination_display_name\":null}],\"message\":null,\"preconditions\":[]}",
-    "fingerprint": "v1:sha256:2d6b50dec3dc3020f5d443085c263a0b20b5b3a35c8b5e15bb9795d60a09b811"
+    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v1\",\"namespace_id\":\"demo\",\"actor_id\":\"test-actor\",\"subject_id\":null,\"operations\":[{\"kind\":\"restore_deleted\",\"inode_id\":\"0000000000000000000000001a\",\"deletion_seq\":17,\"destination_path\":null,\"destination_parent_inode_id\":null,\"destination_display_name\":null}],\"message\":null,\"preconditions\":[]}",
+    "fingerprint": "v1:sha256:5c034b8224392a308ada7e2669e315120e8a6b33c0794b0ac7ffff00e3c26ab7"
   },
   {
     "name": "update_attributes_13",
@@ -588,17 +588,17 @@
     "fingerprint": "v1:sha256:360c6e6583ce782c987115cdad92f2d6d67e9cb611dc6c603aef99f35dac502b"
   },
   {
-    "name": "undelete_under_parent_inode",
+    "name": "restore_deleted_under_parent_inode",
     "operation": {
-      "kind": "undelete",
+      "kind": "restore_deleted",
       "inode_id": "ino_0000000000000000000000001a",
       "deletion_seq": 17,
       "destination_parent_inode_id": "ino_00000000000000000000000007",
       "destination_display_name": "report.txt"
     },
     "preconditions": [],
-    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v1\",\"namespace_id\":\"demo\",\"actor_id\":\"test-actor\",\"subject_id\":null,\"operations\":[{\"kind\":\"undelete\",\"inode_id\":\"0000000000000000000000001a\",\"deletion_seq\":17,\"destination_path\":null,\"destination_parent_inode_id\":\"00000000000000000000000007\",\"destination_display_name\":\"report.txt\"}],\"message\":null,\"preconditions\":[]}",
-    "fingerprint": "v1:sha256:0c8f9e98efe3f9ab4db076937e1af7e87f3387bc0d0c0ddf032a74c2c759c872"
+    "canonical_json": "{\"domain\":\"loonfs.commit.semantic.v1\",\"namespace_id\":\"demo\",\"actor_id\":\"test-actor\",\"subject_id\":null,\"operations\":[{\"kind\":\"restore_deleted\",\"inode_id\":\"0000000000000000000000001a\",\"deletion_seq\":17,\"destination_path\":null,\"destination_parent_inode_id\":\"00000000000000000000000007\",\"destination_display_name\":\"report.txt\"}],\"message\":null,\"preconditions\":[]}",
+    "fingerprint": "v1:sha256:75d91ac28bf938faedab8a1793dc1b1f3768d82c9007ac7df7d7299b6acf5720"
   },
   {
     "name": "update_attributes_by_inode",

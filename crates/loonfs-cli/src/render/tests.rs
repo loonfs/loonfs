@@ -15,7 +15,7 @@ use loonfs_test_support::provider_detail::{
 };
 use loonfs_types::ROOT_INODE_ID;
 use loonfs_types::{
-    AbsolutePath, AttributeValue, AttributesProjection, ChangeSeq, DisplayName, InodeId,
+    AbsolutePath, AttributeValue, AttributesProjection, CommitSeq, DisplayName, InodeId,
     NamespaceId, PathEntry, PathEntryKind, StoreProbeCheck, StoreProbeCheckOutcome,
     StoreProbeResponse,
 };
@@ -141,7 +141,7 @@ fn provider_failure_is_safe_on_embedded_remote_and_doctor_surfaces() {
                     .to_owned(),
                 request_id: None,
                 store_probe: Some(StoreProbeResponse {
-                    run_id: loonfs_types::ProbeRunId::parse("probe_00000000000000000000000001")
+                    probe_id: loonfs_types::ProbeId::parse("probe_00000000000000000000000001")
                         .expect("probe run id"),
                     checks: checks.clone(),
                 }),
@@ -198,7 +198,7 @@ fn path_entry(path: &str, display_name: Option<&str>) -> PathEntry {
         created_by: loonfs_types::ActorId::loonfs(),
         created_at_ms: 1_752_624_000_000,
         kind: PathEntryKind::Directory {},
-        head_seq: ChangeSeq(3),
+        head_seq: CommitSeq(3),
         parent_inode_id: display_name.map(|_| ROOT_INODE_ID),
         display_name: display_name.map(|name| DisplayName::parse(name).expect("display name")),
         binding_version: None,

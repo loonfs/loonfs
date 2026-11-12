@@ -243,7 +243,7 @@ fn no_schema_a_response_reaches_admits_null() {
     for schema_name in [
         "ErrorResponse",
         "ErrorDetails",
-        "RunMaintenanceResponseGc",
+        "RunMaintenanceJobResponseGc",
         "GrepMatch",
         "PinId",
     ] {
@@ -262,9 +262,12 @@ fn no_schema_a_response_reaches_admits_null() {
 const ALWAYS_SERIALIZED_RESPONSE_FIELDS: &[(&str, &str)] = &[
     ("PoolDeletedObjectCounts", "content_objects"),
     ("PoolDeletedObjectCounts", "upload_sessions"),
-    ("RunMaintenanceResponseGc", "deleted"),
-    ("RunMaintenanceResponseGc", "deleted_checkpoints_by_owner"),
-    ("RunMaintenanceResponseGc", "retained"),
+    ("RunMaintenanceJobResponseGc", "deleted"),
+    (
+        "RunMaintenanceJobResponseGc",
+        "deleted_checkpoints_by_owner",
+    ),
+    ("RunMaintenanceJobResponseGc", "retained"),
     ("GrepMatch", "line_truncated"),
     ("DeletedCheckpointsByOwner", "user"),
 ];
@@ -376,7 +379,7 @@ fn openapi_documents_current_server_paths() {
             "/v0/maintenance/namespaces/{namespace_id}/checkpoints/{checkpoint_id}",
             "get",
         ),
-        ("/v0/maintenance/namespaces/{namespace_id}/runs", "post"),
+        ("/v0/maintenance/namespaces/{namespace_id}/jobs", "post"),
         (
             "/v0/maintenance/namespaces/{namespace_id}/grep/index/enable",
             "post",
@@ -1080,7 +1083,7 @@ fn openapi_query_parameters_publish_the_runtime_grammar() {
             "/v0/namespaces/{namespace_id}/changes",
             "get",
             "after_seq",
-            "ChangeSeq",
+            "CommitSeq",
             true,
         ),
         (
@@ -1094,7 +1097,7 @@ fn openapi_query_parameters_publish_the_runtime_grammar() {
             "/v0/namespaces/{namespace_id}",
             "delete",
             "expected_head_seq",
-            "ChangeSeq",
+            "CommitSeq",
             false,
         ),
     ] {
@@ -1185,23 +1188,23 @@ fn openapi_names_tagged_one_of_alternatives() {
             &["NamespaceAccessModeUnrestricted", "NamespaceAccessModeAcl"][..],
         ),
         (
-            "RunMaintenanceRequest",
+            "RunMaintenanceJobRequest",
             &[
-                "RunMaintenanceRequestMetadata",
-                "RunMaintenanceRequestGc",
-                "RunMaintenanceRequestRetention",
-                "RunMaintenanceRequestRetentionWindow",
-                "RunMaintenanceRequestRecoverAdministrator",
+                "RunMaintenanceJobRequestMetadata",
+                "RunMaintenanceJobRequestGc",
+                "RunMaintenanceJobRequestRetention",
+                "RunMaintenanceJobRequestRetentionWindow",
+                "RunMaintenanceJobRequestRecoverAdministrator",
             ][..],
         ),
         (
-            "RunMaintenanceResponse",
+            "RunMaintenanceJobResponse",
             &[
-                "RunMaintenanceResponseMetadata",
-                "RunMaintenanceResponseGc",
-                "RunMaintenanceResponseRetention",
-                "RunMaintenanceResponseRetentionWindow",
-                "RunMaintenanceResponseRecoverAdministrator",
+                "RunMaintenanceJobResponseMetadata",
+                "RunMaintenanceJobResponseGc",
+                "RunMaintenanceJobResponseRetention",
+                "RunMaintenanceJobResponseRetentionWindow",
+                "RunMaintenanceJobResponseRecoverAdministrator",
             ][..],
         ),
         ("PathEntry", &["PathEntryDirectory", "PathEntryFile"][..]),
@@ -1214,16 +1217,16 @@ fn openapi_names_tagged_one_of_alternatives() {
             ][..],
         ),
         (
-            "FilesystemChange",
+            "FilesystemEvent",
             &[
-                "FilesystemChangeDirectoryCreated",
-                "FilesystemChangeFileCreated",
-                "FilesystemChangeContentChanged",
-                "FilesystemChangeMoved",
-                "FilesystemChangeDeleted",
-                "FilesystemChangeUndeleted",
-                "FilesystemChangeAttributesChanged",
-                "FilesystemChangeAccessChanged",
+                "FilesystemEventDirectoryCreated",
+                "FilesystemEventFileCreated",
+                "FilesystemEventContentChanged",
+                "FilesystemEventMoved",
+                "FilesystemEventDeleted",
+                "FilesystemEventRestored",
+                "FilesystemEventAttributesChanged",
+                "FilesystemEventAccessChanged",
             ][..],
         ),
         (
@@ -1242,7 +1245,7 @@ fn openapi_names_tagged_one_of_alternatives() {
                 "FilesystemOperationMoveByInode",
                 "FilesystemOperationCopyPath",
                 "FilesystemOperationCopyByInode",
-                "FilesystemOperationUndelete",
+                "FilesystemOperationRestoreDeleted",
                 "FilesystemOperationRestoreRevision",
                 "FilesystemOperationRestoreRevisionByInode",
                 "FilesystemOperationUpdateAttributes",
@@ -1251,10 +1254,7 @@ fn openapi_names_tagged_one_of_alternatives() {
                 "FilesystemOperationUpdateAccessByInode",
             ][..],
         ),
-        (
-            "ObjectTransferAccess",
-            &["ObjectTransferAccessPresignedUrl"][..],
-        ),
+        ("ObjectTransfer", &["ObjectTransferPresignedUrl"][..]),
         (
             "UploadSession",
             &[
@@ -1442,7 +1442,7 @@ fn openapi_caps_public_ordinals_and_uses_string_inode_ids() {
 
     for name in [
         "RevisionNo",
-        "ChangeSeq",
+        "CommitSeq",
         "AttributesRevisionNo",
         "ManifestNo",
         "WriterEpoch",
@@ -1656,7 +1656,7 @@ fn openapi_reuses_the_one_checksum_and_upload_claim_shapes() {
     let required = required_fields(open);
     assert!(open["properties"].get("checksum_algorithm").is_some());
     assert!(required.contains("checksum_algorithm"));
-    for field in ["access", "part_size_bytes", "content_ref"] {
+    for field in ["transfer", "part_size_bytes", "content_ref"] {
         assert!(
             open["properties"].get(field).is_some(),
             "open session includes `{field}`"

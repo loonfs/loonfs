@@ -191,7 +191,7 @@ pub(crate) fn session_response(
                 } => Some(part_size_bytes.get()),
                 _ => None,
             },
-            access: None,
+            transfer: None,
             content_ref: uploaded,
         },
         Some(UploadOutcome::Completed {

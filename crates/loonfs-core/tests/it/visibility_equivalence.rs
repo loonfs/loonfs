@@ -18,7 +18,7 @@ use loonfs_types::options::StatOptions;
 use loonfs_types::Commit;
 use loonfs_types::ROOT_INODE_ID;
 use loonfs_types::{
-    AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId,
+    AbsolutePath, CommitId, CommitSeq, DeleteDirectoryBehavior, DestinationBehavior, InodeId,
     MetadataFamilyGroup, NamespaceId, PageRequest, RevisionNo,
 };
 use std::sync::Arc;
@@ -212,16 +212,16 @@ impl VisibilityHarness {
         .await
     }
 
-    async fn undelete(
+    async fn restore_deleted(
         &self,
         inode_id: InodeId,
-        deletion_seq: ChangeSeq,
+        deletion_seq: CommitSeq,
         path: &str,
     ) -> Result<Commit, CoreError> {
-        self.publish_operation(FilesystemOperation::Undelete {
+        self.publish_operation(FilesystemOperation::RestoreDeleted {
             inode_id,
             deletion_seq,
-            destination: loonfs_types::options::UndeleteDestination::Path(
+            destination: loonfs_types::options::RestoreDeletedDestination::Path(
                 AbsolutePath::parse(path).expect("valid path"),
             ),
         })
@@ -658,9 +658,9 @@ async fn move_across_a_delete_boundary_preserves_visibility_equivalence() {
         .await;
 
     harness
-        .undelete(source, deletion.committed_seq, "/restored-source")
+        .restore_deleted(source, deletion.committed_seq, "/restored-source")
         .await
-        .expect("undelete source root");
+        .expect("restore source root");
     harness
         .move_path("/safe/branch", "/restored-source/branch")
         .await
@@ -685,8 +685,8 @@ async fn move_across_a_delete_boundary_preserves_visibility_equivalence() {
 }
 
 #[tokio::test]
-async fn undelete_preserves_later_interior_mutations_and_nested_deletions() {
-    let harness = VisibilityHarness::new("visibility-undelete-interior").await;
+async fn a_restore_of_a_deleted_subtree_preserves_later_interior_mutations_and_nested_deletions() {
+    let harness = VisibilityHarness::new("visibility-restore-interior").await;
     harness
         .put_file(
             "/tree/branch/kept.txt",
@@ -758,14 +758,14 @@ async fn undelete_preserves_later_interior_mutations_and_nested_deletions() {
         .await;
 
     harness
-        .undelete(tree, first_deletion.committed_seq, "/restored")
+        .restore_deleted(tree, first_deletion.committed_seq, "/restored")
         .await
-        .expect("undelete mutated subtree");
+        .expect("restore mutated subtree");
     let restored_snapshot = harness.read_context().await;
     harness
         .assert_equivalence(
             &restored_snapshot,
-            "after first undelete",
+            "after first restore",
             &[
                 ExpectedInode::visible(ROOT_INODE_ID, "/"),
                 ExpectedInode::visible(tree, "/restored"),
@@ -780,24 +780,24 @@ async fn undelete_preserves_later_interior_mutations_and_nested_deletions() {
     harness
         .put_file(
             "/restored/branch/moved.txt",
-            b"after undelete",
+            b"after restore",
             DestinationBehavior::Replace,
         )
         .await
-        .expect("mutate interior after undelete");
+        .expect("mutate interior after restore");
     let second_deletion = harness
         .delete("/restored", DeleteDirectoryBehavior::Recursive)
         .await
         .expect("delete subtree again");
     harness
-        .undelete(tree, second_deletion.committed_seq, "/again")
+        .restore_deleted(tree, second_deletion.committed_seq, "/again")
         .await
-        .expect("undelete newer position");
+        .expect("restore newer position");
     let second_restored_snapshot = harness.read_context().await;
     harness
         .assert_equivalence(
             &second_restored_snapshot,
-            "after mutation and second undelete",
+            "after mutation and second restore",
             &[
                 ExpectedInode::visible(ROOT_INODE_ID, "/"),
                 ExpectedInode::visible(tree, "/again"),

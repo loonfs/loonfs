@@ -15,10 +15,10 @@ use crate::metadata::{
 };
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::lookup_keys;
-use loonfs_types::{ChangeSeq, InodeId, NameKey, ROOT_INODE_ID};
+use loonfs_types::{CommitSeq, InodeId, NameKey, ROOT_INODE_ID};
 
 /// Rows one trash page fetches per manifest round-trip. A page's entries are
-/// listed rows; undelete markers share the range until compaction removes
+/// listed rows; restore markers share the range until compaction removes
 /// each pair away, so the raw scan runs a little ahead of the page.
 const ACTIVE_DELETION_RAW_SCAN_LIMIT: usize = 64;
 
@@ -187,7 +187,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     }
 
     /// Returns one page of the namespace's deletions in `range` that no
-    /// undelete has cancelled, oldest deletion first.
+    /// restore has cancelled, oldest deletion first.
     ///
     /// Manifest rows combine with the rows the WAL tail derives, so a deletion
     /// committed seconds ago lists like a fresh file appears in `ls`. Both
@@ -198,7 +198,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     ///
     /// The listing serves a view at or above its manifest's head.
     /// `active_deletions` is a query index, not history, and compaction
-    /// removes a deletion's row together with the row its undelete adds, so
+    /// removes a deletion's row together with the row its restore adds, so
     /// filtering these rows can't return the deletions of a view below the
     /// head.
     pub(super) async fn active_deletions_page(
@@ -244,7 +244,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         let mut combiner =
             ManifestTailCombiner::new(range.lower_bound.clone(), tail, TieOrder::TailFirst);
         let mut entries = Vec::with_capacity(limit);
-        let mut removed_position: Option<(ChangeSeq, InodeId)> = None;
+        let mut removed_position: Option<(CommitSeq, InodeId)> = None;
         while entries.len() < limit {
             let Some((_, record)) = combiner.next(refill).await? else {
                 break;

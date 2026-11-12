@@ -9,27 +9,27 @@ use crate::profiles::ProfileSummary;
 use crate::render::{store_probe_run_outcome, StoreProbeRunOutcome};
 use loonfs_merge::{MergeSessionOutcome, MergeSessionState, MergeSessionStatus};
 use loonfs_types::{
-    AbsolutePath, CapabilityDocument, ChangeSeq, CommitId, DeleteNamespaceResponse,
+    AbsolutePath, CapabilityDocument, CommitId, CommitSeq, DeleteNamespaceResponse,
     DeleteSnapshotResponse, FileRevision, GrepIndex, GrepMatch, InodeId, ListChangesResponse,
     ListCheckpointsResponse, ListSnapshotsResponse, NamespaceId, NamespaceMetadata, PathEntry,
-    RunMaintenanceResponse, RunPoolMaintenanceResponse, Snapshot, StoreProbeResponse,
+    RunMaintenanceJobResponse, RunPoolMaintenanceJobResponse, Snapshot, StoreProbeResponse,
 };
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub(crate) struct ListingHeadDrift {
-    pub first_head_seq: ChangeSeq,
-    pub last_head_seq: ChangeSeq,
+    pub first_head_seq: CommitSeq,
+    pub last_head_seq: CommitSeq,
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct ListingHeadObservation {
-    first_head_seq: Option<ChangeSeq>,
-    last_head_seq: Option<ChangeSeq>,
+    first_head_seq: Option<CommitSeq>,
+    last_head_seq: Option<CommitSeq>,
 }
 
 impl ListingHeadObservation {
-    pub(crate) fn observe(&mut self, head_seq: ChangeSeq) {
+    pub(crate) fn observe(&mut self, head_seq: CommitSeq) {
         self.first_head_seq.get_or_insert(head_seq);
         self.last_head_seq = Some(head_seq);
     }
@@ -121,12 +121,12 @@ pub(crate) struct CommandFailure {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MaintenanceRan {
-    pub response: RunMaintenanceResponse,
-    pub retention_floor_before: Option<ChangeSeq>,
+    pub response: RunMaintenanceJobResponse,
+    pub retention_floor_before: Option<CommitSeq>,
 }
 
 impl MaintenanceRan {
-    pub(crate) fn new(response: RunMaintenanceResponse) -> Self {
+    pub(crate) fn new(response: RunMaintenanceJobResponse) -> Self {
         Self {
             response,
             retention_floor_before: None,
@@ -134,8 +134,8 @@ impl MaintenanceRan {
     }
 
     pub(crate) fn after_retention(
-        response: RunMaintenanceResponse,
-        retention_floor_before: ChangeSeq,
+        response: RunMaintenanceJobResponse,
+        retention_floor_before: CommitSeq,
     ) -> Self {
         Self {
             response,
@@ -207,7 +207,7 @@ pub(crate) enum CommandData {
         /// The sequence the wait drove toward. Absent with `--no-wait` and
         /// on a namespace whose index is disabled.
         #[serde(skip_serializing_if = "Option::is_none")]
-        waited_for_seq: Option<ChangeSeq>,
+        waited_for_seq: Option<CommitSeq>,
         /// Steps the wait spent: bounded index steps in embedded mode,
         /// status checks in remote mode.
         steps: u64,
@@ -225,7 +225,7 @@ pub(crate) enum CommandData {
         namespace_id: NamespaceId,
         path: AbsolutePath,
         /// Namespace head the final page was read from.
-        head_seq: ChangeSeq,
+        head_seq: CommitSeq,
         /// Heads observed when this invocation crossed namespace states.
         #[serde(skip_serializing_if = "Option::is_none")]
         head_drift: Option<ListingHeadDrift>,
@@ -239,10 +239,10 @@ pub(crate) enum CommandData {
         pattern: String,
         namespace_id: NamespaceId,
         /// Namespace head the final page was evaluated against.
-        head_seq: ChangeSeq,
+        head_seq: CommitSeq,
         /// Index watermark: content committed at or below this sequence is
         /// searchable through the index.
-        built_through_seq: ChangeSeq,
+        built_through_seq: CommitSeq,
         matches: Vec<GrepMatch>,
         tail_scanned: bool,
         /// Whether more matches were available when the command stopped.
@@ -278,7 +278,7 @@ pub(crate) enum CommandData {
         target: String,
         #[serde(skip)]
         human_target: Option<String>,
-        committed_seq: ChangeSeq,
+        committed_seq: CommitSeq,
         commit_id: CommitId,
         /// Inode the mutation acted on, when the command resolved one —
         /// `rm` reports it so the deletion stays recoverable via
@@ -301,12 +301,12 @@ pub(crate) enum CommandData {
         #[serde(with = "loonfs_types::inode_id::public")]
         inode_id: InodeId,
         /// Namespace head the existing directory was observed at.
-        head_seq: ChangeSeq,
+        head_seq: CommitSeq,
     },
     PathMove {
         from: String,
         to: String,
-        committed_seq: ChangeSeq,
+        committed_seq: CommitSeq,
         commit_id: CommitId,
     },
     ConfigPath {
@@ -336,7 +336,7 @@ pub(crate) enum CommandData {
     #[serde(untagged)]
     MaintenanceRan(MaintenanceRan),
     #[serde(untagged)]
-    PoolMaintenanceRan(RunPoolMaintenanceResponse),
+    PoolMaintenanceRan(RunPoolMaintenanceJobResponse),
 }
 
 impl CommandData {
@@ -384,7 +384,7 @@ mod tests {
         CommandData::PathEntries {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
             path: AbsolutePath::parse("/docs").expect("absolute path"),
-            head_seq: ChangeSeq(8),
+            head_seq: CommitSeq(8),
             head_drift,
             entries: Vec::new(),
             next_cursor: None,
@@ -394,13 +394,13 @@ mod tests {
     #[test]
     fn listing_head_drift_serializes_only_after_the_head_moves() {
         let mut heads = ListingHeadObservation::default();
-        heads.observe(ChangeSeq(5));
+        heads.observe(CommitSeq(5));
         assert_eq!(heads.drift(), None);
 
         let settled = serde_json::to_value(path_entries(heads.drift())).expect("serialize listing");
         assert!(settled.get("head_drift").is_none(), "{settled}");
 
-        heads.observe(ChangeSeq(8));
+        heads.observe(CommitSeq(8));
         let drifted = serde_json::to_value(path_entries(heads.drift())).expect("serialize listing");
         assert_eq!(
             drifted["head_drift"],

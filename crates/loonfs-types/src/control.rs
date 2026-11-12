@@ -5,7 +5,7 @@
 use crate::envelope::EnvelopeCodecError;
 use crate::WriterId;
 use crate::{
-    ChangeSeq, ChecksumAlgorithm, CommitId, ContentId, ContentRef, ManifestNo, NamespaceId,
+    ChecksumAlgorithm, CommitId, CommitSeq, ContentId, ContentRef, ManifestNo, NamespaceId,
     PayloadChecksum, PinId, PoolId, SubjectId, UploadId,
 };
 use serde::de::DeserializeOwned;
@@ -97,7 +97,7 @@ pub struct ManifestRef {
     /// Monotonic logical position of the referenced manifest.
     pub manifest_no: ManifestNo,
     /// The referenced manifest's folded head, a sequence of the owner namespace.
-    pub head_seq: ChangeSeq,
+    pub head_seq: CommitSeq,
     /// Must equal `payload_checksum` in the referenced manifest envelope.
     pub payload_checksum: PayloadChecksum,
 }
@@ -143,7 +143,7 @@ pub struct PinPayload {
     /// Positions this record at its manifest number.
     pub pin_id: PinId,
     /// Greatest sequence in the pinned manifest.
-    pub head_seq: ChangeSeq,
+    pub head_seq: CommitSeq,
     /// Verifies the referenced manifest payload.
     pub payload_checksum: PayloadChecksum,
     /// Creation time used by collection grace.
@@ -236,7 +236,7 @@ pub struct RebasedFrom {
     /// The fork sequence that the fork's next merge into its source would
     /// have started after when the rebase made the new fork. The new fork's
     /// first replay commit starts after it.
-    pub resume_after_seq: ChangeSeq,
+    pub resume_after_seq: CommitSeq,
 }
 
 const GENESIS_COMMIT_ID: &str = "c_00000000000000000000000000000000";
