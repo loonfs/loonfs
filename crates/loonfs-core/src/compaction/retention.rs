@@ -3,7 +3,7 @@
 use super::run_iterator::LocalityGrouping;
 use crate::error::{CoreError, Result};
 use crate::metadata::DirentryBindingRecord;
-use loonfs_types::format::manifest::{ActiveDeletionRowAction, MetadataRow, MetadataRowFamily};
+use loonfs_types::format::manifest::{MetadataRow, MetadataRowFamily, TrashRowAction};
 use loonfs_types::MetadataFamilyGroup;
 use loonfs_types::{CommitSeq, InodeId, NameKey};
 
@@ -31,7 +31,7 @@ pub(crate) enum RetentionRule {
     WholeState,
     /// Remove cancelled deletion pairs and the listed rows of expired
     /// deletions.
-    ActiveDeletions,
+    Trash,
     /// Per edge and per kind of row, retains the values above the floor and
     /// the newest value at or below it, unless the edge is unbound at the
     /// floor.
@@ -48,9 +48,7 @@ impl RetentionRule {
             Self::WholeState => RetentionOperator::WholeState(WholeStateRetention {
                 previous_at_floor: None,
             }),
-            Self::ActiveDeletions => {
-                RetentionOperator::ActiveDeletions(ActiveDeletionRetention { revoked: false })
-            }
+            Self::Trash => RetentionOperator::Trash(TrashRetention { revoked: false }),
             Self::Bindings => RetentionOperator::Bindings(BindingRetention::default()),
         }
     }
@@ -63,7 +61,7 @@ pub(crate) enum RetentionOperator {
     FirstPerGroup(bool),
     CommitHistory,
     WholeState(WholeStateRetention),
-    ActiveDeletions(ActiveDeletionRetention),
+    Trash(TrashRetention),
     Bindings(BindingRetention),
 }
 
@@ -80,7 +78,7 @@ impl RetentionOperator {
             Self::FirstPerGroup(kept) => (!std::mem::replace(kept, true)).then_some(row),
             Self::CommitHistory => keep_commit_history_row(row, floor_seq),
             Self::WholeState(state) => state.push(family, row, floor_seq)?,
-            Self::ActiveDeletions(state) => state.push(row, floor_seq),
+            Self::Trash(state) => state.push(row, floor_seq),
             Self::Bindings(state) => state.push(family, row, floor_seq)?,
         };
         Ok(kept.map(|row| (family, row)))
@@ -93,7 +91,7 @@ impl RetentionOperator {
             Self::KeepEveryRow | Self::CommitHistory => {}
             Self::FirstPerGroup(kept) => *kept = false,
             Self::WholeState(state) => state.close_group(),
-            Self::ActiveDeletions(state) => state.close_group(),
+            Self::Trash(state) => state.close_group(),
             Self::Bindings(state) => state.close_group(),
         }
     }
@@ -115,8 +113,8 @@ fn keep_commit_history_row(row: MetadataRow, floor_seq: CommitSeq) -> Option<Met
 ///
 /// Whole-state row keys sort each inode's revisions newest first. The first row
 /// at or below the floor is the inode's state at that floor, including a
-/// cleared state, and the floor keeps no older history. The operator keeps a
-/// recoverably deleted inode's rows like any other inode's, so a restore
+/// cleared state, and the floor keeps no older history. The operator keeps the
+/// rows of an inode in the trash like any other inode's, so a restore
 /// restores the prior state, and a base compaction removes the rows of an
 /// inode that an expired deletion hides before they reach the operator. The
 /// operator processes this order without retaining the complete history.
@@ -191,7 +189,7 @@ fn whole_state_revision(row: &MetadataRow) -> Option<(InodeId, u64, CommitSeq)> 
     }
 }
 
-/// Processes active-deletion rows one deletion identity at a time.
+/// Processes trash rows one deletion identity at a time.
 ///
 /// The operator removes a listed row paired with its removal marker, and the
 /// listed row of a deletion at or below the retention floor, which has
@@ -200,14 +198,14 @@ fn whole_state_revision(row: &MetadataRow) -> Option<(InodeId, u64, CommitSeq)> 
 /// Row-key order places the marker first, allowing one flag to determine
 /// whether the listed row is retained.
 #[derive(Debug)]
-pub(crate) struct ActiveDeletionRetention {
+pub(crate) struct TrashRetention {
     /// Whether this deletion's removal marker has already arrived.
     revoked: bool,
 }
 
-impl ActiveDeletionRetention {
+impl TrashRetention {
     fn push(&mut self, row: MetadataRow, floor_seq: CommitSeq) -> Option<MetadataRow> {
-        let MetadataRow::ActiveDeletion(crate::metadata::ActiveDeletionRecord {
+        let MetadataRow::Trash(crate::metadata::TrashRecord {
             action,
             deletion_seq,
             ..
@@ -218,16 +216,12 @@ impl ActiveDeletionRetention {
         match action {
             // Every removal marker goes; what this code determines is whether
             // the listed row goes with it.
-            ActiveDeletionRowAction::Removed { .. } => {
+            TrashRowAction::Removed { .. } => {
                 self.revoked = true;
                 None
             }
-            ActiveDeletionRowAction::Listed { .. }
-                if self.revoked || *deletion_seq <= floor_seq =>
-            {
-                None
-            }
-            ActiveDeletionRowAction::Listed { .. } => Some(row),
+            TrashRowAction::Listed { .. } if self.revoked || *deletion_seq <= floor_seq => None,
+            TrashRowAction::Listed { .. } => Some(row),
         }
     }
 
@@ -406,10 +400,10 @@ const COMMIT_CLUSTERS: [RetentionCluster; 3] = [
         rule: RetentionRule::CommitHistory,
     },
 ];
-const ACTIVE_DELETION_CLUSTERS: [RetentionCluster; 1] = [RetentionCluster {
-    families: &[MetadataRowFamily::ActiveDeletions],
+const TRASH_CLUSTERS: [RetentionCluster; 1] = [RetentionCluster {
+    families: &[MetadataRowFamily::Trash],
     locality: LocalityGrouping::LeadingKeyComponents(2),
-    rule: RetentionRule::ActiveDeletions,
+    rule: RetentionRule::Trash,
 }];
 const REVISION_CLUSTERS: [RetentionCluster; 1] = [RetentionCluster {
     families: &[MetadataRowFamily::Revisions],
@@ -433,7 +427,7 @@ pub(crate) fn retention_clusters(group: MetadataFamilyGroup) -> &'static [Retent
         MetadataFamilyGroup::Revisions => &REVISION_CLUSTERS,
         MetadataFamilyGroup::Inodes => &INODE_CLUSTERS,
         MetadataFamilyGroup::Tombstones => &TOMBSTONE_CLUSTERS,
-        MetadataFamilyGroup::ActiveDeletions => &ACTIVE_DELETION_CLUSTERS,
+        MetadataFamilyGroup::Trash => &TRASH_CLUSTERS,
         MetadataFamilyGroup::Commits => &COMMIT_CLUSTERS,
         MetadataFamilyGroup::ContentLayouts => &LAYOUT_CLUSTERS,
         MetadataFamilyGroup::Attributes => &ATTRIBUTE_CLUSTERS,
@@ -710,8 +704,8 @@ mod tests {
         }
     }
 
-    fn active_deletion_row(deletion_seq: u64, action: ActiveDeletionRowAction) -> MetadataRow {
-        MetadataRow::ActiveDeletion(crate::metadata::ActiveDeletionRecord {
+    fn trash_row(deletion_seq: u64, action: TrashRowAction) -> MetadataRow {
+        MetadataRow::Trash(crate::metadata::TrashRecord {
             root_inode_id: InodeId(9),
             deletion_seq: CommitSeq(deletion_seq),
             action,
@@ -719,9 +713,9 @@ mod tests {
     }
 
     fn listed(deletion_seq: u64) -> MetadataRow {
-        active_deletion_row(
+        trash_row(
             deletion_seq,
-            ActiveDeletionRowAction::Listed {
+            TrashRowAction::Listed {
                 inode_kind: loonfs_types::InodeKind::Directory,
                 deleted_at_ms: 1_000,
                 deleted_by: loonfs_types::ActorId::loonfs(),
@@ -739,26 +733,26 @@ mod tests {
     fn a_cancelled_deletion_leaves_and_a_live_one_stays() {
         // The floor is below the deletion, so only a removal marker removes
         // its listed row.
-        let mut operator = RetentionRule::ActiveDeletions.operator();
-        let removed = active_deletion_row(
+        let mut operator = RetentionRule::Trash.operator();
+        let removed = trash_row(
             3,
-            ActiveDeletionRowAction::Removed {
+            TrashRowAction::Removed {
                 removed_seq: CommitSeq(4),
             },
         );
         assert!(operator
-            .push(MetadataRowFamily::ActiveDeletions, removed, CommitSeq(0))
+            .push(MetadataRowFamily::Trash, removed, CommitSeq(0))
             .expect("push")
             .is_none());
         assert!(operator
-            .push(MetadataRowFamily::ActiveDeletions, listed(3), CommitSeq(0))
+            .push(MetadataRowFamily::Trash, listed(3), CommitSeq(0))
             .expect("push")
             .is_none());
 
         operator.close_group();
         assert!(
             operator
-                .push(MetadataRowFamily::ActiveDeletions, listed(3), CommitSeq(0))
+                .push(MetadataRowFamily::Trash, listed(3), CommitSeq(0))
                 .expect("push")
                 .is_some(),
             "the next deletion is decided on its own markers, not the previous one's"
@@ -769,13 +763,13 @@ mod tests {
     /// above it stays.
     #[test]
     fn a_listed_row_leaves_at_or_below_the_floor() {
-        let mut operator = RetentionRule::ActiveDeletions.operator();
+        let mut operator = RetentionRule::Trash.operator();
         let mut kept = Vec::new();
         for deletion_seq in [39, 40, 41, 99] {
             operator.close_group();
             if let Some((_, row)) = operator
                 .push(
-                    MetadataRowFamily::ActiveDeletions,
+                    MetadataRowFamily::Trash,
                     listed(deletion_seq),
                     CommitSeq(40),
                 )

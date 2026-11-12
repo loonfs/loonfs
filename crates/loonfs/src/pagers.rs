@@ -17,7 +17,7 @@ pub type PathEntriesPager = loonfs_types::Pager<ListPathEntriesResponse, Error>;
 pub type InodeChildrenPager = loonfs_types::Pager<ListInodeChildrenResponse, Error>;
 /// A pager over retained file revisions.
 pub type FileRevisionsPager = loonfs_types::Pager<ListFileRevisionsResponse, Error>;
-/// A pager over recoverable deletions.
+/// A pager over the trash.
 pub type TrashPager = loonfs_types::Pager<loonfs_types::ListTrashResponse, Error>;
 /// A pager over committed changes.
 pub type ChangesPager = loonfs_types::Pager<ListChangesResponse, Error>;

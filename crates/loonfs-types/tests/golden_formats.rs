@@ -24,10 +24,10 @@ use loonfs_types::format::control::{
 };
 use loonfs_types::format::envelope::EnvelopeCodecError;
 use loonfs_types::format::manifest::{
-    decode_namespace_manifest_json, encode_namespace_manifest_json, ActiveDeletionRowAction,
-    DeletedBinding, DeltaPosition, ExtensionEntry, ExtensionRunRef, ExtensionSegmentRef,
-    MetadataRow, MetadataRowFamily, MetadataRunRef, MetadataSegmentRef, NamespaceAccess,
-    NamespaceManifestPayload, RunTier, TombstoneRowAction, METADATA_SEGMENT_ENCODING,
+    decode_namespace_manifest_json, encode_namespace_manifest_json, DeletedBinding, DeltaPosition,
+    ExtensionEntry, ExtensionRunRef, ExtensionSegmentRef, MetadataRow, MetadataRowFamily,
+    MetadataRunRef, MetadataSegmentRef, NamespaceAccess, NamespaceManifestPayload, RunTier,
+    TombstoneRowAction, TrashRowAction, METADATA_SEGMENT_ENCODING,
 };
 use loonfs_types::format::wal::{
     decode_wal_object_envelope_zstd, encode_wal_object_envelope_zstd, MergeRecord, WalCodecError,
@@ -1517,7 +1517,7 @@ fn metadata_row_family_wire_tags_are_pinned() {
             "\"direntry_child_binds\"",
             "\"revisions\"",
             "\"tombstones\"",
-            "\"active_deletions\"",
+            "\"trash\"",
             "\"commit_receipts\"",
             "\"commits\"",
             "\"content_layouts\"",
@@ -2241,14 +2241,14 @@ fn sample_tombstone_rows() -> [MetadataRow; 3] {
     ]
 }
 
-/// The active-deletion row the materializer derives from the set above. It
+/// The trash row the materializer derives from the set above. It
 /// carries the deletion's stamp and the binding the trash entry renders, both
 /// copied from the tombstone event.
-fn sample_active_deletion_listed_row() -> MetadataRow {
-    MetadataRow::ActiveDeletion(loonfs_types::format::manifest::ActiveDeletionRecord {
+fn sample_trash_listed_row() -> MetadataRow {
+    MetadataRow::Trash(loonfs_types::format::manifest::TrashRecord {
         root_inode_id: InodeId(5),
         deletion_seq: CommitSeq(8),
-        action: ActiveDeletionRowAction::Listed {
+        action: TrashRowAction::Listed {
             inode_kind: loonfs_types::InodeKind::Directory,
             deleted_at_ms: 4_000,
             deleted_by: actor(),
@@ -2262,14 +2262,14 @@ fn sample_active_deletion_listed_row() -> MetadataRow {
     })
 }
 
-/// The active-deletion row the materializer derives from the revoke above. It
+/// The trash row the materializer derives from the revoke above. It
 /// repeats the deletion's sequence rather than the restore's, so the two rows
 /// share a key prefix, and its rank sorts it ahead of the row it removes.
-fn sample_active_deletion_removed_row() -> MetadataRow {
-    MetadataRow::ActiveDeletion(loonfs_types::format::manifest::ActiveDeletionRecord {
+fn sample_trash_removed_row() -> MetadataRow {
+    MetadataRow::Trash(loonfs_types::format::manifest::TrashRecord {
         root_inode_id: InodeId(5),
         deletion_seq: CommitSeq(8),
-        action: ActiveDeletionRowAction::Removed {
+        action: TrashRowAction::Removed {
             removed_seq: CommitSeq(9),
         },
     })
@@ -2462,18 +2462,16 @@ fn sample_segment_blocks() -> loonfs_types::format::segment_blocks::BuiltSegment
         std::num::NonZeroUsize::new(256).expect("target block size should be non-zero"),
     );
     let mut rows = vec![
-        // `active-deletion-` sorts ahead of every other family prefix, so
-        // these two rows open the first data block the fixture below pins.
-        // The pair covers both actions: the removal that a restore writes,
-        // and the listing it removes.
-        sample_active_deletion_removed_row(),
-        sample_active_deletion_listed_row(),
-        // `attributes-` sorts after `active-deletion-` and ahead of
-        // `commit-receipt-`, so both attribute rows share the block that
-        // follows. The cleared state goes on the lower inode so it is the
-        // smaller row that opens the family, which keeps both rows inside one
-        // block; pinning the empty map's encoding is the point of carrying
-        // two.
+        // `trash-` sorts after every other family prefix, so these two rows
+        // close the segment in the last data block, which the fixture below
+        // pins. The pair covers both actions: the removal that a restore
+        // writes, and the listing it removes.
+        sample_trash_removed_row(),
+        sample_trash_listed_row(),
+        // `attribute-` sorts ahead of every other family prefix here, so the
+        // attribute rows open the segment. The cleared state goes on the
+        // lower inode so it is the smaller row that opens the family, and
+        // pinning the empty map's encoding is the point of carrying two.
         sample_cleared_attributes_row(),
         sample_populated_attributes_row(),
         sample_commit_receipt_row(),
@@ -2650,25 +2648,26 @@ fn sst_block_data_payload_matches_golden_bytes() {
     // zstd versions, the entry encoding (which the format defines) may not.
     assert_matches_golden(
         "sst_block_data.v1.bin",
-        &unzstd(segment_section(&built.bytes, &index[0].block)),
+        &unzstd(segment_section(&built.bytes, &index[index.len() - 1].block)),
     );
 }
 
 #[test]
-fn sst_block_data_first_block_covers_the_active_deletion_prefix() {
+fn sst_block_data_last_block_covers_the_trash_prefix() {
     let built = sample_segment_blocks();
     let index = sample_segment_index(&built);
-    let position = family_block_position(&built, &index, "active-deletion-");
-    assert_eq!(position, 0, "the active-deletion family opens the segment");
+    let last = index.len() - 1;
+    let position = family_block_position(&built, &index, "trash-");
+    assert_eq!(position, last, "the trash family closes the segment");
     let block = loonfs_types::format::segment_blocks::decode_data_block(
-        segment_section(&built.bytes, &index[0].block),
-        &index[0].block,
+        segment_section(&built.bytes, &index[last].block),
+        &index[last].block,
     )
-    .expect("decode first block");
+    .expect("decode last block");
     assert_eq!(
-        rows_under_prefix(&block, "active-deletion-"),
+        rows_under_prefix(&block, "trash-"),
         2,
-        "both active-deletion rows belong to the pinned first block: {:?}",
+        "both trash rows belong to the pinned last block: {:?}",
         block.row_keys
     );
 }
@@ -2678,10 +2677,7 @@ fn sst_block_data_golden_decodes_to_sample_rows() {
     let block = decode_golden_data_block("sst_block_data.v1.bin");
     assert_eq!(
         block.rows,
-        [
-            sample_active_deletion_removed_row(),
-            sample_active_deletion_listed_row(),
-        ],
+        [sample_trash_removed_row(), sample_trash_listed_row(),],
     );
     assert_eq!(block.row_keys[0], block.rows[0].row_key());
 }
@@ -2825,7 +2821,7 @@ fn sst_block_data_tombstone_golden_decodes_to_sample_rows() {
 }
 
 // ---------------------------------------------------------------------------
-// Tombstone and active-deletion rows: the deleted binding is one value, or it
+// Tombstone and trash rows: the deleted binding is one value, or it
 // is absent
 // ---------------------------------------------------------------------------
 
@@ -2936,8 +2932,8 @@ fn tombstone_rows_reject_flat_binding_fields() {
 }
 
 #[test]
-fn active_deletion_rows_reject_missing_kind_or_binding() {
-    let mut row = row_cbor(&sample_active_deletion_listed_row());
+fn trash_rows_reject_missing_kind_or_binding() {
+    let mut row = row_cbor(&sample_trash_listed_row());
     cbor_map_of(cbor_entry(&mut row, "action"))
         .retain(|(key, _)| key.as_text() != Some("inode_kind"));
     let refusal = assert_row_is_corrupt(&row, "a listed action requires its inode kind");
@@ -2947,7 +2943,7 @@ fn active_deletion_rows_reject_missing_kind_or_binding() {
     );
 
     for missing in ["parent_inode_id", "name_key", "display_name"] {
-        let mut row = row_cbor(&sample_active_deletion_listed_row());
+        let mut row = row_cbor(&sample_trash_listed_row());
         let direntry = cbor_entry(cbor_entry(&mut row, "action"), "deleted_binding");
         cbor_map_of(direntry).retain(|(key, _)| key.as_text() != Some(missing));
         let refusal = assert_row_is_corrupt(&row, "two thirds of a binding is not a binding");
@@ -2957,7 +2953,7 @@ fn active_deletion_rows_reject_missing_kind_or_binding() {
         );
     }
 
-    let mut row = row_cbor(&sample_active_deletion_listed_row());
+    let mut row = row_cbor(&sample_trash_listed_row());
     cbor_map_of(cbor_entry(&mut row, "action"))
         .retain(|(key, _)| key.as_text() != Some("deleted_binding"));
     let refusal =
@@ -3009,7 +3005,7 @@ fn provenance_rows_reject_every_missing_required_field() {
                 "bind_position",
             ][..],
         ),
-        (sample_active_deletion_listed_row(), &["deleted_by"][..]),
+        (sample_trash_listed_row(), &["deleted_by"][..]),
         (
             sample_populated_attributes_row(),
             &["commit_id", "committed_by", "committed_at_ms"][..],
@@ -3017,13 +3013,11 @@ fn provenance_rows_reject_every_missing_required_field() {
     ];
 
     for (row, required_fields) in cases {
-        // The active-deletion row states its attribution inside `action`;
+        // The trash row states its attribution inside `action`;
         // every other row states it at the top level.
         let nested_in_action = matches!(
             row,
-            MetadataRow::ActiveDeletion(
-                loonfs_types::format::manifest::ActiveDeletionRecord { .. }
-            )
+            MetadataRow::Trash(loonfs_types::format::manifest::TrashRecord { .. })
         );
         for required_field in required_fields {
             let mut encoded = row_cbor(&row);

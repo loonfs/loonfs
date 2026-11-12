@@ -147,10 +147,10 @@ fn recursive() -> DeleteOptions {
 /// below the floor and serves the history of one under a deletion above it,
 /// with nested deletions: `/old/draft.txt` is deleted on its own before
 /// `/old`, so a floor between the two deletions expires the inner one and
-/// leaves the outer one recoverable, and a floor at `/old`'s deletion
+/// leaves the outer one in the trash, and a floor at `/old`'s deletion
 /// expires both.
 #[tokio::test]
-async fn every_read_by_inode_refuses_an_expired_subtree_and_serves_a_recoverable_deletion() {
+async fn every_read_by_inode_refuses_an_expired_subtree_and_serves_one_in_the_trash() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let store: SharedObjectStore = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = namespace_id("demo");
@@ -188,7 +188,7 @@ async fn every_read_by_inode_refuses_an_expired_subtree_and_serves_a_recoverable
         .committed_seq;
 
     let not_found = Err(ErrorCode::InodeNotFound);
-    for (floor_seq, recoverable) in [
+    for (floor_seq, in_trash) in [
         (inner, vec!["/kept.txt", "/old/notes.txt"]),
         (outer, Vec::new()),
     ] {
@@ -199,11 +199,11 @@ async fn every_read_by_inode_refuses_an_expired_subtree_and_serves_a_recoverable
         for path in ["/kept.txt", "/old/draft.txt", "/old/notes.txt"] {
             let (current, history) = reads_by_inode(&namespace, inodes[path]).await;
             // A deleted inode has no current entry or content, so only the
-            // history reads serve a recoverable deletion.
+            // history reads serve a deletion in the trash.
             for (read, outcome) in current {
                 assert_eq!(outcome, not_found, "floor {floor_seq}, {path}: {read}");
             }
-            let expected = if recoverable.contains(&path) {
+            let expected = if in_trash.contains(&path) {
                 Ok(())
             } else {
                 not_found
@@ -367,7 +367,7 @@ async fn once_a_deletion_expires_no_principal_reads_its_subtree_by_inode() {
             ("ada".to_owned(), ok),
             ("root".to_owned(), ok),
         ],
-        "while the deletion is recoverable, the boundary keeps the team out"
+        "while the deletion is in the trash, the boundary keeps the team out"
     );
     advance_floor_through(&store, &namespace_id, deletion.committed_seq).await;
     let mut snapshot_only = not_found;

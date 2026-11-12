@@ -3192,10 +3192,10 @@
         "type": "object"
       },
       "ListTrashResponse": {
-        "description": "One page of the namespace's recoverable deletions.",
+        "description": "One page of the namespace's trash.",
         "properties": {
           "entries": {
-            "description": "The recoverable deletions, oldest first.",
+            "description": "The trash entries, oldest deletion first.",
             "items": {
               "$ref": "#/components/schemas/TrashEntry"
             },
@@ -4919,7 +4919,7 @@
         "type": "object"
       },
       "TrashEntry": {
-        "description": "One recoverable deletion and the directory binding that it removed.",
+        "description": "One trash entry: a deletion and the directory binding that it removed.",
         "properties": {
           "deleted_at_ms": {
             "description": "The time of the deletion, in Unix milliseconds.",
@@ -7691,7 +7691,7 @@
     },
     "/v0/namespaces/{namespace_id}/filesystem/trash": {
       "get": {
-        "description": "Returns the namespace's recoverable deletions, oldest first. A deletion leaves the list when it's restored, or when the namespace's retention floor reaches its `deletion_seq`. Each entry includes the inode ID and deletion sequence that a restore needs, and the directory binding that the delete removed.",
+        "description": "Returns the namespace's trash entries, oldest deletion first. An entry leaves the trash when it's restored, or when the namespace's retention floor reaches its `deletion_seq`. Each entry includes the inode ID and deletion sequence that a restore needs, and the directory binding that the delete removed.",
         "operationId": "list_trash",
         "parameters": [
           {
@@ -7756,7 +7756,7 @@
                 }
               }
             },
-            "description": "Recoverable deletions"
+            "description": "Trash entries"
           },
           "400": {
             "content": {
@@ -7802,7 +7802,7 @@
             "$ref": "#/components/responses/UnavailableResponse"
           }
         },
-        "summary": "List recoverable deletions",
+        "summary": "List the trash",
         "tags": [
           "filesystem"
         ],

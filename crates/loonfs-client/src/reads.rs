@@ -53,7 +53,7 @@ pub type PathEntriesPager = Pager<ListPathEntriesResponse, ClientError>;
 pub type InodeChildrenPager = Pager<ListInodeChildrenResponse, ClientError>;
 /// A pager over retained file revisions.
 pub type FileRevisionsPager = Pager<ListFileRevisionsResponse, ClientError>;
-/// A pager over recoverable deletions.
+/// A pager over the trash.
 pub type TrashPager = Pager<ListTrashResponse, ClientError>;
 /// A pager over committed changes.
 pub type ChangesPager = Pager<ListChangesResponse, ClientError>;
@@ -273,12 +273,12 @@ impl Client {
             .await
     }
 
-    /// Lists the namespace's recoverable deletions.
+    /// Lists the namespace's trash.
     pub fn list_trash(&self, namespace_id: &NamespaceId) -> TrashPager {
         self.list_trash_with_options(namespace_id, &ListTrashOptions::default())
     }
 
-    /// Lists the namespace's recoverable deletions, as `options` asks.
+    /// Lists the namespace's trash, as `options` asks.
     pub fn list_trash_with_options(
         &self,
         namespace_id: &NamespaceId,

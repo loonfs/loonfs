@@ -1,4 +1,4 @@
-//! The derived active-deletions family: its reducer, the compaction that collapses
+//! The derived trash family: its reducer, the compaction that collapses
 //! cancelled deletions, and the bounded trash listing it backs.
 //!
 //! The family is materialized by checkpoint publication, so it lives with the
@@ -10,9 +10,7 @@ use crate::metadata::{
     hiding_tombstone_from_records, MetadataStateBuilder, SubtreeTombstoneRecord, TombstoneRowAction,
 };
 use crate::{NamespaceEngine, RuntimeReadContext};
-use loonfs_types::format::manifest::{
-    ActiveDeletionRowAction, DeletedBinding, DeltaPosition, InodeRecord,
-};
+use loonfs_types::format::manifest::{DeletedBinding, DeltaPosition, InodeRecord, TrashRowAction};
 use loonfs_types::options::AttributeInclusion;
 use loonfs_types::DirectoryBinding;
 use loonfs_types::ROOT_INODE_ID;
@@ -89,21 +87,21 @@ fn state_from_tombstones(tombstones: Vec<SubtreeTombstoneRecord>) -> MetadataSta
 
 /// The family's rows for a state, as `(row key, listed or removed)` pairs in
 /// scan order.
-fn active_deletion_rows(state: &MetadataState) -> Vec<(String, &'static str)> {
-    manifest_rows_for_family(state, ApiMetadataRowFamily::ActiveDeletions)
+fn trash_rows(state: &MetadataState) -> Vec<(String, &'static str)> {
+    manifest_rows_for_family(state, ApiMetadataRowFamily::Trash)
         .into_iter()
         .map(|row| {
-            let row_key = row.row_key_for_family(ApiMetadataRowFamily::ActiveDeletions);
+            let row_key = row.row_key_for_family(ApiMetadataRowFamily::Trash);
             let kind = match row {
-                MetadataRow::ActiveDeletion(crate::metadata::ActiveDeletionRecord {
-                    action: ActiveDeletionRowAction::Listed { .. },
+                MetadataRow::Trash(crate::metadata::TrashRecord {
+                    action: TrashRowAction::Listed { .. },
                     ..
                 }) => "listed",
-                MetadataRow::ActiveDeletion(crate::metadata::ActiveDeletionRecord {
-                    action: ActiveDeletionRowAction::Removed { .. },
+                MetadataRow::Trash(crate::metadata::TrashRecord {
+                    action: TrashRowAction::Removed { .. },
                     ..
                 }) => "removed",
-                other => panic!("unexpected row in the active-deletions family: {other:?}"),
+                other => panic!("unexpected row in the trash family: {other:?}"),
             };
             (row_key, kind)
         })
@@ -119,9 +117,9 @@ fn a_delete_adds_a_row_a_restore_removes_it_and_a_redelete_adds_a_new_one() {
         InodeKind::File,
     )]);
     assert_eq!(
-        active_deletion_rows(&deleted),
+        trash_rows(&deleted),
         vec![(
-            "active-deletion-00000000000000000005-00000000000000000000000007-0000000001".to_owned(),
+            "trash-00000000000000000005-00000000000000000000000007-0000000001".to_owned(),
             "listed"
         )],
         "a delete adds exactly one listed row, keyed by its own position"
@@ -132,16 +130,14 @@ fn a_delete_adds_a_row_a_restore_removes_it_and_a_redelete_adds_a_new_one() {
         tombstone_revoke(InodeId(7), 9, 5),
     ]);
     assert_eq!(
-        active_deletion_rows(&restored),
+        trash_rows(&restored),
         vec![
             (
-                "active-deletion-00000000000000000005-00000000000000000000000007-0000000000"
-                    .to_owned(),
+                "trash-00000000000000000005-00000000000000000000000007-0000000000".to_owned(),
                 "removed"
             ),
             (
-                "active-deletion-00000000000000000005-00000000000000000000000007-0000000001"
-                    .to_owned(),
+                "trash-00000000000000000005-00000000000000000000000007-0000000001".to_owned(),
                 "listed"
             ),
         ],
@@ -154,14 +150,14 @@ fn a_delete_adds_a_row_a_restore_removes_it_and_a_redelete_adds_a_new_one() {
         tombstone_set(InodeId(7), 12, "notes.txt", InodeKind::File),
     ]);
     assert_eq!(
-        active_deletion_rows(&redeleted)
+        trash_rows(&redeleted)
             .into_iter()
             .filter(|(_, kind)| *kind == "listed")
             .map(|(row_key, _)| row_key)
             .collect::<Vec<_>>(),
         vec![
-            "active-deletion-00000000000000000005-00000000000000000000000007-0000000001".to_owned(),
-            "active-deletion-00000000000000000012-00000000000000000000000007-0000000001".to_owned(),
+            "trash-00000000000000000005-00000000000000000000000007-0000000001".to_owned(),
+            "trash-00000000000000000012-00000000000000000000000007-0000000001".to_owned(),
         ],
         "a re-delete is committed at a new sequence and adds a new row"
     );
@@ -174,16 +170,14 @@ fn a_removal_carries_the_restores_sequence_so_it_is_written_to_that_commits_run(
         tombstone_revoke(InodeId(7), 9, 5),
     ]);
     assert_eq!(
-        active_deletion_rows(&state),
+        trash_rows(&state),
         vec![
             (
-                "active-deletion-00000000000000000005-00000000000000000000000007-0000000000"
-                    .to_owned(),
+                "trash-00000000000000000005-00000000000000000000000007-0000000000".to_owned(),
                 "removed"
             ),
             (
-                "active-deletion-00000000000000000005-00000000000000000000000007-0000000001"
-                    .to_owned(),
+                "trash-00000000000000000005-00000000000000000000000007-0000000001".to_owned(),
                 "listed"
             ),
         ],
@@ -191,7 +185,7 @@ fn a_removal_carries_the_restores_sequence_so_it_is_written_to_that_commits_run(
     );
     let delta_rows = crate::segment::row::manifest_rows_for_family_after_seq(
         &state,
-        ApiMetadataRowFamily::ActiveDeletions,
+        ApiMetadataRowFamily::Trash,
         CommitSeq(5),
     );
     assert_eq!(
@@ -201,8 +195,8 @@ fn a_removal_carries_the_restores_sequence_so_it_is_written_to_that_commits_run(
     );
     assert_matches!(
         &delta_rows[0],
-        MetadataRow::ActiveDeletion (crate::metadata::ActiveDeletionRecord {
-            action: ActiveDeletionRowAction::Removed { removed_seq },
+        MetadataRow::Trash (crate::metadata::TrashRecord {
+            action: TrashRowAction::Removed { removed_seq },
             ..
         }) if *removed_seq == CommitSeq(9),
         "unexpected delta row: {:?}",
@@ -223,27 +217,27 @@ fn the_compaction_drops_cancelled_pairs_and_expired_deletions_and_keeps_the_rest
         tombstone_set(InodeId(7), 12, "notes.txt", InodeKind::File),
     ]);
     let mut rows_by_family = std::collections::BTreeMap::from([(
-        ApiMetadataRowFamily::ActiveDeletions,
-        manifest_rows_for_family(&state, ApiMetadataRowFamily::ActiveDeletions),
+        ApiMetadataRowFamily::Trash,
+        manifest_rows_for_family(&state, ApiMetadataRowFamily::Trash),
     )]);
     compact_rows_with_retention(
-        MetadataFamilyGroup::ActiveDeletions,
+        MetadataFamilyGroup::Trash,
         &mut rows_by_family,
         CommitSeq(10),
     )
-    .expect("compact active deletions");
+    .expect("compact the trash");
 
     let kept = rows_by_family
-        .remove(&ApiMetadataRowFamily::ActiveDeletions)
+        .remove(&ApiMetadataRowFamily::Trash)
         .expect("family rows")
         .into_iter()
-        .map(|row| row.row_key_for_family(ApiMetadataRowFamily::ActiveDeletions))
+        .map(|row| row.row_key_for_family(ApiMetadataRowFamily::Trash))
         .collect::<Vec<_>>();
     assert_eq!(
         kept,
         vec![
-            "active-deletion-00000000000000000011-00000000000000000000000008-0000000001".to_owned(),
-            "active-deletion-00000000000000000012-00000000000000000000000007-0000000001".to_owned(),
+            "trash-00000000000000000011-00000000000000000000000008-0000000001".to_owned(),
+            "trash-00000000000000000012-00000000000000000000000007-0000000001".to_owned(),
         ],
         "the restored pair and the deletion at the floor go, and both deletions above it stay"
     );
@@ -402,7 +396,7 @@ async fn trash_entries<S: ObjectStore + ?Sized>(
     entries
 }
 
-/// The listing algorithm the active-deletions family replaced: load every
+/// The listing algorithm the trash family replaced: load every
 /// tombstone event the namespace ever recorded, group by root, reduce
 /// newest-event-wins per root, and leave out every deletion at or below the
 /// retention floor.
@@ -519,7 +513,7 @@ async fn the_family_backed_listing_equals_the_old_tombstone_walk_on_every_step()
         HistoryStep::RestoreDeleted("/a.txt", "/a-restored.txt"),
         HistoryStep::Delete("/a-restored.txt"),
         // A deletion inside an already-deleted subtree: delete the child
-        // first, then its parent, so two live deletions nest.
+        // first, then its parent, so two deletions in the trash nest.
         HistoryStep::Delete("/dir/inner.txt"),
         HistoryStep::Delete("/dir"),
         // A restore whose old parent is still deleted: the recovered
@@ -608,7 +602,7 @@ async fn the_family_backed_listing_equals_the_old_tombstone_walk_on_every_step()
     assert_listing_matches_the_old_walk(&store, &namespace_id, usize::MAX).await;
     assert!(
         !trash_entries(&store, &namespace_id, 2).await.is_empty(),
-        "the script must leave live deletions, or the comparison proves nothing"
+        "the script must leave deletions in the trash, or the comparison proves nothing"
     );
 }
 
@@ -773,9 +767,9 @@ async fn trash_pages_resume_after_the_position_the_cursor_names() {
         .expect_err("another endpoint's cursor must not resume a trash listing");
 }
 
-/// The rows of the active-deletions family in the current manifest, as
+/// The rows of the trash family in the current manifest, as
 /// `(deletion sequence, listed or removed)` pairs.
-async fn stored_active_deletions<S: ObjectStore + ?Sized>(
+async fn stored_trash_rows<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Vec<(CommitSeq, &'static str)> {
@@ -786,7 +780,7 @@ async fn stored_active_deletions<S: ObjectStore + ?Sized>(
     super::super::metadata_basis_from_manifest(store, None, &current)
         .segments
         .scan_range(
-            ApiMetadataRowFamily::ActiveDeletions,
+            ApiMetadataRowFamily::Trash,
             "",
             None,
             usize::MAX,
@@ -800,14 +794,14 @@ async fn stored_active_deletions<S: ObjectStore + ?Sized>(
         .collect::<Vec<_>>()
         .into_iter()
         .map(|row| match row {
-            MetadataRow::ActiveDeletion(record) => (
+            MetadataRow::Trash(record) => (
                 record.deletion_seq,
                 match record.action {
-                    ActiveDeletionRowAction::Listed { .. } => "listed",
-                    ActiveDeletionRowAction::Removed { .. } => "removed",
+                    TrashRowAction::Listed { .. } => "listed",
+                    TrashRowAction::Removed { .. } => "removed",
                 },
             ),
-            other => panic!("unexpected row in the active-deletions family: {other:?}"),
+            other => panic!("unexpected row in the trash family: {other:?}"),
         })
         .collect()
 }
@@ -905,7 +899,7 @@ async fn a_deletion_below_the_floor_leaves_the_trash_and_its_row_is_removed() {
     )
     .await;
     assert_eq!(
-        stored_active_deletions(&store, &namespace_id).await,
+        stored_trash_rows(&store, &namespace_id).await,
         Vec::new(),
         "a base compaction over the advance's manifest removes the expired listed row"
     );
@@ -972,8 +966,8 @@ async fn a_trash_cursor_resumes_above_a_floor_that_passed_it() {
 
 #[tokio::test]
 async fn a_trash_page_costs_the_page_not_the_namespaces_deletion_history() {
-    /// One page's reads over a namespace with `deletions` recoverable
-    /// deletions, measured after the family is compacted into its base.
+    /// One page's reads over a namespace with `deletions` trash
+    /// entries, measured after the family is compacted into its base.
     async fn page_reads(deletions: u32) -> usize {
         let temp = tempdir().expect("tempdir");
         let store = RecordingStore::metadata_segments(

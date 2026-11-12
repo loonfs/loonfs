@@ -163,7 +163,7 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
             };
             // A deletion that an earlier merge of this fork made, and that
             // the fork has since undone, is undone by this merge too, while
-            // the deletion is recoverable here. Any other deletion conflicts.
+            // the deletion is in the trash here. Any other deletion conflicts.
             let deletion_seq = self.restored_deletion(inode_id).await?;
             if deletion_seq.is_none() && !self.hidden_by_restored_ancestor(inode_id, edge).await? {
                 self.conflict(inode_id, MergeConflictKind::Visibility, ours, None)
@@ -194,10 +194,10 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
     /// merged-into namespace, when the merge undoes the deletion. That's a
     /// deletion of the inode itself that's the fork's own (see
     /// [`Self::is_own`]), which an earlier merge of the fork made, that's
-    /// still recoverable there, and that the fork undid, so the inode is
+    /// still in the trash there, and that the fork undid, so the inode is
     /// visible in the fork.
     async fn restored_deletion(&mut self, inode_id: InodeId) -> Result<Option<CommitSeq>> {
-        let Some(deletion) = self.theirs.view().recoverable_deletion(inode_id).await? else {
+        let Some(deletion) = self.theirs.view().tombstone_in_trash(inode_id).await? else {
             return Ok(None);
         };
         if !self.is_own(deletion.committed_seq).await? {
