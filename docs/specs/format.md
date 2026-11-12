@@ -63,7 +63,7 @@ Every namespace's root directory has the inode ID whose 128 bits are all zero (`
 
 Version 1 of the format defines two inode kinds, `dir` and `file`. ([Reserved functionality](#125-reserved-functionality) reserves a third kind, `link`.) An inode row records only the item's kind and creation metadata. The item's current parent and name are stored as directory bindings, and its contents are stored as file revisions, so neither the path nor the current content reference is stored on the inode row.
 
-Why does an inode ID begin with its commit's sequence and its create number? Most metadata rows are keyed by inode ID (see [Metadata rows and row keys](#a6-metadata-rows-and-row-keys)), so an inode's ID determines where its rows are stored. The inodes that one commit creates, such as a new directory and its files, have neighboring IDs, so their rows are stored in the same blocks of a [metadata segment](glossary.md#metadata-segment), and reading them loads fewer blocks. A [run](glossary.md#run) contains the rows of a span of commits, so when a run's rows are mostly about new inodes, its inode-keyed segments cover a narrow key range, and a lookup skips each run whose key range can't contain the key. The commits that a writer publishes in one batch share a commit time, but each commit has its own sequence, so the inodes that a batch creates still sort by commit and then by create number.
+Why does an inode ID begin with its commit's sequence and its create number? Most metadata rows are keyed by inode ID (see [Metadata rows and row keys](#a6-metadata-rows-and-row-keys)), so an inode's ID determines where its rows are stored. A [run](glossary.md#run) contains the rows of a span of commits, so when a run's rows are mostly about new inodes, its inode-keyed segments cover a narrow key range, and a lookup skips each run whose key range can't contain the key. The commits that a writer publishes in one batch share a commit time, but each commit has its own sequence, so the inodes that a batch creates still sort by commit and then by create number.
 
 Why are the low 64 bits random? A fork keeps the inode IDs of the inodes that it inherits, and after the fork, the fork and its source both continue from the same sequence, so each namespace can create an inode at the same sequence and create number. The random low word keeps those two IDs apart. Two IDs with the same high word are equal only if their random words are equal, which has a probability of 1 in 2^64, so LoonFS doesn't check a new inode ID against the existing inodes.
 
@@ -1474,7 +1474,7 @@ Why does a fold publish the floor, instead of a separate manifest from the advan
 
 Metadata is compacted by family group. The `direntry_binds` and `direntry_child_binds` families form one group, because they MUST stay consistent with each other. The `commits`, `commit_receipts`, and `merges` families form another group, and each of the other seven groups contains one family. [Metadata rows and row keys](#a6-metadata-rows-and-row-keys) lists the groups.
 
-A compaction rewrites a contiguous window of at most eight of a group's runs into one run. The window either includes the group's oldest run or starts above it, and it can't skip a run in the middle.
+A compaction rewrites a contiguous window of a group's runs into one run. The window either includes the group's oldest run or starts above it, and it can't skip a run in the middle.
 
 ```text
 oldest                                       newest
