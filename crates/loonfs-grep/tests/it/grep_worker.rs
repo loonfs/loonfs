@@ -123,7 +123,7 @@ fn normalize_namespace(mut response: GrepResponse) -> GrepResponse {
 }
 
 #[tokio::test]
-async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
+async fn grep_worker_lifecycle_uses_and_releases_its_backfill_snapshot() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
@@ -148,7 +148,7 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
         namespace
             .put_file(
                 &format!("/before-{index}.txt"),
-                format!("checkpoint needle {index}\n").as_bytes(),
+                format!("snapshot needle {index}\n").as_bytes(),
                 &loonfs_test_support::test_actor(),
             )
             .await
@@ -167,7 +167,10 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
         .await
         .expect("manifest exists");
     let GrepIndexStatus::Backfilling { snapshot_id, .. } = manifest.status() else {
-        panic!("enable must publish checkpointed backfill: {:?}", manifest);
+        panic!(
+            "enable must publish a backfill over a snapshot: {:?}",
+            manifest
+        );
     };
     let snapshot_id = snapshot_id.clone();
 
@@ -346,7 +349,7 @@ async fn exhausted_run_numbers_fail_as_index_corruption_without_writing_the_mani
 }
 
 #[tokio::test]
-async fn enable_creates_no_checkpoint_when_the_manifest_load_fails() {
+async fn enable_creates_no_snapshot_when_the_manifest_load_fails() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
@@ -386,25 +389,25 @@ async fn enable_creates_no_checkpoint_when_the_manifest_load_fails() {
         .worker
         .enable(&namespace_id)
         .await
-        .expect_err("the manifest load fails before checkpoint creation");
+        .expect_err("the manifest load fails before snapshot creation");
     assert_eq!(error.code(), ErrorCode::ServerError, "{error:?}");
     assert_eq!(manifest_loads.load(Ordering::SeqCst), 1);
 
-    let mut pager = host.maintenance.list_checkpoints(&namespace_id);
-    let checkpoints = pager
+    let mut pager = host.maintenance.list_snapshot_records(&namespace_id);
+    let snapshots = pager
         .next()
         .await
         .expect("a fresh pager has one page")
-        .expect("list checkpoints after failed enable");
+        .expect("list snapshots after failed enable");
     assert!(
-        checkpoints.checkpoints.is_empty(),
-        "a failure before manifest publication must not leave an active checkpoint"
+        snapshots.snapshots.is_empty(),
+        "a failure before manifest publication must not leave an active snapshot"
     );
     writer.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test]
-async fn enable_confirms_its_checkpoint_after_an_ambiguous_manifest_write() {
+async fn enable_confirms_its_snapshot_after_an_ambiguous_manifest_write() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
@@ -450,7 +453,7 @@ async fn enable_confirms_its_checkpoint_after_an_ambiguous_manifest_write() {
 }
 
 #[tokio::test]
-async fn restart_confirms_its_checkpoint_after_an_ambiguous_manifest_write() {
+async fn restart_confirms_its_snapshot_after_an_ambiguous_manifest_write() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
@@ -475,11 +478,11 @@ async fn restart_confirms_its_checkpoint_after_an_ambiguous_manifest_write() {
         .enable(&namespace_id)
         .await
         .expect("enable grep");
-    let previous_checkpoint_id = assert_fresh_backfill_attempt(&store, &namespace_id).await;
+    let previous_snapshot_id = assert_fresh_backfill_attempt(&store, &namespace_id).await;
     host.writer
         .open_namespace(&namespace_id)
         .expect("open namespace")
-        .delete_snapshot(&previous_checkpoint_id)
+        .delete_snapshot(&previous_snapshot_id)
         .await
         .expect("make the current backfill restart");
 
@@ -505,13 +508,13 @@ async fn restart_confirms_its_checkpoint_after_an_ambiguous_manifest_write() {
     assert_matches!(outcome, GrepBuildOutcome::BackfillRestarted { .. });
     assert_eq!(failing_store.attempts(), 1);
 
-    let checkpoint_id = assert_fresh_backfill_attempt(&store, &namespace_id).await;
-    assert_ne!(checkpoint_id, previous_checkpoint_id);
+    let snapshot_id = assert_fresh_backfill_attempt(&store, &namespace_id).await;
+    assert_ne!(snapshot_id, previous_snapshot_id);
     writer.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test]
-async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
+async fn retention_gap_and_vanished_snapshot_restart_fresh_backfill() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
@@ -567,7 +570,7 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
         .await
         .expect("gap restart");
     assert_matches!(restart, GrepBuildOutcome::BackfillRestarted { .. });
-    let gap_checkpoint_id = assert_fresh_backfill_attempt(&store, &namespace_id).await;
+    let gap_snapshot_id = assert_fresh_backfill_attempt(&store, &namespace_id).await;
     assert_eq!(
         crate::common::control::grep_entry(&store, &namespace_id)
             .await
@@ -577,24 +580,24 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
         "a rebootstrap keeps the index's segments, whose postings stay valid"
     );
 
-    // The second trigger: the checkpoint stops keeping its basis
+    // The second trigger: the snapshot stops keeping its basis
     // mid-backfill. The enumeration says so out loud instead of quietly
     // answering current state, and the worker starts over again.
     namespace
-        .delete_snapshot(&gap_checkpoint_id)
+        .delete_snapshot(&gap_snapshot_id)
         .await
-        .expect("remove checkpoint mid-backfill");
+        .expect("remove snapshot mid-backfill");
     let vanished = worker
         .steps(&namespace_id, 0)
         .build_step(GramIndexBuildPolicy::default())
         .await
-        .expect("vanished checkpoint restart");
+        .expect("vanished snapshot restart");
     assert_matches!(vanished, GrepBuildOutcome::BackfillRestarted { .. });
     // A deleted record is finished for good, so the new attempt takes a
     // snapshot of its own: a new id, keeping its basis, with the walk starting
     // from nothing.
-    let fresh_checkpoint_id = assert_fresh_backfill_attempt(&store, &namespace_id).await;
-    assert_ne!(fresh_checkpoint_id, gap_checkpoint_id);
+    let fresh_snapshot_id = assert_fresh_backfill_attempt(&store, &namespace_id).await;
+    assert_ne!(fresh_snapshot_id, gap_snapshot_id);
 
     drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
     let response = new_query(&store, &namespace_id, &request("needle"))
@@ -605,7 +608,7 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
 }
 
 #[tokio::test]
-async fn retention_passing_a_backfill_checkpoint_never_serves_a_partial_query() {
+async fn retention_passing_a_backfill_snapshot_never_serves_a_partial_query() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
@@ -644,7 +647,7 @@ async fn retention_passing_a_backfill_checkpoint_never_serves_a_partial_query() 
                 &loonfs_test_support::test_actor(),
             )
             .await
-            .expect("write checkpointed file");
+            .expect("write a file the snapshot captures");
     }
 
     // The maintenance handle is a separate runtime. The feed reads the
@@ -696,7 +699,7 @@ async fn retention_passing_a_backfill_checkpoint_never_serves_a_partial_query() 
         fold_wal_and_advance_retention(&store, &maintenance, &namespace_id).await;
     assert!(retention_floor_seq > captured_seq);
 
-    // Checkpoint pages remain readable after retention passes their basis,
+    // Snapshot pages remain readable after retention passes their basis,
     // so the final page may still publish the snapshot watermark as active.
     // The change-feed boundary is authoritative: a query at that watermark
     // must fail explicitly instead of treating the missing tail as empty.
@@ -776,11 +779,11 @@ async fn an_expired_backfill_snapshot_restarts_the_backfill_from_a_fresh_snapsho
         .expect("write");
     let worker = worker(&store).await;
     worker.enable(&namespace_id).await.expect("enable");
-    let checkpoint_id = assert_fresh_backfill_attempt(&store, &namespace_id).await;
+    let snapshot_id = assert_fresh_backfill_attempt(&store, &namespace_id).await;
 
     // Expire the snapshot under the backfill without deleting it.
-    let key = snapshot_record(&namespace_id, &checkpoint_id);
-    let mut record = control::snapshot_record(&store, &namespace_id, &checkpoint_id)
+    let key = snapshot_record(&namespace_id, &snapshot_id);
+    let mut record = control::snapshot_record(&store, &namespace_id, &snapshot_id)
         .await
         .expect("backfill snapshot");
     assert!(
@@ -808,7 +811,7 @@ async fn an_expired_backfill_snapshot_restarts_the_backfill_from_a_fresh_snapsho
 
     drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
     assert!(
-        control::snapshot_record(&store, &namespace_id, &checkpoint_id)
+        control::snapshot_record(&store, &namespace_id, &snapshot_id)
             .await
             .is_none()
     );
@@ -820,8 +823,8 @@ async fn an_expired_backfill_snapshot_restarts_the_backfill_from_a_fresh_snapsho
 }
 
 /// Asserts the namespace's grep entry is at the start of a backfill attempt
-/// — nothing walked, an active checkpoint keeping its basis — and returns
-/// the checkpoint that attempt holds.
+/// — nothing walked, an active snapshot keeping its basis — and returns
+/// the snapshot that attempt holds.
 async fn assert_fresh_backfill_attempt(
     store: &SharedObjectStore,
     namespace_id: &NamespaceId,
@@ -835,7 +838,7 @@ async fn assert_fresh_backfill_attempt(
         ..
     } = manifest.status()
     else {
-        panic!("expected a checkpointed backfill: {:?}", manifest);
+        panic!("expected a backfill over a snapshot: {:?}", manifest);
     };
     assert_eq!(
         *cursor_inode_id, None,
@@ -923,7 +926,7 @@ async fn commits_during_backfill_are_indexed_once_by_the_feed_phase() {
     let worker = worker(&store).await;
     worker.enable(&namespace_id).await.expect("enable");
     // One file per step, so the backfill is genuinely partway through the
-    // checkpointed file set when the commits below are made.
+    // snapshot's file set when the commits below are made.
     let policy = GramIndexBuildPolicy {
         max_files_per_step: NonZeroUsize::MIN,
         ..GramIndexBuildPolicy::default()
@@ -943,8 +946,8 @@ async fn commits_during_backfill_are_indexed_once_by_the_feed_phase() {
         first
     );
 
-    // Commits strictly after the checkpoint's sequence: one new file, and a
-    // replacement of a file the checkpoint already captured.
+    // Commits strictly after the snapshot's sequence: one new file, and a
+    // replacement of a file the snapshot already captured.
     namespace
         .put_file(
             "/during.txt",
@@ -964,7 +967,7 @@ async fn commits_during_backfill_are_indexed_once_by_the_feed_phase() {
             },
         )
         .await
-        .expect("replace a checkpointed file during backfill");
+        .expect("replace a file the snapshot captured during backfill");
 
     drive_worker_to_current(&worker, &namespace_id, policy).await;
 
@@ -993,7 +996,7 @@ async fn commits_during_backfill_are_indexed_once_by_the_feed_phase() {
         .expect("query the superseded revision");
     assert!(
         superseded.matches.is_empty(),
-        "a revision the checkpoint kept but the feed replaced must not match"
+        "a revision the snapshot kept but the feed replaced must not match"
     );
     writer.shutdown().await.expect("shutdown");
 }
@@ -1379,9 +1382,9 @@ async fn grep_entry_lifecycle_pins_not_materialized_error_surface() {
 }
 
 #[tokio::test]
-async fn a_backfill_checkpoint_mismatch_is_corruption_without_writes() {
+async fn a_backfill_snapshot_mismatch_is_corruption_without_writes() {
     let directory = tempdir().expect("directory");
-    let namespace_id = NamespaceId::parse("checkpoint-mismatch").expect("namespace");
+    let namespace_id = NamespaceId::parse("snapshot-mismatch").expect("namespace");
     let recording = Arc::new(RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
@@ -1389,7 +1392,7 @@ async fn a_backfill_checkpoint_mismatch_is_corruption_without_writes() {
     let store: SharedObjectStore = recording.clone();
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id(
-            "checkpoint-mismatch-writer",
+            "snapshot-mismatch-writer",
         ))
         .build()
         .await
@@ -1398,7 +1401,7 @@ async fn a_backfill_checkpoint_mismatch_is_corruption_without_writes() {
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create");
-    let host = GrepHost::new(&store, "checkpoint-mismatch").await;
+    let host = GrepHost::new(&store, "snapshot-mismatch").await;
     let worker = &host.worker;
     worker.enable(&namespace_id).await.expect("enable");
     publish_edited_entry(&host, &namespace_id, |entry| {
@@ -1422,10 +1425,10 @@ async fn a_backfilling_entry_without_a_snapshot_id_is_index_corrupt() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
-    let namespace_id = NamespaceId::parse("missing-backfill-checkpoint").expect("namespace id");
+    let namespace_id = NamespaceId::parse("missing-backfill-snapshot").expect("namespace id");
     let writer = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id(
-            "missing-checkpoint-writer",
+            "missing-snapshot-writer",
         ))
         .build()
         .await
@@ -1434,7 +1437,7 @@ async fn a_backfilling_entry_without_a_snapshot_id_is_index_corrupt() {
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("create namespace");
-    let host = GrepHost::new(&store, "missing-checkpoint").await;
+    let host = GrepHost::new(&store, "missing-snapshot").await;
     host.worker
         .enable(&namespace_id)
         .await
@@ -2033,7 +2036,7 @@ async fn grep_worker_pins_reorganized_tail_and_pagination_results() {
 }
 
 #[tokio::test]
-async fn checkpoint_backfill_matches_incremental_worker_results() {
+async fn snapshot_backfill_matches_incremental_worker_results() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
@@ -2155,7 +2158,7 @@ async fn a_backfilling_manifest_never_reports_a_built_through_sequence() {
         loonfs_types::GrepIndexStatus::Backfilling {
             captured_seq: CommitSeq(1),
             cursor_inode_id: None,
-            checkpoint_id: match &state {
+            snapshot_id: match &state {
                 GrepIndexStatus::Backfilling { snapshot_id, .. } => snapshot_id.clone(),
                 other => panic!("expected a backfill: {other:?}"),
             },

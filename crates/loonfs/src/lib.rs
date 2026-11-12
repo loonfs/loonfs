@@ -92,31 +92,31 @@ pub use loonfs_core::limits::{
 };
 pub use loonfs_core::time::WallClock;
 pub use loonfs_core::{
-    classify_store_failure, CheckpointPageCursor, CoreError, CreateNamespaceOptions, CurrentFile,
-    CurrentFileState, DeleteNamespaceOptions, ErrorCode, ErrorKind, FileBytes, FileContentStream,
-    FoldWalOutcome, FoldWalResponse, GcOptions, ListSnapshotFilesOptions, RetainedRevisionsPage,
+    classify_store_failure, CoreError, CreateNamespaceOptions, CurrentFile, CurrentFileState,
+    DeleteNamespaceOptions, ErrorCode, ErrorKind, FileBytes, FileContentStream, FoldWalOutcome,
+    FoldWalResponse, GcOptions, ListSnapshotFilesOptions, RetainedRevisionsPage,
     RetainedRevisionsPageCursor, RetentionTarget, SnapshotFile, SnapshotFilesPage,
-    SnapshotFilesPageCursor, SnapshotPageCursor, StreamRange, WriterFence,
-    CONTENT_READ_CHUNK_BYTES, MAX_CURRENT_FILES_PER_STAT,
+    SnapshotFilesPageCursor, SnapshotPageCursor, SnapshotRecordPageCursor, StreamRange,
+    WriterFence, CONTENT_READ_CHUNK_BYTES, MAX_CURRENT_FILES_PER_STAT,
 };
 pub use loonfs_types::{
     AbsolutePath, AccessRevisionNo, ActorId, AdvanceRetentionResponse, AttributeKey,
     AttributeValue, Attributes, AttributesProjection, AttributesRevisionNo, BindingVersion,
-    CapabilityDocument, Checkpoint, CheckpointOwner, ChecksumAlgorithm, CommitId,
-    CommitPrecondition, CommitSeq, ContentId, ContentRef, ContentRefKind, DeleteDirectoryBehavior,
-    DeleteNamespaceResponse, DeleteSnapshotResponse, DeletedCheckpointsByOwner,
-    DeletedObjectCounts, DestinationBehavior, DirectoryPageCursor, DisplayName, EffectiveLimit,
-    EntryInodeKind, FileRevision, FileRevisionsPageCursor, GcResponse, GcSkippedWork, InodeId,
-    InodeKind, ListCheckpointsResponse, ListFileRevisionsResponse, ListInodeChildrenResponse,
-    ListPathEntriesResponse, ListSnapshotsResponse, ManifestNo, MetadataMaintenanceOutcome,
+    CapabilityDocument, ChecksumAlgorithm, CommitId, CommitPrecondition, CommitSeq, ContentId,
+    ContentRef, ContentRefKind, DeleteDirectoryBehavior, DeleteNamespaceResponse,
+    DeleteSnapshotResponse, DeletedObjectCounts, DeletedSnapshotsByOwner, DestinationBehavior,
+    DirectoryPageCursor, DisplayName, EffectiveLimit, EntryInodeKind, FileRevision,
+    FileRevisionsPageCursor, GcResponse, GcSkippedWork, InodeId, InodeKind,
+    ListFileRevisionsResponse, ListInodeChildrenResponse, ListPathEntriesResponse,
+    ListSnapshotRecordsResponse, ListSnapshotsResponse, ManifestNo, MetadataMaintenanceOutcome,
     MetadataMaintenanceResponse, MetadataSkippedWork, MonotonicTimer, NameKey,
     NamespaceDiagnostics, NamespaceId, NamespaceMetadata, Page, PageRequest, PathEntry,
     PathEntryKind, PoolDeletedObjectCounts, PoolGcResponse, PoolId, PoolRetainedCandidates,
     PoolRetainedReason, PrincipalId, PrincipalScope, PrincipalSet, RecoverAdministratorResponse,
     RetainedCandidates, RetainedReason, RevisionNo, SetRetentionWindowResponse, Snapshot,
-    SnapshotId, Subject, SubjectId, TrashEntry, UploadId, WriterId, API_GROUP_FILESYSTEM_V0,
-    API_GROUP_MAINTENANCE_V0, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_MERGES,
-    FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, PROTOCOL_VERSION,
+    SnapshotId, SnapshotRecord, SnapshotRecordOwner, Subject, SubjectId, TrashEntry, UploadId,
+    WriterId, API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0, FEATURE_DOWNLOADS_DIRECT_GET,
+    FEATURE_MERGES, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, PROTOCOL_VERSION,
 };
 pub use loonfs_types::{
     Commit, CompleteUploadBody, CreateUploadBody, DiffEntry, DiffEntryKind, DiffResponse,
@@ -251,8 +251,8 @@ pub use options::{
     UpdateAttributesOptions,
 };
 pub use pagers::{
-    ChangesPager, CheckpointsPager, FileRevisionsPager, InodeChildrenPager, PathEntriesPager,
-    RetainedRevisionsPager, SnapshotFilesPager, SnapshotsPager, TrashPager,
+    ChangesPager, FileRevisionsPager, InodeChildrenPager, PathEntriesPager, RetainedRevisionsPager,
+    SnapshotFilesPager, SnapshotRecordsPager, SnapshotsPager, TrashPager,
 };
 pub use publisher::{CloseNamespaceReport, NamespaceSessionStatus};
 pub use read_view::ReadView;

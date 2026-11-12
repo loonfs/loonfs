@@ -22,7 +22,7 @@ use utoipa::ToSchema;
 pub fn register(schemas: &mut BTreeMap<String, RefOr<Schema>>) {
     let mut named = NamedSchemas::default();
     named.tagged::<CreateUploadBody>("mode", None);
-    named.tagged::<CheckpointOwner>("kind", Some("unknown"));
+    named.tagged::<SnapshotRecordOwner>("kind", Some("unknown"));
     named.tagged::<CommitPrecondition>("kind", None);
     named.tagged::<FilesystemEvent>("kind", Some("unknown"));
     named.tagged::<FilesystemOperation>("kind", None);

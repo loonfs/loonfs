@@ -1,4 +1,4 @@
-//! Snapshot and checkpoint handlers.
+//! Snapshot and snapshot inventory handlers.
 
 use super::error::ApiResponseError;
 use super::extractors::SubjectHeaders;
@@ -12,8 +12,8 @@ use axum::Json;
 #[cfg(feature = "openapi")]
 use loonfs_types::ErrorResponse;
 use loonfs_types::{
-    Checkpoint, CreateSnapshotRequest, DeleteSnapshotResponse, ErrorCode, ExtendSnapshotRequest,
-    ListCheckpointsResponse, ListSnapshotsResponse, Snapshot, SnapshotId,
+    CreateSnapshotRequest, DeleteSnapshotResponse, ErrorCode, ExtendSnapshotRequest,
+    ListSnapshotRecordsResponse, ListSnapshotsResponse, Snapshot, SnapshotId, SnapshotRecord,
 };
 use std::sync::Arc;
 
@@ -76,7 +76,7 @@ pub(super) async fn create_snapshot(
         path = "/v0/namespaces/{namespace_id}/snapshots",
         tag = "namespaces",
         summary = "List snapshots",
-        description = "Lists snapshots in snapshot ID order. An expired snapshot stays in the list until garbage collection deletes it, after its expiry plus the grace window. The list leaves out fork snapshots, which the maintenance checkpoint inventory lists.",
+        description = "Lists snapshots in snapshot ID order. An expired snapshot stays in the list until garbage collection deletes it, after its expiry plus the grace window. The list leaves out fork snapshots, which the maintenance snapshot inventory lists.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             PageQuery
@@ -249,18 +249,18 @@ pub(super) struct SnapshotPathParams {
     feature = "openapi",
     utoipa::path(
         get,
-        operation_id = "list_checkpoints",
+        operation_id = "list_snapshot_records",
         extensions(("x-loonfs-retry" = json!("idempotent"))),
-        path = "/v0/maintenance/namespaces/{namespace_id}/checkpoints",
+        path = "/v0/maintenance/namespaces/{namespace_id}/snapshots",
         tag = "maintenance",
-        summary = "List checkpoints",
-        description = "Lists every snapshot, user snapshots and fork snapshots, in checkpoint ID order. This is the inventory of what keeps manifests from garbage collection. An expired snapshot stays in the list until garbage collection deletes it, after its expiry plus the grace window. A cursor continues the listing against the current set of snapshots.",
+        summary = "List snapshot records",
+        description = "Lists every snapshot, user snapshots and fork snapshots, in snapshot ID order. This is the inventory of what keeps manifests from garbage collection. An expired snapshot stays in the list until garbage collection deletes it, after its expiry plus the grace window. A cursor continues the listing against the current set of snapshots.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             PageQuery
         ),
         responses(
-            (status = 200, description = "Existing checkpoint objects", body = ListCheckpointsResponse),
+            (status = 200, description = "Existing snapshot objects", body = ListSnapshotRecordsResponse),
             (status = 400, description = "Invalid namespace ID, limit, or cursor", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace not found", body = ErrorResponse),
@@ -268,14 +268,14 @@ pub(super) struct SnapshotPathParams {
         )
     )
 )]
-pub(super) async fn list_checkpoints(
+pub(super) async fn list_snapshot_records(
     State(state): State<Arc<HttpState>>,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
     AppQuery(query): AppQuery<PageQuery>,
-) -> Result<Json<ListCheckpointsResponse>, ApiResponseError> {
+) -> Result<Json<ListSnapshotRecordsResponse>, ApiResponseError> {
     let response = state
         .maintenance
-        .list_checkpoints(&namespace_id)
+        .list_snapshot_records(&namespace_id)
         .page_limit(effective_page_limit(query.limit)?)
         .cursor(query.cursor)
         .page()
@@ -288,40 +288,40 @@ pub(super) async fn list_checkpoints(
     feature = "openapi",
     utoipa::path(
         get,
-        operation_id = "get_checkpoint",
+        operation_id = "get_snapshot_record",
         extensions(("x-loonfs-retry" = json!("idempotent"))),
-        path = "/v0/maintenance/namespaces/{namespace_id}/checkpoints/{checkpoint_id}",
+        path = "/v0/maintenance/namespaces/{namespace_id}/snapshots/{snapshot_id}",
         tag = "maintenance",
-        summary = "Retrieve checkpoint",
-        description = "Returns one existing snapshot of any owner, as the checkpoint listing returns it, including an expired snapshot that garbage collection hasn't deleted. A missing ID returns `snapshot_not_found`.",
+        summary = "Retrieve snapshot record",
+        description = "Returns one existing snapshot of any owner, as the snapshot inventory lists it, including an expired snapshot that garbage collection hasn't deleted. A missing ID returns `snapshot_not_found`.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
-            ("checkpoint_id" = String, Path, description = "The checkpoint ID.")
+            ("snapshot_id" = String, Path, description = "The snapshot ID.")
         ),
         responses(
-            (status = 200, description = "Existing checkpoint", body = Checkpoint),
-            (status = 400, description = "Invalid namespace or checkpoint ID", body = ErrorResponse),
+            (status = 200, description = "Existing snapshot", body = SnapshotRecord),
+            (status = 400, description = "Invalid namespace or snapshot ID", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
-            (status = 404, description = "Namespace or checkpoint not found", body = ErrorResponse),
+            (status = 404, description = "Namespace or snapshot not found", body = ErrorResponse),
             crate::http::openapi::UnavailableResponses
         )
     )
 )]
-pub(super) async fn get_checkpoint(
+pub(super) async fn get_snapshot_record(
     State(state): State<Arc<HttpState>>,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
-    AppPath(CheckpointPathParams { checkpoint_id }): AppPath<CheckpointPathParams>,
+    AppPath(SnapshotRecordPathParams { snapshot_id }): AppPath<SnapshotRecordPathParams>,
     AppQuery(_): AppQuery<NoQuery>,
-) -> Result<Json<Checkpoint>, ApiResponseError> {
-    let checkpoint = state
+) -> Result<Json<SnapshotRecord>, ApiResponseError> {
+    let snapshot = state
         .maintenance
-        .get_checkpoint(&namespace_id, &checkpoint_id)
+        .get_snapshot_record(&namespace_id, &snapshot_id)
         .await
         .map_err(ApiResponseError::runtime)?;
-    Ok(Json(checkpoint))
+    Ok(Json(snapshot))
 }
 
 #[derive(Debug, serde::Deserialize)]
-pub(super) struct CheckpointPathParams {
-    checkpoint_id: SnapshotId,
+pub(super) struct SnapshotRecordPathParams {
+    snapshot_id: SnapshotId,
 }

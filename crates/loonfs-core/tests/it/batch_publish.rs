@@ -150,11 +150,11 @@ async fn batch_delete_then_recreate_of_a_durable_file_layers_over_cached_state()
         )
         .await
         .expect("put durable file");
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("checkpoint durable state");
+        .expect("snapshot durable state");
 
-    // One batch: delete the checkpointed file, then recreate the same name
+    // One batch: delete the file the snapshot captured, then recreate the same name
     // with NoReplace. The recreate must observe the batch-local unbind over
     // the durable binding, and the delete must observe the durable binding
     // at all — both through the batch's cached durable layer.
@@ -308,9 +308,9 @@ async fn change_feed_does_not_read_folded_wal_before_current_manifest() {
     create_directory_path(&store, &namespace_id, "/docs", &context, None)
         .await
         .expect("create docs");
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("checkpoint");
+        .expect("snapshot");
 
     let wal_keys = data_wal_keys(&store).await;
     assert_eq!(wal_keys.len(), 1);
@@ -324,7 +324,7 @@ async fn change_feed_does_not_read_folded_wal_before_current_manifest() {
 
     resolve_path(&store, &namespace_id, "/docs")
         .await
-        .expect("checkpoint-backed read should not read pre-checkpoint wal");
+        .expect("snapshot-backed read should not read pre-snapshot wal");
     let changes = list_changes_after(&store, &namespace_id, CommitSeq(0))
         .await
         .expect("read folded commit metadata");
@@ -921,7 +921,7 @@ async fn visible_commit_id_retry_aliases_across_writer_takeover() {
 }
 
 #[tokio::test]
-async fn checkpoint_commit_row_keeps_the_response_after_the_commit_wal_is_compacted() {
+async fn snapshot_commit_row_keeps_the_response_after_the_commit_wal_is_compacted() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -951,7 +951,7 @@ async fn checkpoint_commit_row_keeps_the_response_after_the_commit_wal_is_compac
     )
     .await
     .expect("commit");
-    create_checkpoint(&store, &namespace_id, &first_context)
+    create_snapshot(&store, &namespace_id, &first_context)
         .await
         .expect("compact commit into receipt row");
     namespace_engine(&store, &namespace_id, &first_context)

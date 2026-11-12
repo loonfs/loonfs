@@ -382,7 +382,7 @@ async fn a_replay_from_retained_commit_metadata_keeps_its_events() {
         .client
         .create_snapshot(&namespace, "retired")
         .await
-        .expect("create checkpoint");
+        .expect("create snapshot");
     let advanced = maintenance_past_the_grace_window(harness.store.clone())
         .await
         .advance_retention_floor(&namespace)

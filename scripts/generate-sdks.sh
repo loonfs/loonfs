@@ -34,7 +34,7 @@ prune_generated() {
     go)
         # Fern cannot omit these generator-level model tests.
         for name in capabilities changes commits diff files inodes namespaces snapshots trash types uploads \
-            maintenance/checkpoints maintenance/diagnostics maintenance/grep_index maintenance/jobs \
+            maintenance/snapshots maintenance/diagnostics maintenance/grep_index maintenance/jobs \
             maintenance/pools/jobs; do
             rm "generated/go/${name}_test.go"
         done

@@ -279,9 +279,9 @@ async fn content_only_a_snapshot_manifest_names_stays_until_the_snapshot_is_rele
         loonfs_types::ContentId::parse("con_00000000000000000000000001").expect("kept id"),
     )
     .await;
-    let checkpoint = create_checkpoint(&store, &namespace_id, &setup)
+    let snapshot = create_snapshot(&store, &namespace_id, &setup)
         .await
-        .expect("checkpoint");
+        .expect("snapshot");
     put_file_content_with_id(
         &store,
         &namespace_id,
@@ -304,7 +304,7 @@ async fn content_only_a_snapshot_manifest_names_stays_until_the_snapshot_is_rele
         &crate::test_support::writer_at("test-writer", 0),
     )
     .engine()
-    .delete_snapshot(&checkpoint.checkpoint_id)
+    .delete_snapshot(&snapshot.snapshot_id)
     .await
     .expect("release the snapshot");
     let report = collect_pool(&store, &pool_id, &aged).await;

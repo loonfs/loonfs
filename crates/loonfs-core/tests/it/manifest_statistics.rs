@@ -186,7 +186,7 @@ async fn cached_and_replayed_folds_count_commits_once_and_reads_use_only_manifes
 }
 
 #[tokio::test]
-async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footprint() {
+async fn forks_start_activity_at_zero_and_inherit_the_selected_snapshot_footprint() {
     let dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(dir.path()).expect("store");
     let parent = namespace_id("parent");
@@ -231,7 +231,7 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
         namespace_store(&unavailable_wal, &parent)
             .load_snapshot_statistics(&snapshot.snapshot_id)
             .await
-            .expect("checkpoint statistics exclude newer WAL"),
+            .expect("snapshot statistics exclude newer WAL"),
         baseline
     );
     engine.fold_wal().await.expect("fold parent");
@@ -293,7 +293,7 @@ async fn forks_start_activity_at_zero_and_inherit_the_selected_checkpoint_footpr
         namespace_store(&store, &parent)
             .load_snapshot_statistics(&layout_snapshot.snapshot_id)
             .await
-            .expect("checkpoint layout statistics"),
+            .expect("snapshot layout statistics"),
         layout
     );
     engine

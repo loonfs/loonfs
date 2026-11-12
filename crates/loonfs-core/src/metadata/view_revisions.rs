@@ -150,7 +150,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     /// sequence, or `None` when the inode has never had attributes written.
     ///
     /// Both legs filter by `visible_seq`. Each attribute record replaces the
-    /// one before it, so a checkpoint-basis or fork-basis read that let a
+    /// one before it, so a snapshot-basis or fork-basis read that let a
     /// newer manifest row through would return a map that sequence never saw.
     pub(crate) async fn latest_attributes_revision(
         &self,

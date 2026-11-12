@@ -381,9 +381,9 @@ async fn query_driven_stat_and_list_use_metadata_view_with_delta_run_and_wal_ove
         )
         .await
         .expect("put dead");
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("base checkpoint");
+        .expect("base snapshot");
 
     NamespaceFixture::new(&store, &namespace_id, &context)
         .move_path(
@@ -406,9 +406,9 @@ async fn query_driven_stat_and_list_use_metadata_view_with_delta_run_and_wal_ove
         .delete_path("/dead", Some(&commit_id("delete-dead")))
         .await
         .expect("delete dead");
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("delta checkpoint");
+        .expect("delta snapshot");
 
     NamespaceFixture::new(&store, &namespace_id, &context)
         .put_file(
@@ -495,9 +495,9 @@ async fn query_driven_stat_uses_exact_name_key_for_dash_containing_siblings() {
         )
         .await
         .expect("put report-2024");
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("checkpoint");
+        .expect("snapshot");
 
     let expected = resolve_path(&store, &namespace_id, "/docs/report")
         .await
@@ -574,17 +574,17 @@ async fn wide_directory_listing_resolves_tail_unbinds_cross_directory_renames_an
             .await
             .expect("rebind file");
     }
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("checkpoint wide dir");
+        .expect("snapshot wide dir");
 
-    // Tail-only mutations over checkpointed state: a delete whose unbind
+    // Tail-only mutations over the state the snapshot captured: a delete whose unbind
     // lives only in the WAL tail, and a rename into another directory whose
     // current binding lives outside the listed parent.
     NamespaceFixture::new(&store, &namespace_id, &context)
         .delete_path("/wide/file-010.txt", Some(&commit_id("delete-tail-unbind")))
         .await
-        .expect("delete over checkpointed bind");
+        .expect("delete over the snapshot's bind");
     NamespaceFixture::new(&store, &namespace_id, &context)
         .move_path(
             "/wide/file-020.txt",
@@ -601,7 +601,7 @@ async fn wide_directory_listing_resolves_tail_unbinds_cross_directory_renames_an
             Some(&commit_id("tail-rebind-005")),
         )
         .await
-        .expect("tail rebind over checkpointed bind");
+        .expect("tail rebind over the snapshot's bind");
 
     let mut listed = Vec::new();
     let mut cursor = None;
@@ -622,7 +622,7 @@ async fn wide_directory_listing_resolves_tail_unbinds_cross_directory_renames_an
         .collect();
     assert_eq!(listed, expected);
 
-    // The tail rebind is the visible revision, not the checkpointed one.
+    // The tail rebind is the visible revision, not the one the snapshot captured.
     let rebound = read_file_bytes(&store, &namespace_id, "/wide/file-005.txt")
         .await
         .expect("read tail-rebound file");
@@ -702,9 +702,9 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
         .delete_path("/docs/dead", Some(&commit_id("delete-dead")))
         .await
         .expect("delete dead");
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("checkpoint manifest children");
+        .expect("snapshot manifest children");
 
     NamespaceFixture::new(&store, &namespace_id, &context)
         .put_file(
@@ -837,9 +837,9 @@ async fn revision_history_and_change_feed_name_the_same_supplied_commit() {
         )
         .await
         .expect("commit file mutation");
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("checkpoint committed row");
+        .expect("snapshot committed row");
 
     let revisions = list_file_revisions(&store, &namespace_id, "/docs/provenance.txt")
         .await
@@ -2638,7 +2638,7 @@ async fn listed_revisions_follow_moves_writes_and_restores_across_a_fold() {
     );
     assert!(unfolded[0].content_ref().is_none());
 
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
         .expect("fold the tail");
     let revision_keys: std::collections::BTreeSet<String> = namespace_store(&store, &namespace_id)

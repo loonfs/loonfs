@@ -108,8 +108,7 @@ async fn abandoned_snapshots_with_collected_bases_can_be_reaped_after_failed_cle
             .await
             .expect("reap abandoned snapshot once owner rules permit deletion");
         assert_eq!(
-            collected.deleted_checkpoints_by_owner.user
-                + collected.deleted_checkpoints_by_owner.fork,
+            collected.deleted_snapshots_by_owner.user + collected.deleted_snapshots_by_owner.fork,
             1
         );
         assert!(store.head(&snapshots[0]).await.expect("snapshot").is_none());
@@ -143,7 +142,7 @@ async fn snapshot_removed_after_listing_does_not_make_a_collected_basis_corrupti
     bootstrap_namespace(&base, &namespace_id, &setup)
         .await
         .expect("bootstrap");
-    let snapshot = create_checkpoint(&base, &namespace_id, &setup)
+    let snapshot = create_snapshot(&base, &namespace_id, &setup)
         .await
         .expect("snapshot");
     crate::test_support::NamespaceFixture::new(&base, &namespace_id, &setup)
@@ -176,10 +175,7 @@ async fn snapshot_removed_after_listing_does_not_make_a_collected_basis_corrupti
         store.wait_until_blocked().await;
         store
             .inner()
-            .delete(&keys::snapshot_record(
-                &namespace_id,
-                &snapshot.checkpoint_id,
-            ))
+            .delete(&keys::snapshot_record(&namespace_id, &snapshot.snapshot_id))
             .await
             .expect("release snapshot");
         crate::test_support::namespace_store(store.inner(), &namespace_id)

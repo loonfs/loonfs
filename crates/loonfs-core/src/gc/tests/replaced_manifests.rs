@@ -273,7 +273,7 @@ async fn a_replaced_manifest_kept_by_a_snapshot_keeps_its_segments_until_the_sna
         KeyPredicate::any(),
     );
     let previous = seed_segments(&store, &namespace_id).await;
-    let snapshot = create_checkpoint(&store, &namespace_id, &context(1_000))
+    let snapshot = create_snapshot(&store, &namespace_id, &context(1_000))
         .await
         .expect("take a snapshot of the previous manifest");
     let current = compact_bindings(&store, &namespace_id).await;
@@ -289,7 +289,7 @@ async fn a_replaced_manifest_kept_by_a_snapshot_keeps_its_segments_until_the_sna
     assert_eq!(report.deleted.metadata_segments, 0);
 
     crate::test_support::namespace_store(&store, &namespace_id)
-        .delete_snapshot_record(&snapshot.checkpoint_id)
+        .delete_snapshot_record(&snapshot.snapshot_id)
         .await
         .expect("release the snapshot");
     let report = crate::test_support::namespace_store(&store, &namespace_id)

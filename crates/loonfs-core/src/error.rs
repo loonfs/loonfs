@@ -209,7 +209,7 @@ pub enum CoreError {
     /// accepted earlier may finish.
     #[error("shutting down; new work is not admitted")]
     ShuttingDown,
-    #[error("checkpoint unavailable: {0}")]
+    #[error("snapshot unavailable: {0}")]
     CheckpointUnavailable(String),
     #[error("content `{content_id}` requires content writes that this deployment cannot perform; read through the proxied route")]
     ContentNotMaterialized { content_id: loonfs_types::ContentId },

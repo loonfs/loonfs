@@ -127,7 +127,7 @@ pub(crate) fn sample_active_entry(
     .expect("valid active entry")
 }
 
-/// A backfill walking a checkpoint. It lists the run the walk has
+/// A backfill walking a snapshot. It lists the run the walk has
 /// written so far and no reorganization, which is the index shape the active
 /// fixture above does not pin.
 pub(crate) fn sample_backfilling_entry() -> GrepEntry {

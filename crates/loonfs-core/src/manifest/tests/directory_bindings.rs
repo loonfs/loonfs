@@ -25,7 +25,7 @@ async fn a_cold_path_walk_reads_no_inode() {
         .write_file_bytes("/docs/reports/summary.txt", b"summary", None)
         .await
         .expect("create depth-three path");
-    checkpoint_then_compact(
+    snapshot_then_compact(
         &inner,
         &namespace_id,
         &context,
@@ -86,10 +86,10 @@ async fn a_cold_path_walk_reads_no_inode() {
 }
 
 #[tokio::test]
-async fn a_cold_checkpoint_files_page_bounds_its_parent_binding_reads() {
+async fn a_cold_snapshot_files_page_bounds_its_parent_binding_reads() {
     let directory = tempdir().expect("tempdir");
     let inner = LocalFsStore::new(directory.path()).expect("store");
-    let namespace_id = NamespaceId::parse("checkpoint-file-reads").expect("namespace id");
+    let namespace_id = NamespaceId::parse("snapshot-file-reads").expect("namespace id");
     let context = test_context();
     bootstrap_namespace(&inner, &namespace_id, &context)
         .await
@@ -101,7 +101,7 @@ async fn a_cold_checkpoint_files_page_bounds_its_parent_binding_reads() {
             .await
             .expect("create file");
     }
-    checkpoint_then_compact(
+    snapshot_then_compact(
         &inner,
         &namespace_id,
         &context,
@@ -111,7 +111,7 @@ async fn a_cold_checkpoint_files_page_bounds_its_parent_binding_reads() {
         },
     )
     .await;
-    let checkpoint = create_checkpoint(&inner, &namespace_id, &context)
+    let snapshot = create_snapshot(&inner, &namespace_id, &context)
         .await
         .expect("take a snapshot of the compacted manifest");
     let binding_segments: BTreeSet<_> = crate::test_support::namespace_store(&inner, &namespace_id)
@@ -132,7 +132,7 @@ async fn a_cold_checkpoint_files_page_bounds_its_parent_binding_reads() {
     );
     let page = crate::test_support::namespace_store(&store, &namespace_id)
         .list_snapshot_files_page(
-            &checkpoint.checkpoint_id,
+            &snapshot.snapshot_id,
             PageRequest {
                 cursor: None,
                 limit: EffectiveLimit::new(NonZeroU32::new(1000).expect("nonzero limit")),
@@ -140,7 +140,7 @@ async fn a_cold_checkpoint_files_page_bounds_its_parent_binding_reads() {
             crate::snapshot::ListSnapshotFilesOptions::default(),
         )
         .await
-        .expect("checkpoint files page");
+        .expect("snapshot files page");
     assert_eq!(page.files.len(), files);
     let concurrency = store.reads();
     assert!(concurrency.peak_in_flight > 1, "{concurrency:?}");
@@ -201,7 +201,7 @@ async fn slot_versions_preserve_moves_name_reuse_and_snapshot_reads() {
         .write_file_bytes("/a", b"first", None)
         .await
         .expect("bind a");
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
         .expect("take a snapshot of the first binding");
     let original = crate::test_support::namespace_store(&store, &namespace_id)
@@ -256,7 +256,7 @@ async fn slot_versions_preserve_moves_name_reuse_and_snapshot_reads() {
         .await
         .expect("moved tail");
     assert_names(&moved_tail, &[("/b", inode_id)]).await;
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
         .expect("take a snapshot of the moved binding");
     let moved = crate::test_support::namespace_store(&store, &namespace_id)
@@ -323,7 +323,7 @@ async fn slot_versions_preserve_moves_name_reuse_and_snapshot_reads() {
         .inode_id;
     assert_ne!(replacement, inode_id);
     assert_names(&current, &[("/a", replacement), ("/b", inode_id)]).await;
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
         .expect("fold reuse");
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
@@ -365,7 +365,7 @@ async fn a_lower_numbered_child_reusing_a_slot_survives_a_base_compaction() {
             .await
             .expect("create");
     }
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
         .expect("fold the creates");
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
@@ -398,7 +398,7 @@ async fn a_lower_numbered_child_reusing_a_slot_survives_a_base_compaction() {
         .move_path(moved_path, replaced_path, None)
         .await
         .expect("move the other child into the slot");
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
         .expect("fold the move");
     crate::test_support::NamespaceFixture::new(
@@ -494,7 +494,7 @@ async fn a_child_moved_through_several_parents_keeps_its_current_edge_after_a_ba
         .write_file_bytes(&reports[0], b"body", None)
         .await
         .expect("create the child");
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
         .expect("fold the creates");
     let last_parent = parents[2].0;
@@ -507,7 +507,7 @@ async fn a_child_moved_through_several_parents_keeps_its_current_edge_after_a_ba
             .await
             .expect("move the child");
     }
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
         .expect("fold the moves");
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
@@ -609,7 +609,7 @@ async fn a_listing_reads_only_the_slot_binding_family() {
         .move_path("/a", "/b", None)
         .await
         .expect("unbind and bind");
-    create_checkpoint(&inner, &namespace_id, &context)
+    create_snapshot(&inner, &namespace_id, &context)
         .await
         .expect("fold");
     let manifest = crate::test_support::namespace_store(&inner, &namespace_id)

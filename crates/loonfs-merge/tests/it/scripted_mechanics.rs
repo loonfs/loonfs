@@ -2,7 +2,7 @@
 //! with the next answer of its script and records the requests, and the
 //! helpers that drive a session to its end.
 
-use loonfs_client::{CheckpointsPager, ClientError, Result};
+use loonfs_client::{ClientError, Result, SnapshotRecordsPager};
 use loonfs_merge::{
     ConflictReport, Mechanics, MergeSession, MergeSessionOptions, MergeSessionOutcome,
     MergeSessionState, Resolver,
@@ -12,7 +12,7 @@ use loonfs_test_support::test_actor;
 use loonfs_types::options::MergeForkOptions;
 use loonfs_types::{
     ActorId, Commit, CommitSeq, DeleteNamespaceResponse, ErrorCode, ErrorDetails, ErrorResponse,
-    ListCheckpointsResponse, Merge, MergeConflict, NamespaceId, NamespaceMetadata,
+    ListSnapshotRecordsResponse, Merge, MergeConflict, NamespaceId, NamespaceMetadata,
     NextMergeRangeOutcome, NextMergeRangeResponse, Pager, RebaseForkResponse,
 };
 use serde_json::json;
@@ -41,7 +41,7 @@ pub(crate) enum Sent {
     GetNamespace {
         namespace_id: NamespaceId,
     },
-    ListCheckpoints,
+    ListSnapshotRecords,
 }
 
 /// The answer to one request.
@@ -69,7 +69,7 @@ pub(crate) enum Answer {
     /// The namespace is a fork of `main`, which a rebase of `rebased_from`
     /// created when it has one.
     Namespace { rebased_from: Option<NamespaceId> },
-    /// One page of `main`'s checkpoints: a fork snapshot for each namespace.
+    /// One page of `main`'s snapshots: a fork snapshot for each namespace.
     ForkSnapshots(Vec<NamespaceId>),
     /// The server refuses the request.
     Refused(ErrorCode, Box<ErrorDetails>),
@@ -267,23 +267,23 @@ impl Mechanics for ScriptedMechanics {
         }
     }
 
-    fn list_checkpoints(&self, namespace_id: &NamespaceId) -> CheckpointsPager {
-        let answer = self.answer(Sent::ListCheckpoints);
+    fn list_snapshot_records(&self, namespace_id: &NamespaceId) -> SnapshotRecordsPager {
+        let answer = self.answer(Sent::ListSnapshotRecords);
         let Answer::ForkSnapshots(targets) = answer else {
-            panic!("a checkpoint listing can't answer {answer:?}");
+            panic!("a snapshot inventory listing can't answer {answer:?}");
         };
-        let page: ListCheckpointsResponse = serde_json::from_value(json!({
+        let page: ListSnapshotRecordsResponse = serde_json::from_value(json!({
             "namespace_id": namespace_id,
-            "checkpoints": targets.iter().enumerate().map(|(index, target)| json!({
+            "snapshots": targets.iter().enumerate().map(|(index, target)| json!({
                 "namespace_id": namespace_id,
-                "checkpoint_id": format!("snp_{:020}-{index:026x}", index + 1),
+                "snapshot_id": format!("snp_{:020}-{index:026x}", index + 1),
                 "owner": {"kind": "fork", "target_namespace_id": target},
                 "created_at_ms": 0,
                 "captured_seq": 10,
                 "manifest_no": index + 1,
             })).collect::<Vec<_>>(),
         }))
-        .expect("a checkpoint page should decode");
+        .expect("a snapshot page should decode");
         let mut page = Some(page);
         Pager::new(move |_request| {
             let page = page.take().expect("the listing has one page");
@@ -303,7 +303,7 @@ pub(crate) fn sandbox() -> NamespaceId {
 }
 
 /// Starts a session that merges `sandbox` into `main`, which first
-/// recovers what an earlier run did from the script's checkpoint listing.
+/// recovers what an earlier run did from the script's snapshot inventory.
 pub(crate) async fn recover<R: Resolver>(
     mechanics: &ScriptedMechanics,
     resolver: R,

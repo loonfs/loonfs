@@ -209,10 +209,10 @@ mod tests {
                 Ok(GrepIndexStatus::Backfilling {
                     captured_seq: CommitSeq(3),
                     cursor_inode_id: None,
-                    checkpoint_id: loonfs_types::SnapshotId::parse(
+                    snapshot_id: loonfs_types::SnapshotId::parse(
                         "snp_00000000000000000001-00000000000123456789abcdef",
                     )
-                    .expect("checkpoint id"),
+                    .expect("snapshot id"),
                 })
             },
             || async { Ok(GrepWaitOutcome::Settled) },

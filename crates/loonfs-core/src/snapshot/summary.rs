@@ -1,24 +1,24 @@
 //! The API summaries of a snapshot record.
 
 use loonfs_types::format::control::{SnapshotOwner, SnapshotPayload};
-use loonfs_types::{Checkpoint, CheckpointOwner, Snapshot};
+use loonfs_types::{Snapshot, SnapshotRecord, SnapshotRecordOwner};
 
-/// Converts a snapshot record of any owner to the row the checkpoint inventory
+/// Converts a snapshot record of any owner to the row the snapshot inventory
 /// returns.
-pub(crate) fn checkpoint_summary(record: SnapshotPayload) -> Checkpoint {
+pub(crate) fn snapshot_record_summary(record: SnapshotPayload) -> SnapshotRecord {
     let expires_at_ms = record.owner.expires_at_ms();
     let owner = match record.owner {
-        SnapshotOwner::User { name, .. } => CheckpointOwner::User { name },
+        SnapshotOwner::User { name, .. } => SnapshotRecordOwner::User { name },
         SnapshotOwner::Fork {
             target_namespace_id,
-        } => CheckpointOwner::Fork {
+        } => SnapshotRecordOwner::Fork {
             target_namespace_id,
         },
     };
-    Checkpoint {
+    SnapshotRecord {
         namespace_id: record.namespace_id,
         manifest_no: record.snapshot_id.manifest_no(),
-        checkpoint_id: record.snapshot_id,
+        snapshot_id: record.snapshot_id,
         owner,
         created_at_ms: record.created_at_ms,
         expires_at_ms,

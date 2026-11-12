@@ -1,4 +1,4 @@
-//! Snapshot and checkpoint shapes for the v0 HTTP API.
+//! Snapshot and snapshot record shapes for the v0 HTTP API.
 
 use crate::{CommitSeq, ManifestNo, NamespaceId, SnapshotId};
 use serde::{Deserialize, Serialize};
@@ -31,21 +31,21 @@ pub struct ExtendSnapshotRequest {
     pub ttl_ms: NonZeroU64,
 }
 
-/// The owner of a checkpoint record.
+/// The owner of a snapshot record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum CheckpointOwner {
+pub enum SnapshotRecordOwner {
     /// A snapshot, which a caller created. It's deleted by its ID or after it expires.
-    #[cfg_attr(feature = "openapi", schema(title = "CheckpointOwnerUser"))]
+    #[cfg_attr(feature = "openapi", schema(title = "SnapshotRecordOwnerUser"))]
     User {
         /// The label that the creator recorded. Labels don't need to be unique.
         name: String,
     },
     /// A snapshot that keeps the source state that one fork attempt starts from.
-    #[cfg_attr(feature = "openapi", schema(title = "CheckpointOwnerFork"))]
+    #[cfg_attr(feature = "openapi", schema(title = "SnapshotRecordOwnerFork"))]
     Fork {
-        /// The fork's target namespace. Garbage collection keeps this checkpoint while that
+        /// The fork's target namespace. Garbage collection keeps this snapshot while that
         /// namespace exists.
         target_namespace_id: NamespaceId,
     },
@@ -54,26 +54,26 @@ pub enum CheckpointOwner {
     Unknown,
 }
 
-/// One checkpoint, as its durable record stores it.
+/// One snapshot, as its durable record stores it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct Checkpoint {
-    /// The namespace that the checkpoint belongs to.
+pub struct SnapshotRecord {
+    /// The namespace that the snapshot belongs to.
     pub namespace_id: NamespaceId,
-    /// The checkpoint's durable ID. For a user snapshot, it's also the snapshot's `snapshot_id`.
-    pub checkpoint_id: SnapshotId,
-    /// The checkpoint's owner. For a user snapshot, the owner includes the label.
-    pub owner: CheckpointOwner,
-    /// The time the checkpoint record was created, in Unix milliseconds.
+    /// The snapshot's durable ID.
+    pub snapshot_id: SnapshotId,
+    /// The snapshot's owner. For a user snapshot, the owner includes the label.
+    pub owner: SnapshotRecordOwner,
+    /// The time the snapshot record was created, in Unix milliseconds.
     pub created_at_ms: u64,
-    /// The time the checkpoint expires, in Unix milliseconds. Garbage collection waits one more
+    /// The time the snapshot expires, in Unix milliseconds. Garbage collection waits one more
     /// grace window before it deletes the record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub expires_at_ms: Option<u64>,
-    /// The namespace sequence that the checkpoint captured.
+    /// The namespace sequence that the snapshot captured.
     pub captured_seq: CommitSeq,
-    /// The manifest that the checkpoint keeps.
+    /// The manifest that the snapshot keeps.
     pub manifest_no: ManifestNo,
 }
 
@@ -106,15 +106,15 @@ impl Snapshot {
     }
 }
 
-/// One page of checkpoint records, including expired records that garbage collection hasn't deleted
+/// One page of snapshot records, including expired records that garbage collection hasn't deleted
 /// yet.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct ListCheckpointsResponse {
+pub struct ListSnapshotRecordsResponse {
     /// The namespace that the records belong to.
     pub namespace_id: NamespaceId,
-    /// The records, in ascending checkpoint ID order.
-    pub checkpoints: Vec<Checkpoint>,
+    /// The records, in ascending snapshot ID order.
+    pub snapshots: Vec<SnapshotRecord>,
     /// An opaque cursor for the next page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
@@ -150,13 +150,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn checkpoint_responses_use_one_checkpoint_wire_object() {
+    fn snapshot_record_responses_use_one_snapshot_record_wire_object() {
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-        let checkpoint = Checkpoint {
+        let snapshot = SnapshotRecord {
             namespace_id: namespace_id.clone(),
-            checkpoint_id: SnapshotId::parse("snp_00000000000000000001-00000000000000000000000001")
-                .expect("checkpoint id"),
-            owner: CheckpointOwner::User {
+            snapshot_id: SnapshotId::parse("snp_00000000000000000001-00000000000000000000000001")
+                .expect("snapshot id"),
+            owner: SnapshotRecordOwner::User {
                 name: "release".to_owned(),
             },
             created_at_ms: 1_752_623_000_000,
@@ -164,9 +164,9 @@ mod tests {
             captured_seq: CommitSeq(12),
             manifest_no: ManifestNo(9),
         };
-        let checkpoint_json = serde_json::json!({
+        let snapshot_json = serde_json::json!({
             "namespace_id": "demo",
-            "checkpoint_id": "snp_00000000000000000001-00000000000000000000000001",
+            "snapshot_id": "snp_00000000000000000001-00000000000000000000000001",
             "owner": {"kind": "user", "name": "release"},
             "created_at_ms": 1_752_623_000_000_u64,
             "expires_at_ms": 1_752_626_600_000_u64,
@@ -174,30 +174,30 @@ mod tests {
             "manifest_no": 9,
         });
         assert_eq!(
-            serde_json::to_value(checkpoint.clone()).expect("serialize checkpoint"),
-            checkpoint_json,
+            serde_json::to_value(snapshot.clone()).expect("serialize snapshot"),
+            snapshot_json,
         );
         assert_eq!(
-            serde_json::to_value(ListCheckpointsResponse {
+            serde_json::to_value(ListSnapshotRecordsResponse {
                 namespace_id: namespace_id.clone(),
-                checkpoints: vec![checkpoint.clone()],
+                snapshots: vec![snapshot.clone()],
                 next_cursor: None,
             })
-            .expect("serialize list checkpoints response"),
+            .expect("serialize list snapshots response"),
             serde_json::json!({
                 "namespace_id": "demo",
-                "checkpoints": [checkpoint_json],
+                "snapshots": [snapshot_json],
             }),
         );
     }
 
     #[test]
-    fn optional_checkpoint_fields_are_omitted_and_default_when_absent() {
-        let checkpoint_json = serde_json::to_value(Checkpoint {
+    fn optional_snapshot_record_fields_are_omitted_and_default_when_absent() {
+        let snapshot_json = serde_json::to_value(SnapshotRecord {
             namespace_id: NamespaceId::parse("demo").expect("namespace id"),
-            checkpoint_id: SnapshotId::parse("snp_00000000000000000001-00000000000000000000000001")
-                .expect("checkpoint id"),
-            owner: CheckpointOwner::User {
+            snapshot_id: SnapshotId::parse("snp_00000000000000000001-00000000000000000000000001")
+                .expect("snapshot id"),
+            owner: SnapshotRecordOwner::User {
                 name: "release".to_owned(),
             },
             created_at_ms: 1_752_623_000_000,
@@ -205,25 +205,25 @@ mod tests {
             captured_seq: CommitSeq(3),
             manifest_no: ManifestNo(3),
         })
-        .expect("serialize checkpoint");
-        assert!(checkpoint_json.get("expires_at_ms").is_none());
-        let checkpoint: Checkpoint = serde_json::from_value(checkpoint_json)
-            .expect("decode checkpoint without optional fields");
-        assert_eq!(checkpoint.expires_at_ms, None);
+        .expect("serialize snapshot");
+        assert!(snapshot_json.get("expires_at_ms").is_none());
+        let snapshot: SnapshotRecord =
+            serde_json::from_value(snapshot_json).expect("decode snapshot without optional fields");
+        assert_eq!(snapshot.expires_at_ms, None);
     }
 
     #[test]
-    fn a_checkpoint_owner_from_a_newer_server_decodes_as_unknown() {
-        let checkpoint: Checkpoint = serde_json::from_value(serde_json::json!({
+    fn a_snapshot_record_owner_from_a_newer_server_decodes_as_unknown() {
+        let snapshot: SnapshotRecord = serde_json::from_value(serde_json::json!({
             "namespace_id": "demo",
-            "checkpoint_id": "snp_00000000000000000001-00000000000000000000000001",
+            "snapshot_id": "snp_00000000000000000001-00000000000000000000000001",
             "owner": {"kind": "retention_policy", "policy_id": "nightly"},
             "created_at_ms": 1,
             "captured_seq": 3,
             "manifest_no": 3
         }))
         .expect("a newer owner decodes");
-        assert_eq!(checkpoint.owner, CheckpointOwner::Unknown);
+        assert_eq!(snapshot.owner, SnapshotRecordOwner::Unknown);
     }
 
     #[test]

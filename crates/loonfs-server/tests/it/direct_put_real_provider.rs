@@ -661,7 +661,7 @@ async fn gcp_gcs_direct_put_real_provider_round_trip() {
 
 #[tokio::test]
 #[ignore = "requires real GCP GCS credentials"]
-async fn gcp_gcs_append_keeps_crc32c_after_checkpoint() {
+async fn gcp_gcs_append_keeps_crc32c_after_a_snapshot() {
     let store_config = GcpGcsDirectPutConfig::from_env()
         .expect("load GCP GCS append environment")
         .store();
@@ -715,12 +715,12 @@ async fn gcp_gcs_append_keeps_crc32c_after_checkpoint() {
         .client
         .create_snapshot(&namespace_id, "appended")
         .await
-        .expect("checkpoint append");
+        .expect("snapshot append");
     let folded = harness
         .client
         .stat(&target)
         .await
-        .expect("stat after checkpoint");
+        .expect("stat after snapshot");
     assert_eq!(folded.content_ref(), Some(appended));
     let grant = harness
         .client

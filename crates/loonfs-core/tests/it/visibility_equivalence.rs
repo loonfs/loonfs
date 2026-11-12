@@ -280,7 +280,7 @@ impl VisibilityHarness {
     async fn assert_equivalence(
         &self,
         context: &RuntimeReadContext,
-        checkpoint: &str,
+        stage: &str,
         expected: &[ExpectedInode<'_>],
     ) {
         let inode_ids: Vec<InodeId> = expected
@@ -295,13 +295,13 @@ impl VisibilityHarness {
         assert_eq!(
             states.len(),
             expected.len(),
-            "{checkpoint}: every requested inode must be answered"
+            "{stage}: every requested inode must be answered"
         );
 
         for (expectation, state) in expected.iter().zip(states) {
             assert_eq!(
                 state.inode_id, expectation.inode_id,
-                "{checkpoint}: answers must come back in request order"
+                "{stage}: answers must come back in request order"
             );
             // The two oracles meet here: an inode is reported visible
             // exactly when the tombstone rules admit it and its bindings
@@ -315,13 +315,13 @@ impl VisibilityHarness {
             assert_eq!(
                 current_path.is_some(),
                 expectation.path.is_some(),
-                "{checkpoint}: inode {} visibility disagrees with its expected path",
+                "{stage}: inode {} visibility disagrees with its expected path",
                 expectation.inode_id
             );
             assert_eq!(
                 current_path.as_ref().map(AbsolutePath::as_str),
                 expectation.path,
-                "{checkpoint}: inode {} derived an unexpected root path",
+                "{stage}: inode {} derived an unexpected root path",
                 expectation.inode_id
             );
 
@@ -333,7 +333,7 @@ impl VisibilityHarness {
                     .expect("forward path resolution must confirm a root-reaching chain");
                 assert_eq!(
                     resolved.inode_id, expectation.inode_id,
-                    "{checkpoint}: derived path resolved to a different inode"
+                    "{stage}: derived path resolved to a different inode"
                 );
             }
         }
@@ -980,7 +980,7 @@ async fn run_maintenance_order(namespace: &str, order: MaintenanceOrder) {
 async fn drain_compaction(
     harness: &VisibilityHarness,
     expected: &[ExpectedInode<'_>],
-    checkpoint: &str,
+    stage: &str,
 ) {
     let mut published_units = 0usize;
     for _ in 0..16 {
@@ -1001,9 +1001,7 @@ async fn drain_compaction(
             CompactionUnitOutcome::Published { .. } => {
                 published_units += 1;
                 let context = harness.read_context().await;
-                harness
-                    .assert_equivalence(&context, checkpoint, expected)
-                    .await;
+                harness.assert_equivalence(&context, stage, expected).await;
             }
             other => panic!("a single-writer test's unit should publish, got {other:?}"),
         }

@@ -84,8 +84,8 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "built_through_seq",
     "captured_seq",
     "caught_up",
-    "checkpoint_id",
-    "checkpoint_not_deletable",
+    "snapshot_id",
+    "snapshot_not_deletable",
     "checksum",
     "checksum_algorithm",
     "commit_id",
@@ -115,7 +115,7 @@ const API_SPEC_NON_ERROR_CODE_TOKENS: &[&str] = &[
     "deleted_at_ms",
     "deleted_binding",
     "deleted_by",
-    "deleted_checkpoints_by_owner",
+    "deleted_snapshots_by_owner",
     "deletion_seq",
     "destination_display_name",
     "destination_exists",
@@ -1593,9 +1593,9 @@ async fn http_answers_401_in_envelope_for_missing_and_wrong_tokens() {
             "unauthorized",
             Some("missing or invalid bearer token"),
         );
-        // The checkpoint inventory names this deployment's garbage-collection
+        // The snapshot inventory names this deployment's garbage-collection
         // roots, so it answers behind the same token as everything else.
-        let mut pager = client.list_checkpoints(&namespace_id("demo"));
+        let mut pager = client.list_snapshot_records(&namespace_id("demo"));
         assert_error_response(
             pager.next().await.expect("a fresh pager has one page"),
             401,
@@ -3240,7 +3240,7 @@ mod direct_download {
             .await
             .expect("put file");
         let inode_id = client.stat(&path).await.expect("stat").inode_id;
-        let checkpoint_id = client
+        let snapshot_id = client
             .create_snapshot(&namespace, "pinned")
             .await
             .expect("snapshot")
@@ -3249,8 +3249,8 @@ mod direct_download {
             start_offset: 99,
             ..DownloadOptions::default()
         };
-        let at_checkpoint = DownloadOptions {
-            at: loonfs_client::ReadAt::Snapshot(checkpoint_id),
+        let at_snapshot = DownloadOptions {
+            at: loonfs_client::ReadAt::Snapshot(snapshot_id),
             ..DownloadOptions::default()
         };
 
@@ -3264,7 +3264,7 @@ mod direct_download {
             ),
             (
                 client
-                    .create_revision_download_with_options(&path, RevisionNo(1), &at_checkpoint)
+                    .create_revision_download_with_options(&path, RevisionNo(1), &at_snapshot)
                     .await
                     .map(drop),
                 "/revision_no",

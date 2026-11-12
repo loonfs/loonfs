@@ -642,17 +642,17 @@ fn gc_summaries_report_counts_retention_namespace_retirement_and_skipped_pool_wo
     let mut pass = GcResponse::empty(NamespaceId::parse("demo").expect("namespace id"));
     pass.deleted.wal_objects = 2;
     pass.deleted.manifests = 1;
-    pass.deleted_checkpoints_by_owner.fork = 2;
+    pass.deleted_snapshots_by_owner.fork = 2;
     for _ in 0..4 {
         pass.retain(RetainedReason::WithinGraceWindow);
     }
-    pass.retain(RetainedReason::CheckpointNotDeletable);
+    pass.retain(RetainedReason::SnapshotNotDeletable);
     pass.next_reclamation_at_ms = Some(1_700_000_000_000);
 
     let summary = gc_summary(&pass);
     assert!(summary.contains("2 wal objects"), "{summary}");
     assert!(summary.contains("1 manifests"), "{summary}");
-    assert!(summary.contains("2 fork checkpoints"), "{summary}");
+    assert!(summary.contains("2 fork snapshots"), "{summary}");
     assert!(
         summary.contains("mostly within_grace_window: 4"),
         "{summary}"
@@ -683,7 +683,7 @@ fn gc_summaries_report_counts_retention_namespace_retirement_and_skipped_pool_wo
         NamespaceId::parse("demo").expect("namespace id"),
     ));
     assert!(!empty.contains("namespace is retired"), "{empty}");
-    assert!(empty.contains("0 fork checkpoints, 0 snapshots"), "{empty}");
+    assert!(empty.contains("0 fork snapshots, 0 snapshots"), "{empty}");
     assert!(!empty.contains("skipped"), "{empty}");
 
     let mut pool = loonfs_types::PoolGcResponse::empty(

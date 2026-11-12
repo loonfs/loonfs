@@ -29,7 +29,7 @@ pub use downloads::{
 };
 pub use errors::{ActiveWriter, CommittedReceipt, ErrorDetails, ErrorResponse};
 pub use gc::{
-    DeletedCheckpointsByOwner, DeletedObjectCounts, GcRequest, GcResponse, GcSkippedWork,
+    DeletedObjectCounts, DeletedSnapshotsByOwner, GcRequest, GcResponse, GcSkippedWork,
     PoolDeletedObjectCounts, PoolGcResponse, PoolRetainedCandidates, PoolRetainedReason,
     RetainedCandidates, RetainedReason,
 };
@@ -58,8 +58,9 @@ pub use reads::{
 };
 pub use search::{GrepIndex, GrepIndexStatus, GrepMatch, GrepRequest, GrepResponse, GrepScope};
 pub use snapshots::{
-    Checkpoint, CheckpointOwner, CreateSnapshotRequest, DeleteSnapshotResponse,
-    ExtendSnapshotRequest, ListCheckpointsResponse, ListSnapshotsResponse, Snapshot,
+    CreateSnapshotRequest, DeleteSnapshotResponse, ExtendSnapshotRequest,
+    ListSnapshotRecordsResponse, ListSnapshotsResponse, Snapshot, SnapshotRecord,
+    SnapshotRecordOwner,
 };
 pub use store_probe::{
     StoreProbeCheck, StoreProbeCheckOutcome, StoreProbeRequest, StoreProbeResponse,

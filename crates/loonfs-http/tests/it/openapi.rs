@@ -263,13 +263,10 @@ const ALWAYS_SERIALIZED_RESPONSE_FIELDS: &[(&str, &str)] = &[
     ("PoolDeletedObjectCounts", "content_objects"),
     ("PoolDeletedObjectCounts", "upload_sessions"),
     ("RunMaintenanceJobResponseGc", "deleted"),
-    (
-        "RunMaintenanceJobResponseGc",
-        "deleted_checkpoints_by_owner",
-    ),
+    ("RunMaintenanceJobResponseGc", "deleted_snapshots_by_owner"),
     ("RunMaintenanceJobResponseGc", "retained"),
     ("GrepMatch", "line_truncated"),
-    ("DeletedCheckpointsByOwner", "user"),
+    ("DeletedSnapshotsByOwner", "user"),
 ];
 
 #[test]
@@ -371,12 +368,9 @@ fn openapi_documents_current_server_paths() {
         ),
         ("/v0/namespaces/{namespace_id}/changes", "get"),
         ("/v0/namespaces/{namespace_id}/diff", "get"),
+        ("/v0/maintenance/namespaces/{namespace_id}/snapshots", "get"),
         (
-            "/v0/maintenance/namespaces/{namespace_id}/checkpoints",
-            "get",
-        ),
-        (
-            "/v0/maintenance/namespaces/{namespace_id}/checkpoints/{checkpoint_id}",
+            "/v0/maintenance/namespaces/{namespace_id}/snapshots/{snapshot_id}",
             "get",
         ),
         ("/v0/maintenance/namespaces/{namespace_id}/jobs", "post"),
@@ -490,7 +484,7 @@ fn openapi_documents_current_server_paths() {
     );
     assert_query_params(
         paths,
-        "/v0/maintenance/namespaces/{namespace_id}/checkpoints",
+        "/v0/maintenance/namespaces/{namespace_id}/snapshots",
         "get",
         &["limit", "cursor"],
     );
@@ -961,10 +955,7 @@ fn openapi_query_parameters_publish_the_runtime_grammar() {
             "get",
         ),
         ("/v0/namespaces/{namespace_id}/filesystem/trash", "get"),
-        (
-            "/v0/maintenance/namespaces/{namespace_id}/checkpoints",
-            "get",
-        ),
+        ("/v0/maintenance/namespaces/{namespace_id}/snapshots", "get"),
         ("/v0/namespaces/{namespace_id}/snapshots", "get"),
         ("/v0/namespaces/{namespace_id}/changes", "get"),
         ("/v0/namespaces/{namespace_id}/diff", "get"),
@@ -1152,7 +1143,7 @@ fn openapi_query_parameters_publish_the_runtime_grammar() {
             "cursor",
         ),
         (
-            "/v0/maintenance/namespaces/{namespace_id}/checkpoints",
+            "/v0/maintenance/namespaces/{namespace_id}/snapshots",
             "get",
             "cursor",
         ),
@@ -1264,8 +1255,8 @@ fn openapi_names_tagged_one_of_alternatives() {
             ][..],
         ),
         (
-            "CheckpointOwner",
-            &["CheckpointOwnerUser", "CheckpointOwnerFork"][..],
+            "SnapshotRecordOwner",
+            &["SnapshotRecordOwnerUser", "SnapshotRecordOwnerFork"][..],
         ),
         (
             "CompleteUploadBody",
@@ -1308,8 +1299,8 @@ fn openapi_names_tagged_one_of_alternatives() {
     }
 
     let user_owner = schemas
-        .get("CheckpointOwnerUser")
-        .expect("user checkpoint-owner schema");
+        .get("SnapshotRecordOwnerUser")
+        .expect("user snapshot-owner schema");
     assert!(!required_fields(user_owner).contains("expires_at_ms"));
 }
 

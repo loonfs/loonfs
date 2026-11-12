@@ -646,7 +646,7 @@ async fn a_retried_fold_leaves_the_session_where_an_unraced_fold_does() {
 }
 
 #[tokio::test]
-async fn a_checkpoint_that_loses_its_fold_to_a_compaction_reads_no_wal_object() {
+async fn a_snapshot_that_loses_its_fold_to_a_compaction_reads_no_wal_object() {
     let mut writer = Writer::open().await;
     writer.commit("first", Vec::new(), &["/a"]).await;
     let basis = writer
@@ -663,8 +663,8 @@ async fn a_checkpoint_that_loses_its_fold_to_a_compaction_reads_no_wal_object() 
         OperationSelector::PutCreateIfAbsent,
     );
     gate.block_next();
-    let (checkpoint, ()) = futures::join!(
-        create_checkpoint(&gate, &writer.namespace_id, &writer.context),
+    let (created, ()) = futures::join!(
+        create_snapshot(&gate, &writer.namespace_id, &writer.context),
         async {
             gate.wait_until_blocked().await;
             Rival::CompactorClaim
@@ -674,11 +674,11 @@ async fn a_checkpoint_that_loses_its_fold_to_a_compaction_reads_no_wal_object() 
             gate.release();
         }
     );
-    let checkpoint = checkpoint.expect("checkpoint");
+    let created = created.expect("snapshot");
     let after_park = writer.store.take();
     assert!(writer.wal_reads(&after_park).is_empty(), "{after_park:?}");
     let snapshot = crate::test_support::namespace_store(&*writer.store, &writer.namespace_id)
-        .load_snapshot_record(&checkpoint.checkpoint_id)
+        .load_snapshot_record(&created.snapshot_id)
         .await
         .expect("snapshot record")
         .expect("snapshot");

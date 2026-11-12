@@ -187,7 +187,7 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
         .expect("restore file at a new name");
 
     let mut head_seq = restored.committed_seq;
-    let mut checkpoint = None;
+    let mut snapshot = None;
     let mut fork_listing = BTreeMap::new();
     for stage in [
         "cold",
@@ -214,14 +214,14 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                 );
             }
             "forked" => {
-                let captured = runtime.create_snapshot(&source).await.expect("checkpoint");
+                let captured = runtime.create_snapshot(&source).await.expect("snapshot");
                 assert_eq!(captured.captured_seq, head_seq);
                 let target = writer
                     .fork_namespace(&source, &fork, &test_actor())
                     .await
-                    .expect("fork checkpointed head");
+                    .expect("fork the head the snapshot captured");
                 assert_eq!(target.head_seq, captured.captured_seq);
-                checkpoint = Some(captured);
+                snapshot = Some(captured);
             }
             "floor_advanced" => {
                 head_seq = namespace_writer
@@ -277,7 +277,7 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
             }
             "gc" => {
                 // Every object is fresh, so the pass runs at a clock past
-                // every age gate. The checkpoint and fork snapshots are the only
+                // every age gate. The user snapshot and the fork snapshots are the only
                 // roots for the pre-rebuild file set.
                 let now_ms = loonfs_core::time::current_time_ms()
                     + UNREFERENCED_SEGMENT_GRACE_WINDOW_MS
@@ -356,24 +356,24 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
             if stage == "cold" {
                 fork_listing.insert(path, listed.entries);
             }
-            if let Some(checkpoint) = &checkpoint {
+            if let Some(snapshot) = &snapshot {
                 let view = source_namespace
-                    .read_view_at_snapshot(&checkpoint.snapshot_id)
+                    .read_view_at_snapshot(&snapshot.snapshot_id)
                     .await
-                    .expect("checkpoint view");
+                    .expect("snapshot view");
                 let historical = view
                     .list(path)
                     .page_limit(page_limit(16))
                     .page()
                     .await
-                    .expect("checkpoint listing");
-                assert_eq!(historical.head_seq, checkpoint.captured_seq, "{stage}");
+                    .expect("snapshot listing");
+                assert_eq!(historical.head_seq, snapshot.captured_seq, "{stage}");
                 assert!(historical.next_cursor.is_none());
                 assert_eq!(historical.entries, fork_listing[path], "{stage}: {path}");
                 let inherited = collect_path_entries(&reader, &fork, path)
                     .await
                     .expect("fork listing");
-                assert_eq!(inherited.head_seq, checkpoint.captured_seq, "{stage}");
+                assert_eq!(inherited.head_seq, snapshot.captured_seq, "{stage}");
                 assert!(inherited
                     .entries
                     .iter()
@@ -394,7 +394,7 @@ async fn retained_views_keep_their_meaning_across_maintenance() {
                 );
             }
         }
-        for namespace in std::iter::once(&source).chain(checkpoint.as_ref().map(|_| &fork)) {
+        for namespace in std::iter::once(&source).chain(snapshot.as_ref().map(|_| &fork)) {
             let namespace_reader = reader.namespace(namespace);
             for (path, expected) in [
                 ("/docs/renamed.txt", b"second revision".as_slice()),

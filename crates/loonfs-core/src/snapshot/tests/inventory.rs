@@ -9,31 +9,31 @@ use super::*;
 use loonfs_objectstore::ListedObject;
 use loonfs_test_support::ids::page_limit;
 use loonfs_types::format::control::SnapshotOwner;
-use loonfs_types::{CheckpointOwner, ErrorCode, ListCheckpointsResponse, PageRequest};
+use loonfs_types::{ErrorCode, ListSnapshotRecordsResponse, PageRequest, SnapshotRecordOwner};
 
-async fn list_all_checkpoints<S: ObjectStore + ?Sized>(
+async fn list_all_snapshot_records<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-) -> crate::error::Result<ListCheckpointsResponse> {
+) -> crate::error::Result<ListSnapshotRecordsResponse> {
     let limit = page_limit(2);
-    let mut checkpoints = Vec::new();
+    let mut snapshots = Vec::new();
     let mut cursor = None;
     loop {
         let page = crate::NamespaceEngine::reader(crate::test_support::namespace_store(
             store,
             namespace_id,
         ))
-        .list_checkpoints_page(PageRequest { limit, cursor })
+        .list_snapshot_records_page(PageRequest { limit, cursor })
         .await?;
-        checkpoints.extend(page.items);
+        snapshots.extend(page.items);
         let Some(next_cursor) = page.next_cursor else {
             break;
         };
         cursor = Some(next_cursor);
     }
-    Ok(ListCheckpointsResponse {
+    Ok(ListSnapshotRecordsResponse {
         namespace_id: namespace_id.clone(),
-        checkpoints,
+        snapshots,
         next_cursor: None,
     })
 }
@@ -58,9 +58,9 @@ async fn snapshot_named<S: ObjectStore + ?Sized>(
             &context.clock(),
         )
         .await
-        .map(crate::snapshot::checkpoint_summary)
-        .expect("create checkpoint")
-        .checkpoint_id
+        .map(crate::snapshot::snapshot_record_summary)
+        .expect("create snapshot")
+        .snapshot_id
 }
 
 #[tokio::test]
@@ -77,25 +77,25 @@ async fn two_snapshots_under_one_label_list_as_two_records() {
     let second = snapshot_named(&store, &namespace_id, "nightly", None, &context).await;
     assert_ne!(first, second, "each call mints its own record");
 
-    let listed = list_all_checkpoints(&store, &namespace_id)
+    let listed = list_all_snapshot_records(&store, &namespace_id)
         .await
-        .expect("list checkpoints");
+        .expect("list snapshots");
     assert_eq!(listed.namespace_id, namespace_id);
     let ids: BTreeSet<_> = listed
-        .checkpoints
+        .snapshots
         .iter()
-        .map(|checkpoint| checkpoint.checkpoint_id.clone())
+        .map(|snapshot| snapshot.snapshot_id.clone())
         .collect();
     assert_eq!(ids, BTreeSet::from([first.clone(), second]));
-    for checkpoint in &listed.checkpoints {
+    for snapshot in &listed.snapshots {
         assert_eq!(
-            checkpoint.owner,
-            CheckpointOwner::User {
+            snapshot.owner,
+            SnapshotRecordOwner::User {
                 name: "nightly".to_owned()
             }
         );
-        assert_eq!(checkpoint.created_at_ms, context.now_ms);
-        assert_eq!(checkpoint.expires_at_ms, None, "no ttl was asked for");
+        assert_eq!(snapshot.created_at_ms, context.now_ms);
+        assert_eq!(snapshot.expires_at_ms, None, "no ttl was asked for");
     }
 
     // Delete is what takes a record out of the answer, and it takes out
@@ -108,12 +108,12 @@ async fn two_snapshots_under_one_label_list_as_two_records() {
     .engine()
     .delete_snapshot(&first)
     .await
-    .expect("delete checkpoint");
-    let after_delete = list_all_checkpoints(&store, &namespace_id)
+    .expect("delete snapshot");
+    let after_delete = list_all_snapshot_records(&store, &namespace_id)
         .await
-        .expect("list checkpoints");
-    assert_eq!(after_delete.checkpoints.len(), 1);
-    assert_ne!(after_delete.checkpoints[0].checkpoint_id, first);
+        .expect("list snapshots");
+    assert_eq!(after_delete.snapshots.len(), 1);
+    assert_ne!(after_delete.snapshots[0].snapshot_id, first);
 }
 
 #[tokio::test]
@@ -136,28 +136,28 @@ async fn an_expired_record_is_listed_with_its_expiry_until_it_is_deleted() {
     )
     .await;
 
-    let listed = list_all_checkpoints(&store, &namespace_id)
+    let listed = list_all_snapshot_records(&store, &namespace_id)
         .await
-        .expect("list checkpoints");
-    assert_eq!(listed.checkpoints.len(), 1);
-    assert_eq!(listed.checkpoints[0].checkpoint_id, expired);
-    assert_eq!(listed.checkpoints[0].expires_at_ms, Some(expires_at_ms));
+        .expect("list snapshots");
+    assert_eq!(listed.snapshots.len(), 1);
+    assert_eq!(listed.snapshots[0].snapshot_id, expired);
+    assert_eq!(listed.snapshots[0].expires_at_ms, Some(expires_at_ms));
 }
 
 #[tokio::test]
-async fn a_namespace_that_does_not_exist_is_not_a_namespace_without_checkpoints() {
+async fn a_namespace_that_does_not_exist_is_not_a_namespace_without_snapshots() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("absent").expect("namespace id");
 
-    let error = list_all_checkpoints(&store, &namespace_id)
+    let error = list_all_snapshot_records(&store, &namespace_id)
         .await
         .expect_err("listing an absent namespace fails");
     assert_eq!(error.code(), ErrorCode::NamespaceNotFound);
 }
 
 #[tokio::test]
-async fn pages_concatenate_to_every_checkpoint_once_in_id_order() {
+async fn pages_concatenate_to_every_snapshot_once_in_id_order() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -189,18 +189,14 @@ async fn pages_concatenate_to_every_checkpoint_once_in_id_order() {
             &store,
             &namespace_id,
         ))
-        .list_checkpoints_page(PageRequest {
+        .list_snapshot_records_page(PageRequest {
             limit: page_limit(2),
             cursor,
         })
         .await
-        .expect("list checkpoint page");
+        .expect("list snapshot page");
         page_count += 1;
-        actual.extend(
-            page.items
-                .into_iter()
-                .map(|checkpoint| checkpoint.checkpoint_id),
-        );
+        actual.extend(page.items.into_iter().map(|snapshot| snapshot.snapshot_id));
         let Some(next_cursor) = page.next_cursor else {
             break;
         };
@@ -235,37 +231,37 @@ async fn deleted_snapshots_are_absent_from_later_pages() {
         );
     }
     ids.sort();
-    for checkpoint_id in &ids[1..6] {
+    for snapshot_id in &ids[1..6] {
         crate::test_support::NamespaceFixture::new(
             &store,
             &namespace_id,
             &crate::test_support::writer_at("test-writer", 0),
         )
         .engine()
-        .delete_snapshot(checkpoint_id)
+        .delete_snapshot(snapshot_id)
         .await
-        .expect("delete checkpoint in filtered run");
+        .expect("delete snapshot in filtered run");
     }
 
     let first =
         crate::NamespaceEngine::reader(crate::test_support::namespace_store(&store, &namespace_id))
-            .list_checkpoints_page(PageRequest {
+            .list_snapshot_records_page(PageRequest {
                 limit: page_limit(1),
                 cursor: None,
             })
             .await
             .expect("first page");
-    assert_eq!(first.items[0].checkpoint_id, ids[0]);
+    assert_eq!(first.items[0].snapshot_id, ids[0]);
 
     let second =
         crate::NamespaceEngine::reader(crate::test_support::namespace_store(&store, &namespace_id))
-            .list_checkpoints_page(PageRequest {
+            .list_snapshot_records_page(PageRequest {
                 limit: page_limit(1),
                 cursor: first.next_cursor,
             })
             .await
             .expect("second page across deleted run");
-    assert_eq!(second.items[0].checkpoint_id, ids[6]);
+    assert_eq!(second.items[0].snapshot_id, ids[6]);
     assert_eq!(
         second
             .next_cursor
@@ -276,25 +272,25 @@ async fn deleted_snapshots_are_absent_from_later_pages() {
 
     let third =
         crate::NamespaceEngine::reader(crate::test_support::namespace_store(&store, &namespace_id))
-            .list_checkpoints_page(PageRequest {
+            .list_snapshot_records_page(PageRequest {
                 limit: page_limit(1),
                 cursor: second.next_cursor,
             })
             .await
             .expect("third page");
-    assert_eq!(third.items[0].checkpoint_id, ids[7]);
+    assert_eq!(third.items[0].snapshot_id, ids[7]);
     assert!(third.next_cursor.is_none());
 }
 
 #[derive(Debug)]
-struct DeleteOnCheckpointLoadStore<S> {
+struct DeleteOnSnapshotLoadStore<S> {
     inner: S,
     target: String,
     deleted: std::sync::atomic::AtomicBool,
 }
 
 #[async_trait]
-impl<S: ObjectStore> ObjectStore for DeleteOnCheckpointLoadStore<S> {
+impl<S: ObjectStore> ObjectStore for DeleteOnSnapshotLoadStore<S> {
     loonfs_test_support::delegate_object_store!(self; buffered);
 
     fn checksum_algorithm(&self) -> loonfs_types::ChecksumAlgorithm {
@@ -360,7 +356,7 @@ impl<S: ObjectStore> ObjectStore for DeleteOnCheckpointLoadStore<S> {
 }
 
 #[tokio::test]
-async fn checkpoint_deleted_between_listing_and_load_is_skipped() {
+async fn snapshot_deleted_between_listing_and_load_is_skipped() {
     let temp_dir = tempdir().expect("tempdir");
     let inner = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -384,19 +380,19 @@ async fn checkpoint_deleted_between_listing_and_load_is_skipped() {
     }
     ids.sort();
     let deleted = ids[1].clone();
-    let store = DeleteOnCheckpointLoadStore {
+    let store = DeleteOnSnapshotLoadStore {
         inner,
         target: loonfs_objectstore::keys::snapshot_record(&namespace_id, &deleted),
         deleted: std::sync::atomic::AtomicBool::new(false),
     };
 
-    let listed = list_all_checkpoints(&store, &namespace_id)
+    let listed = list_all_snapshot_records(&store, &namespace_id)
         .await
         .expect("list across concurrent reap");
     let listed_ids = listed
-        .checkpoints
+        .snapshots
         .into_iter()
-        .map(|checkpoint| checkpoint.checkpoint_id)
+        .map(|snapshot| snapshot.snapshot_id)
         .collect::<Vec<_>>();
     assert_eq!(listed_ids, vec![ids[0].clone(), ids[2].clone()]);
 }
@@ -425,12 +421,12 @@ async fn first_page_loads_only_the_records_needed_to_fill_it() {
 
     let page =
         crate::NamespaceEngine::reader(crate::test_support::namespace_store(&store, &namespace_id))
-            .list_checkpoints_page(PageRequest {
+            .list_snapshot_records_page(PageRequest {
                 limit: page_limit(2),
                 cursor: None,
             })
             .await
-            .expect("first checkpoint page");
+            .expect("first snapshot page");
 
     assert_eq!(page.items.len(), 2);
     assert!(page.next_cursor.is_some());
@@ -440,7 +436,7 @@ async fn first_page_loads_only_the_records_needed_to_fill_it() {
 }
 
 #[tokio::test]
-async fn checkpoint_cursor_is_bound_to_its_namespace() {
+async fn snapshot_record_cursor_is_bound_to_its_namespace() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let source = NamespaceId::parse("source").expect("namespace id");
@@ -463,7 +459,7 @@ async fn checkpoint_cursor_is_bound_to_its_namespace() {
     }
     let source_page =
         crate::NamespaceEngine::reader(crate::test_support::namespace_store(&store, &source))
-            .list_checkpoints_page(PageRequest {
+            .list_snapshot_records_page(PageRequest {
                 limit: page_limit(1),
                 cursor: None,
             })
@@ -472,7 +468,7 @@ async fn checkpoint_cursor_is_bound_to_its_namespace() {
 
     let error =
         crate::NamespaceEngine::reader(crate::test_support::namespace_store(&store, &target))
-            .list_checkpoints_page(PageRequest {
+            .list_snapshot_records_page(PageRequest {
                 limit: page_limit(1),
                 cursor: source_page.next_cursor.clone(),
             })
@@ -482,7 +478,7 @@ async fn checkpoint_cursor_is_bound_to_its_namespace() {
 }
 
 /// Checks that the snapshot listing returns user snapshots, expired ones
-/// included, and leaves out fork snapshots, while the checkpoint listing returns
+/// included, and leaves out fork snapshots, while the snapshot inventory returns
 /// every snapshot.
 #[tokio::test]
 async fn the_snapshot_listing_returns_user_snapshots_and_leaves_out_fork_snapshots() {
@@ -544,10 +540,10 @@ async fn the_snapshot_listing_returns_user_snapshots_and_leaves_out_fork_snapsho
         cursor = Some(next_cursor);
     }
     assert_eq!(listed, snapshots);
-    let checkpoints = list_all_checkpoints(&store, &namespace_id)
+    let records = list_all_snapshot_records(&store, &namespace_id)
         .await
-        .expect("list checkpoints");
-    assert_eq!(checkpoints.checkpoints.len(), 6);
+        .expect("list snapshot records");
+    assert_eq!(records.snapshots.len(), 6);
 }
 
 #[tokio::test]
@@ -585,15 +581,15 @@ async fn a_refused_owner_writes_no_record_to_find() {
                 &context.clock(),
             )
             .await
-            .map(crate::snapshot::checkpoint_summary)
+            .map(crate::snapshot::snapshot_record_summary)
             .expect_err("the owner is not creatable");
         assert_eq!(error.code(), ErrorCode::InvalidRequest, "owner: {owner:?}");
     }
 
-    let listed = list_all_checkpoints(&store, &namespace_id)
+    let listed = list_all_snapshot_records(&store, &namespace_id)
         .await
-        .expect("list checkpoints");
-    assert!(listed.checkpoints.is_empty());
+        .expect("list snapshots");
+    assert!(listed.snapshots.is_empty());
 }
 
 /// Checks that a snapshot read by ID matches its listed row, that a snapshot
@@ -627,18 +623,18 @@ async fn a_snapshot_read_by_id_matches_its_listed_row_and_a_read_through_it_chec
         .expect("create fork snapshot")
         .snapshot_id;
 
-    let listed = list_all_checkpoints(&store, &namespace_id)
+    let listed = list_all_snapshot_records(&store, &namespace_id)
         .await
-        .expect("list checkpoints");
-    assert_eq!(listed.checkpoints.len(), 3);
-    for row in &listed.checkpoints {
+        .expect("list snapshots");
+    assert_eq!(listed.snapshots.len(), 3);
+    for row in &listed.snapshots {
         let read = crate::NamespaceEngine::reader(crate::test_support::namespace_store(
             &store,
             &namespace_id,
         ))
-        .get_checkpoint(&row.checkpoint_id)
+        .get_snapshot_record(&row.snapshot_id)
         .await
-        .expect("read checkpoint");
+        .expect("read snapshot");
         assert_eq!(&read, row);
     }
     let expired =
@@ -689,7 +685,7 @@ async fn a_snapshot_read_by_id_matches_its_listed_row_and_a_read_through_it_chec
                 &store,
                 &namespace_id
             ))
-            .get_checkpoint(&missing)
+            .get_snapshot_record(&missing)
             .await
         ),
         ErrorCode::SnapshotNotFound

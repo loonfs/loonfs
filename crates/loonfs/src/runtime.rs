@@ -16,7 +16,7 @@
 //!
 //! Maintenance is a capability of a writable runtime.
 //! [`LoonFs::maintenance`] returns a [`Maintenance`] value that runs folds,
-//! compaction, checkpoints, retention, and garbage collection. A process that
+//! compaction, snapshots, retention, and garbage collection. A process that
 //! only maintains builds a writable runtime and never opens a namespace.
 //!
 //! Build each runtime inside the Tokio runtime where it will be used. Prefer

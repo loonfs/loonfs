@@ -238,7 +238,7 @@ async fn serving_and_maintaining_enables_queries_and_disables_per_namespace() {
     )
     .await;
     // A fresh enable publishes a backfill and reports the sequence its
-    // checkpoint captured — not a watermark it has not reached.
+    // snapshot captured — not a watermark it has not reached.
     assert_matches!(
         &enabled.status,
         loonfs_types::GrepIndexStatus::Backfilling {

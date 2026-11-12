@@ -1455,7 +1455,7 @@ fn control_object_decoders_reject_wrong_format_version_without_fallback() {
                     expires_at_ms: None,
                 },
             })
-            .expect("checkpoint state"),
+            .expect("snapshot state"),
         ),
         (
             ControlObjectKind::UploadSession,

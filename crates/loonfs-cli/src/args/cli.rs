@@ -8,7 +8,7 @@ use super::filesystem::{
     FilesystemStatArgs, FilesystemTransferArgs, TrashArgs,
 };
 use super::flags::PageLimitArgs;
-use super::maintenance::{MaintenanceCheckpointCommand, MaintenanceCommand};
+use super::maintenance::{MaintenanceCommand, MaintenanceSnapshotCommand};
 use super::namespace::{MergeArgs, NamespaceCommand, NamespaceUseArgs, SnapshotCommand};
 use super::profile::ProfileCommand;
 use crate::progress::ProgressMode;
@@ -270,7 +270,7 @@ pub(crate) enum Command {
     Changes(ChangesArgs),
     /// Show the selected deployment's protocol capabilities.
     Capabilities,
-    /// Maintenance operations: metadata, the checkpoint inventory, retention, GC, indexes, and the store.
+    /// Maintenance operations: metadata, the snapshot inventory, retention, GC, indexes, and the store.
     Maintenance {
         #[command(subcommand)]
         command: MaintenanceCommand,
@@ -315,7 +315,7 @@ impl Command {
                 | Self::Trash(_)
                 | Self::Changes(_)
                 | Self::Maintenance {
-                    command: MaintenanceCommand::Checkpoint { .. }
+                    command: MaintenanceCommand::Snapshot { .. }
                         | MaintenanceCommand::Index { .. }
                         | MaintenanceCommand::Metadata(_)
                         | MaintenanceCommand::Fold
@@ -339,8 +339,8 @@ impl Command {
             } => Some(&args.pagination.page_limits),
             Self::Maintenance {
                 command:
-                    MaintenanceCommand::Checkpoint {
-                        command: MaintenanceCheckpointCommand::List(args),
+                    MaintenanceCommand::Snapshot {
+                        command: MaintenanceSnapshotCommand::List(args),
                     },
             } => Some(&args.pagination.page_limits),
             _ => None,

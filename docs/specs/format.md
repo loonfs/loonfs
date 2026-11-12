@@ -396,7 +396,7 @@ Each number refers to exactly one immutable object. A publisher creates the next
 
 Other objects use generated IDs:
 
-- A snapshot ID has the form `snp_{manifest_no:020}-{26 lowercase Crockford base 32 characters}`. The number identifies the snapshot's manifest, and the random part, which has the 26-character spelling that every generated ID uses (see the content ID below), distinguishes separate user and fork snapshots on the same manifest. The durable record and the read routes call it `snapshot_id`, and the maintenance API calls it a `checkpoint_id`.
+- A snapshot ID has the form `snp_{manifest_no:020}-{26 lowercase Crockford base 32 characters}`. The number identifies the snapshot's manifest, and the random part, which has the 26-character spelling that every generated ID uses (see the content ID below), distinguishes separate user and fork snapshots on the same manifest.
 - A content ID is `con_` followed by the 26-character lowercase Crockford base 32 spelling of a random version 4 UUID. The spelling adds two zero bits in front of the UUID's 128 bits and writes each group of 5 bits as one character of `0123456789abcdefghjkmnpqrstvwxyz`, so the first character is `0` through `7`.
 - An inode ID is `ino_` followed by the same 26-character spelling, but its 128 bits aren't a UUID. Its high 64 bits are the creating commit's sequence and the inode's create number, and its low 64 bits are random. The root directory's ID is all zero bits (`ino_00000000000000000000000000`). See [Namespaces and identity](#11-namespaces-and-identity).
 - A metadata segment ID is `seg_` followed by the same 26-character spelling of a random version 4 UUID. It's generated, instead of being derived from the segment's position in publication history.
@@ -1765,7 +1765,7 @@ A candidate snapshot that fails verification is deleted by its creator. If that 
 
 ### 11.8 Retiring an eligible tombstone
 
-After it sweeps its candidate families, a namespace's collection retires a tombstone that's eligible for retirement (see [Retirement](#95-retirement)). It deletes the fork snapshot that the tombstone's fork basis refers to, and counts the snapshot in `deleted_checkpoints_by_owner.fork` only if the snapshot was present. A namespace created without a source has no fork snapshot, so its retirement deletes nothing.
+After it sweeps its candidate families, a namespace's collection retires a tombstone that's eligible for retirement (see [Retirement](#95-retirement)). It deletes the fork snapshot that the tombstone's fork basis refers to, and counts the snapshot in `deleted_snapshots_by_owner.fork` only if the snapshot was present. A namespace created without a source has no fork snapshot, so its retirement deletes nothing.
 
 No retirement deletes content. A retired namespace isn't a [member](glossary.md#pool) of its pool, so its content references don't protect the pool's content, and the pool's collection deletes the content that no other member refers to under [Content roots](#119-content-roots).
 

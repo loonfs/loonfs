@@ -122,7 +122,7 @@ pub struct GrepResponse {
 pub enum GrepIndexStatus {
     /// No index is maintained for this namespace.
     Disabled,
-    /// An index that is running its initial scan of a checkpoint and can't be searched yet.
+    /// An index that is running its initial scan of a snapshot and can't be searched yet.
     Backfilling {
         /// The namespace sequence that completes the backfill when the index reaches it.
         captured_seq: CommitSeq,
@@ -134,8 +134,8 @@ pub enum GrepIndexStatus {
         )]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         cursor_inode_id: Option<InodeId>,
-        /// The checkpoint that keeps the state being scanned.
-        checkpoint_id: SnapshotId,
+        /// The snapshot that keeps the state being scanned.
+        snapshot_id: SnapshotId,
     },
     /// An index that follows the change feed and can be searched through its watermark.
     Active {
@@ -217,8 +217,8 @@ mod tests {
         let backfilling = GrepIndexStatus::Backfilling {
             captured_seq: CommitSeq(9),
             cursor_inode_id: Some(InodeId(4)),
-            checkpoint_id: SnapshotId::parse("snp_00000000000000000001-00000000000000000000000009")
-                .expect("checkpoint id"),
+            snapshot_id: SnapshotId::parse("snp_00000000000000000001-00000000000000000000000009")
+                .expect("snapshot id"),
         };
         assert_eq!(
             serde_json::to_value(&backfilling).expect("serialize backfilling"),
@@ -226,7 +226,7 @@ mod tests {
                 "status": "backfilling",
                 "captured_seq": 9,
                 "cursor_inode_id": InodeId(4).to_string(),
-                "checkpoint_id": "snp_00000000000000000001-00000000000000000000000009"
+                "snapshot_id": "snp_00000000000000000001-00000000000000000000000009"
             }),
             "a backfill reports its target and its walk, never a watermark"
         );
@@ -252,8 +252,8 @@ mod tests {
         let backfilling = GrepIndexStatus::Backfilling {
             captured_seq: CommitSeq(9),
             cursor_inode_id: None,
-            checkpoint_id: SnapshotId::parse("snp_00000000000000000001-00000000000000000000000009")
-                .expect("checkpoint id"),
+            snapshot_id: SnapshotId::parse("snp_00000000000000000001-00000000000000000000000009")
+                .expect("snapshot id"),
         };
         assert!(
             !backfilling.is_built_through(CommitSeq(0)),
@@ -314,10 +314,10 @@ mod tests {
                 status: GrepIndexStatus::Backfilling {
                     captured_seq: CommitSeq(12),
                     cursor_inode_id: Some(InodeId(4)),
-                    checkpoint_id: SnapshotId::parse(
+                    snapshot_id: SnapshotId::parse(
                         "snp_00000000000000000001-00000000000000000000000009"
                     )
-                    .expect("checkpoint id"),
+                    .expect("snapshot id"),
                 },
                 reorganize_pending: false,
             })
@@ -327,7 +327,7 @@ mod tests {
                 "status": "backfilling",
                 "captured_seq": 12,
                 "cursor_inode_id": InodeId(4).to_string(),
-                "checkpoint_id": "snp_00000000000000000001-00000000000000000000000009",
+                "snapshot_id": "snp_00000000000000000001-00000000000000000000000009",
                 "reorganize_pending": false
             })
         );

@@ -207,7 +207,7 @@ async fn maintenance_preserves_the_logical_head() {
                 .expect("fold the WAL tail"),
         )
         .await
-        .expect("checkpoint");
+        .expect("snapshot");
     engine
         .advance_retention_floor(loonfs_core::RetentionTarget::Head)
         .await

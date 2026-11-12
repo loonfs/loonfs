@@ -1,4 +1,4 @@
-//! Checkpoint metadata cache, scan sharing, filters, and lookup behavior.
+//! Snapshot metadata cache, scan sharing, filters, and lookup behavior.
 
 use super::*;
 use crate::block_cache::DecodedBlockCacheStats;
@@ -29,7 +29,7 @@ async fn eight_files_one_row_per_segment<S: ObjectStore + ?Sized>(
         max_rows_per_segment: NonZeroUsize::MIN,
         ..MetadataRunPolicy::default()
     };
-    checkpoint_then_compact(store, namespace_id, context, policy).await
+    snapshot_then_compact(store, namespace_id, context, policy).await
 }
 
 #[tokio::test]
@@ -294,16 +294,16 @@ async fn cached_manifest_carries_its_scan_order_runs() {
             .await
             .expect("write file");
     }
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("create first checkpoint");
+        .expect("create first snapshot");
     crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
         .write_file_bytes("/docs/tail.txt", b"tail\n", None)
         .await
         .expect("write tail file");
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("create second checkpoint");
+        .expect("create second snapshot");
     let manifest_number = current_manifest_number(&store, &namespace_id).await;
 
     let cache = MetadataSegmentCache::unshared(usize::MAX);
@@ -326,7 +326,7 @@ async fn cached_manifest_carries_its_scan_order_runs() {
 
     assert!(
         first.scan_runs.len() >= 2,
-        "two checkpoints should leave more than one run to order"
+        "two snapshots should leave more than one run to order"
     );
     assert_eq!(
         *first.scan_runs,
@@ -465,12 +465,12 @@ async fn segment_range_page_merges_base_and_delta_in_row_key_order() {
         max_rows_per_segment: NonZeroUsize::MIN,
         ..MetadataRunPolicy::default()
     };
-    checkpoint_then_compact(&store, &namespace_id, &context, policy).await;
+    snapshot_then_compact(&store, &namespace_id, &context, policy).await;
     crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
         .write_file_bytes("/docs/b.txt", b"b\n", None)
         .await
         .expect("write b");
-    checkpoint_then_compact(&store, &namespace_id, &context, policy).await;
+    snapshot_then_compact(&store, &namespace_id, &context, policy).await;
     let manifest_number = current_manifest_number(&store, &namespace_id).await;
     let segments =
         super::load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest_number)
@@ -520,7 +520,7 @@ async fn lookup_skips_segments_whose_filter_rules_the_name_out() {
         .await
         .expect("bootstrap");
 
-    // "beta" is written to the base run; a second checkpoint puts "alpha" and
+    // "beta" is written to the base run; a second snapshot puts "alpha" and
     // "gamma" in a delta run. The delta bind segment's key range then straddles
     // "beta", so min/max pruning cannot exclude it — only its bloom filter
     // can prove the name absent.
@@ -528,9 +528,9 @@ async fn lookup_skips_segments_whose_filter_rules_the_name_out() {
         .write_file_bytes("/docs/beta.txt", b"beta\n", None)
         .await
         .expect("write beta");
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("first checkpoint");
+        .expect("first snapshot");
     crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
         .write_file_bytes("/docs/alpha.txt", b"alpha\n", None)
         .await
@@ -539,9 +539,9 @@ async fn lookup_skips_segments_whose_filter_rules_the_name_out() {
         .write_file_bytes("/docs/gamma.txt", b"gamma\n", None)
         .await
         .expect("write gamma");
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("second checkpoint");
+        .expect("second snapshot");
 
     let manifest_number = current_manifest_number(&store, &namespace_id).await;
     let cache = MetadataSegmentCache::unshared(usize::MAX);
@@ -619,11 +619,11 @@ async fn lookup_skips_segments_whose_filter_rules_the_name_out() {
         .iter()
         .filter(|run| run.tier == RunTier::Delta)
         .max_by_key(|run| run.run_seq)
-        .expect("the second checkpoint's run")
+        .expect("the second snapshot's run")
         .segments
         .iter()
         .find(|descriptor| descriptor.family == ApiMetadataRowFamily::DirentryBinds)
-        .expect("the second checkpoint's bind segment");
+        .expect("the second snapshot's bind segment");
     let filter = load_segment_filter(&store, None, &SessionBlockMemo::default(), delta_bind)
         .await
         .expect("load the delta filter");
@@ -662,18 +662,18 @@ async fn a_listing_skips_a_run_without_the_directorys_rows_by_its_parent_probe()
             .await
             .expect("write a file");
     }
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("first checkpoint");
+        .expect("first snapshot");
     for path in ["/root.txt", "/later/b.txt"] {
         fixture
             .write_file_bytes(path, b"second\n", None)
             .await
             .expect("write a file");
     }
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("second checkpoint");
+        .expect("second snapshot");
 
     let manifest_number = current_manifest_number(&store, &namespace_id).await;
     let cache = MetadataSegmentCache::unshared(usize::MAX);
@@ -691,11 +691,11 @@ async fn a_listing_skips_a_run_without_the_directorys_rows_by_its_parent_probe()
         .runs
         .iter()
         .max_by_key(|run| run.run_seq)
-        .expect("the second checkpoint's run")
+        .expect("the second snapshot's run")
         .segments
         .iter()
         .find(|descriptor| descriptor.family == ApiMetadataRowFamily::DirentryBinds)
-        .expect("the second checkpoint's bind segment")
+        .expect("the second snapshot's bind segment")
         .clone();
     let young_filter =
         load_segment_filter(&store, None, &SessionBlockMemo::default(), &young_binds)
@@ -754,7 +754,7 @@ async fn a_view_reuses_decoded_blocks_without_a_shared_cache() {
         .await
         .expect("write hello");
     let manifest_number = {
-        checkpoint_then_compact(
+        snapshot_then_compact(
             &store,
             &namespace_id,
             &context,
@@ -816,7 +816,7 @@ async fn a_zero_block_memo_and_block_cache_refetch_data_blocks_for_reads_and_fol
         .write_file_bytes("/docs/hello.txt", b"hello\n", None)
         .await
         .expect("write hello");
-    checkpoint_then_compact(
+    snapshot_then_compact(
         &store,
         &namespace_id,
         &context,
@@ -878,7 +878,7 @@ async fn point_lookups_skip_inline_filtered_runs_without_fetches() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    // Three checkpoints append three delta runs whose direntry key ranges
+    // Three snapshots append three delta runs whose direntry key ranges
     // straddle one another (each run binds names from both ends of the
     // alphabet), so range pruning alone cannot narrow a name lookup below
     // several candidate segments — the shape a bulk-loaded directory's
@@ -890,9 +890,9 @@ async fn point_lookups_skip_inline_filtered_runs_without_fetches() {
                 .await
                 .expect("write file");
         }
-        create_checkpoint(&store, &namespace_id, &context)
+        create_snapshot(&store, &namespace_id, &context)
             .await
-            .expect("create checkpoint");
+            .expect("create snapshot");
     }
     let manifest_number = current_manifest_number(&store, &namespace_id).await;
     let segments =
@@ -1029,9 +1029,9 @@ async fn corrupt_inline_filter_fails_the_lookup() {
         .write_file_bytes("/docs/hello.txt", b"hello\n", None)
         .await
         .expect("write hello");
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("create checkpoint");
+        .expect("create snapshot");
     let manifest_number = current_manifest_number(&store, &namespace_id).await;
     let segments =
         load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest_number)
@@ -1073,11 +1073,11 @@ async fn corrupt_inline_filter_fails_the_lookup() {
     );
 }
 
-/// One checkpointed direntry segment, with the inline filter copy stripped
+/// One direntry segment from a snapshot's manifest, with the inline filter copy stripped
 /// from its descriptor so both the filter and the index have to come from
 /// somewhere other than the manifest — the shape a base segment, whose
 /// filter is too big to inline, already has.
-async fn checkpointed_direntry_segment() -> (
+async fn direntry_segment_after_snapshot() -> (
     tempfile::TempDir,
     RecordingStore<LocalFsStore>,
     MetadataSegmentRef,
@@ -1097,9 +1097,9 @@ async fn checkpointed_direntry_segment() -> (
             .await
             .expect("write file");
     }
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("create checkpoint");
+        .expect("create snapshot");
     let manifest_number = current_manifest_number(&store, &namespace_id).await;
     let segments =
         load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest_number)
@@ -1120,7 +1120,7 @@ async fn checkpointed_direntry_segment() -> (
 
 #[tokio::test]
 async fn a_cold_filter_load_fetches_the_index_in_the_same_read() {
-    let (_temp_dir, store, descriptor) = checkpointed_direntry_segment().await;
+    let (_temp_dir, store, descriptor) = direntry_segment_after_snapshot().await;
     let cache = MetadataSegmentCache::unshared(usize::MAX);
     let memo = SessionBlockMemo::default();
 
@@ -1143,7 +1143,7 @@ async fn a_cold_filter_load_fetches_the_index_in_the_same_read() {
     assert!(!index.is_empty(), "a segment holds at least one data block");
 }
 
-/// One checkpointed direntry segment rebuilt with a one-byte block target,
+/// One direntry segment from a snapshot's manifest, rebuilt with a one-byte block target,
 /// so every row is written to its own data block. A handful of test rows would
 /// otherwise fit in one block, and the coalescing span path only says
 /// anything with several. Returns the segment's index, read with no caches,
@@ -1170,9 +1170,9 @@ async fn multi_block_direntry_segment() -> (
             .await
             .expect("write file");
     }
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("create checkpoint");
+        .expect("create snapshot");
     let manifest_number = current_manifest_number(&store, &namespace_id).await;
     let segments =
         load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest_number)
@@ -1490,7 +1490,7 @@ async fn a_wide_read_passes_handles_and_stored_bytes_to_the_block_cache() {
 }
 
 #[tokio::test]
-async fn checkpoint_delta_update_does_not_read_existing_metadata_segments() {
+async fn snapshot_delta_update_does_not_read_existing_metadata_segments() {
     let temp_dir = tempdir().expect("tempdir");
     let store =
         RecordingStore::metadata_segments(LocalFsStore::new(temp_dir.path()).expect("store"));
@@ -1504,9 +1504,9 @@ async fn checkpoint_delta_update_does_not_read_existing_metadata_segments() {
         .write_file_bytes("/docs/first.txt", b"first\n", None)
         .await
         .expect("write first");
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("create first checkpoint");
+        .expect("create first snapshot");
 
     crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
         .write_file_bytes("/docs/second.txt", b"second\n", None)
@@ -1514,20 +1514,20 @@ async fn checkpoint_delta_update_does_not_read_existing_metadata_segments() {
         .expect("write second");
     store.reset();
 
-    let checkpoint = create_checkpoint(&store, &namespace_id, &context)
+    let snapshot = create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("create delta checkpoint");
+        .expect("create delta snapshot");
 
     assert_eq!(
         store.count(OperationSelector::Read),
         0,
-        "delta checkpoint update should use the WAL tail and copy existing metadata file refs"
+        "delta snapshot update should use the WAL tail and copy existing metadata file refs"
     );
     let materialized =
-        load_manifest_state_for_inspection(&store, &namespace_id, checkpoint.manifest_no)
+        load_manifest_state_for_inspection(&store, &namespace_id, snapshot.manifest_no)
             .await
-            .expect("load checkpoint manifest");
-    // One delta run per checkpoint, the first included.
+            .expect("load snapshot manifest");
+    // One delta run per snapshot, the first included.
     assert_eq!(delta_runs(&materialized.manifest).len(), 2);
 }
 
@@ -1535,7 +1535,7 @@ async fn checkpoint_delta_update_does_not_read_existing_metadata_segments() {
 async fn two_loaded_views_share_one_read_working_pool_and_return_the_same_rows() {
     use crate::cache::ReadWorkingMemory;
 
-    let (_root, store, descriptor) = checkpointed_direntry_segment().await;
+    let (_root, store, descriptor) = direntry_segment_after_snapshot().await;
     let namespace_id = &descriptor.owner_namespace_id;
     let manifest_number = current_manifest_number(&store, namespace_id).await;
     let cache = |pool| {

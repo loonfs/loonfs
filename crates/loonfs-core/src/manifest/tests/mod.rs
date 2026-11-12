@@ -129,7 +129,7 @@ async fn load_manifest_projection_metadata_state<S: ObjectStore + ?Sized>(
             .collect::<Vec<_>>();
         rows.extend(manifest_rows_for_family(&tail_rows, family));
         rows.sort_by_key(|row| row.row_key_for_family(family));
-        append_rows_to_metadata(&mut metadata_state, family, "checkpoint projection", &rows)?;
+        append_rows_to_metadata(&mut metadata_state, family, "snapshot projection", &rows)?;
     }
     Ok((projection.head, metadata_state.build()))
 }
@@ -137,11 +137,11 @@ async fn load_manifest_projection_metadata_state<S: ObjectStore + ?Sized>(
 /// Every lifecycle test in this file takes snapshots as one user owner; owner-specific
 /// behavior (fork owners, distinct-owner records) is exercised explicitly
 /// where it matters.
-pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
+pub(crate) async fn create_snapshot<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &WriterAt,
-) -> crate::error::Result<loonfs_types::Checkpoint> {
+) -> crate::error::Result<loonfs_types::SnapshotRecord> {
     let namespace = crate::test_support::namespace_store(store, namespace_id);
     let manifest = crate::test_support::folded_manifest(&namespace).await?;
     namespace
@@ -154,7 +154,7 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
             &context.clock(),
         )
         .await
-        .map(crate::snapshot::checkpoint_summary)
+        .map(crate::snapshot::snapshot_record_summary)
 }
 
 pub(crate) use crate::test_support::writer_at;
@@ -277,20 +277,20 @@ async fn advance_floor_through<S: ObjectStore + ?Sized>(
     assert_eq!(advanced.response.retention_floor_seq, deletion_seq);
 }
 
-/// Checkpoints, then compacts every delta run into the base through
+/// Creates a snapshot, then compacts every delta run into the base through
 /// compaction units, returning the resulting current manifest number. The
-/// old synchronous rebuild produced this shape in one checkpoint call;
+/// old synchronous rebuild produced this shape in one snapshot call;
 /// tests that need a compacted base with a specific segmentation policy use
 /// this instead.
-async fn checkpoint_then_compact<S: ObjectStore + ?Sized>(
+async fn snapshot_then_compact<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &WriterAt,
     policy: MetadataRunPolicy,
 ) -> ManifestNo {
-    create_checkpoint(store, namespace_id, context)
+    create_snapshot(store, namespace_id, context)
         .await
-        .expect("create checkpoint");
+        .expect("create snapshot");
     drain_compaction(
         store,
         namespace_id,
@@ -724,7 +724,7 @@ fn manifest_no(seq: CommitSeq) -> ManifestNo {
     ManifestNo(seq.0)
 }
 
-async fn write_file_and_checkpoint(
+async fn write_file_and_create_snapshot(
     store: &LocalFsStore,
     namespace_id: &NamespaceId,
     context: &WriterAt,
@@ -736,9 +736,9 @@ async fn write_file_and_checkpoint(
         .write_file_bytes(&path, bytes.as_bytes(), None)
         .await
         .expect("write file");
-    create_checkpoint(store, namespace_id, context)
+    create_snapshot(store, namespace_id, context)
         .await
-        .expect("create checkpoint")
+        .expect("create snapshot")
         .captured_seq
 }
 
@@ -755,7 +755,7 @@ fn delta_run_count(payload: &NamespaceManifestPayload) -> usize {
 }
 
 // Test support: a manifest built directly from a MetadataState, used to
-// author arbitrary layouts without driving the full checkpoint pipeline.
+// author arbitrary layouts without driving the full snapshot pipeline.
 #[cfg(test)]
 pub(crate) struct ManifestMetadataSource<'a> {
     pub(crate) head: &'a NamespaceReadState,

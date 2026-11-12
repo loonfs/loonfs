@@ -582,7 +582,7 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
             .expect("fold the WAL tail"),
         )
         .await
-        .expect("create source checkpoint before fork");
+        .expect("create source snapshot before fork");
 
     let source_head = head_state(&store, &source_namespace_id).await;
     assert_eq!(source_head.seq, CommitSeq(1));
@@ -1017,7 +1017,7 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
         .gc(&options, &aged.clock())
         .await
         .expect("ancestor waits");
-    assert_eq!(ancestor_waiting.deleted_checkpoints_by_owner.fork, 0);
+    assert_eq!(ancestor_waiting.deleted_snapshots_by_owner.fork, 0);
     namespace_engine(&store, &descendant, &aged)
         .delete_namespace(Default::default())
         .await
@@ -1040,7 +1040,7 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
         .gc(&options, &aged.clock())
         .await
         .expect("wait for descendant grace");
-    assert_eq!(waiting.deleted_checkpoints_by_owner.fork, 0);
+    assert_eq!(waiting.deleted_snapshots_by_owner.fork, 0);
     aged.now_ms = descendant_deadline;
     namespace_store(&store, &descendant)
         .gc(&options, &aged.clock())
@@ -1050,13 +1050,13 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
         .gc(&options, &aged.clock())
         .await
         .expect("parent releases its fork snapshot");
-    assert_eq!(released.deleted_checkpoints_by_owner.fork, 1);
+    assert_eq!(released.deleted_snapshots_by_owner.fork, 1);
     assert_eq!(released.reclaimable_at_ms, Some(parent_deadline));
     let released = namespace_store(&store, &ancestor)
         .gc(&options, &aged.clock())
         .await
         .expect("collect ancestor after parent releases its snapshot");
-    assert_eq!(released.deleted_checkpoints_by_owner.fork, 0);
+    assert_eq!(released.deleted_snapshots_by_owner.fork, 0);
     assert!(released.reclaimable_at_ms.is_some());
 }
 
@@ -1099,7 +1099,7 @@ async fn fork_namespace_rejects_corrupt_source_manifest_descriptors() {
     let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
 
     seed_source_namespace_for_fork(&store, &source_namespace_id, &context).await;
-    let checkpoint = namespace_engine(&store, &source_namespace_id, &context)
+    let snapshot = namespace_engine(&store, &source_namespace_id, &context)
         .create_snapshot(
             "test-snapshot".to_owned(),
             None,
@@ -1111,10 +1111,10 @@ async fn fork_namespace_rejects_corrupt_source_manifest_descriptors() {
             .expect("fold the WAL tail"),
         )
         .await
-        .expect("create source checkpoint");
+        .expect("create source snapshot");
 
     let source_record =
-        load_snapshot_record(&store, &source_namespace_id, &checkpoint.snapshot_id).await;
+        load_snapshot_record(&store, &source_namespace_id, &snapshot.snapshot_id).await;
     let manifest_key = metadata_manifest_object(
         &source_namespace_id,
         &source_record.snapshot_id.manifest_no(),
@@ -1154,7 +1154,7 @@ async fn fork_namespace_rejects_corrupt_source_manifest_descriptors() {
 }
 
 #[tokio::test]
-async fn fork_source_checkpoint_failure_leaves_target_namespace_absent() {
+async fn fork_source_snapshot_failure_leaves_target_namespace_absent() {
     let temp_dir = tempdir().expect("tempdir");
     let source_namespace_id = namespace_id("demo");
     let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
@@ -1166,14 +1166,14 @@ async fn fork_source_checkpoint_failure_leaves_target_namespace_absent() {
             source_namespace_id.as_str()
         )),
         OperationSelector::PutCreateIfAbsent,
-        InjectedError::PermissionDenied("injected source checkpoint failure".to_owned()),
+        InjectedError::PermissionDenied("injected source snapshot failure".to_owned()),
     );
     store.fail_next(1);
     seed_source_namespace_for_fork(&store, &source_namespace_id, &context).await;
 
     let error = fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
         .await
-        .expect_err("source checkpoint failure should abort fork before target publication");
+        .expect_err("source snapshot failure should abort fork before target publication");
     assert_eq!(error.code(), ErrorCode::StoragePermissionDenied);
     assert!(
         namespace_keys(&store, &clone_namespace_id).await.is_empty(),
@@ -1809,7 +1809,7 @@ async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_cont
             .gc(&options, &aged.clock())
             .await
             .expect("retire leaf");
-        assert_eq!(report.deleted_checkpoints_by_owner.fork, 1);
+        assert_eq!(report.deleted_snapshots_by_owner.fork, 1);
         assert!(
             store
                 .snapshot()

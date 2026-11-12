@@ -1,4 +1,4 @@
-//! HTTP snapshot lifecycle operations and the checkpoint inventory.
+//! HTTP snapshot lifecycle operations and the snapshot inventory.
 
 use crate::common::http_split_support::test_config;
 use crate::common::start_server;
@@ -258,11 +258,11 @@ async fn http_snapshots_validate_names_ttls_and_ids() {
     harness.server.abort();
 }
 
-/// Checks that the snapshot listing and the checkpoint inventory list the
+/// Checks that the snapshot listing and the snapshot inventory list the
 /// same snapshot as one record, that the inventory also lists fork snapshots, and
 /// that the snapshot routes refuse a fork snapshot's ID.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_snapshots_and_the_checkpoint_inventory_list_the_same_snapshot() {
+async fn http_user_and_maintenance_snapshot_listings_list_the_same_snapshot() {
     let temp_dir = tempdir().expect("tempdir");
     let mut config = test_config(
         temp_dir.path().join("store"),
@@ -297,26 +297,26 @@ async fn http_snapshots_and_the_checkpoint_inventory_list_the_same_snapshot() {
         .await
         .expect("fork namespace");
 
-    let checkpoints: serde_json::Value = retry_result_on_macos_teardown_einval(|| {
+    let records: serde_json::Value = retry_result_on_macos_teardown_einval(|| {
         decode_response(
             raw_agent()
                 .get(&format!(
-                    "{}/v0/maintenance/namespaces/{}/checkpoints",
+                    "{}/v0/maintenance/namespaces/{}/snapshots",
                     harness.server_url, namespace
                 ))
                 .set("authorization", "Bearer test-token")
                 .call(),
         )
     })
-    .expect("list checkpoints");
-    let checkpoints = checkpoints["checkpoints"]
+    .expect("list snapshot records");
+    let records = records["snapshots"]
         .as_array()
-        .expect("checkpoint list is an array");
-    assert_eq!(checkpoints.len(), 3);
-    let listed_snapshot = checkpoints
+        .expect("snapshot list is an array");
+    assert_eq!(records.len(), 3);
+    let listed_snapshot = records
         .iter()
-        .find(|item| item["checkpoint_id"] == expiring.snapshot_id.as_str())
-        .expect("the snapshot is in the checkpoint inventory");
+        .find(|item| item["snapshot_id"] == expiring.snapshot_id.as_str())
+        .expect("the snapshot is in the snapshot inventory");
     assert_eq!(
         listed_snapshot["owner"],
         serde_json::json!({"kind": "user", "name": "brief"})
@@ -325,10 +325,10 @@ async fn http_snapshots_and_the_checkpoint_inventory_list_the_same_snapshot() {
         listed_snapshot["expires_at_ms"],
         serde_json::json!(expiring.expires_at_ms)
     );
-    let fork_snapshot = checkpoints
+    let fork_snapshot = records
         .iter()
         .find(|item| item["owner"]["kind"] == "fork")
-        .expect("the fork snapshot is in the checkpoint inventory")["checkpoint_id"]
+        .expect("the fork snapshot is in the snapshot inventory")["snapshot_id"]
         .as_str()
         .expect("fork snapshot id")
         .to_owned();
@@ -416,7 +416,7 @@ async fn snapshot_lifecycle_round_trips_through_the_client() {
 }
 
 #[tokio::test]
-async fn snapshot_and_checkpoint_listings_reject_each_others_cursors() {
+async fn user_and_maintenance_snapshot_listings_reject_each_others_cursors() {
     use loonfs_client::ClientError;
     use loonfs_test_support::ids::page_limit;
 
@@ -464,28 +464,28 @@ async fn snapshot_and_checkpoint_listings_reject_each_others_cursors() {
         .await
         .expect("a snapshot cursor resumes the snapshot listing");
     assert_eq!(resumed.snapshots.len(), 1);
-    let checkpoint_cursor = harness
+    let snapshot_record_cursor = harness
         .client
-        .list_checkpoints(&namespace)
+        .list_snapshot_records(&namespace)
         .page_limit(page_limit(1))
         .page()
         .await
-        .expect("first checkpoint page")
+        .expect("first snapshot record page")
         .next_cursor
-        .expect("checkpoint cursor");
+        .expect("snapshot record cursor");
 
     let rejections = [
         harness
             .client
             .list_snapshots(&namespace)
             .page_limit(page_limit(1))
-            .cursor(Some(checkpoint_cursor))
+            .cursor(Some(snapshot_record_cursor))
             .page()
             .await
             .map(drop),
         harness
             .client
-            .list_checkpoints(&namespace)
+            .list_snapshot_records(&namespace)
             .page_limit(page_limit(1))
             .cursor(Some(snapshot_cursor))
             .page()
@@ -507,7 +507,7 @@ async fn snapshot_and_checkpoint_listings_reject_each_others_cursors() {
 }
 
 #[tokio::test]
-async fn snapshot_and_checkpoint_retrieves_return_their_listed_rows() {
+async fn user_and_maintenance_snapshot_retrieves_return_their_listed_rows() {
     use loonfs_client::ClientError;
 
     let temp_dir = tempdir().expect("tempdir");
@@ -547,18 +547,18 @@ async fn snapshot_and_checkpoint_retrieves_return_their_listed_rows() {
         .await
         .expect("retrieve snapshot");
     assert_eq!(listed.snapshots, vec![retrieved]);
-    let checkpoints = harness
+    let records = harness
         .client
-        .list_checkpoints(&namespace)
+        .list_snapshot_records(&namespace)
         .page()
         .await
-        .expect("list checkpoints");
-    let checkpoint = harness
+        .expect("list snapshot records");
+    let record = harness
         .client
-        .get_checkpoint(&namespace, &created.snapshot_id)
+        .get_snapshot_record(&namespace, &created.snapshot_id)
         .await
-        .expect("retrieve checkpoint");
-    assert_eq!(checkpoints.checkpoints, vec![checkpoint]);
+        .expect("retrieve snapshot record");
+    assert_eq!(records.snapshots, vec![record]);
 
     harness
         .client
@@ -585,7 +585,7 @@ async fn snapshot_and_checkpoint_retrieves_return_their_listed_rows() {
         code(
             harness
                 .client
-                .get_checkpoint(&namespace, &created.snapshot_id)
+                .get_snapshot_record(&namespace, &created.snapshot_id)
                 .await
                 .expect_err("a deleted snapshot is not found")
         ),

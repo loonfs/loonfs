@@ -11,7 +11,7 @@ use loonfs_merge::{MergeSessionOutcome, MergeSessionState, MergeSessionStatus};
 use loonfs_types::{
     AbsolutePath, CapabilityDocument, CommitId, CommitSeq, DeleteNamespaceResponse,
     DeleteSnapshotResponse, FileRevision, GrepIndex, GrepMatch, InodeId, ListChangesResponse,
-    ListCheckpointsResponse, ListSnapshotsResponse, NamespaceId, NamespaceMetadata, PathEntry,
+    ListSnapshotRecordsResponse, ListSnapshotsResponse, NamespaceId, NamespaceMetadata, PathEntry,
     RunMaintenanceJobResponse, RunPoolMaintenanceJobResponse, Snapshot, StoreProbeResponse,
 };
 use serde::{Deserialize, Serialize};
@@ -188,7 +188,7 @@ pub(crate) enum CommandData {
     SnapshotsListed(ListSnapshotsResponse),
     SnapshotExtended(Snapshot),
     SnapshotDeleted(DeleteSnapshotResponse),
-    CheckpointsListed(ListCheckpointsResponse),
+    SnapshotRecordsListed(ListSnapshotRecordsResponse),
     /// A merge session after `loonfs merge` ran it as far as it goes.
     MergeSession {
         /// The record file that keeps the session between runs. The command

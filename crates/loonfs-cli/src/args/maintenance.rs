@@ -19,10 +19,10 @@ pub(crate) enum MaintenanceCommand {
     /// Fold the WAL tail whatever its length, and compact metadata until
     /// nothing is due.
     Fold,
-    /// List the checkpoint inventory: every snapshot, user snapshots and fork snapshots.
-    Checkpoint {
+    /// List the snapshot inventory: every snapshot, user snapshots and fork snapshots.
+    Snapshot {
         #[command(subcommand)]
-        command: MaintenanceCheckpointCommand,
+        command: MaintenanceSnapshotCommand,
     },
     /// Inspect and manage the gram content index.
     Index {
@@ -58,11 +58,11 @@ pub(crate) struct MaintenanceRecoverAdministratorArgs {
 }
 
 #[derive(Debug, Subcommand)]
-pub(crate) enum MaintenanceCheckpointCommand {
-    /// List every snapshot in checkpoint ID order, user snapshots and fork snapshots.
+pub(crate) enum MaintenanceSnapshotCommand {
+    /// List every snapshot in snapshot ID order, user snapshots and fork snapshots.
     ///
     /// Expired snapshots remain listed until garbage collection deletes them.
-    List(MaintenanceCheckpointListArgs),
+    List(MaintenanceSnapshotListArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -151,7 +151,7 @@ pub(crate) struct MaintenanceRetentionWindowArgs {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct MaintenanceCheckpointListArgs {
+pub(crate) struct MaintenanceSnapshotListArgs {
     #[command(flatten)]
     pub pagination: PaginationArgs,
 }

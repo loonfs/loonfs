@@ -633,7 +633,7 @@ fn begin_upload_validates_controls_without_replay_reads() {
     )
     .expect("put file");
     fs.create_snapshot_blocking(&namespace_id)
-        .expect("checkpoint");
+        .expect("snapshot");
     fs.put_file_with_options_blocking(
         &namespace_id,
         "/docs/hello.txt",

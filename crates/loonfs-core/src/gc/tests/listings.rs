@@ -90,7 +90,7 @@ async fn a_collection_heads_only_the_discovery_probe_and_successor() {
         .gc(&options(), &context(1_000 + retirement_ms()).clock())
         .await
         .expect("retire fork");
-    assert_eq!(retired.deleted_checkpoints_by_owner.fork, 1);
+    assert_eq!(retired.deleted_snapshots_by_owner.fork, 1);
     // The fork's hint lags at its first manifest, so discovery's probe finds
     // the manifest after it and probes one window above that, and a tombstone
     // needs no successor check.
@@ -191,7 +191,7 @@ async fn snapshot_views_add_segment_reads_only_for_uncovered_layout_segments() {
             .load_current_manifest()
             .await
             .expect("previous");
-        let snapshot = create_checkpoint(&store, &namespace_id, &setup)
+        let snapshot = create_snapshot(&store, &namespace_id, &setup)
             .await
             .expect("take a snapshot of the previous manifest");
         if own_runs {
@@ -244,7 +244,7 @@ async fn snapshot_views_add_segment_reads_only_for_uncovered_layout_segments() {
         let mut rooted_reads = rooted.take_get_keys();
         rooted_reads.sort();
         crate::test_support::namespace_store(&store, &namespace_id)
-            .delete_snapshot_record(&snapshot.checkpoint_id)
+            .delete_snapshot_record(&snapshot.snapshot_id)
             .await
             .expect("release the snapshot");
         let current_only = RecordingStore::metadata_segments(Arc::clone(&store));
@@ -299,7 +299,7 @@ async fn a_collection_reads_each_extent_filter_once_however_many_snapshot_views_
             &setup,
         )
         .await;
-        create_checkpoint(setup_store, &namespace_id, &setup)
+        create_snapshot(setup_store, &namespace_id, &setup)
             .await
             .expect("fold and take a snapshot");
         let folded = crate::test_support::namespace_store(setup_store, &namespace_id)

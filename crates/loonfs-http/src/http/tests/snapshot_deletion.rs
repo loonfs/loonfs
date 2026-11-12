@@ -1,4 +1,4 @@
-//! Snapshot deletion and the checkpoint inventory's read-only routes through
+//! Snapshot deletion and the snapshot inventory's read-only routes through
 //! the router.
 
 use super::*;
@@ -38,10 +38,10 @@ async fn request(
 }
 
 /// Checks that deleting a snapshot deletes its record once and that repeating
-/// the delete succeeds without a write, that the checkpoint inventory has
+/// the delete succeeds without a write, that the snapshot inventory has
 /// no create or delete route, and that a deleted snapshot can't be extended.
 #[tokio::test]
-async fn snapshot_deletes_are_idempotent_and_the_checkpoint_inventory_is_read_only() {
+async fn snapshot_deletes_are_idempotent_and_the_snapshot_inventory_is_read_only() {
     let directory = tempdir().expect("tempdir");
     let store = Arc::new(RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
@@ -59,7 +59,7 @@ async fn snapshot_deletes_are_idempotent_and_the_checkpoint_inventory_is_read_on
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
         .expect("namespace");
-    let checkpoints = format!("/v0/maintenance/namespaces/{namespace_id}/checkpoints");
+    let snapshot_records = format!("/v0/maintenance/namespaces/{namespace_id}/snapshots");
     let snapshots = format!("/v0/namespaces/{namespace_id}/snapshots");
     let (status, created) = request(
         &router,
@@ -74,8 +74,8 @@ async fn snapshot_deletes_are_idempotent_and_the_checkpoint_inventory_is_read_on
     let uri = format!("{snapshots}/{snapshot_id}");
 
     for (method, path) in [
-        (Method::POST, checkpoints.clone()),
-        (Method::DELETE, format!("{checkpoints}/{snapshot_id}")),
+        (Method::POST, snapshot_records.clone()),
+        (Method::DELETE, format!("{snapshot_records}/{snapshot_id}")),
     ] {
         store.reset();
         let (status, body) = request(&router, method, &path, json!({"name": "view"})).await;
@@ -155,17 +155,17 @@ async fn a_snapshot_on_a_deleted_namespace_stays_deletable() {
     let (status, listed) = request(
         &router,
         Method::GET,
-        &format!("/v0/maintenance/namespaces/{namespace_id}/checkpoints"),
+        &format!("/v0/maintenance/namespaces/{namespace_id}/snapshots"),
         json!({}),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{listed}");
-    let fork_snapshot_id = listed["checkpoints"]
+    let fork_snapshot_id = listed["snapshots"]
         .as_array()
-        .expect("checkpoints")
+        .expect("snapshots")
         .iter()
-        .find(|checkpoint| checkpoint["owner"]["kind"] == "fork")
-        .expect("fork snapshot")["checkpoint_id"]
+        .find(|snapshot| snapshot["owner"]["kind"] == "fork")
+        .expect("fork snapshot")["snapshot_id"]
         .as_str()
         .expect("fork snapshot id")
         .to_owned();

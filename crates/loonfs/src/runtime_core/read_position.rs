@@ -248,7 +248,7 @@ impl RuntimeCore {
     /// A HEAD that finds nothing records the check. A HEAD that finds a
     /// successor starts the walk of [`same_epoch_manifests_above`]. The
     /// position moves onto each manifest with the position's writer epoch (a
-    /// fold, a compaction, a checkpoint, or a snapshot, by this runtime or by
+    /// fold, a compaction, or a snapshot, by this runtime or by
     /// another process) in order, as it moves onto the manifests this
     /// runtime publishes (see [`HeadPositions::move_position`]). A fold that
     /// folds past the position's tip covered a WAL object that the session

@@ -222,7 +222,7 @@ impl ExecutionBudget {
 
     /// Waits for a fold permit. Every fold has one, and so does every
     /// operation that may fold first: a namespace deletion, and the creation
-    /// of a checkpoint, a snapshot, or a fork of the current head.
+    /// of a snapshot or a fork of the current head.
     pub(crate) async fn fold_permit(&self) -> BudgetPermit<'_> {
         self.inner.folds.acquire().await
     }
@@ -322,7 +322,7 @@ impl ExecutionBudgetBuilder {
 
     /// Sets the maximum number of WAL tails folded at once. Session folds,
     /// [`Maintenance`](crate::Maintenance) folds, namespace deletions, and
-    /// the creation of checkpoints, snapshots, and forks of the current head
+    /// the creation of snapshots and forks of the current head
     /// all take a fold permit, because each may fold. Defaults to
     /// [`DEFAULT_MAX_CONCURRENT_FOLDS`].
     pub fn max_concurrent_folds(mut self, limit: NonZeroUsize) -> Self {

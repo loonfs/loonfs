@@ -24,8 +24,8 @@ use super::handlers_query::{
     grep_queries_not_served,
 };
 use super::handlers_snapshots::{
-    create_snapshot, delete_snapshot, extend_snapshot, get_checkpoint, get_snapshot,
-    list_checkpoints, list_snapshots,
+    create_snapshot, delete_snapshot, extend_snapshot, get_snapshot, get_snapshot_record,
+    list_snapshot_records, list_snapshots,
 };
 use super::handlers_store::probe_store;
 use super::handlers_uploads::{
@@ -186,9 +186,9 @@ routes! {
             post(grep_index_not_maintained),
         ),
     },
-    "/v0/maintenance/namespaces/{namespace_id}/checkpoints" => { GET list_checkpoints },
-    "/v0/maintenance/namespaces/{namespace_id}/checkpoints/{checkpoint_id}" => {
-        GET get_checkpoint,
+    "/v0/maintenance/namespaces/{namespace_id}/snapshots" => { GET list_snapshot_records },
+    "/v0/maintenance/namespaces/{namespace_id}/snapshots/{snapshot_id}" => {
+        GET get_snapshot_record,
     },
     "/v0/maintenance/namespaces/{namespace_id}/jobs" => { POST run_maintenance_job [deadline_exempt] },
     "/v0/maintenance/pools/{pool_id}/jobs" => { POST run_pool_maintenance_job [deadline_exempt] },

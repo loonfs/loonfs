@@ -88,7 +88,7 @@ async fn compact_receipt_past_horizon(
         runtime
             .create_snapshot(namespace_id)
             .await
-            .expect("create checkpoint");
+            .expect("create snapshot");
     }
     let advanced = runtime
         .advance_retention_floor(namespace_id)
@@ -737,7 +737,7 @@ async fn a_retention_trimmed_commit_seq_leaves_the_conflict_standing() {
     runtime
         .create_snapshot(&namespace_id)
         .await
-        .expect("create checkpoint");
+        .expect("create snapshot");
     let advanced = runtime
         .advance_retention_floor(&namespace_id)
         .await
