@@ -8,7 +8,7 @@ use crate::storage::content::{content_object_key_for_ref, DurableContentValidati
 use crate::storage::content_location::extent_object_key;
 use crate::storage::content_location::ContentLocation;
 use crate::storage::tail_content::{assemble_tail_content, write_tail_content, ContentWrites};
-use crate::PermitPool;
+use crate::Permits;
 use loonfs_objectstore::ObjectStore;
 use loonfs_objectstore::ObjectStoreErrorKind;
 use loonfs_types::options::AttributeInclusion;
@@ -201,7 +201,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         &self,
         content_ref: &ContentRef,
         start_offset: u64,
-        content_writes: &PermitPool,
+        content_writes: &Permits,
     ) -> Result<Vec<ObjectRange>> {
         let store = self.segments.store();
         if start_offset != 0 && start_offset >= content_ref.size_bytes {
@@ -291,7 +291,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         revision_no: Option<RevisionNo>,
         start_offset: u64,
         access: &ReadAccess<'_, S>,
-        content_writes: &PermitPool,
+        content_writes: &Permits,
     ) -> Result<DirectDownloadTarget> {
         let entry = self
             .resolve_file_content(absolute_path, revision_no, access)
@@ -325,7 +325,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         revision_no: Option<RevisionNo>,
         start_offset: u64,
         access: &ReadAccess<'_, S>,
-        content_writes: &PermitPool,
+        content_writes: &Permits,
     ) -> Result<DirectDownloadByInodeTarget> {
         let revision = match revision_no {
             Some(revision_no) => {

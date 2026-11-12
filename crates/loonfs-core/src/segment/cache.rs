@@ -187,7 +187,7 @@ pub type DecodedMetadataSegmentBlock = DecodedSegmentBlock<
 >;
 
 /// Most bytes that the block memo of a read without a shared read working
-/// memory keeps, in a pool of the read's own.
+/// memory keeps, in a budget of the read's own.
 const MAX_UNSHARED_READ_WORKING_BYTES: usize = 64 * 1024 * 1024;
 
 /// Returns a read working memory of [`MAX_UNSHARED_READ_WORKING_BYTES`] that

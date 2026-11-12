@@ -679,12 +679,12 @@ async fn one_namespace_id_in_two_stores_is_charged_separately() {
 #[tokio::test]
 async fn content_write_permits_default_to_32_and_count_what_holds_and_waits() {
     let budget = ExecutionBudget::default();
-    let pool = budget.content_writes();
+    let permits = budget.content_writes();
     let held = futures::future::join_all(
-        (0..crate::DEFAULT_MAX_CONCURRENT_CONTENT_WRITES.get()).map(|_| pool.acquire()),
+        (0..crate::DEFAULT_MAX_CONCURRENT_CONTENT_WRITES.get()).map(|_| permits.acquire()),
     )
     .await;
-    let mut waiting = Box::pin(pool.acquire());
+    let mut waiting = Box::pin(permits.acquire());
     assert!(futures::poll!(waiting.as_mut()).is_pending());
     assert_eq!(
         budget.stats(),

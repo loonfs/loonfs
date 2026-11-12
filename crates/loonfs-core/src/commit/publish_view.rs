@@ -19,7 +19,7 @@ use crate::segment::VerifiedMetadataSegments;
 use crate::storage::tail_content::ContentWrites;
 use crate::time::Observation;
 use crate::wal::ProjectedWalTail;
-use crate::PermitPool;
+use crate::Permits;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::{ChangeSeq, CommitId};
 use std::sync::Arc;
@@ -28,7 +28,7 @@ pub(crate) struct PublishMetadataView<'a, S: ObjectStore + ?Sized> {
     pub(super) acquired_writer: AcquiredWriter,
     /// Where each content write that the batch's planning sends takes its
     /// permit.
-    content_write_permits: &'a PermitPool,
+    content_write_permits: &'a Permits,
     /// The tip observation starts with this load rather than a retained view.
     pub(crate) tail_discovered: bool,
     manifest_segments: VerifiedMetadataSegments<'a, S>,

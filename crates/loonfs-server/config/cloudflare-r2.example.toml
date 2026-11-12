@@ -1,7 +1,7 @@
 bind = "127.0.0.1:9400"
 content_token_secret = "dev-content-token-secret"
 writer_id = "loonfs-server-r2"
-# Derive memory pools from 5 GiB. Omit this to use the Linux cgroup limit.
+# Derive memory budgets from 5 GiB. Omit this to use the Linux cgroup limit.
 # An R2 content write can keep 72 MiB in memory, so at the default counts an
 # R2 server needs at least 4,476 MiB.
 memory_limit_bytes = 5368709120

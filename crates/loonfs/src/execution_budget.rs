@@ -3,7 +3,7 @@
 use crate::metrics::{MetricsRecorder, NoopMetricsRecorder};
 use loonfs_core::cache::ReadWorkingMemory;
 pub(crate) use loonfs_core::BudgetPermit;
-use loonfs_core::PermitPool;
+use loonfs_core::Permits;
 use metrics::{AdmissionInstruments, ExecutionBudgetInstruments};
 use std::fmt;
 use std::num::NonZeroUsize;
@@ -73,12 +73,12 @@ pub struct ExecutionBudget {
 struct ExecutionBudgetInner {
     read_working_memory: Arc<ReadWorkingMemory>,
     admission: AdmittedTotals,
-    reads: PermitPool,
-    publications: PermitPool,
-    folds: PermitPool,
-    compactions: PermitPool,
+    reads: Permits,
+    publications: Permits,
+    folds: Permits,
+    compactions: Permits,
     max_compaction_input_bytes: NonZeroUsize,
-    content_writes: Arc<PermitPool>,
+    content_writes: Arc<Permits>,
 }
 
 impl fmt::Debug for ExecutionBudget {
@@ -144,7 +144,7 @@ impl ExecutionBudget {
         }
     }
 
-    pub(crate) fn content_writes(&self) -> Arc<PermitPool> {
+    pub(crate) fn content_writes(&self) -> Arc<Permits> {
         Arc::clone(&self.inner.content_writes)
     }
 
@@ -256,8 +256,8 @@ pub struct ExecutionBudgetBuilder {
 
 impl ExecutionBudgetBuilder {
     /// Sets the bytes retained by read, publication, and fold memos across
-    /// all runtimes sharing this budget. A full pool makes a memo evict its
-    /// own entries or leave blocks unretained. Reads never wait or fail for
+    /// all runtimes sharing this budget. When the budget is used up, a memo
+    /// evicts its own entries or leaves blocks unretained. Reads never wait or fail for
     /// memory. Defaults to 256 MiB; zero disables retention.
     pub fn max_read_working_bytes(mut self, bytes: usize) -> Self {
         self.max_read_working_bytes = bytes;
@@ -393,12 +393,12 @@ impl ExecutionBudgetBuilder {
                     admitted: Mutex::default(),
                     instruments: admission,
                 },
-                reads: PermitPool::new(self.max_concurrent_reads, Some(reads)),
-                publications: PermitPool::new(self.max_concurrent_publications, Some(publications)),
-                folds: PermitPool::new(self.max_concurrent_folds, Some(folds)),
-                compactions: PermitPool::new(self.max_concurrent_compactions, Some(compactions)),
+                reads: Permits::new(self.max_concurrent_reads, Some(reads)),
+                publications: Permits::new(self.max_concurrent_publications, Some(publications)),
+                folds: Permits::new(self.max_concurrent_folds, Some(folds)),
+                compactions: Permits::new(self.max_concurrent_compactions, Some(compactions)),
                 max_compaction_input_bytes: self.max_compaction_input_bytes,
-                content_writes: Arc::new(PermitPool::new(
+                content_writes: Arc::new(Permits::new(
                     self.max_concurrent_content_writes,
                     Some(content_writes),
                 )),

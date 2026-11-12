@@ -686,8 +686,8 @@ async fn read_working_memory_counts_large_indexes_and_filters() {
     }
     let mut descriptor = segment(&store, &expected).await;
     descriptor.filter_inline = None;
-    let pool = Arc::new(ReadWorkingMemory::new(64 * 1024 * 1024, None));
-    let memo = SessionBlockMemo::new(Arc::clone(&pool));
+    let read_working_memory = Arc::new(ReadWorkingMemory::new(64 * 1024 * 1024, None));
+    let memo = SessionBlockMemo::new(Arc::clone(&read_working_memory));
     store.reset();
     let index = index_block_load::load_segment_index(&store, None, &memo, &descriptor)
         .await
@@ -701,7 +701,7 @@ async fn read_working_memory_counts_large_indexes_and_filters() {
         index_bytes > stored_data_bytes,
         "index {index_bytes}, stored data {stored_data_bytes}"
     );
-    let index_reservation = pool.in_use();
+    let index_reservation = read_working_memory.in_use();
     assert!(
         index_reservation > index_bytes,
         "the index and memo containers are charged"
@@ -711,7 +711,7 @@ async fn read_working_memory_counts_large_indexes_and_filters() {
         .await
         .expect("filter");
     let filter_bytes = filter.decoded_bytes() + 2 * std::mem::size_of::<usize>();
-    assert!(pool.in_use() >= index_reservation + filter_bytes);
+    assert!(read_working_memory.in_use() >= index_reservation + filter_bytes);
     assert_eq!(store.count(OperationSelector::Read), 2);
     assert_eq!(
         *index_block_load::load_segment_index(&store, None, &memo, &descriptor)
@@ -721,7 +721,7 @@ async fn read_working_memory_counts_large_indexes_and_filters() {
     );
     assert_eq!(store.count(OperationSelector::Read), 2);
     drop(memo);
-    assert_eq!(pool.in_use(), 0);
+    assert_eq!(read_working_memory.in_use(), 0);
     assert_eq!(index.len(), 2048);
     assert!(filter.may_contain(&expected[0].filter_key_for_family(FAMILY)));
 }

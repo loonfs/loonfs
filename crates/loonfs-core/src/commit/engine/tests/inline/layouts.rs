@@ -1086,7 +1086,7 @@ async fn tail_revision_downloads_use_materialized_objects_in_either_order() {
         let pool_id = pool_id(&store).await;
         for revision in revisions {
             let key = content_span(&pool_id, &original.content_ref().content_id, 0, 10);
-            let pool = crate::PermitPool::new(std::num::NonZeroUsize::MIN, None);
+            let permits = crate::Permits::new(std::num::NonZeroUsize::MIN, None);
             let absent = store.head(&key).await.expect("head").is_none();
             if absent {
                 blocked.block_next();
@@ -1096,18 +1096,18 @@ async fn tail_revision_downloads_use_materialized_objects_in_either_order() {
                 Some(revision),
                 0,
                 &access,
-                &pool,
+                &permits,
             ));
             if absent {
                 tokio::select! {
                     () = blocked.wait_until_blocked() => {}
                     result = &mut download => panic!("download finished before writing: {result:?}"),
                 }
-                assert_eq!(pool.counts().running, 1);
+                assert_eq!(permits.counts().running, 1);
                 blocked.release();
             }
             let target = download.await.expect("download revision");
-            assert_eq!(pool.counts(), crate::PoolCounts::default());
+            assert_eq!(permits.counts(), crate::PermitCounts::default());
             assert_eq!(target.ranges[0].object_key, key);
             assert_eq!(
                 target.content_ref.content_id,
@@ -1163,10 +1163,10 @@ async fn two_chains_in_one_fold_share_one_write_permit() {
     );
     blocked.inner().block_next();
     store.reset();
-    let pool = Arc::new(crate::PermitPool::new(std::num::NonZeroUsize::MIN, None));
+    let permits = Arc::new(crate::Permits::new(std::num::NonZeroUsize::MIN, None));
     let deadline = OperationClock::start(0, Arc::new(StdMonotonicTimer::default()));
     let namespace = crate::NamespaceStore {
-        content_writes: Arc::clone(&pool),
+        content_writes: Arc::clone(&permits),
         ..crate::test_support::namespace_store(&blocked, &namespace_id)
     };
     let mut fold = std::pin::pin!(namespace.fold_wal_tail(None, &deadline));
@@ -1175,13 +1175,13 @@ async fn two_chains_in_one_fold_share_one_write_permit() {
         _ = &mut fold => panic!("fold finished before the content write"),
     }
     assert!(futures::poll!(&mut fold).is_pending());
-    assert_eq!(pool.counts().running, 1);
+    assert_eq!(permits.counts().running, 1);
     assert_eq!(blocked.puts().total, 1);
     blocked.inner().release();
     fold.await.expect("both chains finish");
     assert_eq!(blocked.puts().peak_in_flight, 1);
     assert_eq!(blocked.puts().total, 2);
-    assert_eq!(pool.counts(), crate::PoolCounts::default());
+    assert_eq!(permits.counts(), crate::PermitCounts::default());
     assert_eq!(
         content_operations(&store)
             .iter()

@@ -22,7 +22,7 @@ root = "unused"
 }
 
 #[test]
-fn four_gib_derives_each_pool_and_folds_unused_grep_into_segments() {
+fn four_gib_derives_each_budget_and_folds_unused_grep_into_segments() {
     let mut config = memory_config("memory_limit_bytes = 4294967296");
     for mode in [JobMode::ServeOnly, JobMode::Disabled, JobMode::MaintainOnly] {
         config.grep.mode = mode;
@@ -140,7 +140,7 @@ max_cache_bytes = 0
     let memory = config
         .clone()
         .validate()
-        .expect("explicit pools fit")
+        .expect("explicit budgets fit")
         .memory;
     assert_eq!(
         memory.fixed.map(|(_, bytes)| bytes),
@@ -354,7 +354,7 @@ fn cgroup_limits_accept_finite_numbers_and_skip_absent_or_unlimited_files() {
 }
 
 /// Checks that the SSD tier adds its write queue and the estimated
-/// memory of its index to `fixed`, which the pools are sized after.
+/// memory of its index to `fixed`, which the budgets are sized after.
 #[test]
 fn the_ssd_tier_adds_its_write_queue_and_index_to_fixed() {
     let without = memory_config("memory_limit_bytes = 8589934592");

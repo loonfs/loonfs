@@ -31,7 +31,7 @@ pub(super) struct ScanLoader<'a, S: ObjectStore + ?Sized> {
     pub(super) block_memo: &'a SessionBlockMemo,
     /// The read working memory that a key-range refill reserves its blocks'
     /// decoded bytes from.
-    pub(super) pool: &'a Arc<ReadWorkingMemory>,
+    pub(super) read_working_memory: &'a Arc<ReadWorkingMemory>,
     pub(super) blocks_per_refill: BlocksPerRefill,
     pub(super) upper_bound: Option<&'a str>,
 }
@@ -136,7 +136,7 @@ impl<S: ObjectStore + ?Sized> ScanLoader<'_, S> {
         entries: &'e [SegmentIndexEntry],
     ) -> (&'e [SegmentIndexEntry], ReadReservation) {
         let decoded_bytes = |entry: &SegmentIndexEntry| entry.block.decoded_bytes as usize;
-        let mut reservation = self.pool.reserve(
+        let mut reservation = self.read_working_memory.reserve(
             entries.iter().map(decoded_bytes).sum(),
             decoded_bytes(&entries[0]),
         );

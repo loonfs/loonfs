@@ -472,7 +472,7 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
             store: self.store,
             segment_cache: self.segment_cache,
             block_memo: &self.block_memo,
-            pool: self.block_memo.pool(),
+            read_working_memory: self.block_memo.read_working_memory(),
             blocks_per_refill,
             upper_bound,
         };
@@ -509,7 +509,12 @@ impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataSegments<'a, S> {
             if iterators.is_empty() {
                 break;
             }
-            refill_iterators(&loader, &mut iterators, loader.pool.available_bytes()).await?;
+            refill_iterators(
+                &loader,
+                &mut iterators,
+                loader.read_working_memory.available_bytes(),
+            )
+            .await?;
             if filter_admitted {
                 for iterator in &iterators[previously_open..] {
                     let matched = iterator

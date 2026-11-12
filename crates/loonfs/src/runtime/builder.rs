@@ -161,7 +161,7 @@ impl<M> LoonFsBuilder<M> {
     /// Runs this runtime's reads, publications, folds, and compactions under
     /// `execution_budget`, which other runtimes may share.
     ///
-    /// Read memos share its read working memory pool.
+    /// Read memos share its read working memory budget.
     /// Every publication request this runtime admits counts against the
     /// budget's admitted totals until its work settles. Public reads wait for
     /// a read permit before loading anything. Publication batches,

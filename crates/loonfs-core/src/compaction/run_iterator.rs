@@ -547,7 +547,7 @@ mod tests {
     struct ShortBatches {
         blocks: Vec<Arc<DecodedDataBlock<String>>>,
         index: Arc<Vec<SegmentIndexEntry>>,
-        pool: Arc<ReadWorkingMemory>,
+        read_working_memory: Arc<ReadWorkingMemory>,
         requests: Mutex<Vec<usize>>,
     }
 
@@ -577,7 +577,7 @@ mod tests {
             Self {
                 blocks,
                 index: Arc::new(index),
-                pool: Arc::new(ReadWorkingMemory::new(usize::MAX, None)),
+                read_working_memory: Arc::new(ReadWorkingMemory::new(usize::MAX, None)),
                 requests: Mutex::new(Vec::new()),
             }
         }
@@ -600,7 +600,7 @@ mod tests {
             let count = entries.len().min(2);
             Ok(LoadedBlocks {
                 blocks: self.blocks[first..first + count].to_vec(),
-                reservation: Some(self.pool.reserve(100 * count, 100)),
+                reservation: Some(self.read_working_memory.reserve(100 * count, 100)),
             })
         }
     }
@@ -618,7 +618,7 @@ mod tests {
                 break;
             }
             // Only the batch that the iterator keeps is reserved.
-            assert!(loader.pool.in_use() <= 200);
+            assert!(loader.read_working_memory.in_use() <= 200);
             while iterator.head().is_some() {
                 rows.push(iterator.take_head());
             }
@@ -627,6 +627,6 @@ mod tests {
         assert_eq!(rows, expected);
         assert_eq!(*loader.requests.lock().expect("requests"), [5, 3, 1]);
         drop(iterator);
-        assert_eq!(loader.pool.in_use(), 0);
+        assert_eq!(loader.read_working_memory.in_use(), 0);
     }
 }

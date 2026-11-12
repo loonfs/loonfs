@@ -25,7 +25,7 @@
 //! };
 //! use loonfs_core::time::SystemWallClock;
 //! use loonfs_core::{
-//!     CreateNamespaceOptions, MetadataRunPolicy, NamespaceEngine, NamespaceStore, PermitPool,
+//!     CreateNamespaceOptions, MetadataRunPolicy, NamespaceEngine, NamespaceStore, Permits,
 //! };
 //! use loonfs_objectstore::local_fs_store::LocalFsStore;
 //! use loonfs_types::StdMonotonicTimer;
@@ -49,7 +49,7 @@
 //!     )),
 //!     Arc::new(SystemWallClock),
 //!     Arc::new(StdMonotonicTimer::default()),
-//!     Arc::new(PermitPool::new(
+//!     Arc::new(Permits::new(
 //!         NonZeroUsize::new(32).expect("a nonzero limit"),
 //!         None,
 //!     )),
@@ -96,7 +96,7 @@ mod merge;
 mod namespace;
 mod object_cache;
 mod options;
-mod permit_pool;
+mod permits;
 mod phase;
 mod pool_store;
 mod read_working_memory;
@@ -228,7 +228,7 @@ pub use path::read::{
     CurrentFile, CurrentFileState, DirectDownloadByInodeTarget, DirectDownloadTarget, FileBytes,
     FileRevisionsPage, ObjectRange, RetainedRevisionsPage, RetainedRevisionsPageCursor,
 };
-pub use permit_pool::{BudgetPermit, PermitPool, PermitPoolObserver, PoolCounts};
+pub use permits::{BudgetPermit, PermitCounts, PermitObserver, Permits};
 pub use phase::Phase;
 pub use pool_store::PoolStore;
 pub use segment::{MetadataFamilyGroup, MetadataRunPolicy};

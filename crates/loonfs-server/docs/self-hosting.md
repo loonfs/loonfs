@@ -66,7 +66,7 @@ For S3 or Google Cloud Storage, configure the bucket to remove incomplete multip
 
 ## Set one number
 
-This section describes how the server sizes its memory pools from one memory limit.
+This section describes how the server sizes its memory budgets from one memory limit.
 
 Set the top-level `memory_limit_bytes` to the pod's memory limit:
 
@@ -76,7 +76,7 @@ memory_limit_bytes = 4294967296
 
 If you leave it out on Linux, the server reads `/sys/fs/cgroup/memory.max` (cgroup v2), and then `/sys/fs/cgroup/memory/memory.limit_in_bytes` (cgroup v1). It ignores a missing or unreadable file, the value `max`, an invalid number, and any value of 1 EiB or more. If the server doesn't find a finite limit, it keeps all the existing defaults and logs at startup that it's unsized.
 
-From the limit, the server calculates the managed memory that it divides among its pools:
+From the limit, the server calculates the managed memory that it divides among its budgets:
 
 ```text
 fixed = 128 MiB
@@ -93,11 +93,11 @@ managed = memory_limit_bytes - fixed - headroom - metadata_cache.max_manifest_by
 
 `fixed` covers the process's own cost, response data that the HTTP transport keeps, transfer chunks, the encoded segments that each fold and compaction writes, the bytes that each content write keeps in memory, the completed upload sessions that garbage collection keeps between collections, and the SSD tier of the metadata segment cache. A content write keeps at most 16 MiB in memory, which is the part that an assembly builds and the source read that it copies into that part, at 8 MiB each. On R2, the part can be 64 MiB, because an R2 assembly sends a part through the server whenever the part doesn't lie within one source object, so a content write keeps up to 72 MiB. The SSD tier's term is its 64 MiB write queue plus its index of the blocks on disk, at 168 bytes for each block. The tier charges each block at least 4 KiB against its budget, so it keeps at most one block for each 4 KiB of `max_segment_bytes`, and the term is a bound: about 484 MiB for a 10 GiB tier, and about 4.2 GiB for a 100 GiB tier. (In a compacted namespace of 20,000 files, the average stored block was 4.1 KiB.) (See [Keeping metadata blocks on local SSD](#keeping-metadata-blocks-on-local-ssd).)
 
-The headroom covers memory that the allocator keeps after the server frees it. The pools share the other 80% of what's left after `fixed` and the 200 MiB, so the headroom is 200 MiB plus a quarter of the pools.
+The headroom covers memory that the allocator keeps after the server frees it. The budgets share the other 80% of what's left after `fixed` and the 200 MiB, so the headroom is 200 MiB plus a quarter of the budgets.
 
-The budgets of the manifest cache (`metadata_cache.max_manifest_bytes`) and the head cache (`metadata_cache.max_head_bytes`) aren't shares of managed memory, because the memory that manifests and namespace heads need depends on the namespaces that the server reads, not on the host. They're 32 MiB and 16 MiB unless you set them, with or without a limit. The merge allowance (`max_merge_bytes`) isn't a share either, because the memory that a merge needs depends on the merges that callers make, not on the host. It's 512 MiB unless you set it, with or without a limit. Setting it to zero turns merges off, and the formula then reserves nothing for them (see [Resource sizing](#resource-sizing)). Startup fails if managed memory is below 256 MiB, or if the final pools plus `fixed` and the headroom exceed the limit. The error message lists each term. Fractions are rounded down to whole bytes.
+The budgets of the manifest cache (`metadata_cache.max_manifest_bytes`) and the head cache (`metadata_cache.max_head_bytes`) aren't shares of managed memory, because the memory that manifests and namespace heads need depends on the namespaces that the server reads, not on the host. They're 32 MiB and 16 MiB unless you set them, with or without a limit. The merge allowance (`max_merge_bytes`) isn't a share either, because the memory that a merge needs depends on the merges that callers make, not on the host. It's 512 MiB unless you set it, with or without a limit. Setting it to zero turns merges off, and the formula then reserves nothing for them (see [Resource sizing](#resource-sizing)). Startup fails if managed memory is below 256 MiB, or if the final budgets plus `fixed` and the headroom exceed the limit. The error message lists each term. Fractions are rounded down to whole bytes.
 
-| Pool | Share of managed memory | Setting |
+| Budget | Share of managed memory | Setting |
 | --- | ---: | --- |
 | Metadata segment cache | 30% | `metadata_cache.max_segment_bytes` |
 | WAL tail cache | 10% | `metadata_cache.max_wal_tail_bytes` |
@@ -107,11 +107,11 @@ The budgets of the manifest cache (`metadata_cache.max_manifest_bytes`) and the 
 | Admitted publication bytes | 10% | `max_admitted_bytes` |
 | Compaction input | 10% | `max_compaction_input_bytes`, divided by `max_concurrent_compactions` |
 
-You can still set each pool's setting to override its share. The sum check uses the final values, including one compaction input allowance for each concurrent compaction. At startup, the server logs one line for each term, with its final value and whether it was derived or set. Without sizing, the pools you didn't set are logged as defaults.
+You can still set each budget's setting to override its share. The sum check uses the final values, including one compaction input allowance for each concurrent compaction. At startup, the server logs one line for each term, with its final value and whether it was derived or set. Without sizing, the budgets you didn't set are logged as defaults.
 
 Sizing doesn't change the counts, which keep their defaults: 8 publications, 2 folds, 2 compactions, 32 content writes, 64 reads, 256 requests, 1,024 connections, 8 uploads, and 16 downloads. Count settings you set explicitly still apply. The formula uses the final connection, transfer, fold, compaction, and content write counts, and it divides compaction input by the final compaction count.
 
-Why is the headroom 200 MiB plus a quarter of the pools? In the lab, the server's peak memory on Linux with the three glibc settings below was 10% to 32% above the same workload's memory on macOS, and a quiet phase stayed about 200 MiB above it. With glibc's defaults, the peaks were up to about three times the macOS figures (769 MiB against 256 MiB for one workload), which is more than the headroom covers. So for a Linux deployment, set these environment variables (the published image already sets them):
+Why is the headroom 200 MiB plus a quarter of the budgets? In the lab, the server's peak memory on Linux with the three glibc settings below was 10% to 32% above the same workload's memory on macOS, and a quiet phase stayed about 200 MiB above it. With glibc's defaults, the peaks were up to about three times the macOS figures (769 MiB against 256 MiB for one workload), which is more than the headroom covers. So for a Linux deployment, set these environment variables (the published image already sets them):
 
 - `MALLOC_ARENA_MAX=2` limits glibc to two arenas (separate heaps), instead of up to eight for each CPU core.
 - `MALLOC_TRIM_THRESHOLD_=131072` makes glibc return free memory at the top of a heap to the kernel once it's more than 128 KiB.
@@ -388,7 +388,7 @@ After a request releases its permit, the HTTP transport can still keep response 
 
 At the connection cap, the server waits before it accepts another TCP connection. A client can still complete a TCP connection into the OS backlog, but it receives no HTTP response or TLS handshake until a slot is free. If the backlog fills, connecting clients can time out or fail, depending on the OS. Idle keep-alive connections and incomplete TLS handshakes keep their slots until they close. Probes still need a connection slot, so size the connection cap to leave room for them.
 
-Each cache, queue, and unit of work has its own memory budget. The values in the table below are ceilings, not allocations, so memory grows toward a ceiling only as a cache fills or as work runs. The sizing formula reserves the fixed costs and headroom separately from the pools, and it doesn't measure total process memory.
+Each cache, queue, and unit of work has its own memory budget. The values in the table below are ceilings, not allocations, so memory grows toward a ceiling only as a cache fills or as work runs. The sizing formula reserves the fixed costs and headroom separately from the budgets, and it doesn't measure total process memory.
 
 | Budget | Setting | Default | What it bounds | Kind |
 | --- | --- | --- | --- | --- |
@@ -417,15 +417,15 @@ Each cache, queue, and unit of work has its own memory budget. The values in the
 | Reads | `max_concurrent_reads` | 64 | Public reads running at once. Each page takes one slot | Concurrency |
 | Publications | `max_concurrent_publications` | 8 | Publications running at once | Concurrency |
 
-All memos share one read working memory pool. When the pool is full, a memo evicts its own entries or doesn't retain new blocks, and reads don't wait or fail because of memory. The pool counts decoded data, index and filter sections, keys, reference counts, and memo containers. Setting it to zero disables retention. A block that a caller already has stays valid after it's evicted.
+All memos share one read working memory budget. When the read working memory is full, a memo evicts its own entries or doesn't retain new blocks, and reads don't wait or fail because of memory. The budget counts decoded data, index and filter sections, keys, reference counts, and memo containers. Setting it to zero disables retention. A block that a caller already has stays valid after it's evicted.
 
-A fold keeps its segment output in memory and takes its memo from the shared pool. A compaction keeps its compaction input and its segment output in memory, which comes to up to 96 MiB per concurrent compaction without sizing or overrides. A metadata step that folds the WAL tail and then compacts takes a fold permit for the fold, and then a compaction permit for the compaction. So the fold and compaction limits bound that memory, not `max_concurrent_maintenance`.
+A fold keeps its segment output in memory and takes its memo from the shared read working memory. A compaction keeps its compaction input and its segment output in memory, which comes to up to 96 MiB per concurrent compaction without sizing or overrides. A metadata step that folds the WAL tail and then compacts takes a fold permit for the fold, and then a compaction permit for the compaction. So the fold and compaction limits bound that memory, not `max_concurrent_maintenance`.
 
 A compaction keeps at most `max_compaction_input_bytes` of decoded input in memory at once, whatever the size of its window, so lowering the setting makes compactions read in smaller waves.
 
 The segment output budget has no setting, and a segment larger than the budget is written on its own.
 
-When a snapshot or a fork has to fold the WAL tail first, it runs that fold with the shared read working memory pool. Creating a snapshot or a fork waits for a fold permit, even when the tail is already folded. A fork of a snapshot doesn't fold, and it doesn't take a fold permit.
+When a snapshot or a fork has to fold the WAL tail first, it runs that fold with the shared read working memory. Creating a snapshot or a fork waits for a fold permit, even when the tail is already folded. A fork of a snapshot doesn't fold, and it doesn't take a fold permit.
 
 Maintenance requests sent to the API don't count against `max_concurrent_maintenance`, but their folds and compactions take the same fold and compaction permits as every other fold and compaction, and a maintenance request's fold or compaction unit also waits for a fold or a unit of the same namespace that's already running.
 
@@ -470,7 +470,7 @@ The `loonfs_grep_steps_running` gauge reports the steps that have a permit, and 
 
 The server builds one `GrepStepBudget` from `[grep].max_concurrent_steps` for its grep worker. If you embed grep in a host that runs more than one worker (for example, one for each runtime), pass a clone of one budget to every worker, so the limit is one ceiling for the whole process. A worker that has its own budget adds its own steps on top of that ceiling.
 
-A 256 MiB container can't pass the sizing check, because managed memory alone must be at least 256 MiB after `fixed` and the headroom. With the default counts, a 2.5 GiB limit leaves about 157 MiB of managed memory, which is too little, and the smallest limit that passes is 2,684 MiB. On R2, the default 32 content writes take 2,304 MiB, so the smallest limit that passes is 4,476 MiB unless you lower `max_concurrent_content_writes` or `max_merge_bytes`. A deployment that never merges sets `max_merge_bytes = 0`, and then the smallest limit that passes is 2,044 MiB, or 3,836 MiB on R2. Use the formula in [Set one number](#set-one-number) when you change counts or override individual pools.
+A 256 MiB container can't pass the sizing check, because managed memory alone must be at least 256 MiB after `fixed` and the headroom. With the default counts, a 2.5 GiB limit leaves about 157 MiB of managed memory, which is too little, and the smallest limit that passes is 2,684 MiB. On R2, the default 32 content writes take 2,304 MiB, so the smallest limit that passes is 4,476 MiB unless you lower `max_concurrent_content_writes` or `max_merge_bytes`. A deployment that never merges sets `max_merge_bytes = 0`, and then the smallest limit that passes is 2,044 MiB, or 3,836 MiB on R2. Use the formula in [Set one number](#set-one-number) when you change counts or override individual budgets.
 
 The server keeps a writer session open for each namespace it has written to, until background maintenance closes the session (see [Background maintenance](#background-maintenance)). One idle session uses about 3 KiB of heap, so 10,000 open sessions use about 30 MiB. A session also keeps its WAL tail in memory until a fold moves the tail into segments. The write stop (128 unfolded WAL objects) and the inline tail limit bound that tail. The server stops keeping a session when its namespace is deleted, or when a request finds that the namespace doesn't exist.
 

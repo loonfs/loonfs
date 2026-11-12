@@ -5,8 +5,9 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::{Semaphore, SemaphorePermit};
 
-/// Receives a pool's running and waiting counts after every change.
-pub trait PermitPoolObserver: Send + Sync {
+/// Receives the running and waiting counts of one set of permits after
+/// every change.
+pub trait PermitObserver: Send + Sync {
     fn report(&self, running: usize, waiting: usize);
 }
 
@@ -14,33 +15,32 @@ pub trait PermitPoolObserver: Send + Sync {
 /// them or waits for them.
 ///
 /// Waits are first come, first served.
-pub struct PermitPool {
+pub struct Permits {
     permits: Semaphore,
-    counts: Mutex<PoolCounts>,
-    observer: Option<Arc<dyn PermitPoolObserver>>,
+    counts: Mutex<PermitCounts>,
+    observer: Option<Arc<dyn PermitObserver>>,
 }
 
-/// The work that has a [`PermitPool`]'s permits and the work that waits
+/// The work that has a permit from a [`Permits`] and the work that waits
 /// for one.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct PoolCounts {
+pub struct PermitCounts {
     pub running: usize,
     pub waiting: usize,
 }
 
-impl std::fmt::Debug for PermitPool {
+impl std::fmt::Debug for Permits {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("PermitPool")
+            .debug_struct("Permits")
             .field("counts", &self.counts())
             .finish_non_exhaustive()
     }
 }
 
-impl PermitPool {
-    /// Creates a pool of `limit` permits that reports its counts to
-    /// `observer`.
-    pub fn new(limit: NonZeroUsize, observer: Option<Arc<dyn PermitPoolObserver>>) -> Self {
+impl Permits {
+    /// Creates `limit` permits whose counts are reported to `observer`.
+    pub fn new(limit: NonZeroUsize, observer: Option<Arc<dyn PermitObserver>>) -> Self {
         Self {
             permits: Semaphore::new(limit.get().min(Semaphore::MAX_PERMITS)),
             counts: Mutex::default(),
@@ -52,14 +52,14 @@ impl PermitPool {
     pub async fn acquire(&self) -> BudgetPermit<'_> {
         self.update(|counts| counts.waiting += 1);
         let mut permit = BudgetPermit {
-            pool: self,
+            permits: self,
             permit: None,
         };
         let acquired = self
             .permits
             .acquire()
             .await
-            .expect("permit pool permits should remain open");
+            .expect("the permits should remain open");
         self.update(|counts| {
             counts.waiting -= 1;
             counts.running += 1;
@@ -70,38 +70,38 @@ impl PermitPool {
 
     /// Snapshots the work that has a permit and the work that waits for
     /// one.
-    pub fn counts(&self) -> PoolCounts {
+    pub fn counts(&self) -> PermitCounts {
         *self
             .counts
             .lock()
-            .expect("the pool counts lock should not be poisoned")
+            .expect("the permit counts lock should not be poisoned")
     }
 
     /// Changes the counts, then reports them after the lock is released,
     /// because the observer is caller code.
-    fn update(&self, change: impl FnOnce(&mut PoolCounts)) {
+    fn update(&self, change: impl FnOnce(&mut PermitCounts)) {
         let counts = {
             let mut counts = self
                 .counts
                 .lock()
-                .expect("the pool counts lock should not be poisoned");
+                .expect("the permit counts lock should not be poisoned");
             change(&mut counts);
             *counts
         };
         self.report(counts);
     }
 
-    fn report(&self, counts: PoolCounts) {
+    fn report(&self, counts: PermitCounts) {
         if let Some(observer) = &self.observer {
             observer.report(counts.running, counts.waiting);
         }
     }
 }
 
-/// A permit from a [`PermitPool`], or a place in the queue for one.
+/// A permit from a [`Permits`], or a place in the queue for one.
 /// Dropping it returns the permit or gives up the place.
 pub struct BudgetPermit<'a> {
-    pool: &'a PermitPool,
+    permits: &'a Permits,
     permit: Option<SemaphorePermit<'a>>,
 }
 
@@ -114,7 +114,7 @@ impl Drop for BudgetPermit<'_> {
         // panicking. The critical section only updates two counts.
         let counts = {
             let mut counts = self
-                .pool
+                .permits
                 .counts
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
@@ -125,7 +125,7 @@ impl Drop for BudgetPermit<'_> {
             }
             *counts
         };
-        self.pool.report(counts);
+        self.permits.report(counts);
         // The count falls before the permit returns, so the running count
         // never passes the limit.
         drop(permit);
