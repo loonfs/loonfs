@@ -1,7 +1,7 @@
 bind = "127.0.0.1:9400"
 content_token_secret = "dev-content-token-secret"
 writer_id = "loonfs-server-aws"
-# Derive memory pools from 4 GiB. Omit this to use the Linux cgroup limit.
+# Derive memory budgets from 4 GiB. Omit this to use the Linux cgroup limit.
 memory_limit_bytes = 4294967296
 #manifest_revalidation_interval_ms = 1000
 #max_staleness_ms = 1000

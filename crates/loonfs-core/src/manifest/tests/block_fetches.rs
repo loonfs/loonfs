@@ -250,7 +250,7 @@ async fn a_scan_refill_loads_no_more_than_the_read_working_memory_has_left() {
             .map(|entry| entry.block.decoded_bytes as usize)
             .sum()
     };
-    let pool = Arc::new(crate::read_working_memory::ReadWorkingMemory::new(
+    let read_working_memory = Arc::new(crate::read_working_memory::ReadWorkingMemory::new(
         64 * 1024 * 1024,
         None,
     ));
@@ -258,7 +258,7 @@ async fn a_scan_refill_loads_no_more_than_the_read_working_memory_has_left() {
         MetadataSegmentCache::new(
             Arc::new(SharedSegmentBlocks::new(usize::MAX, usize::MAX)),
             ObjectStoreScope::new(0),
-            Arc::clone(&pool),
+            Arc::clone(&read_working_memory),
         )
     };
     let (store, descriptor, lower, upper) = (&store, &descriptor, &lower, &upper);
@@ -282,7 +282,7 @@ async fn a_scan_refill_loads_no_more_than_the_read_working_memory_has_left() {
     // blocks; four of the range's blocks, which all decode to about the same
     // size, fit in the rest.
     let room = decoded_bytes(first..first + 4);
-    let held = pool.reserve(pool.limit() - room, 0);
+    let held = read_working_memory.reserve(read_working_memory.limit() - room, 0);
     let wanted: Vec<_> = expected
         .iter()
         .filter(|row| {
@@ -299,7 +299,11 @@ async fn a_scan_refill_loads_no_more_than_the_read_working_memory_has_left() {
         .map(|(_, row)| row)
         .collect();
     assert_eq!(page, wanted);
-    assert_eq!(pool.in_use(), held.bytes(), "the scan released its blocks");
+    assert_eq!(
+        read_working_memory.in_use(),
+        held.bytes(),
+        "the scan released its blocks"
+    );
 
     let mut gets = data_gets(store, descriptor);
     gets.sort_unstable();
@@ -325,7 +329,8 @@ async fn a_scan_refill_loads_no_more_than_the_read_working_memory_has_left() {
     // block, above the limit, and the scan reads the range one block at a
     // time.
     drop(held);
-    let held = pool.reserve(pool.limit(), pool.limit());
+    let held =
+        read_working_memory.reserve(read_working_memory.limit(), read_working_memory.limit());
     store.reset();
     let page: Vec<_> = scan(cache())
         .await
@@ -334,7 +339,11 @@ async fn a_scan_refill_loads_no_more_than_the_read_working_memory_has_left() {
         .map(|(_, row)| row)
         .collect();
     assert_eq!(page, wanted);
-    assert_eq!(pool.in_use(), held.bytes(), "the scan released its blocks");
+    assert_eq!(
+        read_working_memory.in_use(),
+        held.bytes(),
+        "the scan released its blocks"
+    );
     let gets = data_gets(store, descriptor);
     assert_eq!(
         gets.len(),

@@ -8,7 +8,7 @@ use crate::error::{CoreError, Result};
 use crate::limits::MAX_LAYOUT_EXTENTS;
 use crate::namespace::state::NamespaceReadState;
 use crate::wal::ProjectedContent;
-use crate::PermitPool;
+use crate::Permits;
 use bytes::Bytes;
 use loonfs_objectstore::{AssemblySource, ObjectStore, ObjectStoreError};
 use loonfs_types::format::manifest::ContentLayoutRecord;
@@ -66,7 +66,7 @@ pub(crate) fn assemble_tail_content(
 /// store.
 pub(crate) struct ContentWrites<'a, S: ?Sized> {
     pub(crate) store: &'a S,
-    pub(crate) permits: &'a PermitPool,
+    pub(crate) permits: &'a Permits,
     pub(crate) pool_id: &'a PoolId,
     /// The namespace whose WAL includes the pieces that the writes store. A
     /// namespace's WAL includes pieces only for chains that the namespace
@@ -78,7 +78,7 @@ pub(crate) struct ContentWrites<'a, S: ?Sized> {
 impl<'a, S: ?Sized> ContentWrites<'a, S> {
     /// Returns where the content writes of the namespace whose head is
     /// `head` go: its pool's prefix in `store`.
-    pub(crate) fn new(store: &'a S, permits: &'a PermitPool, head: &'a NamespaceReadState) -> Self {
+    pub(crate) fn new(store: &'a S, permits: &'a Permits, head: &'a NamespaceReadState) -> Self {
         Self {
             store,
             permits,

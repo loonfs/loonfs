@@ -1,9 +1,9 @@
-//! The instruments of an execution budget: its admitted totals, its permit
-//! pools, and its read working memory.
+//! The instruments of an execution budget: its admitted totals, its
+//! permits, and its read working memory.
 
 use crate::metrics::{CounterHandle, GaugeHandle, MetricsRecorder};
 use loonfs_core::cache::ReadWorkingMemoryObserver;
-use loonfs_core::PermitPoolObserver;
+use loonfs_core::PermitObserver;
 use std::sync::Arc;
 
 /// The instruments of one execution budget, registered when the budget is
@@ -11,11 +11,11 @@ use std::sync::Arc;
 pub(crate) struct ExecutionBudgetInstruments {
     pub(crate) read_working_memory: Arc<dyn ReadWorkingMemoryObserver>,
     pub(crate) admission: AdmissionInstruments,
-    pub(crate) reads: Arc<dyn PermitPoolObserver>,
-    pub(crate) publications: Arc<dyn PermitPoolObserver>,
-    pub(crate) folds: Arc<dyn PermitPoolObserver>,
-    pub(crate) compactions: Arc<dyn PermitPoolObserver>,
-    pub(crate) content_writes: Arc<dyn PermitPoolObserver>,
+    pub(crate) reads: Arc<dyn PermitObserver>,
+    pub(crate) publications: Arc<dyn PermitObserver>,
+    pub(crate) folds: Arc<dyn PermitObserver>,
+    pub(crate) compactions: Arc<dyn PermitObserver>,
+    pub(crate) content_writes: Arc<dyn PermitObserver>,
 }
 
 impl ExecutionBudgetInstruments {
@@ -50,7 +50,7 @@ impl ExecutionBudgetInstruments {
                     &[],
                 ),
             },
-            reads: PermitPoolGauges::register(
+            reads: PermitGauges::register(
                 recorder,
                 (
                     "loonfs.execution_budget.reads_running",
@@ -61,7 +61,7 @@ impl ExecutionBudgetInstruments {
                     "Public reads waiting for a read permit",
                 ),
             ),
-            publications: PermitPoolGauges::register(
+            publications: PermitGauges::register(
                 recorder,
                 (
                     "loonfs.execution_budget.publications_running",
@@ -72,7 +72,7 @@ impl ExecutionBudgetInstruments {
                     "Namespace publication workers waiting for a publication permit",
                 ),
             ),
-            folds: PermitPoolGauges::register(
+            folds: PermitGauges::register(
                 recorder,
                 (
                     "loonfs.execution_budget.folds_running",
@@ -83,7 +83,7 @@ impl ExecutionBudgetInstruments {
                     "Folds, and operations that may fold first, waiting for a fold permit",
                 ),
             ),
-            compactions: PermitPoolGauges::register(
+            compactions: PermitGauges::register(
                 recorder,
                 (
                     "loonfs.execution_budget.compactions_running",
@@ -94,7 +94,7 @@ impl ExecutionBudgetInstruments {
                     "Metadata compactions waiting for a compaction permit",
                 ),
             ),
-            content_writes: PermitPoolGauges::register(
+            content_writes: PermitGauges::register(
                 recorder,
                 (
                     "loonfs.execution_budget.content_writes_running",
@@ -134,18 +134,18 @@ impl AdmissionInstruments {
 }
 
 /// The running and waiting gauges of one kind of budget permit.
-struct PermitPoolGauges {
+struct PermitGauges {
     running: Arc<dyn GaugeHandle>,
     waiting: Arc<dyn GaugeHandle>,
 }
 
-impl PermitPoolGauges {
-    /// Registers one pool's gauges now.
+impl PermitGauges {
+    /// Registers the gauges of one set of permits now.
     fn register(
         recorder: &dyn MetricsRecorder,
         (running_name, running_description): (&'static str, &'static str),
         (waiting_name, waiting_description): (&'static str, &'static str),
-    ) -> Arc<dyn PermitPoolObserver> {
+    ) -> Arc<dyn PermitObserver> {
         Arc::new(Self {
             running: recorder.register_gauge(running_name, running_description, &[]),
             waiting: recorder.register_gauge(waiting_name, waiting_description, &[]),
@@ -153,7 +153,7 @@ impl PermitPoolGauges {
     }
 }
 
-impl PermitPoolObserver for PermitPoolGauges {
+impl PermitObserver for PermitGauges {
     fn report(&self, running: usize, waiting: usize) {
         self.running.set(i64::try_from(running).unwrap_or(i64::MAX));
         self.waiting.set(i64::try_from(waiting).unwrap_or(i64::MAX));

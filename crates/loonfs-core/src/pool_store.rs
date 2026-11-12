@@ -6,7 +6,7 @@ use crate::error::{CoreError, Result};
 use crate::namespace::head_cache::HeadAndWalTailCache;
 use crate::namespace::store::NamespaceStore;
 use crate::object_cache::ObjectCache;
-use crate::permit_pool::PermitPool;
+use crate::permits::Permits;
 use crate::segment::{MetadataRunPolicy, MetadataSegmentCache};
 use crate::time::OperationClock;
 use loonfs_objectstore::keys::pool_record;
@@ -28,7 +28,7 @@ pub struct PoolStore<S> {
     pub(crate) object_cache: Arc<ObjectCache>,
     pub(crate) wall_clock: Arc<dyn WallClock>,
     pub(crate) timer: Arc<dyn MonotonicTimer>,
-    pub(crate) content_writes: Arc<PermitPool>,
+    pub(crate) content_writes: Arc<Permits>,
     pub(crate) run_policy: MetadataRunPolicy,
 }
 
@@ -46,7 +46,7 @@ impl<S> PoolStore<S> {
         object_cache: Arc<ObjectCache>,
         wall_clock: Arc<dyn WallClock>,
         timer: Arc<dyn MonotonicTimer>,
-        content_writes: Arc<PermitPool>,
+        content_writes: Arc<Permits>,
         run_policy: MetadataRunPolicy,
     ) -> Self {
         Self {

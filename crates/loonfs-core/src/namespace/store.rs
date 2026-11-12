@@ -4,7 +4,7 @@
 
 use crate::namespace::head_cache::HeadAndWalTailCache;
 use crate::object_cache::ObjectCache;
-use crate::permit_pool::PermitPool;
+use crate::permits::Permits;
 use crate::segment::{MetadataRunPolicy, MetadataSegmentCache};
 use crate::time::OperationClock;
 use loonfs_types::{MonotonicTimer, NamespaceId, WallClock};
@@ -28,7 +28,7 @@ pub struct NamespaceStore<S> {
     /// The timer behind every operation clock and observation.
     pub(crate) timer: Arc<dyn MonotonicTimer>,
     /// Where every content write takes its permit.
-    pub(crate) content_writes: Arc<PermitPool>,
+    pub(crate) content_writes: Arc<Permits>,
     /// The budgets that folds and compactions run under.
     pub(crate) run_policy: MetadataRunPolicy,
 }
@@ -47,7 +47,7 @@ impl<S> NamespaceStore<S> {
         object_cache: Arc<ObjectCache>,
         wall_clock: Arc<dyn WallClock>,
         timer: Arc<dyn MonotonicTimer>,
-        content_writes: Arc<PermitPool>,
+        content_writes: Arc<Permits>,
         run_policy: MetadataRunPolicy,
     ) -> Self {
         Self {

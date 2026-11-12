@@ -111,7 +111,10 @@ async fn pin_fold_reads(
     }
     let retained = budget.stats().read_working_bytes;
     if max_read_working_bytes > 1 {
-        assert!(retained > 0, "{creation:?} charges the shared pool");
+        assert!(
+            retained > 0,
+            "{creation:?} charges the shared read working memory"
+        );
     } else {
         assert_eq!(retained, 0);
     }
@@ -146,7 +149,7 @@ async fn pin_fold_reads(
 }
 
 #[tokio::test]
-async fn folds_and_pin_folds_use_the_shared_pool_and_segment_cache() {
+async fn folds_and_pin_folds_use_the_shared_read_working_memory_and_segment_cache() {
     for creation in [PinCreation::Fold, PinCreation::Snapshot, PinCreation::Fork] {
         let small_memo_reads = pin_fold_reads(creation, 1, 0).await;
         let default_memo_reads =

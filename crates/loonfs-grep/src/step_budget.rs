@@ -1,7 +1,7 @@
 //! The limit on grep steps that keep file content or index segments, which
 //! a host shares across its grep workers.
 
-use loonfs::engine::{BudgetPermit, PermitPool, PoolCounts};
+use loonfs::engine::{BudgetPermit, PermitCounts, Permits};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -17,7 +17,7 @@ pub const DEFAULT_MAX_CONCURRENT_GREP_STEPS: NonZeroUsize = NonZeroUsize::new(2)
 /// runtimes or stores those workers serve.
 #[derive(Debug, Clone)]
 pub struct GrepStepBudget {
-    permits: Arc<PermitPool>,
+    permits: Arc<Permits>,
 }
 
 impl GrepStepBudget {
@@ -25,13 +25,13 @@ impl GrepStepBudget {
     /// content or index segments at once.
     pub fn new(max_concurrent_steps: NonZeroUsize) -> Self {
         Self {
-            permits: Arc::new(PermitPool::new(max_concurrent_steps, None)),
+            permits: Arc::new(Permits::new(max_concurrent_steps, None)),
         }
     }
 
     /// Reports the steps that have a permit and the steps that found work
     /// and wait for one.
-    pub fn stats(&self) -> PoolCounts {
+    pub fn stats(&self) -> PermitCounts {
         self.permits.counts()
     }
 

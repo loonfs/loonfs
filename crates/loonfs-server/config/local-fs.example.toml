@@ -4,7 +4,7 @@ bind = "127.0.0.1:9400"
 # a non-blank value in this file takes precedence over the environment.
 content_token_secret = "dev-content-token-secret"
 writer_id = "loonfs-server-local"
-# Derive memory pools from 4 GiB. Omit this to use the Linux cgroup limit.
+# Derive memory budgets from 4 GiB. Omit this to use the Linux cgroup limit.
 memory_limit_bytes = 4294967296
 # Public reads running at once. Each page takes one slot. A streamed read
 # releases its slot before returning the body. Reads past this limit wait.

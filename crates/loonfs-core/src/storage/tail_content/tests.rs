@@ -142,9 +142,9 @@ async fn large_extents_assemble_with_only_source_heads_and_retry_without_writes(
     let (layout, tail, reference) = fixture(&store, &[20 * mib, 20 * mib], false, 12 * mib).await;
     let content = tail.content(&reference).expect("content");
     store.reset();
-    let pool = PermitPool::new(std::num::NonZeroUsize::MIN, None);
+    let permits = Permits::new(std::num::NonZeroUsize::MIN, None);
     let written = write_tail_content(
-        ContentWrites::new(&store, &pool, &HEAD),
+        ContentWrites::new(&store, &permits, &HEAD),
         &layout,
         &content,
         assemble_tail_content(&HEAD.pool_id, &content).expect("pieces"),
@@ -184,7 +184,7 @@ async fn large_extents_assemble_with_only_source_heads_and_retry_without_writes(
     assert_eq!(metadata.checksum, Some(reference.checksum.clone()));
     local.reset();
     let retried = write_tail_content(
-        ContentWrites::new(&store, &pool, &HEAD),
+        ContentWrites::new(&store, &permits, &HEAD),
         &layout,
         &content,
         assemble_tail_content(&HEAD.pool_id, &content).expect("pieces"),
@@ -210,7 +210,7 @@ async fn extent_bound_assembles_behind_the_largest_own_extent_and_keeps_shared_e
     let written = write_tail_content(
         ContentWrites::new(
             &store,
-            &PermitPool::new(std::num::NonZeroUsize::MIN, None),
+            &Permits::new(std::num::NonZeroUsize::MIN, None),
             &HEAD,
         ),
         &layout,
@@ -290,9 +290,9 @@ async fn local_large_tail_assembles_without_sources() {
     for (actual, resident) in pieces.iter().zip(&content.pieces) {
         assert_eq!(actual.as_ptr(), resident.bytes.as_ptr());
     }
-    let pool = PermitPool::new(std::num::NonZeroUsize::MIN, None);
+    let permits = Permits::new(std::num::NonZeroUsize::MIN, None);
     let written = write_tail_content(
-        ContentWrites::new(&store, &pool, &HEAD),
+        ContentWrites::new(&store, &permits, &HEAD),
         &layout,
         &content,
         pieces,
@@ -348,7 +348,7 @@ async fn materialized_tail_prefixes_keep_own_extents_whole() {
         let written = write_tail_content(
             ContentWrites::new(
                 &store,
-                &PermitPool::new(std::num::NonZeroUsize::MIN, None),
+                &Permits::new(std::num::NonZeroUsize::MIN, None),
                 &HEAD,
             ),
             &layout,
@@ -378,21 +378,21 @@ async fn validation_materialization_holds_a_write_permit() {
         OperationSelector::Head,
     );
     let (layout, tail, reference) = fixture(&store, &[6], false, 4).await;
-    let pool = PermitPool::new(std::num::NonZeroUsize::MIN, None);
+    let permits = Permits::new(std::num::NonZeroUsize::MIN, None);
     store.arm();
     let content = tail.content(&reference);
     let write = materialize_content_layout(
-        ContentWrites::new(&store, &pool, &HEAD),
+        ContentWrites::new(&store, &permits, &HEAD),
         &layout,
         content.as_ref(),
         &reference,
     );
     let check = async {
         store.wait_until_blocked().await;
-        assert_eq!(pool.counts().running, 1);
+        assert_eq!(permits.counts().running, 1);
         store.release();
     };
     let (written, ()) = tokio::join!(write, check);
     assert_eq!(written.expect("combined").extents[0].length, 10);
-    assert_eq!(pool.counts(), crate::PoolCounts::default());
+    assert_eq!(permits.counts(), crate::PermitCounts::default());
 }

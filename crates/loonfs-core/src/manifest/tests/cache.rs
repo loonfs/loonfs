@@ -1532,21 +1532,21 @@ async fn checkpoint_delta_update_does_not_read_existing_metadata_segments() {
 }
 
 #[tokio::test]
-async fn two_loaded_views_share_one_read_working_pool_and_return_the_same_rows() {
+async fn two_loaded_views_share_one_read_working_memory_and_return_the_same_rows() {
     use crate::cache::ReadWorkingMemory;
 
     let (_root, store, descriptor) = checkpointed_direntry_segment().await;
     let namespace_id = &descriptor.owner_namespace_id;
     let manifest_number = current_manifest_number(&store, namespace_id).await;
-    let cache = |pool| {
+    let cache = |read_working_memory| {
         MetadataSegmentCache::new(
             Arc::new(SharedSegmentBlocks::new(0, 0)),
             ObjectStoreScope::new(0),
-            pool,
+            read_working_memory,
         )
     };
-    let probe_pool = Arc::new(ReadWorkingMemory::new(64 * 1024 * 1024, None));
-    let probe_cache = cache(Arc::clone(&probe_pool));
+    let probe_memory = Arc::new(ReadWorkingMemory::new(64 * 1024 * 1024, None));
+    let probe_cache = cache(Arc::clone(&probe_memory));
     let probe = load_manifest_segments_for_inspection(
         &store,
         Some(&probe_cache),
@@ -1566,12 +1566,12 @@ async fn two_loaded_views_share_one_read_working_pool_and_return_the_same_rows()
         )
         .await
         .expect("probe rows");
-    let working_bytes = probe_pool.in_use();
+    let working_bytes = probe_memory.in_use();
     assert!(working_bytes > 0);
     drop(probe);
-    assert_eq!(probe_pool.in_use(), 0);
-    let pool = Arc::new(ReadWorkingMemory::new(working_bytes, None));
-    let shared_cache = cache(Arc::clone(&pool));
+    assert_eq!(probe_memory.in_use(), 0);
+    let read_working_memory = Arc::new(ReadWorkingMemory::new(working_bytes, None));
+    let shared_cache = cache(Arc::clone(&read_working_memory));
     let first = load_manifest_segments_for_inspection(
         &store,
         Some(&shared_cache),
@@ -1603,7 +1603,7 @@ async fn two_loaded_views_share_one_read_working_pool_and_return_the_same_rows()
             expected
         );
     }
-    assert_eq!(pool.in_use(), working_bytes);
+    assert_eq!(read_working_memory.in_use(), working_bytes);
     store.reset();
     assert_eq!(
         first
@@ -1637,7 +1637,7 @@ async fn two_loaded_views_share_one_read_working_pool_and_return_the_same_rows()
     );
     assert!(store.count(OperationSelector::Read) > 0);
     drop(first);
-    assert_eq!(pool.in_use(), 0);
+    assert_eq!(read_working_memory.in_use(), 0);
     second
         .scan_range(
             ApiMetadataRowFamily::DirentryBinds,
@@ -1649,7 +1649,7 @@ async fn two_loaded_views_share_one_read_working_pool_and_return_the_same_rows()
         )
         .await
         .expect("read after release");
-    assert_eq!(pool.in_use(), working_bytes);
+    assert_eq!(read_working_memory.in_use(), working_bytes);
     store.reset();
     second
         .scan_range(
@@ -1664,7 +1664,7 @@ async fn two_loaded_views_share_one_read_working_pool_and_return_the_same_rows()
         .expect("retained reread");
     assert_eq!(store.count(OperationSelector::Read), 0);
     drop(second);
-    assert_eq!(pool.in_use(), 0);
+    assert_eq!(read_working_memory.in_use(), 0);
 }
 
 async fn current_segment_refs<S: ObjectStore + ?Sized>(

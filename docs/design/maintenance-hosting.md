@@ -90,29 +90,29 @@ Sweeps and session steps run in separate loops. A long compaction uses one slot 
 
 ## Shared read working memory
 
-This section describes the shared pool that limits read working memory.
+This section describes the shared budget that limits read working memory.
 
-The pool's size is `max_read_working_bytes` in `ExecutionBudget`, which defaults to 256 MiB. All read-only and writable runtimes that are given clones of a budget share this pool. A runtime without an explicit budget creates a private one. Core callers without a runtime budget use an unshared 64 MiB pool. Metadata caches have their own limits, which are managed separately.
+The budget is `max_read_working_bytes` in `ExecutionBudget`, which defaults to 256 MiB. All read-only and writable runtimes that are given clones of a budget share this read working memory. A runtime without an explicit budget creates a private one. Core callers without a runtime budget use an unshared 64 MiB budget. Metadata caches have their own limits, which are managed separately.
 
 | Limit | Owner | Default | At the limit |
 | --- | --- | --- | --- |
-| `max_read_working_bytes` | `ExecutionBudget` | 256 MiB | A memo evicts its own entries, and continues without keeping blocks that don't fit. A scan's refill loads fewer blocks, and always takes its first block, which the pool records even above the limit, so the pool can exceed the limit by one block for each segment that a scan has open until the scan consumes the block. Nothing waits. |
+| `max_read_working_bytes` | `ExecutionBudget` | 256 MiB | A memo evicts its own entries, and continues without keeping blocks that don't fit. A scan's refill loads fewer blocks, and always takes its first block, which the budget records even above the limit, so the read working memory can exceed the limit by one block for each segment that a scan has open until the scan consumes the block. Nothing waits. |
 
-Read, publication, fold, and pin-fold memos reserve memory from this pool, and so does each refill of a scan, for the decoded bytes of its blocks until the scan has consumed them. A memo's reservation covers:
+Read, publication, fold, and pin-fold memos reserve memory from this budget, and so does each refill of a scan, for the decoded bytes of its blocks until the scan has consumed them. A memo's reservation covers:
 
 - decoded data blocks,
 - decoded indexes and filters,
 - keys and reference counts, and
 - allocated memo container capacity.
 
-Evicting or dropping an entry releases its reservation. A block that a caller already has stays valid after eviction. Cache entries are charged to their own limits, even when they share an allocation with a memo. Allocator bookkeeping, temporary decoding, returned rows, and blocks borrowed after eviction aren't counted in this pool. The pool doesn't limit read concurrency.
+Evicting or dropping an entry releases its reservation. A block that a caller already has stays valid after eviction. Cache entries are charged to their own limits, even when they share an allocation with a memo. Allocator bookkeeping, temporary decoding, returned rows, and blocks borrowed after eviction aren't counted in this budget. The budget doesn't limit read concurrency.
 
 `ExecutionBudget::stats().read_working_bytes` reports the retained bytes. The budget's recorder reports two gauges:
 
 - `loonfs.execution_budget.read_working_bytes`
 - `loonfs.execution_budget.read_working_reservation_failures`, which counts failed attempts to reserve, including retries after eviction.
 
-The reference server sets the pool's size with its `max_read_working_bytes` setting, and a value of zero keeps no memo, so each scan keeps one block for each segment that it has open.
+The reference server sets the budget with its `max_read_working_bytes` setting, and a value of zero keeps no memo, so each scan keeps one block for each segment that it has open.
 
 ## Store request costs
 

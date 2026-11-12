@@ -8,11 +8,11 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 /// The decoded index, filter, and lookup blocks that one read has loaded,
-/// charged to the read working memory and evicted oldest first when the pool
-/// is full, until the read ends.
+/// charged to the read working memory and evicted oldest first when the read
+/// working memory is full, until the read ends.
 #[derive(Debug)]
 pub(crate) struct SessionBlockMemo {
-    pool: Arc<ReadWorkingMemory>,
+    read_working_memory: Arc<ReadWorkingMemory>,
     inner: Mutex<SessionBlockMemoInner>,
 }
 
@@ -43,9 +43,9 @@ fn key_bytes(key: &MetadataSegmentCacheKey) -> usize {
 }
 
 impl SessionBlockMemo {
-    pub(crate) fn new(pool: Arc<ReadWorkingMemory>) -> Self {
+    pub(crate) fn new(read_working_memory: Arc<ReadWorkingMemory>) -> Self {
         Self {
-            pool,
+            read_working_memory,
             inner: Mutex::default(),
         }
     }
@@ -63,8 +63,8 @@ impl SessionBlockMemo {
     }
 
     /// Returns the read working memory that the memo is charged to.
-    pub(super) fn pool(&self) -> &Arc<ReadWorkingMemory> {
-        &self.pool
+    pub(super) fn read_working_memory(&self) -> &Arc<ReadWorkingMemory> {
+        &self.read_working_memory
     }
 
     pub(super) fn record(
@@ -90,11 +90,15 @@ impl SessionBlockMemo {
         loop {
             let bytes = inner.bytes();
             if bytes <= inner.reserved_bytes {
-                self.pool.release(inner.reserved_bytes - bytes);
+                self.read_working_memory
+                    .release(inner.reserved_bytes - bytes);
                 inner.reserved_bytes = bytes;
                 break;
             }
-            if self.pool.try_reserve(bytes - inner.reserved_bytes) {
+            if self
+                .read_working_memory
+                .try_reserve(bytes - inner.reserved_bytes)
+            {
                 inner.reserved_bytes = bytes;
                 break;
             }
@@ -119,7 +123,7 @@ impl Drop for SessionBlockMemo {
             .inner
             .get_mut()
             .expect("session block memo lock should not be poisoned");
-        self.pool.release(inner.reserved_bytes);
+        self.read_working_memory.release(inner.reserved_bytes);
     }
 }
 
@@ -149,25 +153,25 @@ mod tests {
 
     #[test]
     fn replacement_and_eviction_release_reservations_without_invalidating_borrows() {
-        let pool = Arc::new(ReadWorkingMemory::new(4096, None));
-        let memo = SessionBlockMemo::new(Arc::clone(&pool));
+        let read_working_memory = Arc::new(ReadWorkingMemory::new(4096, None));
+        let memo = SessionBlockMemo::new(Arc::clone(&read_working_memory));
         let block = data_block(2048);
         memo.record(&key(1), &block);
-        let recorded_bytes = pool.in_use();
+        let recorded_bytes = read_working_memory.in_use();
         assert!(recorded_bytes > 2048);
         let borrowed = memo.get(&key(1)).expect("decoded block");
         memo.record(&key(1), &block);
-        assert_eq!(pool.in_use(), recorded_bytes);
+        assert_eq!(read_working_memory.in_use(), recorded_bytes);
         memo.record(&key(2), &block);
         assert!(memo.get(&key(1)).is_none());
         assert!(memo.get(&key(2)).is_some());
-        assert!(pool.in_use() <= 4096);
+        assert!(read_working_memory.in_use() <= 4096);
         memo.record(&key(3), &data_block(4096));
         assert!(memo.get(&key(3)).is_none());
-        assert_eq!(pool.in_use(), 0);
+        assert_eq!(read_working_memory.in_use(), 0);
         assert_eq!(borrowed.weight(), 2048);
         memo.record(&key(2), &block);
         drop(memo);
-        assert_eq!(pool.in_use(), 0);
+        assert_eq!(read_working_memory.in_use(), 0);
     }
 }

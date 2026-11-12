@@ -139,7 +139,7 @@ pub mod engine {
     };
     pub use loonfs_core::{
         next_run_no_after, refill_iterators, select_next_iterator, BudgetPermit, ExtensionBasis,
-        ExtensionPublication, LoadedBlocks, PermitPool, PoolCounts, SegmentBlockLoader,
+        ExtensionPublication, LoadedBlocks, PermitCounts, Permits, SegmentBlockLoader,
         SegmentRowIterator,
     };
     pub use loonfs_types::format::manifest::{ExtensionEntry, ExtensionRunRef};

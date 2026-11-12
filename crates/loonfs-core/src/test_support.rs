@@ -13,10 +13,10 @@ pub fn observed_now() -> crate::time::Observation {
     crate::time::Observation::now(std_timer())
 }
 
-/// A pool of 32 content write permits that reports its counts to nothing,
-/// for a test whose content write limit doesn't matter.
-pub fn content_writes() -> crate::PermitPool {
-    crate::PermitPool::new(
+/// 32 content write permits with no observer, for a test whose content
+/// write limit doesn't matter.
+pub fn content_writes() -> crate::Permits {
+    crate::Permits::new(
         std::num::NonZeroUsize::new(32).expect("32 is nonzero"),
         None,
     )
