@@ -1,10 +1,7 @@
-//! The `rm`, `restore`, `undelete`, and `mkdir` commands, and the commit and
+//! The `rm`, `restore`, and `mkdir` commands, and the commit and
 //! destination options that every mutating command shares.
 
-use crate::args::{
-    CommitArgs, FilesystemMkdirArgs, FilesystemRestoreArgs, FilesystemRmArgs,
-    FilesystemUndeleteArgs,
-};
+use crate::args::{CommitArgs, FilesystemMkdirArgs, FilesystemRestoreArgs, FilesystemRmArgs};
 use crate::commands::context::{
     create_directory_tolerating_existing, namespace_path, render_target, shell_quote, Invocation,
     NamespaceContext, ProfileSource, RemoteDirectoryOutcome, RestoreDeletedHint, RootPath,
@@ -15,7 +12,9 @@ use loonfs_client::{
     CommitOptions, CreateDirectoryOptions, DeleteOptions, RestoreDeletedDestination,
     RestoreDeletedOptions,
 };
-use loonfs_types::{DeleteDirectoryBehavior, DestinationBehavior, ErrorCode};
+use loonfs_types::{
+    CommitSeq, DeleteDirectoryBehavior, DestinationBehavior, ErrorCode, InodeId, RevisionNo,
+};
 
 pub(crate) fn commit_options(args: &CommitArgs) -> CommitOptions {
     CommitOptions {
@@ -44,7 +43,7 @@ pub(crate) async fn run_filesystem_rm(
         .map_err(|error| context.fail(error))?;
     let commit = commit_options(&args.commit);
     // Resolve the inode before deleting: the id is half of the recovery
-    // handle `loonfs undelete` needs. The delete then includes it as an
+    // handle `loonfs restore` needs. The delete then includes it as an
     // expectation, so a rebinding racing this command fails the delete
     // instead of removing (and mis-reporting) a different inode.
     let deleted_inode = context
@@ -117,16 +116,38 @@ pub(crate) async fn run_filesystem_restore(
     args: FilesystemRestoreArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = NamespaceContext::resolve(invocation, args.actor.actor_id.as_ref()).await?;
-    let root = RootPath::Refused;
-    let spec = namespace_path(context.namespace(), "path", &args.path, root)
-        .map_err(|error| context.fail(error))?;
     let commit = commit_options(&args.commit);
-    let revision_no = args.revision;
+    match args.inode {
+        Some(inode_id) => {
+            let deletion_seq = args
+                .deletion_seq
+                .expect("clap requires `--deletion-seq` with `--inode`");
+            restore_deleted(&context, inode_id, deletion_seq, args.to.as_deref(), commit).await
+        }
+        None => {
+            let path = args.path.expect("clap requires a path without `--inode`");
+            let revision_no = args
+                .revision
+                .expect("clap requires `--revision` without `--inode`");
+            restore_revision(&context, &path, revision_no, &commit).await
+        }
+    }
+}
+
+async fn restore_revision(
+    context: &NamespaceContext,
+    path: &str,
+    revision_no: RevisionNo,
+    commit: &CommitOptions,
+) -> Result<CommandOutput, CommandFailure> {
+    let root = RootPath::Refused;
+    let spec = namespace_path(context.namespace(), "path", path, root)
+        .map_err(|error| context.fail(error))?;
     let result = context
         .profile
         .target
         .client
-        .restore_revision_with_options(&spec, revision_no, context.actor(), &commit)
+        .restore_revision_with_options(&spec, revision_no, context.actor(), commit)
         .await
         .map_err(|error| context.fail(error))?;
 
@@ -140,22 +161,20 @@ pub(crate) async fn run_filesystem_restore(
     }))
 }
 
-pub(crate) async fn run_filesystem_undelete(
-    invocation: &Invocation,
-    args: FilesystemUndeleteArgs,
+async fn restore_deleted(
+    context: &NamespaceContext,
+    inode_id: InodeId,
+    deletion_seq: CommitSeq,
+    destination_path: Option<&str>,
+    commit: CommitOptions,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = NamespaceContext::resolve(invocation, args.actor.actor_id.as_ref()).await?;
     let root = RootPath::Refused;
     // An absent path restores in place; the destination is then the parent
     // and name the deletion recorded, which no path here could name better.
-    let spec = args
-        .destination_path
-        .as_deref()
-        .map(|path| namespace_path(context.namespace(), "destination_path", path, root))
+    let spec = destination_path
+        .map(|path| namespace_path(context.namespace(), "--to", path, root))
         .transpose()
         .map_err(|error| context.fail(error))?;
-    let commit = commit_options(&args.commit);
-    let deletion_seq = args.deletion_seq;
     let destination = spec
         .as_ref()
         .map_or(RestoreDeletedDestination::Recorded, |spec| {
@@ -167,7 +186,7 @@ pub(crate) async fn run_filesystem_undelete(
         .client
         .restore_deleted_with_options(
             context.namespace(),
-            args.inode,
+            inode_id,
             deletion_seq,
             context.actor(),
             &RestoreDeletedOptions {
@@ -189,7 +208,7 @@ pub(crate) async fn run_filesystem_undelete(
         target,
         committed_seq: result.committed_seq,
         commit_id: result.commit_id,
-        inode_id: Some(args.inode),
+        inode_id: Some(inode_id),
         recovery_command: None,
     }))
 }

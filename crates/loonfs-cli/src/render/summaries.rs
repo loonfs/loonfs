@@ -195,10 +195,10 @@ pub(super) fn pool_gc_summary(report: &PoolGcResponse) -> String {
     lines.extend(report.skipped.iter().map(|reason| {
         match reason {
             GcSkippedWork::ContentSweepPoolBudget => {
-                "skipped the content sweep: the pass couldn't read every pool member's roots within its budget"
+                "skipped the content sweep: the collection couldn't read every pool member's roots within its budget"
             }
             GcSkippedWork::ContentSweepUnreadableMember => {
-                "skipped the content sweep: the pass couldn't read one pool member's roots"
+                "skipped the content sweep: the collection couldn't read one pool member's roots"
             }
             GcSkippedWork::Unknown => "skipped work for a reason unknown to this CLI",
         }
@@ -262,7 +262,7 @@ pub(super) fn event_descriptor(event: &loonfs_types::FilesystemEvent) -> String 
             deleted_binding, ..
         } => format!("delete '{}'", deleted_binding.display_name),
         FilesystemEvent::Restored { display_name, .. } => {
-            format!("undelete '{display_name}'")
+            format!("restore '{display_name}'")
         }
         FilesystemEvent::AttributesChanged {
             inode_id,

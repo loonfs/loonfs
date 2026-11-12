@@ -9,7 +9,7 @@ On an embedded profile, `loonfs maintenance index enable` runs its bounded index
 Requests through an embedded profile work as follows:
 
 - **Validation and errors.** Requests go through the HTTP API's validation, error envelope, and JSON body limits. A failed request reports the HTTP API's request ID and error details.
-- **Deadline.** The HTTP API cancels a request that runs longer than 60 seconds (the server's default deadline). Routes that stream file content and maintenance runs aren't subject to that deadline.
+- **Deadline.** The HTTP API cancels a request that runs longer than 60 seconds (the server's default deadline). Routes that stream file content and maintenance jobs aren't subject to that deadline.
 - **Concurrency.** The HTTP API admits at most 8 concurrent uploads and 16 concurrent downloads, the same defaults as the server.
 - **Transfer size.** The upload and download size limits are `u64::MAX`, so embedded transfers aren't limited in size.
 - **Downloads.** An interrupted embedded download starts again from the beginning. Progress for a single-file `loonfs get` counts the bytes received, but doesn't show a total.
@@ -89,7 +89,7 @@ Selectors
       Default namespace for the current environment. --namespace takes
       precedence over it, and it takes precedence over the profile default
 
-  Commands that commit (put, mkdir, rm, mv, cp, restore, undelete) accept:
+  Commands that commit (put, mkdir, rm, mv, cp, restore) accept:
     -m, --message <message>
       Annotation recorded on the commit and shown by `loonfs changes`
 
@@ -192,7 +192,7 @@ Namespace management
     --expected-head-seq, the command deletes only if the namespace head is
     still at that sequence
 
-  loonfs merge <namespace> --from <fork> [--through <seq>] [--record <path>]
+  loonfs merge <namespace> --source <fork> [--through <seq>] [--record <path>]
                [--abandon] [--actor-id <stable-id>]
     Merge a fork into the namespace it was forked from. A merge that's too
     large is merged in pieces. A merge that conflicts is rebased into a new
@@ -340,7 +340,7 @@ Writing
 
   loonfs rm <path> [-r] [--actor-id <id>]
     Delete a file, or with -r a directory and everything under it, as one
-    commit. The output includes the handle that `loonfs undelete` needs
+    commit. The output includes the handle that `loonfs restore` needs
 
   loonfs mv <source> <dest> [--force]
             [--expected-destination-inode-id <id>]
@@ -368,19 +368,19 @@ History and recovery
                  [--actor-id <id>]
     Write a prior revision's content as the file's next revision
 
+  loonfs restore --inode <id> --deletion-seq <seq> [--to <path>]
+                 [--actor-id <id>]
+    Restore a deleted file or directory. --inode and --deletion-seq come
+    from `loonfs trash` or the `rm` output, and together they identify one
+    exact deletion, so a stale command can't cancel a later delete. Omit
+    --to to restore the item in place, under the parent and name recorded
+    with its deletion. That works even if an enclosing directory was
+    renamed since. Pass --to to restore it somewhere else
+
   loonfs trash [--limit <n>] [--page-size <n>] [--cursor <cursor>]
                [--all] [--jsonl]
     List recoverable deletions, including when each item was deleted and the
-    exact `loonfs undelete` command that restores it
-
-  loonfs undelete [<path>] --inode <id> --deletion-seq <seq>
-                  [--actor-id <id>]
-    Recover a deleted file or directory. --inode and --deletion-seq come
-    from `loonfs trash` or the `rm` output, and together they identify one
-    exact deletion, so a stale command can't cancel a later delete. Omit
-    <path> to restore the item in place, under the parent and name recorded
-    with its deletion. That works even if an enclosing directory was
-    renamed since. Pass <path> to restore it somewhere else
+    exact `loonfs restore` command that restores it
 
   loonfs changes [--after <seq>] [--limit <n>] [--page-size <n>]
                  [--all] [--jsonl] [--snapshot-id <id>]
@@ -405,7 +405,7 @@ Maintenance
     Fold the WAL tail if it's due, and compact metadata until nothing is
     due. A compaction unit can take minutes, so the command can too.
     It stops after 16 compaction units. A `due` outcome means that work
-    remains, and a later run continues it. --max-wal-tail-objects
+    remains, and a later job continues it. --max-wal-tail-objects
     overrides the default fold threshold.
 
   loonfs maintenance fold
@@ -435,10 +435,10 @@ Maintenance
     itself.
 
   loonfs maintenance gc [--grace-window-ms <ms>]
-    Run one complete pass over the namespace and print its report. Each
+    Run one collection of the namespace and print its report. Each
     call reads the current manifest and hint, lists the pins, then lists
     every family under the namespace's prefix from the beginning and
-    sweeps each family to the end. The pass deletes the namespace's
+    sweeps each family to the end. The collection deletes the namespace's
     unreferenced manifests, WAL objects, metadata segments, extension
     segments, and pins. The namespace's content objects, upload records,
     and temporary objects are stored in its pool, and this command doesn't

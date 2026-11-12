@@ -63,7 +63,7 @@ pub(crate) struct TreeTransferFailure {
 pub(crate) struct TrashListing {
     #[serde(flatten)]
     pub response: loonfs_types::ListTrashResponse,
-    /// One complete `loonfs undelete` per entry, in `response.entries` order.
+    /// One complete `loonfs restore` per entry, in `response.entries` order.
     #[serde(skip)]
     pub recovery_commands: Vec<String>,
 }
@@ -282,13 +282,13 @@ pub(crate) enum CommandData {
         commit_id: CommitId,
         /// Inode the mutation acted on, when the command resolved one —
         /// `rm` reports it so the deletion stays recoverable via
-        /// `loonfs undelete`.
+        /// `loonfs restore`.
         #[serde(
             skip_serializing_if = "Option::is_none",
             with = "loonfs_types::inode_id::public::option"
         )]
         inode_id: Option<InodeId>,
-        /// The `loonfs undelete` that puts this deletion back, set by `rm`
+        /// The `loonfs restore` that puts this deletion back, set by `rm`
         /// alone. Human-only, for the reason [`TrashListing`] gives.
         #[serde(skip)]
         recovery_command: Option<String>,
