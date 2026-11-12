@@ -789,8 +789,8 @@ mod tests {
                             head_seq: CommitSeq(0),
                             payload_checksum: crate::sha256_digest(b"source"),
                         },
-                        source_pin_id: crate::PinId::parse(
-                            "pin_00000000000000000001-0000000000000001",
+                        source_snapshot_id: crate::SnapshotId::parse(
+                            "snp_00000000000000000001-00000000000000000000000001",
                         )
                         .expect("checkpoint"),
                         rebased_from: None,

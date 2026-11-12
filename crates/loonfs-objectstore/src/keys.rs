@@ -4,8 +4,8 @@
 
 use loonfs_types::format::manifest::{ExtensionSegmentRef, MetadataSegmentRef};
 use loonfs_types::{
-    ContentId, ExtensionName, IndexSegmentId, ManifestNo, MetadataSegmentId, NamespaceId, PinId,
-    PoolId, ProbeId, UploadId, WalNo,
+    ContentId, ExtensionName, IndexSegmentId, ManifestNo, MetadataSegmentId, NamespaceId, PoolId,
+    ProbeId, SnapshotId, UploadId, WalNo,
 };
 
 /// Prefix for objects created by store probes.
@@ -21,8 +21,8 @@ pub(crate) const MANIFEST_DIRECTORY: &str = "manifests";
 pub(crate) const MANIFEST_SUFFIX: &str = ".json.zst";
 pub(crate) const SEGMENT_DIRECTORY: &str = "segments";
 pub(crate) const SEGMENT_SUFFIX: &str = ".sst.zst";
-pub(crate) const PIN_DIRECTORY: &str = "pins";
-pub(crate) const PIN_SUFFIX: &str = ".json";
+pub(crate) const SNAPSHOT_DIRECTORY: &str = "snapshots";
+pub(crate) const SNAPSHOT_SUFFIX: &str = ".json";
 pub(crate) const UPLOAD_DIRECTORY: &str = "uploads";
 pub(crate) const UPLOAD_SESSION_SUFFIX: &str = ".json";
 pub(crate) const UPLOAD_OUTCOME_SUFFIX: &str = ".outcome.json";
@@ -127,14 +127,17 @@ pub fn metadata_segment_object_key(descriptor: &MetadataSegmentRef) -> String {
     metadata_segment(&descriptor.owner_namespace_id, &descriptor.segment_id)
 }
 
-/// Builds a pin key with its manifest number in the id.
-pub fn pin(namespace_id: &NamespaceId, pin_id: &PinId) -> String {
-    format!("{}{pin_id}{PIN_SUFFIX}", pin_prefix(namespace_id))
+/// Builds a snapshot key with its manifest number in the id.
+pub fn snapshot_record(namespace_id: &NamespaceId, snapshot_id: &SnapshotId) -> String {
+    format!(
+        "{}{snapshot_id}{SNAPSHOT_SUFFIX}",
+        snapshot_prefix(namespace_id)
+    )
 }
 
-/// Builds the listing prefix containing pins for one namespace.
-pub fn pin_prefix(namespace_id: &NamespaceId) -> String {
-    format!("{}{PIN_DIRECTORY}/", namespace_prefix(namespace_id))
+/// Builds the listing prefix containing snapshots for one namespace.
+pub fn snapshot_prefix(namespace_id: &NamespaceId) -> String {
+    format!("{}{SNAPSHOT_DIRECTORY}/", namespace_prefix(namespace_id))
 }
 
 /// Builds the listing prefix containing every object that one pool stores.
@@ -247,9 +250,8 @@ mod tests {
     use super::{
         content_blob, content_blob_name, content_prefix, content_span, content_span_name,
         extension_segment, hint, metadata_manifest_object, metadata_segment,
-        metadata_segment_object_key, pin, pool_prefix, pool_record, probe_run_prefix,
-        probe_runs_prefix, temporary_object, upload_outcome, upload_session, wal_object,
-        wal_prefix,
+        metadata_segment_object_key, pool_prefix, pool_record, probe_run_prefix, probe_runs_prefix,
+        snapshot_record, temporary_object, upload_outcome, upload_session, wal_object, wal_prefix,
     };
     use loonfs_types::format::manifest::{
         MetadataRowFamily, MetadataSegmentRef, METADATA_SEGMENT_ENCODING,
@@ -257,7 +259,7 @@ mod tests {
     use loonfs_types::format::segment_blocks::BlockHandle;
     use loonfs_types::{
         ContentId, ExtensionName, IndexSegmentId, ManifestNo, MetadataSegmentId, NamespaceId,
-        PinId, PoolId, ProbeId, UploadId, WalNo,
+        PoolId, ProbeId, SnapshotId, UploadId, WalNo,
     };
 
     const CONTENT_ID: &str = "con_5bsqqg28t5cy4tqkff04hmasw9";
@@ -279,8 +281,9 @@ mod tests {
         loonfs_test_support::ids::numbered_pool_id(1)
     }
 
-    fn pin_id() -> PinId {
-        PinId::parse("pin_00000000000000000001-0000000000000001").expect("valid pin id")
+    fn snapshot_id() -> SnapshotId {
+        SnapshotId::parse("snp_00000000000000000001-00000000000000000000000001")
+            .expect("valid snapshot id")
     }
 
     fn metadata_segment_id() -> MetadataSegmentId {
@@ -346,7 +349,10 @@ mod tests {
                 .replace("{pool_id}", pool_id().as_str())
                 .replace("{wal_no:020}", &format!("{:020}", 42))
                 .replace("{manifest_no:020}", "00000000000000000400")
-                .replace("{pin_id}", "pin_00000000000000000001-0000000000000001")
+                .replace(
+                    "{snapshot_id}",
+                    "snp_00000000000000000001-00000000000000000000000001",
+                )
                 .replace("{extension_name}", "grep")
                 .replace("{segment_id}", segment_id)
                 .replace("{upload_id}", "upl_00000000000000000000000001")
@@ -362,7 +368,10 @@ mod tests {
                 "Namespace manifests",
                 metadata_manifest_object(&namespace_id(), &ManifestNo(400)),
             ),
-            ("Pin records", pin(&namespace_id(), &pin_id())),
+            (
+                "Snapshot records",
+                snapshot_record(&namespace_id(), &snapshot_id()),
+            ),
             (
                 "Metadata segments",
                 metadata_segment(&owner_namespace_id(), &metadata_segment_id()),

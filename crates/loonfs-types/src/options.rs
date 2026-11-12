@@ -6,7 +6,7 @@ use crate::{
     AbsolutePath, AccessGrants, AccessRevisionNo, AttributeKey, AttributeValue,
     AttributesRevisionNo, CommitId, CommitPrecondition, CommitSeq, DeleteDirectoryBehavior,
     DestinationBehavior, DestinationPrecondition, DisplayName, EffectiveLimit, InodeId,
-    NamespaceAccess, PinId, RevisionNo,
+    NamespaceAccess, RevisionNo, SnapshotId,
 };
 use std::collections::BTreeMap;
 use std::num::NonZeroU64;
@@ -107,9 +107,9 @@ pub enum ReadAt {
     /// The live head, confirmed as the consistency asks, or as the runtime's
     /// default consistency when it's `None`.
     Live(Option<Consistency>),
-    /// The state that this snapshot, or this fork pin of the namespace,
+    /// The state that this snapshot, or this fork snapshot of the namespace,
     /// captured.
-    Snapshot(PinId),
+    Snapshot(SnapshotId),
 }
 
 impl Default for ReadAt {
@@ -118,10 +118,10 @@ impl Default for ReadAt {
     }
 }
 
-impl From<Option<PinId>> for ReadAt {
+impl From<Option<SnapshotId>> for ReadAt {
     /// Returns a read of the snapshot, or of the live head at the runtime's
     /// default consistency when there's no snapshot.
-    fn from(snapshot_id: Option<PinId>) -> Self {
+    fn from(snapshot_id: Option<SnapshotId>) -> Self {
         snapshot_id.map_or(Self::Live(None), Self::Snapshot)
     }
 }
@@ -578,7 +578,7 @@ pub struct DirectMultipartUploadOptions {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ForkNamespaceOptions {
     /// Fork from this unexpired snapshot instead of the current head.
-    pub snapshot_id: Option<PinId>,
+    pub snapshot_id: Option<SnapshotId>,
 }
 
 /// Options for merging a fork into a namespace.

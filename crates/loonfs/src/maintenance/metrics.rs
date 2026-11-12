@@ -41,7 +41,7 @@ impl MetricLabel for CompactionOutcome {
 /// One reclaimable family: its label, and the count a collection reports for it.
 type GcKind<R> = (&'static str, fn(&R) -> u64);
 
-/// Counts each deletion of a namespace's collection once, with pins grouped by
+/// Counts each deletion of a namespace's collection once, with snapshots grouped by
 /// owner.
 const GC_CATEGORIES: [GcKind<GcResponse>; 6] = [
     ("deleted_wal_objects", |gc| gc.deleted.wal_objects),

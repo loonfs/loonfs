@@ -85,7 +85,7 @@ use loonfs_types::format::segment_blocks::{
 };
 use loonfs_types::{
     AbsolutePath, CommitId, CommitSeq, DestinationBehavior, EffectiveLimit, InodeId, ManifestNo,
-    NameKey, NamespaceId, PinId, RevisionNo, RunNo,
+    NameKey, NamespaceId, RevisionNo, RunNo, SnapshotId,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::num::{NonZeroU32, NonZeroUsize};
@@ -134,7 +134,7 @@ async fn load_manifest_projection_metadata_state<S: ObjectStore + ?Sized>(
     Ok((projection.head, metadata_state.build()))
 }
 
-/// Every lifecycle test in this file pins as one user owner; owner-specific
+/// Every lifecycle test in this file takes snapshots as one user owner; owner-specific
 /// behavior (fork owners, distinct-owner records) is exercised explicitly
 /// where it matters.
 pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
@@ -145,9 +145,9 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
     let namespace = crate::test_support::namespace_store(store, namespace_id);
     let manifest = crate::test_support::folded_manifest(&namespace).await?;
     namespace
-        .create_pin(
-            loonfs_types::format::control::PinOwner::User {
-                name: "test-pin".to_owned(),
+        .create_snapshot_record(
+            loonfs_types::format::control::SnapshotOwner::User {
+                name: "test-snapshot".to_owned(),
                 expires_at_ms: None,
             },
             manifest,

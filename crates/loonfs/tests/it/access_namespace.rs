@@ -451,7 +451,7 @@ async fn snapshot_after_administrator_change() -> (
     tempfile::TempDir,
     loonfs::LoonFs<loonfs::ReadOnly>,
     NamespaceId,
-    loonfs_types::PinId,
+    loonfs_types::SnapshotId,
     loonfs_types::ContentRef,
 ) {
     let (directory, writer, namespace) = create_namespace().await;

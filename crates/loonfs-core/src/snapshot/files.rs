@@ -1,7 +1,7 @@
-//! Lists files from the manifest pinned by a snapshot.
+//! Lists files from the manifest kept by a snapshot.
 
 use super::lifecycle::ensure_unexpired;
-use super::read_basis::{load_pin_basis, PinBasis};
+use super::read_basis::{load_snapshot_basis, SnapshotBasis};
 use crate::engine::{NamespaceEngine, RuntimeReadContext};
 use crate::error::{CoreError, Result};
 use crate::metadata::MetadataView;
@@ -10,7 +10,7 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{lookup_keys, MetadataRow, MetadataRowFamily};
 use loonfs_types::format::segment_blocks::string_prefix_upper_bound;
 use loonfs_types::{
-    CommitSeq, ContentRef, InodeId, InodeKind, PageRequest, PagedResponse, PinId, RevisionNo,
+    CommitSeq, ContentRef, InodeId, InodeKind, PageRequest, PagedResponse, RevisionNo, SnapshotId,
 };
 
 /// Minimum number of inode rows scanned at once.
@@ -23,8 +23,8 @@ pub struct SnapshotFilesPageCursor {
     pub after_inode_id: InodeId,
 }
 
-/// One file in the state a snapshot pins, with the content the snapshot
-/// pinned for it.
+/// One file in the state a snapshot keeps, with the content the snapshot
+/// kept for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotFile {
     /// The file's inode id.
@@ -39,7 +39,7 @@ pub struct SnapshotFile {
     pub size_bytes: u64,
 }
 
-/// Options for listing the files a snapshot pins.
+/// Options for listing the files a snapshot keeps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ListSnapshotFilesOptions {
     /// Whether to include deleted files and files under a deleted directory,
@@ -47,7 +47,7 @@ pub struct ListSnapshotFilesOptions {
     pub include_deleted: bool,
 }
 
-/// One page of the files a snapshot pins.
+/// One page of the files a snapshot keeps.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotFilesPage {
     /// The sequence captured by the snapshot.
@@ -81,7 +81,7 @@ impl PagedResponse for SnapshotFilesPage {
 }
 
 impl<S: ObjectStore, M> NamespaceEngine<S, M> {
-    /// Lists files from the manifest pinned by the snapshot `snapshot_id`,
+    /// Lists files from the manifest kept by the snapshot `snapshot_id`,
     /// ordered by inode ID: the files visible at the snapshot, or every file it
     /// retains with `options.include_deleted`. Directories are omitted.
     ///
@@ -94,7 +94,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// `checkpoint_unavailable`.
     pub async fn list_snapshot_files_page(
         &self,
-        snapshot_id: &PinId,
+        snapshot_id: &SnapshotId,
         request: PageRequest<SnapshotFilesPageCursor>,
         options: ListSnapshotFilesOptions,
         context: &RuntimeReadContext,
@@ -108,18 +108,18 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
 }
 
 impl<S: ObjectStore> NamespaceStore<S> {
-    /// Lists one page of the files the snapshot `snapshot_id` pins, as
+    /// Lists one page of the files that the snapshot `snapshot_id` keeps, as
     /// [`NamespaceEngine::list_snapshot_files_page`] describes.
     pub(crate) async fn list_snapshot_files_page(
         &self,
-        snapshot_id: &PinId,
+        snapshot_id: &SnapshotId,
         request: PageRequest<SnapshotFilesPageCursor>,
         options: ListSnapshotFilesOptions,
     ) -> Result<SnapshotFilesPage> {
         let now_ms = self.wall_clock.now_ms();
-        let record = ensure_unexpired(self.load_user_pin(snapshot_id).await?, now_ms)?.state;
-        let PinBasis { manifest, segments } =
-            load_pin_basis(&self.store, &self.segment_cache, record).await?;
+        let record = ensure_unexpired(self.load_user_snapshot(snapshot_id).await?, now_ms)?.state;
+        let SnapshotBasis { manifest, segments } =
+            load_snapshot_basis(&self.store, &self.segment_cache, record).await?;
 
         let captured_seq = manifest.head_seq;
         let view = MetadataView::over_manifest_segments(&segments, captured_seq);

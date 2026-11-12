@@ -502,8 +502,8 @@ impl LoonFs<Writable> {
     /// moves this runtime's views of both namespaces past the fork.
     ///
     /// The source's WAL tail is folded first, through the source's one fold
-    /// path, and `fork` pins the fold's manifest (see
-    /// [`PublisherRegistry::pin_after_fold`]).
+    /// path, and `fork` takes a snapshot of the fold's manifest (see
+    /// [`PublisherRegistry::snapshot_after_fold`]).
     pub(crate) async fn install_fork<Fork>(
         &self,
         source_namespace_id: &NamespaceId,
@@ -516,7 +516,7 @@ impl LoonFs<Writable> {
         let result = self
             .mode
             .publisher
-            .pin_after_fold(source_namespace_id, |manifest| {
+            .snapshot_after_fold(source_namespace_id, |manifest| {
                 fork(self.engine(source_namespace_id), manifest)
             })
             .await;

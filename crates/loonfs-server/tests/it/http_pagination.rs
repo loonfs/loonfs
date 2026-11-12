@@ -56,7 +56,7 @@ async fn http_paginates_checkpoint_inventory_and_rejects_invalid_requests() {
         expected_ids.push(
             harness
                 .client
-                .create_snapshot(&demo, &format!("pin-{index}"))
+                .create_snapshot(&demo, &format!("snapshot-{index}"))
                 .await
                 .expect("create checkpoint")
                 .snapshot_id,

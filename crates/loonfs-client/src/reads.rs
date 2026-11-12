@@ -595,11 +595,11 @@ impl Client {
     }
 
     /// Streams one retained file revision by inode identity through the
-    /// server, at the consistency or the pin that `options` sets.
+    /// server, at the consistency or the snapshot that `options` sets.
     ///
     /// See [`Self::read_file_stream_with_options`] for when the bytes are
     /// verified. Options that read a snapshot, or one of the namespace's fork
-    /// pins, read the revision that the pinned manifest keeps.
+    /// snapshots, read the revision that the snapshot's manifest keeps.
     pub async fn read_file_revision_stream_by_inode_with_options(
         &self,
         namespace_id: &NamespaceId,
@@ -657,7 +657,7 @@ mod tests {
     use crate::ClientConfig;
     use loonfs_types::options::Consistency;
     use loonfs_types::FilesystemEvent;
-    use loonfs_types::PinId;
+    use loonfs_types::SnapshotId;
     use loonfs_types::{ContentId, ContentRef, EntryInodeKind, PathEntryKind};
 
     fn client_for(transport: &scripted_transport::ScriptedTransport) -> Client {
@@ -781,8 +781,8 @@ mod tests {
     #[tokio::test]
     async fn reads_send_only_the_parameters_of_what_they_read_at() {
         let spec = NamespacePath::parse("demo", "/file.txt").expect("namespace path");
-        let snapshot_id =
-            PinId::parse("pin_00000000000000000001-0000000000000002").expect("snapshot ID");
+        let snapshot_id = SnapshotId::parse("snp_00000000000000000001-00000000000000000000000002")
+            .expect("snapshot ID");
         let transport = scripted_transport::script([
             Outcome::Success(b"file".to_vec()),
             Outcome::Success(b"file".to_vec()),

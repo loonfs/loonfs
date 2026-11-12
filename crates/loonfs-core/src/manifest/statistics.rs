@@ -5,13 +5,13 @@ use crate::error::{CoreError, Result};
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::store::NamespaceStore;
 use crate::segment::index_block_load::segment_object_bytes;
-use crate::snapshot::load_pin_basis;
+use crate::snapshot::load_snapshot_basis;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::{ForkBasis, ManifestRef, NamespaceStatus};
 use loonfs_types::format::manifest::{
     ManifestActivity, MetadataRowFamily, NamespaceManifestEnvelope,
 };
-use loonfs_types::{PinId, WalNo};
+use loonfs_types::{SnapshotId, WalNo};
 use std::collections::BTreeMap;
 
 /// Statistics through the selected manifest's folded head. Newer WAL commits
@@ -51,7 +51,7 @@ impl LoadedManifest {
 
 impl<S: ObjectStore> NamespaceStore<S> {
     /// Reads the current manifest's statistics without folding or scanning the WAL,
-    /// metadata segments, content, or pins. Deleted namespaces retain final totals.
+    /// metadata segments, content, or snapshots. Deleted namespaces retain final totals.
     pub async fn load_statistics(&self) -> Result<NamespaceStatistics> {
         self.load_current_manifest().await?.statistics()
     }
@@ -61,15 +61,15 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// `snapshot_not_found`.
     pub async fn load_snapshot_statistics(
         &self,
-        snapshot_id: &PinId,
+        snapshot_id: &SnapshotId,
     ) -> Result<NamespaceStatistics> {
-        let Some(loaded) = self.load_pin(snapshot_id).await? else {
+        let Some(loaded) = self.load_snapshot_record(snapshot_id).await? else {
             return Err(CoreError::SnapshotNotFound {
                 snapshot_id: snapshot_id.clone(),
             });
         };
-        let pinned = load_pin_basis(&self.store, &self.segment_cache, loaded.state).await?;
-        manifest_statistics(pinned.segments.manifest(), pinned.segments.manifest_bytes)
+        let basis = load_snapshot_basis(&self.store, &self.segment_cache, loaded.state).await?;
+        manifest_statistics(basis.segments.manifest(), basis.segments.manifest_bytes)
     }
 }
 

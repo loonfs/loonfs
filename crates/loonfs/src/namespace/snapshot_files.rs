@@ -4,19 +4,19 @@
 use crate::pagers::SnapshotFilesPager;
 use crate::trace::{self, operation_span};
 use crate::{
-    Consistency, ListSnapshotFilesOptions, Namespace, PinId, Result, SnapshotFilesPage,
-    SnapshotFilesPageCursor,
+    Consistency, ListSnapshotFilesOptions, Namespace, Result, SnapshotFilesPage,
+    SnapshotFilesPageCursor, SnapshotId,
 };
 use loonfs_types::PageRequest;
 
 impl<M: crate::Mode> Namespace<M> {
     /// Lists files visible at a snapshot in ascending inode-ID order.
     ///
-    /// The pinned manifest is read without replaying later WAL entries.
+    /// The snapshot's manifest is read without replaying later WAL entries.
     /// Directories are omitted. A missing or expired snapshot returns
     /// `snapshot_not_found` rather than falling back to current state. A
     /// subject that isn't an administrator gets `forbidden`.
-    pub fn list_snapshot_files(&self, snapshot_id: &PinId) -> SnapshotFilesPager {
+    pub fn list_snapshot_files(&self, snapshot_id: &SnapshotId) -> SnapshotFilesPager {
         self.list_snapshot_files_with_options(snapshot_id, &ListSnapshotFilesOptions::default())
     }
 
@@ -25,7 +25,7 @@ impl<M: crate::Mode> Namespace<M> {
     /// deleted files and files under a deleted directory.
     pub fn list_snapshot_files_with_options(
         &self,
-        snapshot_id: &PinId,
+        snapshot_id: &SnapshotId,
         options: &ListSnapshotFilesOptions,
     ) -> SnapshotFilesPager {
         loonfs_types::Pager::with_state(
@@ -40,7 +40,7 @@ impl<M: crate::Mode> Namespace<M> {
 
     async fn snapshot_files_page(
         &self,
-        snapshot_id: &PinId,
+        snapshot_id: &SnapshotId,
         request: PageRequest<SnapshotFilesPageCursor>,
         options: ListSnapshotFilesOptions,
     ) -> Result<SnapshotFilesPage> {

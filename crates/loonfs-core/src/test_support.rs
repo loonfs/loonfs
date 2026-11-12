@@ -301,7 +301,7 @@ pub async fn load_pool_id<S: ObjectStore>(store: S, namespace_id: &NamespaceId) 
 }
 
 /// Folds the namespace's WAL tail and returns the manifest that covers it,
-/// the manifest that a snapshot or a fork of the current head pins.
+/// the manifest that a snapshot or a fork of the current head keeps.
 pub async fn folded_manifest<S: ObjectStore>(
     namespace: &NamespaceStore<S>,
 ) -> crate::Result<loonfs_types::format::control::ManifestRef> {

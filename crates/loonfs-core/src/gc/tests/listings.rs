@@ -152,12 +152,12 @@ fn layout_segments(manifest: &crate::namespace::control::LoadedManifest) -> BTre
         .collect()
 }
 
-/// Checks that a pool member's pinned view on an earlier manifest adds extent filter reads
+/// Checks that a pool member's snapshot view on an earlier manifest adds extent filter reads
 /// only for the layout segments that the current manifest doesn't list: a
-/// layout compaction gives the pinned manifest layout segments of its own,
+/// layout compaction gives the snapshot's manifest layout segments of its own,
 /// and a writer claim leaves the layout segments as they were.
 #[tokio::test]
-async fn pinned_views_add_segment_reads_only_for_uncovered_layout_segments() {
+async fn snapshot_views_add_segment_reads_only_for_uncovered_layout_segments() {
     use crate::compaction::CompactionUnitOutcome;
 
     for own_runs in [false, true] {
@@ -191,9 +191,9 @@ async fn pinned_views_add_segment_reads_only_for_uncovered_layout_segments() {
             .load_current_manifest()
             .await
             .expect("previous");
-        let pin = create_checkpoint(&store, &namespace_id, &setup)
+        let snapshot = create_checkpoint(&store, &namespace_id, &setup)
             .await
-            .expect("pin the previous manifest");
+            .expect("take a snapshot of the previous manifest");
         if own_runs {
             let mut fixture = crate::test_support::NamespaceFixture::new(
                 &store,
@@ -244,9 +244,9 @@ async fn pinned_views_add_segment_reads_only_for_uncovered_layout_segments() {
         let mut rooted_reads = rooted.take_get_keys();
         rooted_reads.sort();
         crate::test_support::namespace_store(&store, &namespace_id)
-            .delete_pin(&pin.checkpoint_id)
+            .delete_snapshot_record(&snapshot.checkpoint_id)
             .await
-            .expect("release the pin");
+            .expect("release the snapshot");
         let current_only = RecordingStore::metadata_segments(Arc::clone(&store));
         collect_pool(&current_only, &pool_id, &context(now_ms)).await;
         let mut current_reads = current_only.take_get_keys();
@@ -266,11 +266,11 @@ async fn pinned_views_add_segment_reads_only_for_uncovered_layout_segments() {
 }
 
 /// Checks that a pool's collection reads the extent filter of each layout segment once,
-/// when every pinned view adds one delta run over a base that the current
-/// manifest no longer lists, and that it loads those pinned manifests with
+/// when every snapshot view adds one delta run over a base that the current
+/// manifest no longer lists, and that it loads those snapshots' manifests with
 /// more than one read and at most `STORE_READS_IN_FLIGHT` reads in flight.
 #[tokio::test]
-async fn a_collection_reads_each_extent_filter_once_however_many_pinned_views_list_its_segment() {
+async fn a_collection_reads_each_extent_filter_once_however_many_snapshot_views_list_its_segment() {
     use crate::compaction::CompactionUnitOutcome;
 
     const DELTA_RUNS: usize = 8;
@@ -301,7 +301,7 @@ async fn a_collection_reads_each_extent_filter_once_however_many_pinned_views_li
         .await;
         create_checkpoint(setup_store, &namespace_id, &setup)
             .await
-            .expect("fold and pin");
+            .expect("fold and take a snapshot");
         let folded = crate::test_support::namespace_store(setup_store, &namespace_id)
             .load_current_manifest()
             .await
@@ -341,7 +341,7 @@ async fn a_collection_reads_each_extent_filter_once_however_many_pinned_views_li
         .expect("compacted manifest");
     assert!(layout_segments(&current).is_disjoint(&base));
     segments.extend(layout_segments(&current));
-    // A pin keeps each fold's manifest, so every manifest is a root.
+    // A snapshot keeps each fold's manifest, so every manifest is a root.
     let now_ms = now_after_newest_object(setup_store, &namespace_id, 1).await;
     collect_pool(&store, &pool_id, &context(now_ms)).await;
 

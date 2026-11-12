@@ -136,7 +136,7 @@ async fn an_ambiguous_manifest_read_back_must_finish_within_its_budget() {
                 payload.namespace_id = NamespaceId::parse("fork").expect("namespace");
                 payload.fork_basis = Some(ForkBasis {
                     manifest: current.manifest(),
-                    source_pin_id: PinId::generate(ManifestNo(1)),
+                    source_snapshot_id: SnapshotId::generate(ManifestNo(1)),
                     rebased_from: None,
                 });
             } else {
@@ -783,7 +783,7 @@ async fn a_fold_whose_manifest_put_succeeds_without_an_answer_reports_published(
 }
 
 #[tokio::test]
-async fn a_checkpoint_losing_manifest_publication_pins_the_winner() {
+async fn a_checkpoint_losing_manifest_publication_keeps_the_winner() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
     let store = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
@@ -810,15 +810,15 @@ async fn a_checkpoint_losing_manifest_publication_pins_the_winner() {
         checkpoint
     };
     let (losing, winning) = futures::join!(losing, winning);
-    let losing = losing.expect("losing publication still pins the winner");
+    let losing = losing.expect("losing publication still keeps the winner");
     let winning = winning.expect("winner");
     let losing = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_pin(&losing.checkpoint_id)
+        .load_snapshot_record(&losing.checkpoint_id)
         .await
         .expect("record")
         .expect("present");
     let winning = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_pin(&winning.checkpoint_id)
+        .load_snapshot_record(&winning.checkpoint_id)
         .await
         .expect("record")
         .expect("present");

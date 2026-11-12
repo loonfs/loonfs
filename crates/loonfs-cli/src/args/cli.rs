@@ -221,7 +221,7 @@ pub(crate) enum Command {
     /// with the conflicts and the new fork to inspect. It saves the session
     /// in a record file after every step, so a rerun resumes where the last
     /// run stopped. Without a record, it recovers the session's new forks
-    /// from the namespace's fork pins.
+    /// from the namespace's fork snapshots.
     Merge(MergeArgs),
     /// Set the default namespace for a profile.
     /// This sets the interactive default. Automation that runs concurrently

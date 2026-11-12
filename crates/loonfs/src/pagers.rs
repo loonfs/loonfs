@@ -21,7 +21,7 @@ pub type FileRevisionsPager = loonfs_types::Pager<ListFileRevisionsResponse, Err
 pub type TrashPager = loonfs_types::Pager<loonfs_types::ListTrashResponse, Error>;
 /// A pager over committed changes.
 pub type ChangesPager = loonfs_types::Pager<ListChangesResponse, Error>;
-/// A pager over the files a snapshot pins.
+/// A pager over the files a snapshot keeps.
 pub type SnapshotFilesPager = loonfs_types::Pager<SnapshotFilesPage, Error>;
 /// A pager over every retained file revision in a read view.
 pub type RetainedRevisionsPager = loonfs_types::Pager<loonfs_core::RetainedRevisionsPage, Error>;

@@ -1,5 +1,5 @@
 //! Whole-namespace reads for a consumer that derives its own data from the
-//! filesystem: enumerating the files a snapshot pinned, asking where those
+//! filesystem: enumerating the files a snapshot kept, asking where those
 //! files are now, and reading one content object by reference.
 
 use crate::common::*;
@@ -88,12 +88,12 @@ async fn listed_files(
     found
 }
 
-/// Every file a snapshot pins, read one page at a time so the paging path
+/// Every file a snapshot keeps, read one page at a time so the paging path
 /// carries every assertion.
 async fn snapshot_files(
     reader: &LoonFs<ReadOnly>,
     namespace_id: &NamespaceId,
-    snapshot_id: &loonfs::PinId,
+    snapshot_id: &loonfs::SnapshotId,
     limit: usize,
 ) -> Vec<SnapshotFile> {
     let namespace = reader.namespace(namespace_id);
@@ -221,7 +221,7 @@ async fn build_mixed_namespace(fs: &TestRuntime, namespace_id: &NamespaceId) {
 }
 
 #[tokio::test]
-async fn checkpoint_enumeration_answers_the_state_it_pinned() {
+async fn checkpoint_enumeration_answers_the_state_it_captured() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = open_runtime_async(store(temp_dir.path()), "checkpoint-files-test").await;
     let namespace_id = namespace_id("demo");
@@ -310,7 +310,7 @@ async fn checkpoint_enumeration_answers_the_state_it_pinned() {
             "/docs/deep/charlie.txt",
             "/notes/restored.txt",
         ]),
-        "the pinned state should hold the restored file and neither the \
+        "the checkpoint's state should hold the restored file and neither the \
          deleted subtree nor anything written later"
     );
 
@@ -361,7 +361,7 @@ async fn checkpoint_enumeration_answers_the_state_it_pinned() {
     assert_eq!(
         by_inode[&alpha_inode_id].revision_no,
         RevisionNo(1),
-        "the replacement was committed after the checkpoint, so the pinned revision stays"
+        "the replacement was committed after the checkpoint, so the checkpoint's revision stays"
     );
     assert_eq!(
         now[&alpha_inode_id].revision_no,
@@ -558,17 +558,17 @@ async fn a_deleted_checkpoint_refuses_enumeration_instead_of_answering_current_s
         .page_limit(page_limit(10))
         .page()
         .await
-        .expect_err("a deleted checkpoint pins nothing to enumerate");
+        .expect_err("a deleted checkpoint keeps nothing to enumerate");
     assert_eq!(error.code(), ErrorCode::SnapshotNotFound);
 
-    let missing = loonfs::PinId::parse("pin_00000000000000000001-0123456789abcdef")
+    let missing = loonfs::SnapshotId::parse("snp_00000000000000000001-00000000000123456789abcdef")
         .expect("valid checkpoint id");
     let error = namespace
         .list_snapshot_files(&missing)
         .page_limit(page_limit(10))
         .page()
         .await
-        .expect_err("a checkpoint that never existed pins nothing either");
+        .expect_err("a checkpoint that never existed keeps nothing either");
     assert_eq!(error.code(), ErrorCode::SnapshotNotFound);
 }
 

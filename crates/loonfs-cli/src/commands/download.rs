@@ -4,7 +4,7 @@ use crate::error::{CliError, Result};
 use bytes::Bytes;
 use futures::StreamExt;
 use loonfs_client::{DirectDownloadStream, PayloadStream, ReadAt};
-use loonfs_types::{ContentRef, PinId, RevisionNo};
+use loonfs_types::{ContentRef, RevisionNo, SnapshotId};
 
 /// Which revision of a file a download reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,7 +19,10 @@ pub(crate) enum FileVersion {
 impl FileVersion {
     /// Converts the `--revision` and `--snapshot-id` flags, which clap makes
     /// exclusive.
-    pub(crate) fn from_flags(revision_no: Option<RevisionNo>, snapshot_id: Option<PinId>) -> Self {
+    pub(crate) fn from_flags(
+        revision_no: Option<RevisionNo>,
+        snapshot_id: Option<SnapshotId>,
+    ) -> Self {
         match revision_no {
             Some(revision_no) => Self::Revision(revision_no),
             None => Self::At(ReadAt::from(snapshot_id)),

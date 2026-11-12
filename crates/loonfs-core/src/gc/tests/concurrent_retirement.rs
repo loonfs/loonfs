@@ -1,14 +1,14 @@
 //! Overlapping retirement collections preserve other members and retry partial effects.
 
 use super::*;
-use loonfs_objectstore::keys::{content_prefix, pin};
+use loonfs_objectstore::keys::{content_prefix, snapshot_record};
 
-/// Checks that overlapping retirements of a fork tolerate a source pin
+/// Checks that overlapping retirements of a fork tolerate a fork snapshot
 /// delete whose acknowledgement was lost, that the fork's retirement deletes
 /// none of the content the fork wrote, and that the pool's collection later
 /// collects that content while a live sibling keeps what it inherited.
 #[tokio::test]
-async fn overlapping_retirement_retries_a_lost_pin_delete_and_preserves_a_live_sibling() {
+async fn overlapping_retirement_retries_a_lost_snapshot_delete_and_preserves_a_live_sibling() {
     let directory = tempdir().expect("directory");
     let inner = LocalFsStore::new(directory.path()).expect("store");
     let source = NamespaceId::parse("source").expect("source");
@@ -58,22 +58,22 @@ async fn overlapping_retirement_retries_a_lost_pin_delete_and_preserves_a_live_s
         .filter(|key| !source_keys.contains(key))
         .collect::<Vec<_>>();
     assert_eq!(target_keys.len(), 3);
-    let source_pin_of = |manifest: &crate::namespace::control::LoadedManifest| {
+    let source_snapshot_of = |manifest: &crate::namespace::control::LoadedManifest| {
         manifest
             .payload()
             .fork_basis
             .as_ref()
             .expect("fork basis")
-            .source_pin_id
+            .source_snapshot_id
             .clone()
     };
-    let target_pin = source_pin_of(
+    let target_snapshot = source_snapshot_of(
         &crate::test_support::namespace_store(&inner, &target)
             .load_current_manifest()
             .await
             .expect("target"),
     );
-    let sibling_pin = source_pin_of(
+    let sibling_snapshot = source_snapshot_of(
         &crate::test_support::namespace_store(&inner, &sibling)
             .load_current_manifest()
             .await
@@ -88,16 +88,16 @@ async fn overlapping_retirement_retries_a_lost_pin_delete_and_preserves_a_live_s
     }
     let deadline = context(setup.now_ms + retirement_ms());
     let gc_options = options();
-    let target_pin_key = pin(&source, &target_pin);
+    let target_snapshot_key = snapshot_record(&source, &target_snapshot);
     let store = BlockingStore::new(
         FailStore::new(
             inner,
-            KeyPredicate::exact(&target_pin_key),
+            KeyPredicate::exact(&target_snapshot_key),
             OperationSelector::Delete,
             InjectedError::Transport("delete acknowledgement lost".to_owned()),
         )
         .apply_then_fail(),
-        KeyPredicate::exact(&target_pin_key),
+        KeyPredicate::exact(&target_snapshot_key),
         OperationSelector::Delete,
     );
     store.block_next();
@@ -110,17 +110,17 @@ async fn overlapping_retirement_retries_a_lost_pin_delete_and_preserves_a_live_s
             .gc(&gc_options, &deadline.clock())
             .await
             .expect_err("a delete succeeded but its acknowledgement was lost");
-        assert!(!pin_exists(store.inner(), &source, &target_pin).await);
+        assert!(!snapshot_record_exists(store.inner(), &source, &target_snapshot).await);
         store.inner().clear();
         let retried = crate::test_support::namespace_store(store.inner(), &target)
             .gc(&gc_options, &deadline.clock())
             .await
             .expect("second collector retries from the beginning");
         assert_eq!(retried.deleted_checkpoints_by_owner.fork, 0);
-        assert!(pin_exists(store.inner(), &source, &sibling_pin).await);
+        assert!(snapshot_record_exists(store.inner(), &source, &sibling_snapshot).await);
         store.release();
     });
-    delayed.expect("the older collector tolerates an already-deleted pin");
+    delayed.expect("the older collector tolerates an already-deleted snapshot");
     for key in source_keys.iter().chain(&target_keys) {
         assert!(store.head(key).await.expect("pool content").is_some());
     }

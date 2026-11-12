@@ -208,7 +208,7 @@ async fn subject_headers_distinguish_service_and_subject_authority() {
         .oneshot(request(
             "POST",
             "/v0/namespaces/demo-acl/snapshots",
-            Some(r#"{"name":"pin","ttl_ms":60000}"#),
+            Some(r#"{"name":"snapshot","ttl_ms":60000}"#),
             &[("Loonfs-Subject", "usr_ada")],
         ))
         .await
@@ -236,7 +236,7 @@ async fn subject_headers_distinguish_service_and_subject_authority() {
             .oneshot(request(
                 "POST",
                 "/v0/namespaces/demo-acl/snapshots",
-                Some(r#"{"name":"pin","ttl_ms":60000}"#),
+                Some(r#"{"name":"snapshot","ttl_ms":60000}"#),
                 &headers,
             ))
             .await
@@ -272,7 +272,7 @@ async fn retrieving_a_snapshot_in_an_acl_namespace_requires_an_administrator_sub
         .oneshot(request(
             "POST",
             "/v0/namespaces/demo-acl/snapshots",
-            Some(r#"{"name":"pin","ttl_ms":60000}"#),
+            Some(r#"{"name":"snapshot","ttl_ms":60000}"#),
             &[],
         ))
         .await
@@ -503,7 +503,7 @@ async fn an_acl_namespace_is_created_over_the_wire() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(json_body(response).await["access"], expected_access);
 
-    let snapshot = Some(r#"{"name":"pin","ttl_ms":60000}"#);
+    let snapshot = Some(r#"{"name":"snapshot","ttl_ms":60000}"#);
     let response = router
         .clone()
         .oneshot(request(

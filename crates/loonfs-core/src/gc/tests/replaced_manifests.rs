@@ -1,4 +1,4 @@
-//! Replaced manifests: a manifest that is neither current nor pinned, and the
+//! Replaced manifests: a manifest that is neither current nor kept by a snapshot, and the
 //! segments only it lists, go by age alone.
 
 use super::*;
@@ -31,9 +31,9 @@ async fn seed_segments<S: ObjectStore>(store: &S, namespace_id: &NamespaceId) ->
             .expect("fold");
     }
     assert!(store
-        .list_prefix(&pin_prefix(namespace_id))
+        .list_prefix(&snapshot_prefix(namespace_id))
         .await
-        .expect("list pins")
+        .expect("list snapshots")
         .is_empty());
     let namespace = crate::test_support::namespace_store(store, namespace_id);
     namespace.raise_hint_to_current_manifest().await;
@@ -259,38 +259,39 @@ async fn a_replaced_manifest_and_its_segments_stay_within_their_grace_windows() 
     }
 }
 
-/// Checks that a user pin on a replaced manifest keeps the manifest and
+/// Checks that a user snapshot on a replaced manifest keeps the manifest and
 /// every segment it lists however old they are, and that the first
-/// collection after the pin is deleted removes the manifest and the segments
+/// collection after the snapshot is deleted removes the manifest and the segments
 /// that only it listed.
 #[tokio::test]
-async fn a_pinned_replaced_manifest_keeps_itself_and_its_segments_until_the_pin_is_released() {
+async fn a_replaced_manifest_kept_by_a_snapshot_keeps_its_segments_until_the_snapshot_is_released()
+{
     let directory = tempdir().expect("directory");
-    let namespace_id = NamespaceId::parse("replaced-pinned").expect("namespace");
+    let namespace_id = NamespaceId::parse("replaced-snapshot").expect("namespace");
     let store = MetadataMapStore::aged(
         LocalFsStore::new(directory.path()).expect("store"),
         KeyPredicate::any(),
     );
     let previous = seed_segments(&store, &namespace_id).await;
-    let pin = create_checkpoint(&store, &namespace_id, &context(1_000))
+    let snapshot = create_checkpoint(&store, &namespace_id, &context(1_000))
         .await
-        .expect("pin the previous manifest");
+        .expect("take a snapshot of the previous manifest");
     let current = compact_bindings(&store, &namespace_id).await;
     let dropped = dropped_segments(&previous, &current);
 
     let report = crate::test_support::namespace_store(&store, &namespace_id)
         .gc(&options(), &context(NOW_MS).clock())
         .await
-        .expect("collection with the pin");
+        .expect("collection with the snapshot");
     assert!(exists(&store, &previous.object_key).await);
     assert_objects_exist(&store, &segment_keys(&previous), true).await;
     assert_eq!(report.deleted.manifests, 0);
     assert_eq!(report.deleted.metadata_segments, 0);
 
     crate::test_support::namespace_store(&store, &namespace_id)
-        .delete_pin(&pin.checkpoint_id)
+        .delete_snapshot_record(&snapshot.checkpoint_id)
         .await
-        .expect("release the pin");
+        .expect("release the snapshot");
     let report = crate::test_support::namespace_store(&store, &namespace_id)
         .gc(&options(), &context(NOW_MS).clock())
         .await

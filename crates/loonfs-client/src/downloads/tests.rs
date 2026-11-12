@@ -7,7 +7,8 @@ use crate::scripted_transport::{self, Outcome};
 use crate::ClientConfig;
 use loonfs_types::options::{Consistency, ReadAt};
 use loonfs_types::{
-    AbsolutePath, CapabilityDocument, ContentId, PinId, API_GROUP_FILESYSTEM_V0, PROTOCOL_VERSION,
+    AbsolutePath, CapabilityDocument, ContentId, SnapshotId, API_GROUP_FILESYSTEM_V0,
+    PROTOCOL_VERSION,
 };
 use std::assert_matches;
 use std::collections::BTreeMap;
@@ -598,8 +599,8 @@ async fn grants_send_only_the_fields_of_what_they_read_at() {
         content_ref: path_grant.content_ref.clone(),
         ranges: path_grant.ranges.clone(),
     };
-    let snapshot_id =
-        PinId::parse("pin_00000000000000000001-0000000000000002").expect("snapshot ID");
+    let snapshot_id = SnapshotId::parse("snp_00000000000000000001-00000000000000000000000002")
+        .expect("snapshot ID");
     let cases = [
         (ReadAt::Live(None), serde_json::json!({})),
         (

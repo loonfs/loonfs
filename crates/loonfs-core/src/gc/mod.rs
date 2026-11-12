@@ -1,5 +1,5 @@
 //! Stateless garbage collection: a namespace's collection of its own objects
-//! from its current manifest and pins, and a pool's collection of its
+//! from its current manifest and snapshots, and a pool's collection of its
 //! content, upload records, and temporary objects from the roots of its
 //! members.
 
@@ -9,11 +9,11 @@ mod deletes;
 mod families;
 mod live_set;
 mod options;
-mod pinned;
-mod pins;
 mod pool;
 mod retire;
 mod session_cache;
+mod snapshot_manifests;
+mod snapshots;
 mod sweep;
 #[cfg(test)]
 mod tests;

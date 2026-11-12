@@ -1,6 +1,6 @@
-//! Listing the active pins a namespace still carries.
+//! Listing the active snapshots a namespace still carries.
 //!
-//! The listing exists so a pin can be found again once its creation response
+//! The listing exists so a snapshot can be found again once its creation response
 //! is gone, so what it must never do is hide a record that still roots a
 //! basis. These tests pin exactly that: labels do not identify records,
 //! delete removes them from the answer, and a passed expiry does not.
@@ -8,7 +8,7 @@
 use super::*;
 use loonfs_objectstore::ListedObject;
 use loonfs_test_support::ids::page_limit;
-use loonfs_types::format::control::PinOwner;
+use loonfs_types::format::control::SnapshotOwner;
 use loonfs_types::{CheckpointOwner, ErrorCode, ListCheckpointsResponse, PageRequest};
 
 async fn list_all_checkpoints<S: ObjectStore + ?Sized>(
@@ -38,17 +38,17 @@ async fn list_all_checkpoints<S: ObjectStore + ?Sized>(
     })
 }
 
-async fn pin_named<S: ObjectStore + ?Sized>(
+async fn snapshot_named<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     name: &str,
     expires_at_ms: Option<u64>,
     context: &WriterAt,
-) -> PinId {
+) -> SnapshotId {
     let namespace = crate::test_support::namespace_store(store, namespace_id);
     namespace
-        .create_pin(
-            PinOwner::User {
+        .create_snapshot_record(
+            SnapshotOwner::User {
                 name: name.to_owned(),
                 expires_at_ms,
             },
@@ -64,7 +64,7 @@ async fn pin_named<S: ObjectStore + ?Sized>(
 }
 
 #[tokio::test]
-async fn two_pins_under_one_label_list_as_two_records() {
+async fn two_snapshots_under_one_label_list_as_two_records() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -73,8 +73,8 @@ async fn two_pins_under_one_label_list_as_two_records() {
         .await
         .expect("bootstrap namespace");
 
-    let first = pin_named(&store, &namespace_id, "nightly", None, &context).await;
-    let second = pin_named(&store, &namespace_id, "nightly", None, &context).await;
+    let first = snapshot_named(&store, &namespace_id, "nightly", None, &context).await;
+    let second = snapshot_named(&store, &namespace_id, "nightly", None, &context).await;
     assert_ne!(first, second, "each call mints its own record");
 
     let listed = list_all_checkpoints(&store, &namespace_id)
@@ -127,7 +127,7 @@ async fn an_expired_record_is_listed_with_its_expiry_until_it_is_deleted() {
         .expect("bootstrap namespace");
 
     let expires_at_ms = context.now_ms - 1;
-    let expired = pin_named(
+    let expired = snapshot_named(
         &store,
         &namespace_id,
         "yesterday",
@@ -169,10 +169,10 @@ async fn pages_concatenate_to_every_checkpoint_once_in_id_order() {
     let mut expected = Vec::new();
     for index in 0..7 {
         expected.push(
-            pin_named(
+            snapshot_named(
                 &store,
                 &namespace_id,
-                &format!("pin-{index}"),
+                &format!("snapshot-{index}"),
                 None,
                 &context,
             )
@@ -212,7 +212,7 @@ async fn pages_concatenate_to_every_checkpoint_once_in_id_order() {
 }
 
 #[tokio::test]
-async fn deleted_pins_are_absent_from_later_pages() {
+async fn deleted_snapshots_are_absent_from_later_pages() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -224,10 +224,10 @@ async fn deleted_pins_are_absent_from_later_pages() {
     let mut ids = Vec::new();
     for index in 0..8 {
         ids.push(
-            pin_named(
+            snapshot_named(
                 &store,
                 &namespace_id,
-                &format!("pin-{index}"),
+                &format!("snapshot-{index}"),
                 None,
                 &context,
             )
@@ -271,7 +271,7 @@ async fn deleted_pins_are_absent_from_later_pages() {
             .next_cursor
             .as_ref()
             .map(|cursor| cursor.last_key.as_str()),
-        Some(loonfs_objectstore::keys::pin(&namespace_id, &ids[6]).as_str())
+        Some(loonfs_objectstore::keys::snapshot_record(&namespace_id, &ids[6]).as_str())
     );
 
     let third =
@@ -372,10 +372,10 @@ async fn checkpoint_deleted_between_listing_and_load_is_skipped() {
     let mut ids = Vec::new();
     for index in 0..3 {
         ids.push(
-            pin_named(
+            snapshot_named(
                 &inner,
                 &namespace_id,
-                &format!("pin-{index}"),
+                &format!("snapshot-{index}"),
                 None,
                 &context,
             )
@@ -386,7 +386,7 @@ async fn checkpoint_deleted_between_listing_and_load_is_skipped() {
     let deleted = ids[1].clone();
     let store = DeleteOnCheckpointLoadStore {
         inner,
-        target: loonfs_objectstore::keys::pin(&namespace_id, &deleted),
+        target: loonfs_objectstore::keys::snapshot_record(&namespace_id, &deleted),
         deleted: std::sync::atomic::AtomicBool::new(false),
     };
 
@@ -411,16 +411,16 @@ async fn first_page_loads_only_the_records_needed_to_fill_it() {
         .await
         .expect("bootstrap namespace");
     for index in 0..20 {
-        pin_named(
+        snapshot_named(
             &inner,
             &namespace_id,
-            &format!("pin-{index}"),
+            &format!("snapshot-{index}"),
             None,
             &context,
         )
         .await;
     }
-    let prefix = loonfs_objectstore::keys::pin_prefix(&namespace_id);
+    let prefix = loonfs_objectstore::keys::snapshot_prefix(&namespace_id);
     let store = RecordingStore::new(inner, KeyPredicate::prefix(prefix));
 
     let page =
@@ -452,7 +452,14 @@ async fn checkpoint_cursor_is_bound_to_its_namespace() {
             .expect("bootstrap namespace");
     }
     for index in 0..2 {
-        pin_named(&store, &source, &format!("pin-{index}"), None, &context).await;
+        snapshot_named(
+            &store,
+            &source,
+            &format!("snapshot-{index}"),
+            None,
+            &context,
+        )
+        .await;
     }
     let source_page =
         crate::NamespaceEngine::reader(crate::test_support::namespace_store(&store, &source))
@@ -474,11 +481,11 @@ async fn checkpoint_cursor_is_bound_to_its_namespace() {
     assert_eq!(error.code(), ErrorCode::InvalidRequest);
 }
 
-/// Checks that the snapshot listing returns user pins, expired ones
-/// included, and leaves out fork pins, while the checkpoint listing returns
-/// every pin.
+/// Checks that the snapshot listing returns user snapshots, expired ones
+/// included, and leaves out fork snapshots, while the checkpoint listing returns
+/// every snapshot.
 #[tokio::test]
-async fn the_snapshot_listing_returns_user_pins_and_leaves_out_fork_pins() {
+async fn the_snapshot_listing_returns_user_snapshots_and_leaves_out_fork_snapshots() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -486,16 +493,16 @@ async fn the_snapshot_listing_returns_user_pins_and_leaves_out_fork_pins() {
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap namespace");
-    let fork_owner = PinOwner::Fork {
+    let fork_owner = SnapshotOwner::Fork {
         target_namespace_id: NamespaceId::parse("clone").expect("namespace id"),
     };
     let mut snapshots = BTreeSet::new();
     for index in 0..3 {
         snapshots.insert(
-            pin_named(
+            snapshot_named(
                 &store,
                 &namespace_id,
-                &format!("pin-{index}"),
+                &format!("snapshot-{index}"),
                 Some(context.now_ms - 1),
                 &context,
             )
@@ -503,7 +510,7 @@ async fn the_snapshot_listing_returns_user_pins_and_leaves_out_fork_pins() {
         );
         let namespace = crate::test_support::namespace_store(&store, &namespace_id);
         namespace
-            .create_pin(
+            .create_snapshot_record(
                 fork_owner.clone(),
                 crate::test_support::folded_manifest(&namespace)
                     .await
@@ -511,7 +518,7 @@ async fn the_snapshot_listing_returns_user_pins_and_leaves_out_fork_pins() {
                 &context.clock(),
             )
             .await
-            .expect("create fork pin");
+            .expect("create fork snapshot");
     }
 
     let mut listed = BTreeSet::new();
@@ -554,15 +561,15 @@ async fn a_refused_owner_writes_no_record_to_find() {
         .expect("bootstrap namespace");
 
     let refused = [
-        PinOwner::User {
+        SnapshotOwner::User {
             name: String::new(),
             expires_at_ms: None,
         },
-        PinOwner::User {
+        SnapshotOwner::User {
             name: String::new(),
             expires_at_ms: Some(context.now_ms + 60_000),
         },
-        PinOwner::User {
+        SnapshotOwner::User {
             name: "report-run".to_owned(),
             expires_at_ms: Some(0),
         },
@@ -570,7 +577,7 @@ async fn a_refused_owner_writes_no_record_to_find() {
     for owner in refused {
         let namespace = crate::test_support::namespace_store(&store, &namespace_id);
         let error = namespace
-            .create_pin(
+            .create_snapshot_record(
                 owner.clone(),
                 crate::test_support::folded_manifest(&namespace)
                     .await
@@ -589,11 +596,11 @@ async fn a_refused_owner_writes_no_record_to_find() {
     assert!(listed.checkpoints.is_empty());
 }
 
-/// Checks that a pin read by ID matches its listed row, that a snapshot
+/// Checks that a snapshot read by ID matches its listed row, that a snapshot
 /// read by ID returns an expired snapshot, and that a read through an
-/// expired snapshot or a fork pin returns `snapshot_not_found`.
+/// expired snapshot or a fork snapshot returns `snapshot_not_found`.
 #[tokio::test]
-async fn a_pin_read_by_id_matches_its_listed_row_and_a_read_through_it_checks_expiry() {
+async fn a_snapshot_read_by_id_matches_its_listed_row_and_a_read_through_it_checks_expiry() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -601,13 +608,14 @@ async fn a_pin_read_by_id_matches_its_listed_row_and_a_read_through_it_checks_ex
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap namespace");
-    let unexpiring = pin_named(&store, &namespace_id, "nightly", None, &context).await;
+    let unexpiring = snapshot_named(&store, &namespace_id, "nightly", None, &context).await;
     let expires_at_ms = context.now_ms + 10;
-    let expiring = pin_named(&store, &namespace_id, "view", Some(expires_at_ms), &context).await;
+    let expiring =
+        snapshot_named(&store, &namespace_id, "view", Some(expires_at_ms), &context).await;
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let fork = namespace
-        .create_pin(
-            PinOwner::Fork {
+        .create_snapshot_record(
+            SnapshotOwner::Fork {
                 target_namespace_id: NamespaceId::parse("clone").expect("namespace id"),
             },
             crate::test_support::folded_manifest(&namespace)
@@ -616,8 +624,8 @@ async fn a_pin_read_by_id_matches_its_listed_row_and_a_read_through_it_checks_ex
             &context.clock(),
         )
         .await
-        .expect("create fork pin")
-        .pin_id;
+        .expect("create fork snapshot")
+        .snapshot_id;
 
     let listed = list_all_checkpoints(&store, &namespace_id)
         .await
@@ -645,8 +653,8 @@ async fn a_pin_read_by_id_matches_its_listed_row_and_a_read_through_it_checks_ex
     }
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let namespace = &namespace;
-    let read_at = |pin_id, now_ms| async move {
-        crate::snapshot::ensure_unexpired(namespace.load_user_pin(pin_id).await?, now_ms)
+    let read_at = |snapshot_id, now_ms| async move {
+        crate::snapshot::ensure_unexpired(namespace.load_user_snapshot(snapshot_id).await?, now_ms)
     };
     read_at(&expiring, expires_at_ms - 1)
         .await
@@ -673,7 +681,8 @@ async fn a_pin_read_by_id_matches_its_listed_row_and_a_read_through_it_checks_ex
         ),
         ErrorCode::SnapshotNotFound
     );
-    let missing = PinId::parse("pin_00000000000000000009-0000000000000009").expect("pin id");
+    let missing = SnapshotId::parse("snp_00000000000000000009-00000000000000000000000009")
+        .expect("snapshot id");
     assert_eq!(
         code(
             crate::NamespaceEngine::reader(crate::test_support::namespace_store(
@@ -688,9 +697,9 @@ async fn a_pin_read_by_id_matches_its_listed_row_and_a_read_through_it_checks_ex
 }
 
 /// Checks that deleting a missing snapshot succeeds without a write, and
-/// that deleting a fork pin returns `snapshot_not_found` and keeps it.
+/// that deleting a fork snapshot returns `snapshot_not_found` and keeps it.
 #[tokio::test]
-async fn deleting_a_missing_snapshot_succeeds_and_a_fork_pin_is_not_a_snapshot() {
+async fn deleting_a_missing_snapshot_succeeds_and_a_fork_snapshot_is_not_a_user_snapshot() {
     let temp_dir = tempdir().expect("tempdir");
     let store = RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
@@ -701,11 +710,11 @@ async fn deleting_a_missing_snapshot_succeeds_and_a_fork_pin_is_not_a_snapshot()
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap namespace");
-    let snapshot = pin_named(&store, &namespace_id, "nightly", None, &context).await;
+    let snapshot = snapshot_named(&store, &namespace_id, "nightly", None, &context).await;
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let fork = namespace
-        .create_pin(
-            PinOwner::Fork {
+        .create_snapshot_record(
+            SnapshotOwner::Fork {
                 target_namespace_id: NamespaceId::parse("clone").expect("namespace id"),
             },
             crate::test_support::folded_manifest(&namespace)
@@ -714,8 +723,8 @@ async fn deleting_a_missing_snapshot_succeeds_and_a_fork_pin_is_not_a_snapshot()
             &context.clock(),
         )
         .await
-        .expect("create fork pin")
-        .pin_id;
+        .expect("create fork snapshot")
+        .snapshot_id;
 
     for attempt in 0..2 {
         store.reset();
@@ -744,11 +753,11 @@ async fn deleting_a_missing_snapshot_succeeds_and_a_fork_pin_is_not_a_snapshot()
     .engine()
     .delete_snapshot(&fork)
     .await
-    .expect_err("a fork pin isn't a snapshot");
+    .expect_err("a fork snapshot isn't a user snapshot");
     assert_eq!(error.code(), ErrorCode::SnapshotNotFound);
     assert_eq!(store.counts().deletes, 0);
     assert!(crate::test_support::namespace_store(&store, &namespace_id)
-        .load_pin(&fork)
+        .load_snapshot_record(&fork)
         .await
         .expect("load")
         .is_some());

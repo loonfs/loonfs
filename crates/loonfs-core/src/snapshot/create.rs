@@ -1,15 +1,15 @@
-//! Creates a verified pin of a manifest that a caller's fold published or
+//! Creates a verified snapshot of a manifest that a caller's fold published or
 //! found current.
 
-use super::record::{write_pin, PinBasisVerification};
+use super::record::{write_snapshot_record, SnapshotBasisVerification};
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::CoreError;
 use crate::error::Result;
 use crate::namespace::store::NamespaceStore;
 use crate::time::OperationClock;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::control::{ManifestRef, PinOwner, PinPayload};
-use loonfs_types::{PinId, Snapshot};
+use loonfs_types::format::control::{ManifestRef, SnapshotOwner, SnapshotPayload};
+use loonfs_types::{Snapshot, SnapshotId};
 
 /// Longest accepted snapshot name. A label bound, not a durable format
 /// limit.
@@ -19,7 +19,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Creates a snapshot of `manifest`, the manifest that the caller's fold
     /// of the WAL tail published or found current.
     ///
-    /// Every call generates a fresh `PinId`, and `name` is a label, not a
+    /// Every call generates a fresh `SnapshotId`, and `name` is a label, not a
     /// key. A manifest that stopped being current before the snapshot's
     /// verification returns `checkpoint_unavailable`, so the caller folds
     /// and snapshots again. A snapshot with `expires_at_ms` can't be read
@@ -32,8 +32,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         manifest: ManifestRef,
     ) -> Result<Snapshot> {
         self.namespace
-            .create_pin(
-                PinOwner::User {
+            .create_snapshot_record(
+                SnapshotOwner::User {
                     name,
                     expires_at_ms,
                 },
@@ -46,22 +46,22 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
 }
 
 impl<S: ObjectStore> NamespaceStore<S> {
-    /// Creates a verified pin of `manifest` for `owner`.
+    /// Creates a verified snapshot of `manifest` for `owner`.
     ///
     /// `manifest` is the manifest that the caller's fold published or found
     /// current. The call returns `checkpoint_unavailable` when the manifest
-    /// stopped being current before the pin's verification, so the caller
-    /// can fold and pin again.
-    pub(crate) async fn create_pin(
+    /// stopped being current before the snapshot's verification, so the caller
+    /// can fold and take a snapshot again.
+    pub(crate) async fn create_snapshot_record(
         &self,
-        owner: PinOwner,
+        owner: SnapshotOwner,
         manifest: ManifestRef,
         clock: &OperationClock,
-    ) -> Result<PinPayload> {
-        validate_pin_owner(&owner)?;
-        let pin_id = PinId::generate(manifest.manifest_no);
-        let record = PinPayload {
-            pin_id: pin_id.clone(),
+    ) -> Result<SnapshotPayload> {
+        validate_snapshot_owner(&owner)?;
+        let snapshot_id = SnapshotId::generate(manifest.manifest_no);
+        let record = SnapshotPayload {
+            snapshot_id: snapshot_id.clone(),
             namespace_id: self.namespace_id.clone(),
             head_seq: manifest.head_seq,
             payload_checksum: manifest.payload_checksum,
@@ -69,25 +69,26 @@ impl<S: ObjectStore> NamespaceStore<S> {
             owner,
         };
         let verification = async {
-            write_pin(&self.store, &record).await?;
-            self.verify_pin_basis(&record).await
+            write_snapshot_record(&self.store, &record).await?;
+            self.verify_snapshot_basis(&record).await
         }
         .await;
         let error = match verification {
-            Ok(PinBasisVerification::Verified) => return Ok(record),
-            Ok(PinBasisVerification::Invalid) => CoreError::CheckpointUnavailable(
-                "the pinned manifest stopped being current before the pin was verified".to_owned(),
+            Ok(SnapshotBasisVerification::Verified) => return Ok(record),
+            Ok(SnapshotBasisVerification::Invalid) => CoreError::CheckpointUnavailable(
+                "the snapshot's manifest stopped being current before the snapshot record was verified".to_owned(),
             ),
             Err(error) => error,
         };
-        self.delete_failed_pin(&pin_id, &error).await;
+        self.delete_failed_snapshot_record(&snapshot_id, &error)
+            .await;
         Err(error)
     }
 }
 
-fn validate_pin_owner(owner: &PinOwner) -> Result<()> {
+fn validate_snapshot_owner(owner: &SnapshotOwner) -> Result<()> {
     match owner {
-        PinOwner::User {
+        SnapshotOwner::User {
             name,
             expires_at_ms,
         } => {
@@ -99,7 +100,7 @@ fn validate_pin_owner(owner: &PinOwner) -> Result<()> {
             }
             Ok(())
         }
-        PinOwner::Fork { .. } => Ok(()),
+        SnapshotOwner::Fork { .. } => Ok(()),
     }
 }
 

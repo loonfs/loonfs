@@ -11,7 +11,7 @@ use super::RuntimeCore;
 use crate::metrics::ReadHeadSource;
 use crate::pinned_read::PinnedRead;
 use crate::trace::phase_span;
-use crate::{Consistency, CoreError, NamespaceId, PinId};
+use crate::{Consistency, CoreError, NamespaceId, SnapshotId};
 use crate::{Error, Result};
 use loonfs_core::cache::{CachedHead, ProjectedWalTail, WalTailCacheKey};
 use loonfs_core::control::{
@@ -321,34 +321,34 @@ impl RuntimeCore {
     }
 
     /// Pins the metadata view that an unexpired snapshot, or one of the
-    /// namespace's fork pins, captured.
+    /// namespace's fork snapshots, captured.
     pub(crate) async fn pinned_read_at_snapshot(
         &self,
         namespace_id: &NamespaceId,
-        snapshot_id: &PinId,
+        snapshot_id: &SnapshotId,
     ) -> Result<PinnedRead> {
         let live = self
             .current_read_context(namespace_id, Consistency::Strong)
             .await?;
-        let pinned = self
+        let basis = self
             .namespace_store(namespace_id)
             .load_snapshot_read_basis(&live.read_basis.head, snapshot_id)
             .await
             .map_err(Error::from)?;
-        Ok(self.pinned_read_at_basis(namespace_id, pinned, live))
+        Ok(self.pinned_read_at_basis(namespace_id, basis, live))
     }
 
     fn pinned_read_at_basis(
         &self,
         namespace_id: &NamespaceId,
-        pinned: ReadBasis,
+        basis: ReadBasis,
         live: RuntimeReadContext,
     ) -> PinnedRead {
         PinnedRead {
             engine: self
                 .reader_engine(namespace_id)
                 .with_authorization_head(live),
-            context: self.read_context(pinned, None),
+            context: self.read_context(basis, None),
         }
     }
 

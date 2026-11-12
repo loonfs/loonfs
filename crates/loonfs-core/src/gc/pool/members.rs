@@ -1,13 +1,13 @@
 //! The roots of a pool's members, which protect the pool's content: the
-//! upload sessions, and each member's current manifest, WAL tail, and pinned
-//! manifests, read in the walk over fork pins that finds the members.
+//! upload sessions, and each member's current manifest, WAL tail, and the
+//! manifests that its snapshots keep, read in the walk over fork snapshots that finds the members.
 
 use super::uploads::{ListedUpload, ListedUploadSession};
 use crate::error::{CoreError, Result};
 use crate::gc::charged_set::{ChargedMap, ChargedQueue, ChargedSet, CollectionMemory};
 use crate::gc::live_set::RetirementStatus;
-use crate::gc::pinned::{missing_root_manifest, ListedPinKey, PinnedManifest};
 use crate::gc::session_cache::{CompletedUploadSession, CompletedUploadSessionCache};
+use crate::gc::snapshot_manifests::{missing_root_manifest, ListedSnapshotKey, SnapshotManifest};
 use crate::limits::{NAMESPACE_RETIREMENT_GRACE_WINDOW_MS, POOL_ROOTS_READ_BUDGET_MS};
 use crate::namespace::control::{LoadedHint, LoadedManifest};
 use crate::namespace::read_anchor::project_anchor_tail;
@@ -18,7 +18,7 @@ use crate::time::{Observation, OperationClock};
 use futures::TryStreamExt;
 use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::control::{PinOwner, PinPayload};
+use loonfs_types::format::control::{SnapshotOwner, SnapshotPayload};
 use loonfs_types::format::manifest::{MetadataRowFamily, MetadataSegmentRef};
 use loonfs_types::{ContentId, NamespaceId, PoolId, UploadId};
 use std::sync::Arc;
@@ -26,13 +26,13 @@ use std::sync::Arc;
 /// How far the collection has read one member of the pool.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MemberState {
-    /// The member is the pool's first member, or the target of a fork pin
+    /// The member is the pool's first member, or the target of a fork snapshot
     /// that the walk listed, and the collection hasn't read its roots.
     Found,
     /// The collection has read the member's roots, and its retirement status by the
     /// collection's clock.
     Read { status: RetirementStatus },
-    /// The member is the target of a fork pin, and it has no current
+    /// The member is the target of a fork snapshot, and it has no current
     /// manifest, because its installation hasn't finished, or it failed. It
     /// has no roots, and no commit can be published in it.
     Absent,
@@ -54,10 +54,10 @@ pub(super) enum MemberWalkOutcome {
 #[derive(Clone, Copy, Debug)]
 pub(super) struct MemberWalkReport {
     pub(super) outcome: MemberWalkOutcome,
-    /// The pool's first member, and every fork pin target that the walk
+    /// The pool's first member, and every fork snapshot target that the walk
     /// found, including a target whose installation hasn't finished.
     pub(super) members: usize,
-    /// The members whose roots the collection read. A fork pin target without a
+    /// The members whose roots the collection read. A fork snapshot target without a
     /// current manifest has no roots, and it counts as read.
     pub(super) members_read: usize,
 }
@@ -82,7 +82,7 @@ pub(super) struct PoolRoots {
     /// Every member that the walk has found.
     members: ChargedMap<NamespaceId, MemberState>,
     /// The members whose roots the collection hasn't read yet, in the order that
-    /// the fork pin listings found them.
+    /// the fork snapshot listings found them.
     member_queue: ChargedQueue<NamespaceId>,
     /// The configured grace, or the retirement grace when that's longer.
     retirement_grace_window_ms: u64,
@@ -179,7 +179,7 @@ impl PoolRoots {
     }
 
     /// Reads the roots of the first member, and then of every other member in
-    /// the order that the walk over fork pins finds them.
+    /// the order that the walk over fork snapshots finds them.
     ///
     /// The walk reads each member once, one member at a time. It stops at the
     /// first member whose roots can't be read, and before a member that it
@@ -198,7 +198,7 @@ impl PoolRoots {
         observed: Observation,
         clock: &OperationClock,
     ) -> Result<()> {
-        // The first member is found before its pin listing, so that a fork pin
+        // The first member is found before its snapshot listing, so that a fork snapshot
         // can't add it to the walk's queue.
         self.members
             .insert(first_member_namespace_id.clone(), MemberState::Found)?;
@@ -251,10 +251,10 @@ impl PoolRoots {
         Ok(())
     }
 
-    /// Reads the roots of `member`, a fork pin's target, and returns the
+    /// Reads the roots of `member`, a fork snapshot's target, and returns the
     /// member's state.
     ///
-    /// A fork pin's target has no current manifest until its installation
+    /// A fork snapshot's target has no current manifest until its installation
     /// finishes, and it has no roots and no forks until then.
     async fn load_member<S: ObjectStore>(
         &mut self,
@@ -282,12 +282,12 @@ impl PoolRoots {
     }
 
     /// Adds the content IDs of the WAL tail above `current`, the layout
-    /// segments of the manifests that the member's pins keep, and the targets
-    /// of its fork pins, and returns the member's retirement status and
+    /// segments of the manifests that the member's snapshots keep, and the targets
+    /// of its fork snapshots, and returns the member's retirement status and
     /// current manifest.
     ///
-    /// A pin whose manifest is missing makes the member's roots unreadable,
-    /// because only the member's own collection decides about its pins.
+    /// A snapshot whose manifest is missing makes the member's roots unreadable,
+    /// because only the member's own collection decides about its snapshots.
     async fn read_member<S: ObjectStore>(
         &mut self,
         member: &NamespaceStore<S>,
@@ -311,38 +311,39 @@ impl PoolRoots {
                 }
             }
         }
-        let mut pinned = false;
-        let mut pins = member.list_pinned_manifests(head.manifest_no);
-        while let Some(listed) = pins.try_next().await? {
-            pinned = true;
-            let ListedPinKey::Pin(pin) = listed else {
+        let mut has_snapshots = false;
+        let mut snapshots = member.list_snapshot_manifests(head.manifest_no);
+        while let Some(listed) = snapshots.try_next().await? {
+            has_snapshots = true;
+            let ListedSnapshotKey::Snapshot(snapshot) = listed else {
                 continue;
             };
-            if let Some(PinPayload {
-                owner: PinOwner::Fork {
-                    target_namespace_id,
-                },
+            if let Some(SnapshotPayload {
+                owner:
+                    SnapshotOwner::Fork {
+                        target_namespace_id,
+                    },
                 ..
-            }) = &pin.record
+            }) = &snapshot.record
             {
                 self.add_fork_target(target_namespace_id)?;
             }
-            match &pin.manifest {
-                PinnedManifest::Loaded(manifest) => self.protect_layout_segments(manifest)?,
-                PinnedManifest::Rooted => {}
-                PinnedManifest::Missing(manifest_no) => {
+            match &snapshot.manifest {
+                SnapshotManifest::Loaded(manifest) => self.protect_layout_segments(manifest)?,
+                SnapshotManifest::Rooted => {}
+                SnapshotManifest::Missing(manifest_no) => {
                     return Err(missing_root_manifest(
                         &member.namespace_id,
                         *manifest_no,
-                        &pin.key,
+                        &snapshot.key,
                     ));
                 }
             }
         }
-        drop(pins);
+        drop(snapshots);
         let status = RetirementStatus::of(
             head.status.is_deleted().then_some(head),
-            pinned,
+            has_snapshots,
             self.retirement_grace_window_ms,
             self.now_ms,
         );
@@ -372,7 +373,7 @@ impl PoolRoots {
         Ok(())
     }
 
-    /// Adds `target_namespace_id`, the target of a fork pin, to the members
+    /// Adds `target_namespace_id`, the target of a fork snapshot, to the members
     /// that the walk has found and to the back of the walk's queue, unless the
     /// walk has found it already.
     fn add_fork_target(&mut self, target_namespace_id: &NamespaceId) -> Result<()> {
@@ -394,11 +395,11 @@ impl PoolRoots {
     /// read, or of a namespace that the walk didn't find when the walk
     /// stopped early. A member without a current manifest, and a namespace
     /// that a finished walk didn't find, are eligible, because no commit can
-    /// be published in the first, and only retirement deletes the fork pin
+    /// be published in the first, and only retirement deletes the fork snapshot
     /// that would find the second. That holds for a namespace with a session that
     /// the collection listed before the walk, because a namespace has a current
     /// manifest before it can create a session. A fork installed after the
-    /// walk read its source's pins isn't found either, so a session that the
+    /// walk read its source's snapshots isn't found either, so a session that the
     /// collection didn't list as completed before the walk can't rely on this status
     /// to skip the completed-content grace.
     pub(super) fn find_retirement_status(

@@ -4,7 +4,7 @@
 use super::deletes::{Counter, Decision};
 use super::families::CandidateFamily;
 use super::live_set::LiveSet;
-use super::pins::PinSweep;
+use super::snapshots::SnapshotSweep;
 use crate::error::Result;
 use crate::namespace::store::NamespaceStore;
 use crate::time::OperationClock;
@@ -34,7 +34,7 @@ impl<S: ObjectStore> Sweep<'_, S> {
             return Ok(self.retain(RetainedReason::UnrecognizedKey, None));
         }
         let Some(deleted) = family.deleted_counter() else {
-            return self.process_pin(entry.key).await;
+            return self.process_snapshot(entry.key).await;
         };
         if self.live.protects(family, &entry.key) {
             return Ok(self.retain(RetainedReason::Referenced, None));
@@ -47,28 +47,34 @@ impl<S: ObjectStore> Sweep<'_, S> {
         ))
     }
 
-    async fn process_pin(&self, key: String) -> Result<Decision<GcResponse>> {
-        // The collection read its pin records while it loaded its roots. A
-        // record changes only when an unexpired user pin is extended, so a
+    async fn process_snapshot(&self, key: String) -> Result<Decision<GcResponse>> {
+        // The collection read its snapshot records while it loaded its roots. A
+        // record changes only when an unexpired user snapshot is extended, so a
         // record that the collection read earlier leads to the same decision
         // as one that it reads now.
-        let decision = match self.live.pin_records.get(&key) {
+        let decision = match self.live.snapshot_records.get(&key) {
             Some(record) => {
                 self.namespace
-                    .sweep_pin_record(&key, record, self.grace_window_ms, self.live, self.clock)
+                    .sweep_snapshot_record(
+                        &key,
+                        record,
+                        self.grace_window_ms,
+                        self.live,
+                        self.clock,
+                    )
                     .await?
             }
             None => {
                 self.namespace
-                    .sweep_pin(&key, self.grace_window_ms, self.live, self.clock)
+                    .sweep_snapshot(&key, self.grace_window_ms, self.live, self.clock)
                     .await?
             }
         };
         let counter: Counter<GcResponse> = match decision {
-            PinSweep::DeleteFork => |report| &mut report.deleted_checkpoints_by_owner.fork,
-            PinSweep::DeleteUser => |report| &mut report.deleted_checkpoints_by_owner.user,
-            PinSweep::Gone => return Ok(Decision::Gone),
-            PinSweep::Retain { reclaimable_at_ms } => {
+            SnapshotSweep::DeleteFork => |report| &mut report.deleted_checkpoints_by_owner.fork,
+            SnapshotSweep::DeleteUser => |report| &mut report.deleted_checkpoints_by_owner.user,
+            SnapshotSweep::Gone => return Ok(Decision::Gone),
+            SnapshotSweep::Retain { reclaimable_at_ms } => {
                 return Ok(self.retain(RetainedReason::CheckpointNotDeletable, reclaimable_at_ms));
             }
         };

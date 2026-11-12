@@ -340,15 +340,15 @@ async fn snapshot_views_with_and_without_an_expiry_keep_missing_segments_corrupt
 }
 
 #[tokio::test]
-async fn snapshot_views_with_and_without_an_expiry_report_their_deleted_pin_when_a_segment_is_missing(
+async fn snapshot_views_with_and_without_an_expiry_report_their_deleted_snapshot_when_a_segment_is_missing(
 ) {
     use loonfs_objectstore::{keys, ObjectStore};
     use loonfs_types::format::manifest::MetadataRowFamily;
 
     let directory = tempdir().expect("tempdir");
     let store = store(directory.path());
-    let namespace_id = NamespaceId::parse("deleted-pin-segment").expect("namespace");
-    let runtime = open_runtime_async(store.clone(), "deleted-pin-segment").await;
+    let namespace_id = NamespaceId::parse("deleted-snapshot-segment").expect("namespace");
+    let runtime = open_runtime_async(store.clone(), "deleted-snapshot-segment").await;
     runtime
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await
@@ -503,7 +503,7 @@ async fn a_namespace_listing_at_a_snapshot_resumes_only_a_cursor_of_that_snapsho
     let root = first_page.entries[0].parent_inode_id.expect("root inode");
 
     for (snapshot, reason) in [
-        (&twin, "does not match requested pin"),
+        (&twin, "does not match requested snapshot"),
         (&later, "does not match the read view head"),
     ] {
         assert_cursor_rejected(
@@ -601,9 +601,12 @@ async fn snapshot_directory_cursor_resumes_only_at_its_snapshot() {
         first_page.next_cursor.as_deref().expect("next cursor"),
     )
     .expect("decode cursor");
-    assert_eq!(cursor.pin_id.as_ref(), Some(&first_snapshot.snapshot_id));
+    assert_eq!(
+        cursor.snapshot_id.as_ref(),
+        Some(&first_snapshot.snapshot_id)
+    );
     let mut unbound_cursor = cursor.clone();
-    unbound_cursor.pin_id = None;
+    unbound_cursor.snapshot_id = None;
     let unbound_cursor = loonfs_types::encode_cursor(&unbound_cursor).expect("encode cursor");
     let cursor = first_page.next_cursor.clone().expect("next cursor");
 

@@ -1,9 +1,9 @@
 //! A rebase's new fork: the `rebased_from` that its creation records through
-//! its fork pin, and the two substitutions in the merge rules for a replay
+//! its fork snapshot, and the two substitutions in the merge rules for a replay
 //! commit into it.
 
 use super::*;
-use loonfs_objectstore::keys::pin_prefix;
+use loonfs_objectstore::keys::snapshot_prefix;
 use loonfs_types::NamespaceRebasedFrom;
 
 fn rebase_fork(name: &str) -> NamespaceId {
@@ -46,9 +46,9 @@ async fn fork_for_rebase(
 }
 
 /// Checks that a rebase's new fork records the fork sequence that the fork's
-/// next merge into main starts after, as main's pinned manifest records it,
+/// next merge into main starts after, as the manifest of main's snapshot records it,
 /// and that a fork point below that manifest's retention floor creates no
-/// namespace and leaves no fork pin.
+/// namespace and leaves no fork snapshot.
 #[tokio::test]
 async fn a_rebase_fork_records_where_the_forks_next_merge_starts() {
     let (_directory, store, main, writer) = setup().await;
@@ -111,12 +111,12 @@ async fn a_rebase_fork_records_where_the_forks_next_merge_starts() {
     );
     assert_eq!(
         store
-            .list_prefix(&pin_prefix(&main))
+            .list_prefix(&snapshot_prefix(&main))
             .await
-            .expect("main's pins")
+            .expect("main's snapshots")
             .len(),
         2,
-        "only the two rebase forks keep fork pins"
+        "only the two rebase forks keep fork snapshots"
     );
 }
 

@@ -126,9 +126,9 @@ impl PoolDeletedObjectCounts {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DeletedCheckpointsByOwner {
-    /// The user pins that the collection deleted after they expired or their namespace was deleted.
+    /// The user snapshots that the collection deleted after they expired or their namespace was deleted.
     pub user: u64,
-    /// The fork pins that the collection deleted because their target namespaces no longer exist.
+    /// The fork snapshots that the collection deleted because their target namespaces no longer exist.
     pub fork: u64,
 }
 
@@ -156,7 +156,7 @@ pub struct GcResponse {
     /// The bytes of every object that the collection listed under the namespace, each object once,
     /// before the collection's deletes.
     pub listed_bytes: u64,
-    /// The earliest future retirement deadline or pin deletion time.
+    /// The earliest future retirement deadline or snapshot deletion time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub next_reclamation_at_ms: Option<u64>,

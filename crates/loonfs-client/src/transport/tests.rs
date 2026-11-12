@@ -18,7 +18,7 @@ use loonfs_types::DeleteSnapshotResponse;
 use loonfs_types::NamespaceDiagnostics;
 use loonfs_types::NamespaceMetadata;
 use loonfs_types::ObjectTransfer;
-use loonfs_types::PinId;
+use loonfs_types::SnapshotId;
 use loonfs_types::UploadId;
 use loonfs_types::UploadSession;
 use loonfs_types::UploadSessionStatus;
@@ -761,8 +761,8 @@ async fn retry_policy_matches_snapshot_and_maintenance_operation_classes() {
         &transport,
     );
 
-    let snapshot_id =
-        PinId::parse("pin_00000000000000000001-0000000000000001").expect("valid pin id");
+    let snapshot_id = SnapshotId::parse("snp_00000000000000000001-00000000000000000000000001")
+        .expect("valid snapshot id");
     let deleted = DeleteSnapshotResponse {
         namespace_id: namespace_id.clone(),
         snapshot_id: snapshot_id.clone(),

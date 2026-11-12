@@ -1,7 +1,7 @@
 //! The decisions that a collection's sweeps make about listed objects, and
 //! the bounded concurrent deletes that carry them out.
 
-use super::pins::GraceAge;
+use super::snapshots::GraceAge;
 use crate::error::{CoreError, Result};
 use crate::in_flight::STORE_WRITES_IN_FLIGHT;
 use futures::{Stream, TryStreamExt};

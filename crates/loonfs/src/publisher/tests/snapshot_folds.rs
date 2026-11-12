@@ -143,7 +143,7 @@ async fn creations_started_together_fold_one_at_a_time_at_a_limit_of_one() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(segment_write_watch(temp_dir.path()));
     let namespaces = (0..3)
-        .map(|index| NamespaceId::parse(format!("pin-fold-{index}")).expect("namespace id"))
+        .map(|index| NamespaceId::parse(format!("snapshot-fold-{index}")).expect("namespace id"))
         .collect::<Vec<_>>();
     let writer = writer_over(
         store.clone(),
@@ -224,7 +224,7 @@ fn folds_run(recorder: &DefaultMetricsRecorder) -> u64 {
 /// Checks that the snapshots that wait for a fold in progress share one
 /// fold after it. The first snapshot's fold is parked at its manifest put,
 /// three more snapshots arrive, and one more commit is published. The three
-/// snapshots then pin the manifest of one fold, which folds the commit, so
+/// snapshots then keep the manifest of one fold, which folds the commit, so
 /// two folds run and two manifests are published after the park.
 #[tokio::test]
 async fn snapshots_that_wait_for_a_fold_share_the_next_fold() {

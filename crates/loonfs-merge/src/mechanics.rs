@@ -58,7 +58,7 @@ pub trait Mechanics: Send + Sync {
         namespace_id: &NamespaceId,
     ) -> impl Future<Output = Result<NamespaceMetadata>> + Send;
 
-    /// Lists the namespace's pins, whose fork pins identify the namespace's
+    /// Lists the namespace's snapshots, whose fork snapshots identify the namespace's
     /// forks (see [`Client::list_checkpoints`]).
     fn list_checkpoints(&self, namespace_id: &NamespaceId) -> CheckpointsPager;
 }

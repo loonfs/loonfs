@@ -13,7 +13,7 @@ use loonfs::{
 };
 use loonfs_types::{
     AbsolutePath, CommitSeq, ContentRef, EffectiveLimit, InodeId, LimitError, NamespaceId, Page,
-    PathEntry, PinId, RevisionNo, Subject, MAX_PAGE_LIMIT,
+    PathEntry, RevisionNo, SnapshotId, Subject, MAX_PAGE_LIMIT,
 };
 use loonfs_types::{FilesystemEvent, ListChangesResponse};
 
@@ -90,14 +90,14 @@ impl NamespaceReads {
         Ok(self.namespace.metadata().await?)
     }
 
-    /// Lists the files a snapshot pins, in ascending inode-id order.
+    /// Lists the files a snapshot keeps, in ascending inode-id order.
     /// Deleted files are included so a restore needs no new postings;
     /// queries determine visibility.
     ///
     /// A page returns `snapshot_not_found` if the snapshot was deleted,
     /// expired, or collected, and `checkpoint_unavailable` if its manifest is
     /// gone. The caller must then restart the backfill from a new snapshot.
-    pub fn list_snapshot_files(&self, snapshot_id: &PinId) -> SnapshotFilesPager {
+    pub fn list_snapshot_files(&self, snapshot_id: &SnapshotId) -> SnapshotFilesPager {
         self.namespace.list_snapshot_files_with_options(
             snapshot_id,
             &ListSnapshotFilesOptions {
@@ -109,7 +109,7 @@ impl NamespaceReads {
     /// Reads committed changes after `after_seq` as semantic events.
     ///
     /// In a fork, when `after_seq` is below the fork point, this reads the
-    /// source's changes through the fork pin (see
+    /// source's changes through the fork snapshot (see
     /// [`Self::list_fork_gap_after`]). Otherwise, it returns
     /// `rebootstrap_required` when `after_seq` is below the retention floor.
     /// The page is `strong`, because `after_seq` comes
@@ -144,7 +144,7 @@ impl NamespaceReads {
 
     /// Lists one page of a fork's "gap" after `after_seq`, which is the
     /// source's commits above `after_seq` and at or below the fork point,
-    /// read through the fork pin as a rebase reads its source.
+    /// read through the fork snapshot as a rebase reads its source.
     ///
     /// A fork's own feed starts at the fork point, which is its first
     /// retention floor, so grep reads the commits below the fork point that
@@ -184,7 +184,7 @@ impl NamespaceReads {
             return Err(error.into());
         };
         let options = ListChangesOptions {
-            at: ReadAt::Snapshot(basis.source_pin_id),
+            at: ReadAt::Snapshot(basis.source_snapshot_id),
             ..ListChangesOptions::default()
         };
         match self
@@ -263,7 +263,7 @@ impl NamespaceReadView<'_> {
     /// The feed itself may observe a later durable head. Its immutable commit
     /// prefix is truncated here so later commits cannot affect this query. In
     /// a fork, when `after_seq` is below the fork point, this reads the
-    /// source's changes through the fork pin (see
+    /// source's changes through the fork snapshot (see
     /// [`NamespaceReads::list_fork_gap_after`]), and the page after the gap's
     /// last commit continues in the fork's own feed.
     pub(crate) async fn list_changes_after(

@@ -730,7 +730,7 @@ async fn a_retention_trimmed_commit_seq_leaves_the_conflict_standing() {
         .await
         .expect("first put");
 
-    // Pin the head, then give up incremental replay below it. The commit's
+    // Take a snapshot of the head, then give up incremental replay below it. The commit's
     // receipt still binds the id, so a rerun still conflicts and the
     // conflict still names the commit's sequence — but the change feed no
     // longer answers for that sequence.

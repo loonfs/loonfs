@@ -327,7 +327,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .limit
             .finish_page(&mut children, |last| DirectoryPageCursor {
                 head_seq: self.visible_seq,
-                pin_id: None,
+                snapshot_id: None,
                 directory_inode_id: resolved.inode_id,
                 last_name_key: last.binding.name_key.clone(),
             });

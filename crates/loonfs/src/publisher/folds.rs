@@ -1,5 +1,5 @@
 //! The one fold path of each namespace in a writable runtime, and the locks
-//! that keep a namespace's folds apart from each other and from its pins, and
+//! that keep a namespace's folds apart from each other and from its snapshots, and
 //! its compaction units apart.
 
 use super::registry::NamespaceChange;
@@ -23,16 +23,16 @@ use tracing::Instrument;
 ///
 /// A fold takes the fold lock in exclusive mode before it decides that a
 /// fold is due, and keeps it until it has moved the session's position, so
-/// two folds never fold the same tail. A pin takes the lock in shared mode
+/// two folds never fold the same tail. A snapshot takes the lock in shared mode
 /// from the moment it has a fold's manifest until its verification, so a
-/// fold in this runtime never replaces that manifest before the pin is
-/// verified, and any number of pins run at once. The fold rounds record
+/// fold in this runtime never replaces that manifest before the snapshot is
+/// verified, and any number of snapshots run at once. The fold rounds record
 /// which fold served a request: a fold that took its input after the
 /// request arrived covers every commit acknowledged before the request, so
 /// the requests that wait for one fold share the next one. A compaction
 /// unit takes the compaction lock before it plans, so two units never plan
 /// from the same manifest. The fold lock and the compaction lock are `tokio`
-/// locks, because a fold, a pin, and a unit keep them across store requests.
+/// locks, because a fold, a snapshot, and a unit keep them across store requests.
 #[derive(Default)]
 pub(crate) struct NamespaceTurns {
     pub(super) fold: RwLock<()>,
@@ -122,8 +122,8 @@ impl PublisherRegistry {
     ///
     /// Every fold of a namespace in this runtime runs here, with the
     /// namespace's fold lock in exclusive mode, so a fold waits for a fold in
-    /// progress instead of folding the same tail, and for the pins in
-    /// progress (see [`Self::pin_after_fold`]). Under [`FoldWhen::Always`], a
+    /// progress instead of folding the same tail, and for the snapshots in
+    /// progress (see [`Self::snapshot_after_fold`]). Under [`FoldWhen::Always`], a
     /// fold that took its input after the call arrived serves the call. The
     /// fold's input is the position of the
     /// namespace's writer session while the session isn't fenced and the
@@ -213,44 +213,46 @@ impl PublisherRegistry {
         Ok(folded)
     }
 
-    /// Folds the WAL tail of `namespace_id` and runs `pin` at the manifest
-    /// that covers the tail, and repeats both while the pin finds that
+    /// Folds the WAL tail of `namespace_id` and runs `create` at the manifest
+    /// that covers the tail, and repeats both while the snapshot finds that
     /// manifest replaced before its verification, for at most
-    /// `MAX_CONTENTION_ATTEMPTS` pins.
+    /// `MAX_CONTENTION_ATTEMPTS` snapshots.
     ///
     /// Each attempt uses a fold that took its input after the attempt
     /// arrived, and folds only when no such fold has completed (see
     /// [`Self::fold_namespace`]). The attempt keeps the namespace's fold lock
-    /// in shared mode from the moment it has the fold's manifest until `pin`
+    /// in shared mode from the moment it has the fold's manifest until `create`
     /// returns, so no fold in this runtime replaces the manifest before the
-    /// pin is verified, and other pins run at the same time. A compaction
+    /// snapshot is verified, and other snapshots run at the same time. A compaction
     /// unit, an extension's publication, or another process can still
     /// replace the manifest, so the attempts stay.
-    pub(crate) async fn pin_after_fold<T, Pin>(
+    pub(crate) async fn snapshot_after_fold<T, SnapshotFuture>(
         &self,
         namespace_id: &NamespaceId,
-        mut pin: impl FnMut(ManifestRef) -> Pin,
+        mut create: impl FnMut(ManifestRef) -> SnapshotFuture,
     ) -> Result<T>
     where
-        Pin: Future<Output = loonfs_core::Result<T>>,
+        SnapshotFuture: Future<Output = loonfs_core::Result<T>>,
     {
         let turns = self.namespace_turns(namespace_id);
-        let mut pins = 1;
+        let mut attempts = 1;
         loop {
             let arrival = turns.started();
-            let (manifest, turn) = self.fold_for_pin(namespace_id, &turns, arrival).await?;
-            let pinned = pin(manifest).await;
+            let (manifest, turn) = self
+                .fold_for_snapshot(namespace_id, &turns, arrival)
+                .await?;
+            let created = create(manifest).await;
             drop(turn);
-            match pinned {
-                Err(CoreError::CheckpointUnavailable(_)) if pins < MAX_CONTENTION_ATTEMPTS => {
-                    pins += 1;
+            match created {
+                Err(CoreError::CheckpointUnavailable(_)) if attempts < MAX_CONTENTION_ATTEMPTS => {
+                    attempts += 1;
                 }
-                pinned => return pinned.map_err(Error::from),
+                created => return created.map_err(Error::from),
             }
         }
     }
 
-    async fn fold_for_pin<'a>(
+    async fn fold_for_snapshot<'a>(
         &self,
         namespace_id: &NamespaceId,
         turns: &'a NamespaceTurns,
@@ -262,9 +264,9 @@ impl PublisherRegistry {
         }
         drop(shared);
         // The fold lock is released from exclusive mode, not downgraded to
-        // shared mode. If a pin kept the lock from its fold, the next
-        // waiter's exclusive lock would wait for that pin, and the waiters
-        // would pin one at a time.
+        // shared mode. If a snapshot kept the lock from its fold, the next
+        // waiter's exclusive lock would wait for that snapshot, and the waiters
+        // would take their snapshots one at a time.
         {
             let _exclusive = turns.fold.write().await;
             if turns.folded_after(arrival).is_none() {

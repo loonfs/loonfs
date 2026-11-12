@@ -9,10 +9,10 @@ mod http_access;
 mod inline_commits;
 mod maintenance_jobs;
 mod namespaces;
-mod pin_deletion;
 mod ranged_reads;
 mod read_consistency;
 mod request_limit;
+mod snapshot_deletion;
 mod surface;
 mod usage;
 
@@ -3156,7 +3156,7 @@ mod direct_download {
         )
         .await
         .expect("app");
-        let snapshot_id = "pin_00000000000000000001-0000000000000002";
+        let snapshot_id = "snp_00000000000000000001-00000000000000000000000002";
         let route = "/v0/namespaces/demo/filesystem/downloads";
         let inode_route = "/v0/namespaces/demo/inodes/ino_00000000000000000000000000/downloads";
         let revision_route =
