@@ -11,7 +11,7 @@ use loonfs::{
 };
 use loonfs_grep::{GrepService, GrepWorker};
 use loonfs_objectstore::presign::DirectTransferIssuers;
-use loonfs_types::{ErrorCode, MonotonicTimer, NamespaceId, SecretString, Subject};
+use loonfs_types::{MonotonicTimer, NamespaceId, SecretString, Subject};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
@@ -241,9 +241,10 @@ impl HttpState {
 
 /// The writer sessions that a host keeps open for the handlers.
 ///
-/// The handlers open a namespace's writable handle through these methods,
-/// and call them when a request finds the namespace gone or the session
-/// fenced, so that the host drops the handle.
+/// The handlers open a namespace's writable handle through these methods. An
+/// open returns the held handle only while its session is open. When the
+/// held session is fenced, or its namespace was deleted or is missing, the
+/// open drops the handle and opens the namespace again.
 pub trait WriterSessions: Send + Sync {
     /// Opens the writable handle of an existing namespace.
     fn open<'a>(
@@ -253,13 +254,6 @@ pub trait WriterSessions: Send + Sync {
 
     /// Drops the handle of a deleted namespace.
     fn forget(&self, namespace_id: &NamespaceId);
-
-    /// Drops the handle after a request through it failed with `error`,
-    /// when its namespace is missing or deleted or the held session is
-    /// fenced. An error about another namespace that the request refers to,
-    /// such as a merge's fork, keeps the handle. Another writer can delete a
-    /// namespace, or fence its session, after this host opened its handle.
-    fn forget_after(&self, namespace_id: &NamespaceId, error: &loonfs::Error);
 
     /// Records that the namespace's grep index has work for the host's
     /// maintenance.
@@ -285,13 +279,16 @@ impl HostState for () {
 /// handle only for a namespace that existed when the handle was first
 /// opened. The host's maintenance scheduler can close a caught-up session after its last open is old enough
 /// and no caller has a clone. A later write opens a new session and acquires
-/// a new writer epoch. Deletion or a request that finds the namespace gone
-/// also drops the handle.
-/// A request that finds its session fenced fails with `writer_fenced` and
-/// drops the handle. The session stays dead. A later request opens a
-/// new session, whose first publish takes the namespace back. While the old
-/// session's work ends, an open can fail with retryable `writer_session_closed`.
-/// Sustained fencing of one namespace means two writers receive its traffic.
+/// a new writer epoch. Deletion also drops the handle.
+/// An open returns the held handle only while its session is open. When the
+/// session found its namespace deleted or missing, the open closes the
+/// handle. When another writer fenced the session, the request that found
+/// the fence failed with `writer_fenced`, and the open drops the handle
+/// without a close, because the session can't be used again. The open then
+/// starts a new session, whose first publish takes the namespace back. While
+/// the old session's work ends, an open can fail with retryable
+/// `writer_session_closed`. Sustained fencing of one namespace means two
+/// writers receive its traffic.
 pub struct Namespaces<S> {
     runtime: LoonFs<Writable>,
     handles: Mutex<BTreeMap<NamespaceId, Arc<Mutex<HeldNamespace<S>>>>>,
@@ -340,13 +337,19 @@ impl<S: HostState> Namespaces<S> {
                     let mut held = entry
                         .lock()
                         .expect("a held namespace lock should not be poisoned");
-                    if held.closing.is_none()
-                        && held.handle.session_status() != NamespaceSessionStatus::Closed
-                    {
-                        held.last_opened_at_ms = self.timer.monotonic_now_ms();
-                        return Ok(held.handle.clone());
+                    match (held.closing.is_some(), held.handle.session_status()) {
+                        (false, NamespaceSessionStatus::Open) => {
+                            held.last_opened_at_ms = self.timer.monotonic_now_ms();
+                            return Ok(held.handle.clone());
+                        }
+                        (false, NamespaceSessionStatus::Fenced) => {
+                            drop(held);
+                            handles.remove(namespace_id);
+                            tracing::warn!(%namespace_id, "host dropped a fenced writer session");
+                            None
+                        }
+                        _ => Some((entry.clone(), held.begin_close())),
                     }
-                    Some((entry.clone(), held.begin_close()))
                 } else if checked {
                     let handle = self.runtime.open_namespace(namespace_id)?;
                     let now_ms = self.timer.monotonic_now_ms();
@@ -461,45 +464,6 @@ impl<S: HostState> WriterSessions for Namespaces<S> {
 
     fn forget(&self, namespace_id: &NamespaceId) {
         self.lock().remove(namespace_id);
-    }
-
-    fn forget_after(&self, namespace_id: &NamespaceId, error: &loonfs::Error) {
-        let code = error.code();
-        if code.is_namespace_gone() {
-            let gone_id = error.details().and_then(|details| details.namespace_id);
-            if gone_id.is_none_or(|gone_id| gone_id == *namespace_id) {
-                self.forget(namespace_id);
-            }
-            return;
-        }
-        if code != ErrorCode::WriterFenced {
-            return;
-        }
-        // The status is checked under the table lock, so a late error can't
-        // drop a healthy replacement.
-        let mut handles = self.lock();
-        if !handles.get(namespace_id).is_some_and(|entry| {
-            entry
-                .lock()
-                .expect("a held namespace lock should not be poisoned")
-                .handle
-                .session_status()
-                == NamespaceSessionStatus::Fenced
-        }) {
-            return;
-        }
-        handles.remove(namespace_id);
-        drop(handles);
-        let active_writer_id = error
-            .to_error_response()
-            .details
-            .and_then(|details| details.active_writer)
-            .map(|writer| writer.active_writer_id);
-        tracing::warn!(
-            %namespace_id,
-            active_writer_id = active_writer_id.as_ref().map(tracing::field::display),
-            "host dropped a fenced writer session"
-        );
     }
 
     fn mark_index_dirty(&self, namespace_id: &NamespaceId) {

@@ -319,11 +319,14 @@ impl NamespacePublisher {
 
     pub(super) fn session_status(&self) -> NamespaceSessionStatus {
         if !matches!(self.lock_state().admission, PublisherAdmissionStatus::Open) {
-            NamespaceSessionStatus::Closed
-        } else if self.session_is_fenced() {
-            NamespaceSessionStatus::Fenced
-        } else {
-            NamespaceSessionStatus::Open
+            return NamespaceSessionStatus::Closed;
+        }
+        match *lock_state(&self.session) {
+            WriterSessionStatus::Fenced(_) => NamespaceSessionStatus::Fenced,
+            WriterSessionStatus::NamespaceGone => NamespaceSessionStatus::Closed,
+            WriterSessionStatus::Unacquired | WriterSessionStatus::Acquired(_) => {
+                NamespaceSessionStatus::Open
+            }
         }
     }
 

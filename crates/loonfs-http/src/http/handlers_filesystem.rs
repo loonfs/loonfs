@@ -589,7 +589,6 @@ pub(super) async fn create_commit(
     } else {
         Some(
             content_preparation_for_puts(
-                state.namespaces.as_ref(),
                 &namespace,
                 state.content_tokens(),
                 &put_content_refs,
@@ -628,13 +627,9 @@ pub(super) async fn create_commit(
         namespace.commit(request).await
     };
     let response = response_result.map_err(|error| {
-        ApiResponseError::runtime_for_namespace_writer(
-            state.namespaces.as_ref(),
-            &namespace_id,
-            error,
-        )
-        .with_commit_field_param()
-        .with_commit_id(&commit_id_for_errors)
+        ApiResponseError::runtime(error)
+            .with_commit_field_param()
+            .with_commit_id(&commit_id_for_errors)
     })?;
     Ok(Json(response))
 }

@@ -659,13 +659,13 @@ While the scheduler closes a session:
 - An open that's waiting doesn't fail with `writer_session_closed` from this path.
 - Opens of other namespaces don't wait for this close.
 
-The server also drops a session when the namespace is deleted, when a request finds that the namespace doesn't exist, or when the session is fenced. When a session is fenced:
+The server also drops a session when the namespace is deleted through the server. A session records that it's fenced, and that a publish found its namespace deleted or missing, and the server drops such a session when the next request opens the namespace. When a session is fenced:
 
 - The request that finds the fence fails with `writer_fenced`, and the server doesn't resubmit it.
 - The session can't be used again, including every clone of it that a request still in flight is using.
 - A later request opens a new session, and that session's first publish takes the namespace back. Until the old session's work ends, an open can return `writer_session_closed` (503). A later request can open a session after that work ends.
 - A fence on one namespace doesn't affect the sessions for other namespaces.
-- Each dropped fenced session produces a warning with the namespace, and with the winning writer ID when the error includes it. The host table keeps a cumulative count of these drops. Typed hosts call `Namespaces::forget_if_fenced` after a failure, and they read `Namespaces::fenced_sessions_dropped` for the count.
+- Each dropped fenced session produces a warning with the namespace.
 
 Sustained fencing of one namespace means that two writers are being sent its traffic, and the namespace should be routed to one writer. A `retention` job and the reference server's sweep don't fence a writer, because they record a new retention floor in a "[floor object](glossary.md#floor-object)" (a WAL object with no commits) without claiming the writer epoch (see [Retention jobs](#retention-jobs)).
 

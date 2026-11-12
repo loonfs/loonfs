@@ -1,11 +1,10 @@
 //! The HTTP error envelope served by every v0 endpoint, and the mapping
 //! from error kinds to HTTP statuses.
 
-use crate::WriterSessions;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use loonfs_types::{CommitId, ErrorCode, ErrorDetails, ErrorKind, ErrorResponse, NamespaceId};
+use loonfs_types::{CommitId, ErrorCode, ErrorDetails, ErrorKind, ErrorResponse};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct ServedErrorCode(pub(super) ErrorCode);
@@ -116,24 +115,6 @@ impl ApiResponseError {
     pub(crate) fn runtime(error: loonfs::Error) -> Self {
         Self::from_error_response(error.code(), error.to_error_response())
     }
-
-    /// Maps a failure from the host's writable handle for `namespace_id`, and
-    /// drops the handle when its session is fenced or its namespace is gone.
-    pub(super) fn runtime_for_namespace_writer(
-        namespaces: &dyn WriterSessions,
-        namespace_id: &NamespaceId,
-        error: loonfs::Error,
-    ) -> Self {
-        namespaces.forget_after(namespace_id, &error);
-        Self::runtime(error)
-    }
-
-    pub(super) fn for_namespace_writer<'a>(
-        namespaces: &'a dyn WriterSessions,
-        namespace_id: &'a NamespaceId,
-    ) -> impl FnOnce(loonfs::Error) -> Self + 'a {
-        |error| Self::runtime_for_namespace_writer(namespaces, namespace_id, error)
-    }
 }
 
 /// Maps an error code, by its caller-action [`ErrorKind`], to the HTTP status
@@ -212,6 +193,7 @@ impl IntoResponse for ApiResponseError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use loonfs_types::NamespaceId;
 
     #[tokio::test]
     async fn deleted_namespace_responses_identify_the_failed_namespace() {
