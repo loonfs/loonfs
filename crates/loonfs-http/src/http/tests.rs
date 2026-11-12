@@ -955,7 +955,7 @@ async fn grep_error_unreadable_entries_and_segments_are_index_corrupt_and_core_r
         &writer,
         &unknown_member,
         loonfs_types::format::manifest::ExtensionEntry::new(
-            2,
+            1,
             Vec::new(),
             state(serde_json::json!({ "status": active, "watermark": 1 })),
         ),

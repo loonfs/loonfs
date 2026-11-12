@@ -1843,7 +1843,7 @@ fn assert_unsupported_version_error<T: std::fmt::Debug>(
             assert_eq!(error.code(), ErrorCode::IndexCorrupt, "code for {case}");
             assert_eq!(
                 error.to_string(),
-                "grep index has format version `3`, and this build reads version `2`; query or \
+                "grep index has format version `3`, and this build reads version `1`; query or \
                  disable the index with a build that reads version `3`",
                 "error text for {case}"
             );

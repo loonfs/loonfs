@@ -727,7 +727,7 @@ fn sample_extensions_manifest() -> NamespaceManifestPayload {
         filter_inline: None,
     };
     let entry = ExtensionEntry::new(
-        2,
+        1,
         vec![ExtensionRunRef {
             run_no: RunNo(1),
             level: 0,

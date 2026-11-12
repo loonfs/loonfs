@@ -35,23 +35,23 @@ use std::path::{Path, PathBuf};
 // ---------------------------------------------------------------------------
 
 /// The entry of an active index reorganizing a set of segments.
-pub(crate) const ACTIVE_ENTRY_FIXTURE: &str = "grep_entry.v2.json";
+pub(crate) const ACTIVE_ENTRY_FIXTURE: &str = "grep_entry.v1.json";
 /// The entry of a backfill in progress, with segments and no
 /// reorganization.
-pub(crate) const BACKFILLING_ENTRY_FIXTURE: &str = "grep_entry.backfilling.v2.json";
+pub(crate) const BACKFILLING_ENTRY_FIXTURE: &str = "grep_entry.backfilling.v1.json";
 /// The entry of a disabled index, which lists neither segments nor a
 /// reorganization.
-pub(crate) const DISABLED_ENTRY_FIXTURE: &str = "grep_entry.disabled.v2.json";
+pub(crate) const DISABLED_ENTRY_FIXTURE: &str = "grep_entry.disabled.v1.json";
 /// One data block of `gram_postings` rows.
-const GRAM_POSTINGS_BLOCK_FIXTURE: &str = "grep_segment_gram_postings.v2.bin";
+const GRAM_POSTINGS_BLOCK_FIXTURE: &str = "grep_segment_gram_postings.v1.bin";
 /// One data block of `text` rows.
-const TEXTS_BLOCK_FIXTURE: &str = "grep_segment_texts.v2.bin";
+const TEXTS_BLOCK_FIXTURE: &str = "grep_segment_texts.v1.bin";
 /// One data block of `content_revision` rows.
-const CONTENT_REVISIONS_BLOCK_FIXTURE: &str = "grep_segment_content_revisions.v2.bin";
+const CONTENT_REVISIONS_BLOCK_FIXTURE: &str = "grep_segment_content_revisions.v1.bin";
 /// One data block of `value` rows.
-const VALUES_BLOCK_FIXTURE: &str = "grep_segment_values.v2.bin";
+const VALUES_BLOCK_FIXTURE: &str = "grep_segment_values.v1.bin";
 /// One data block of `filter` rows.
-const FILTERS_BLOCK_FIXTURE: &str = "grep_segment_filters.v2.bin";
+const FILTERS_BLOCK_FIXTURE: &str = "grep_segment_filters.v1.bin";
 
 // ---------------------------------------------------------------------------
 // Golden helpers

@@ -26,7 +26,7 @@ async fn publish_run(
         .publish_extension(&basis, &grep(), |base| {
             (
                 ExtensionEntry::new(
-                    2,
+                    1,
                     vec![extension_run(base, vec![segment.clone()])],
                     serde_json::Map::new(),
                 ),

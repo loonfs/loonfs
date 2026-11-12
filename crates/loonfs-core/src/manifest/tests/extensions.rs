@@ -87,7 +87,7 @@ fn entry_after(basis: &ExtensionBasis, status: &str, base: RunNo) -> (ExtensionE
         .cloned()
         .expect("an object");
     (
-        ExtensionEntry::new(2, runs, state),
+        ExtensionEntry::new(1, runs, state),
         base.successor().expect("run"),
     )
 }
@@ -462,7 +462,7 @@ async fn no_two_runs_of_a_manifest_share_a_number() {
         for (name, runs) in entries {
             payload.extensions.insert(
                 ExtensionName::parse(name).expect("extension name"),
-                ExtensionEntry::new(2, runs, serde_json::Map::new()),
+                ExtensionEntry::new(1, runs, serde_json::Map::new()),
             );
         }
         crate::manifest::validate::validate_manifest(&folded.object_key, &payload)
