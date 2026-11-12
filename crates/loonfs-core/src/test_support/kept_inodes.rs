@@ -177,7 +177,6 @@ pub(crate) async fn compact_with_seed<S: ObjectStore + ?Sized>(
             compacted,
             &cancellation,
             &CompactionPublication {
-                compactor_epoch: loonfs_types::CompactorEpoch(0),
                 compaction: OperationClock::start(0, Arc::clone(&timer)),
                 publication: OperationClock::start(0, timer),
             },

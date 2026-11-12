@@ -9,7 +9,7 @@ use crate::test_support::{writer_at, NamespaceFixture};
 use crate::DeleteNamespaceOptions;
 use loonfs_types::format::manifest::{ExtensionEntry, ExtensionRunRef, ExtensionSegmentRef};
 use loonfs_types::format::segment_blocks::BlockHandle;
-use loonfs_types::{CompactorEpoch, ExtensionName, IndexSegmentId};
+use loonfs_types::{ExtensionName, IndexSegmentId};
 use std::num::NonZeroU64;
 
 fn grep() -> ExtensionName {
@@ -107,8 +107,8 @@ async fn current_entry(store: &LocalFsStore, namespace_id: &NamespaceId) -> Exte
         .clone()
 }
 
-/// Checks that a fold, a compaction, a compactor claim, a retention advance,
-/// a retention window change, and another writer's claim each copy the
+/// Checks that a fold, a compaction, a retention advance, a retention
+/// window change, and another writer's claim each copy the
 /// entry, and that the tombstone copies it with its runs emptied.
 #[tokio::test]
 async fn every_publication_copies_the_entry_and_a_tombstone_empties_its_runs() {
@@ -142,11 +142,7 @@ async fn every_publication_copies_the_entry_and_a_tombstone_empties_its_runs() {
         .clone()
         .with_run_policy(crate::test_support::one_delta_run_policy())
         .engine()
-        .compact_metadata_unit(
-            None,
-            CompactorEpoch(0),
-            &MetadataCompactionCancellation::default(),
-        )
+        .compact_metadata_unit(None, &MetadataCompactionCancellation::default())
         .await
         .expect("compact");
     assert!(matches!(compacted, CompactionUnitOutcome::Published { .. }));
@@ -154,12 +150,6 @@ async fn every_publication_copies_the_entry_and_a_tombstone_empties_its_runs() {
         current_entry(&store, &namespace_id).await,
         entry,
         "the entry after a compaction"
-    );
-    fixture.engine().claim_compactor().await.expect("claim");
-    assert_eq!(
-        current_entry(&store, &namespace_id).await,
-        entry,
-        "the entry after a compactor claim"
     );
     NamespaceFixture::new(
         &store,
@@ -222,7 +212,6 @@ enum EntryCopy {
     Fold,
     Compaction,
     RetentionAdvance,
-    CompactorClaim,
 }
 
 impl EntryCopy {
@@ -241,11 +230,7 @@ impl EntryCopy {
                     .clone()
                     .with_run_policy(crate::test_support::one_delta_run_policy())
                     .engine()
-                    .compact_metadata_unit(
-                        None,
-                        CompactorEpoch(0),
-                        &MetadataCompactionCancellation::default(),
-                    )
+                    .compact_metadata_unit(None, &MetadataCompactionCancellation::default())
                     .await
                     .expect("compact");
                 assert!(matches!(compacted, CompactionUnitOutcome::Published { .. }));
@@ -264,15 +249,12 @@ impl EntryCopy {
                 .await
                 .expect("advance");
             }
-            Self::CompactorClaim => {
-                fixture.engine().claim_compactor().await.expect("claim");
-            }
         }
     }
 }
 
 /// Checks that an extension's publication that loses its put to a fold, a
-/// compaction, a retention advance, or a compactor claim is published over
+/// compaction, or a retention advance is published over
 /// the manifest that won, which copied the entry, and that its new run's
 /// number follows the winner's runs.
 #[tokio::test]
@@ -281,7 +263,6 @@ async fn an_extension_publication_that_loses_to_a_copy_of_its_entry_is_rebuilt_o
         EntryCopy::Fold,
         EntryCopy::Compaction,
         EntryCopy::RetentionAdvance,
-        EntryCopy::CompactorClaim,
     ] {
         let directory = tempdir().expect("directory");
         let store = LocalFsStore::new(directory.path()).expect("store");

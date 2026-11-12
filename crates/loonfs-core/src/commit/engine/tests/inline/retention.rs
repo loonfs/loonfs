@@ -47,7 +47,6 @@ async fn compact_and_check_pair(
             .engine()
             .compact_metadata_unit(
                 None,
-                loonfs_types::CompactorEpoch(0),
                 &crate::compaction::MetadataCompactionCancellation::default(),
             )
             .await

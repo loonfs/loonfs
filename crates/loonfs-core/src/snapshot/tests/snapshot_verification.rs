@@ -87,7 +87,6 @@ pub(super) async fn compact_and_collect_replaced_segments<S: ObjectStore>(
     .engine()
     .compact_metadata_unit(
         None,
-        selected.compactor_epoch(),
         &crate::compaction::MetadataCompactionCancellation::default(),
     )
     .await

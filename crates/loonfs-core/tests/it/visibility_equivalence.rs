@@ -988,7 +988,6 @@ async fn drain_compaction(
             .engine
             .compact_metadata_unit(
                 None,
-                loonfs_types::CompactorEpoch(0),
                 &loonfs_core::MetadataCompactionCancellation::default(),
             )
             .await

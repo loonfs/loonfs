@@ -331,7 +331,7 @@ A counter in the manifest that increases each time a new writer session takes ov
 
 ### Epoch claim
 
-A manifest publication that increases the writer epoch or the compactor epoch by one. A writer's claim is followed by a fence, and until the fence is written, the previous writer can still commit.
+A manifest publication that increases the writer epoch by one. A writer's claim is followed by a fence, and until the fence is written, the previous writer can still commit.
 
 ### Fence
 
@@ -341,13 +341,9 @@ A WAL object with no commits. A new writer session publishes a fence as part of 
 
 A WAL object with no commits that records a new [retention floor](#retention-floor) in its `retention_floor_seq`. A retention advance creates a floor object at the next WAL number, so the WAL orders the advance against every restore. Any process can create a floor object without claiming the [writer epoch](#writer-epoch), and a floor object doesn't fence the namespace's [writer session](#writer-session). A writer whose commit collides with a floor object runs discovery and validates its batch again against the new floor. For example, if the WAL tip is WAL object 30 at sequence 140, an advance of the floor to 20 creates WAL object 31 with `head_seq` 140, no commits, and `retention_floor_seq` 20, and the fold that covers WAL object 31 publishes a manifest with floor 20. See [Advancing the retention floor](format.md#101-advancing-the-retention-floor).
 
-### Compactor epoch
-
-A counter in the manifest, like the writer epoch, that stops a compaction from publishing its result if a newer compactor has claimed the namespace since the compaction started.
-
 ### Maintainer
 
-The role that folds a namespace's WAL, compacts its metadata, publishes an extension's entry, advances its [retention floor](#retention-floor), and collects its garbage. The other role is the writer, which commits and deletes the namespace, under the [writer epoch](#writer-epoch). Any process can be a namespace's maintainer, with or without the writer session. A compaction claims the compactor epoch first, and a fold or an extension's publication publishes under the current compactor epoch without a claim. A retention advance creates a [floor object](#floor-object) with the current writer epoch, copied from the manifest without a claim (see [Advancing the retention floor](format.md#101-advancing-the-retention-floor)). See [Maintenance roles](../design/maintenance-roles.md) for the two roles and [Publishing a manifest](format.md#72-publishing-a-manifest).
+The role that folds a namespace's WAL, compacts its metadata, publishes an extension's entry, advances its [retention floor](#retention-floor), and collects its garbage. The other role is the writer, which commits and deletes the namespace, under the [writer epoch](#writer-epoch). Any process can be a namespace's maintainer, with or without the writer session. A fold, a compaction, or an extension's publication copies the writer epoch from the manifest it builds on and claims nothing. A retention advance creates a [floor object](#floor-object) with the current writer epoch, copied from the manifest without a claim (see [Advancing the retention floor](format.md#101-advancing-the-retention-floor)). See [Maintenance roles](../design/maintenance-roles.md) for the two roles and [Publishing a manifest](format.md#72-publishing-a-manifest).
 
 ### Job
 

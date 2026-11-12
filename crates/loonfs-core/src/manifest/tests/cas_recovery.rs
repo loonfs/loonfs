@@ -210,7 +210,7 @@ async fn an_ambiguous_manifest_read_back_must_finish_within_its_budget() {
 }
 
 #[tokio::test]
-async fn identical_compactor_claims_report_the_loser_as_covered() {
+async fn identical_window_changes_report_the_loser_as_covered() {
     for race_at_put in [false, true] {
         let directory = tempdir().expect("directory");
         let namespace_id = NamespaceId::parse("demo").expect("namespace");
@@ -224,8 +224,8 @@ async fn identical_compactor_claims_report_the_loser_as_covered() {
             .expect("current");
         let mut payload = current.payload().clone();
         payload.manifest_no = payload.manifest_no.successor().expect("next manifest");
-        payload.compactor_epoch.0 += 1;
-        let claim = encode_manifest(payload);
+        payload.retention_window_ms = std::num::NonZeroU64::new(60_000);
+        let change = encode_manifest(payload);
         let blocked = BlockingStore::new(
             store.clone(),
             KeyPredicate::manifest(&namespace_id),
@@ -233,17 +233,17 @@ async fn identical_compactor_claims_report_the_loser_as_covered() {
         );
         let (losing, winning) = if race_at_put {
             blocked.block_next();
-            let losing = publish_once(&blocked, claim.clone());
+            let losing = publish_once(&blocked, change.clone());
             let winning = async {
                 blocked.wait_until_blocked().await;
-                let outcome = publish_once(&store, claim.clone()).await;
+                let outcome = publish_once(&store, change.clone()).await;
                 blocked.release();
                 outcome
             };
             futures::join!(losing, winning)
         } else {
-            let winning = publish_once(&store, claim.clone()).await;
-            (publish_once(&store, claim).await, winning)
+            let winning = publish_once(&store, change.clone()).await;
+            (publish_once(&store, change).await, winning)
         };
         assert_matches!(
             winning.expect("winner"),
@@ -435,16 +435,16 @@ async fn discovery_probes_windows_above_the_hint_and_a_missing_hint_reads_as_abs
         .create()
         .await
         .expect("bootstrap");
-    for _ in 2..=11 {
+    for number in 2..=11 {
         crate::test_support::NamespaceFixture::new(
             &store,
             &namespace_id,
             &crate::test_support::writer_at("test-writer", 0),
         )
         .engine()
-        .claim_compactor()
+        .set_retention_window(std::num::NonZeroU64::new(number * 60_000))
         .await
-        .expect("publish a claim");
+        .expect("publish a window change");
     }
     let window = u64::try_from(crate::limits::MANIFEST_PROBE_WINDOW).expect("a small window");
     let hint = hint(&namespace_id);
@@ -981,15 +981,15 @@ async fn namespace_status_and_change_feed_reload_a_head_behind_the_floor() {
 }
 
 #[tokio::test]
-async fn an_ambiguous_compactor_claim_retries_instead_of_confirming() {
+async fn an_ambiguous_window_change_is_not_confirmed_as_published() {
     use loonfs_test_support::stores::{FailStore, InjectedError};
 
     let directory = tempdir().expect("directory");
-    let namespace_id = NamespaceId::parse("claimed").expect("namespace");
-    let claim_key = metadata_manifest_object(&namespace_id, &ManifestNo(2));
+    let namespace_id = NamespaceId::parse("changed").expect("namespace");
+    let change_key = metadata_manifest_object(&namespace_id, &ManifestNo(2));
     let store = FailStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::new(move |key| key == claim_key),
+        KeyPredicate::new(move |key| key == change_key),
         OperationSelector::PutCreateIfAbsent,
         InjectedError::Transport("response lost".to_owned()),
     )
@@ -999,26 +999,23 @@ async fn an_ambiguous_compactor_claim_retries_instead_of_confirming() {
         .create()
         .await
         .expect("create");
-    // The claim was written, but a rival could have written the same bytes, so the
-    // claimant reads it as the rival's and takes the next epoch.
-    let epoch = crate::test_support::NamespaceFixture::new(
+    // The change was written, but a rival could have written the same bytes,
+    // so the call reads it as the rival's, builds on it, and publishes nothing.
+    let window_ms = std::num::NonZeroU64::new(60_000);
+    let report = crate::test_support::NamespaceFixture::new(
         &store,
         &namespace_id,
         &crate::test_support::writer_at("test-writer", 0),
     )
     .engine()
-    .claim_compactor()
+    .set_retention_window(window_ms)
     .await
-    .expect("claim")
-    .response;
-    assert_eq!(epoch, loonfs_types::CompactorEpoch(2));
+    .expect("change the window");
+    assert!(report.published.is_none());
     let current = crate::test_support::namespace_store(&store, &namespace_id)
         .load_current_manifest()
         .await
         .expect("current manifest");
-    assert_eq!(current.payload().manifest_no, ManifestNo(3));
-    assert_eq!(
-        current.payload().compactor_epoch,
-        loonfs_types::CompactorEpoch(2)
-    );
+    assert_eq!(current.payload().manifest_no, ManifestNo(2));
+    assert_eq!(current.payload().retention_window_ms, window_ms);
 }

@@ -257,7 +257,6 @@ impl TestCore {
 fn test_writer_state() -> Arc<WriterState> {
     Arc::new(WriterState {
         writer_id: loonfs_test_support::ids::writer_id("writer-a"),
-        compactor_epochs: tokio::sync::Mutex::default(),
     })
 }
 

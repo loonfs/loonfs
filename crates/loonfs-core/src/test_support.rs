@@ -446,16 +446,13 @@ pub async fn drain_compaction<S: ObjectStore + ?Sized>(
             .engine()
             .compact_metadata_unit(
                 None,
-                loonfs_types::CompactorEpoch(0),
                 &crate::compaction::MetadataCompactionCancellation::default(),
             )
             .await
             .expect("compaction step");
         match outcome {
             crate::CompactionUnitOutcome::Published { .. } => published += 1,
-            crate::CompactionUnitOutcome::Abandoned | crate::CompactionUnitOutcome::Fenced => {
-                continue
-            }
+            crate::CompactionUnitOutcome::Abandoned => continue,
             other => {
                 std::assert_matches!(
                     other,

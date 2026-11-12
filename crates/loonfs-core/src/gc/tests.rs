@@ -1116,7 +1116,6 @@ async fn gc_reclaims_manifests_superseded_by_wal_folds() {
         .engine()
         .compact_metadata_unit(
             None,
-            loonfs_types::CompactorEpoch(0),
             &crate::compaction::MetadataCompactionCancellation::default(),
         )
         .await

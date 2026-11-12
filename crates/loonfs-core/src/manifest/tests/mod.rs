@@ -410,7 +410,6 @@ async fn run_planned_compaction_under<S: ObjectStore + ?Sized>(
             compacted,
             cancellation,
             &CompactionPublication {
-                compactor_epoch: loonfs_types::CompactorEpoch(0),
                 compaction: OperationClock::start(0, Arc::clone(&timer)),
                 publication: OperationClock::start(0, timer),
             },
@@ -874,7 +873,6 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
         status: head.status,
         writer: head.writer.clone(),
         folded_wal_no: head.wal_no,
-        compactor_epoch: loonfs_types::CompactorEpoch(0),
         namespace_id: namespace_id.clone(),
         manifest_no,
 
@@ -994,7 +992,6 @@ pub(super) async fn publish_manifest_with_segments<S: ObjectStore + ?Sized>(
         status: loonfs_types::format::control::NamespaceStatus::Active {},
         writer: None,
         folded_wal_no: loonfs_types::WalNo(0),
-        compactor_epoch: loonfs_types::CompactorEpoch(0),
         namespace_id: namespace_id.clone(),
         manifest_no,
 

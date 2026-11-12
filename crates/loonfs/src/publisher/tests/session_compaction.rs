@@ -1,9 +1,7 @@
-//! A writable session's own metadata compaction: started by its folds,
-//! cancelled by close and shutdown, and run under the runtime's compactor
-//! claim.
+//! A writable session's own metadata compaction: started by its folds, and
+//! cancelled by close and shutdown.
 
 use super::*;
-use crate::MetadataCompactionOutcome;
 use loonfs_core::control::LoadedManifest;
 use loonfs_types::format::manifest::RunTier;
 use loonfs_types::format::segment_blocks::{DEFAULT_MAX_DELTA_RUNS, DEFAULT_MIN_COMPACTION_RUNS};
@@ -241,7 +239,7 @@ async fn a_session_streaming_compaction_survives_its_own_next_fold() {
     parked.store.release();
     parked.writer.drain().await.expect("the compaction settles");
     assert!(compactions(&parked.recorder, "completed") >= 1);
-    for outcome in ["abandoned", "cancelled", "fenced", "failed"] {
+    for outcome in ["abandoned", "cancelled", "failed"] {
         assert_eq!(
             compactions(&parked.recorder, outcome),
             0,
@@ -406,95 +404,6 @@ async fn shutdown_drains_session_compactions() {
         parked_manifest_no,
         "a cancelled job publishes nothing"
     );
-}
-
-#[tokio::test]
-async fn maintenance_values_from_one_runtime_share_one_compactor_claim() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store: SharedStore = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
-    let writer = crate::LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id("writer-a"))
-        .session_fold_at_wal_objects(FOLD_EVERY_WRITE)
-        .build()
-        .await
-        .expect("build writer");
-    let namespace_id = NamespaceId::parse("shared-claim").expect("namespace id");
-    writer
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    let namespace = writer
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
-    let epoch_before = current_manifest(store.as_ref(), &namespace_id)
-        .await
-        .compactor_epoch();
-
-    write_until_the_session_compacts(&writer, &namespace, store.as_ref(), "/before").await;
-    assert_eq!(
-        current_manifest(store.as_ref(), &namespace_id)
-            .await
-            .compactor_epoch()
-            .0,
-        epoch_before.0 + 1,
-        "the session's compaction claims the namespace once"
-    );
-
-    // The direct value needs a unit that the session's own compaction didn't
-    // run. Another process folds each of the next writes while this
-    // runtime's fold permits are held, so the session's fold finds its tail
-    // folded and starts no compaction, and the folded delta runs make a size
-    // tier due.
-    let mut permits = Vec::new();
-    for _ in 0..crate::DEFAULT_MAX_CONCURRENT_FOLDS.get() {
-        permits.push(writer.execution_budget().fold_permit().await);
-    }
-    for index in 0..DEFAULT_MIN_COMPACTION_RUNS.get() {
-        namespace
-            .put_file(
-                &format!("/direct-{index}"),
-                b"body",
-                &loonfs_test_support::test_actor(),
-            )
-            .await
-            .expect("put a file");
-        loonfs_core::test_support::namespace_store(store.as_ref(), &namespace_id)
-            .fold_wal_tail(
-                None,
-                &loonfs_core::time::OperationClock::start(
-                    0,
-                    loonfs_core::test_support::std_timer(),
-                ),
-            )
-            .await
-            .expect("fold the write in another process");
-    }
-    drop(permits);
-    namespace
-        .wait_for_fold()
-        .await
-        .expect("the session's fold settles");
-    writer.drain().await.expect("the session settles");
-    let direct = writer.maintenance(loonfs_test_support::ids::writer_id("direct-maintenance"));
-    assert_matches!(
-        direct
-            .compact_metadata(&namespace_id, &crate::MaintenanceCancellation::new())
-            .await
-            .expect("compact through another maintenance value")
-            .compaction,
-        MetadataCompactionOutcome::Published { .. }
-    );
-
-    write_until_the_session_compacts(&writer, &namespace, store.as_ref(), "/after").await;
-    assert_eq!(
-        current_manifest(store.as_ref(), &namespace_id)
-            .await
-            .compactor_epoch()
-            .0,
-        epoch_before.0 + 1,
-        "one claim serves the session and the direct call, so neither fences the other"
-    );
-    writer.shutdown().await.expect("shut down writer");
 }
 
 #[tokio::test]

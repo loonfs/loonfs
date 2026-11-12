@@ -321,13 +321,13 @@ fn compaction_instruments_register_the_closed_vocabularies() {
     let snapshot = recorder.snapshot();
     assert_eq!(
         snapshot.by_name("loonfs.maintenance.compactions").count(),
-        5
+        4
     );
     assert_eq!(
         snapshot
             .by_name("loonfs.maintenance.compaction_seconds")
             .count(),
-        5
+        4
     );
     assert_eq!(
         snapshot

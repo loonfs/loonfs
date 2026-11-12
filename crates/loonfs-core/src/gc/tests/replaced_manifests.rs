@@ -66,7 +66,6 @@ async fn compact_bindings<S: ObjectStore>(store: &S, namespace_id: &NamespaceId)
         .engine()
         .compact_metadata_unit(
             None,
-            loonfs_types::CompactorEpoch(0),
             &crate::compaction::MetadataCompactionCancellation::default(),
         )
         .await

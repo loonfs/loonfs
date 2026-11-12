@@ -11,7 +11,7 @@ use crate::compaction::{CompactionUnitOutcome, MetadataCompactionCancellation};
 use crate::manifest::RetentionTarget;
 use crate::test_support::NamespaceFixture;
 use loonfs_types::format::wal::{MergeRecord, MAX_WAL_OBJECT_BYTES};
-use loonfs_types::{AbsolutePath, CompactorEpoch, DisplayName, EffectiveLimit, InodeId, Merge};
+use loonfs_types::{AbsolutePath, DisplayName, EffectiveLimit, InodeId, Merge};
 use std::collections::BTreeMap;
 
 /// The sequence of `main` that the tests' fork was made at.
@@ -707,11 +707,7 @@ async fn advance_floor_and_compact(
     for _ in 0..32 {
         let outcome = maintainer
             .engine()
-            .compact_metadata_unit(
-                None,
-                CompactorEpoch(0),
-                &MetadataCompactionCancellation::default(),
-            )
+            .compact_metadata_unit(None, &MetadataCompactionCancellation::default())
             .await
             .expect("compact a family group");
         if matches!(outcome, CompactionUnitOutcome::NotNeeded) {

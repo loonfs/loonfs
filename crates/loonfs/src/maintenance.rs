@@ -46,12 +46,15 @@ pub use reports::{
 /// call runs in the caller's task; this value starts no background work.
 /// Operations that mutate durable control state record the writer id it was
 /// created with. Every value from one runtime shares that runtime's
-/// compactor claim and execution budget with its writer sessions.
+/// execution budget with its writer sessions.
 #[derive(Clone)]
 pub struct Maintenance {
     pub(crate) core: RuntimeCore,
     pub(crate) publisher: PublisherRegistry,
-    pub(crate) writer: Arc<WriterState>,
+    /// Keeps the runtime's writer state alive, because the runtime's
+    /// publication work stops once no runtime, namespace handle, or
+    /// maintenance value refers to it (see [`crate::Writable`]).
+    _writer: Arc<WriterState>,
     pub(crate) writer_id: WriterId,
     /// A narrowed per-segment row budget for the tests that need many
     /// compacted segments. See [`Self::narrow_segment_row_budget`].
@@ -71,7 +74,7 @@ impl Maintenance {
         Self {
             core,
             publisher,
-            writer,
+            _writer: writer,
             writer_id,
             #[cfg(test)]
             segment_row_budget: None,
@@ -250,9 +253,9 @@ impl Maintenance {
     /// session's, and each unit waits for a unit in progress, so the call
     /// never repeats that work.
     ///
-    /// Stops when nothing is due, when another process has the compactor
-    /// epoch, when `cancellation` is set, when the namespace's writer
-    /// session in this runtime is closed or its namespace deleted, after three
+    /// Stops when nothing is due, when `cancellation` is set, when the
+    /// namespace's writer session in this runtime is closed or its namespace
+    /// deleted, after three
     /// abandoned units in a row, or after it publishes 16 compaction units.
     /// Work still due after the 16th unit waits for the next call. A unit
     /// that loses its manifest put to another publication tries again over
@@ -270,7 +273,7 @@ impl Maintenance {
     /// nothing is due now and nothing can become due without a new commit
     /// under `options`, based on the state this call read. It is
     /// [`MetadataMaintenanceOutcome::Due`] at a work limit, after lost races,
-    /// on fencing or cancellation, when a compaction unit does not finish,
+    /// on cancellation, when a compaction unit does not finish,
     /// or while a tail waits for the idle fold age. When the wait for the
     /// idle fold age is the only work left, the report says when the fold
     /// comes due.

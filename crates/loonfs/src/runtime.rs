@@ -35,10 +35,9 @@ use crate::{
 use loonfs_core::NamespaceWriterEngine;
 use loonfs_types::format::control::ManifestRef;
 use loonfs_types::{
-    u64_from_usize, CompactorEpoch, Subject, WriterId, FEATURE_COMMIT_INLINE_CONTENT,
-    FEATURE_MERGES, LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES_PER_OPERATION,
+    u64_from_usize, Subject, WriterId, FEATURE_COMMIT_INLINE_CONTENT, FEATURE_MERGES,
+    LIMIT_COMMIT_MAX_INLINE_CONTENT_BYTES_PER_OPERATION,
 };
-use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
@@ -87,11 +86,6 @@ pub struct Writable {
 pub(crate) struct WriterState {
     /// The writer ID that the runtime's sessions commit as.
     pub(crate) writer_id: WriterId,
-    /// The compactor epoch this runtime has for each namespace. Its
-    /// sessions and every `Maintenance` value share it, so they never fence
-    /// each other. It's a `tokio` mutex because a first claim keeps it locked
-    /// across `claim_compactor().await`, so concurrent groups share one epoch.
-    pub(crate) compactor_epochs: tokio::sync::Mutex<BTreeMap<NamespaceId, CompactorEpoch>>,
 }
 
 impl fmt::Debug for Writable {
@@ -286,10 +280,8 @@ impl LoonFs<Writable> {
     ///
     /// Maintenance shares this runtime's store client, caches, and
     /// publication service, so fold decisions see the inline bytes of the
-    /// sessions this runtime keeps. It also shares the runtime's compactor
-    /// claim, so it never fences this runtime's sessions or another value
-    /// from this runtime, and its folds and compactions take their permits from
-    /// the runtime's [`ExecutionBudget`].
+    /// sessions this runtime keeps. Its folds and compactions take their
+    /// permits from the runtime's [`ExecutionBudget`].
     /// Operations that mutate durable control state record `writer_id`. A
     /// process that only maintains builds a writable runtime and never opens
     /// a namespace.

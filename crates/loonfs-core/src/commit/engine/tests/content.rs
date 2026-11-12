@@ -601,7 +601,6 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
         .engine()
         .compact_metadata_unit(
             None,
-            loonfs_types::CompactorEpoch(0),
             &crate::compaction::MetadataCompactionCancellation::default(),
         )
         .await

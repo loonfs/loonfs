@@ -252,7 +252,7 @@ async fn a_same_sequence_writer_acquisition_does_not_cover_a_fence_fold() {
 }
 
 /// Checks that an acquisition whose anchor load is held past the revalidation
-/// bound, while a fold, a compactor claim, and a collection run, stops when
+/// bound, while a fold, a retention window change, and a collection run, stops when
 /// its publication budget runs out and writes no fence over the collected
 /// objects.
 #[tokio::test]
@@ -283,8 +283,8 @@ async fn an_acquisition_held_past_the_revalidation_bound_writes_no_fence() {
     };
     let (acquired, ()) = futures::join!(namespace.acquire_writer(&setup.writer_id), async {
         // The claim is written and its first WAL read is held. Meanwhile
-        // a fold folds the first fence, a compactor claim supersedes the
-        // fold, the runtime that published them raises the hint, and
+        // a fold folds the first fence, a retention window change supersedes
+        // the fold, the runtime that published them raises the hint, and
         // collection removes the folded manifest and the folded fence.
         store.wait_until_blocked().await;
         let claim = crate::test_support::namespace_store(store.inner(), &namespace_id)
@@ -297,19 +297,19 @@ async fn an_acquisition_held_past_the_revalidation_bound_writes_no_fence() {
             .fold_wal()
             .await
             .expect("fold");
-        let compactor_claim = crate::test_support::NamespaceFixture::new(
+        let window_change = crate::test_support::NamespaceFixture::new(
             store.inner(),
             &namespace_id,
             &crate::test_support::writer_at("test-writer", 0),
         )
         .engine()
-        .claim_compactor()
+        .set_retention_window(std::num::NonZeroU64::new(60_000))
         .await
-        .expect("compactor claim")
+        .expect("window change")
         .published
-        .expect("a published claim");
+        .expect("a published window change");
         crate::test_support::namespace_store(store.inner(), &namespace_id)
-            .raise_hint(compactor_claim.manifest.manifest_no, None)
+            .raise_hint(window_change.manifest.manifest_no, None)
             .await
             .expect("raise the hint");
         for key in [

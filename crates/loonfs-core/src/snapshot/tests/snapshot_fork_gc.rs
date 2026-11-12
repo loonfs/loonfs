@@ -79,7 +79,6 @@ impl Fixture {
         .engine()
         .compact_metadata_unit(
             None,
-            selected.compactor_epoch(),
             &crate::compaction::MetadataCompactionCancellation::default(),
         )
         .await

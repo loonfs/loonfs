@@ -147,13 +147,13 @@ pub use entropy::{install_entropy, installed_entropy, Entropy, OsEntropy, Seeded
 pub use error::{ErrorCode, ErrorKind};
 pub use ids::{
     generated_id, generated_id_body_prefixes, next_public_ordinal, BindingVersion,
-    BindingVersionValidationError, CommitId, CommitIdValidationError, CommitSeq, CompactorEpoch,
-    ContentId, ExtensionName, ExtensionNameValidationError, GeneratedIdValidationError,
-    IndexSegmentId, ManifestNo, MetadataCompactionId, MetadataSegmentId, NameKey,
-    NameKeyValidationError, NamespaceId, NamespaceIdValidationError, PoolId, ProbeId,
-    PublicOrdinalRangeError, RevisionNo, RunNo, SnapshotId, UploadId, WalNo, WriterEpoch, WriterId,
-    WriterIdValidationError, GENERATED_ID_BODY_BYTES, MAX_EXTENSION_NAME_BYTES, MAX_ID_BYTES,
-    MAX_NAME_KEY_BYTES, MAX_PUBLIC_INTEGER, MAX_WRITER_ID_BYTES,
+    BindingVersionValidationError, CommitId, CommitIdValidationError, CommitSeq, ContentId,
+    ExtensionName, ExtensionNameValidationError, GeneratedIdValidationError, IndexSegmentId,
+    ManifestNo, MetadataCompactionId, MetadataSegmentId, NameKey, NameKeyValidationError,
+    NamespaceId, NamespaceIdValidationError, PoolId, ProbeId, PublicOrdinalRangeError, RevisionNo,
+    RunNo, SnapshotId, UploadId, WalNo, WriterEpoch, WriterId, WriterIdValidationError,
+    GENERATED_ID_BODY_BYTES, MAX_EXTENSION_NAME_BYTES, MAX_ID_BYTES, MAX_NAME_KEY_BYTES,
+    MAX_PUBLIC_INTEGER, MAX_WRITER_ID_BYTES,
 };
 pub use inode_id::{InodeId, InodeIdValidationError, ROOT_INODE_ID};
 pub use layout::{ContentExtent, ContentLayout, ContentLayoutError, ExtentObject};

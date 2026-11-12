@@ -1987,7 +1987,6 @@ async fn snapshots_append_past_the_threshold_and_compaction_drains() {
         .engine()
         .compact_metadata_unit(
             None,
-            loonfs_types::CompactorEpoch(0),
             &crate::compaction::MetadataCompactionCancellation::default(),
         )
         .await
@@ -2071,7 +2070,6 @@ async fn a_unit_honors_its_run_budget_and_reads_only_the_selected_runs() {
     .engine()
     .compact_metadata_unit(
         None,
-        loonfs_types::CompactorEpoch(0),
         &crate::compaction::MetadataCompactionCancellation::default(),
     )
     .await
@@ -2147,7 +2145,6 @@ async fn bounded_compaction_reaches_the_unbounded_state_and_preserves_intermedia
     .engine()
     .compact_metadata_unit(
         None,
-        loonfs_types::CompactorEpoch(0),
         &crate::compaction::MetadataCompactionCancellation::default(),
     )
     .await
@@ -2225,7 +2222,6 @@ async fn bounded_compaction_reaches_the_unbounded_state_and_preserves_intermedia
     .engine()
     .compact_metadata_unit(
         None,
-        loonfs_types::CompactorEpoch(0),
         &crate::compaction::MetadataCompactionCancellation::default(),
     )
     .await
@@ -2439,7 +2435,6 @@ async fn compaction_resumes_from_the_manifest_after_interruption() {
     .engine()
     .compact_metadata_unit(
         None,
-        loonfs_types::CompactorEpoch(0),
         &crate::compaction::MetadataCompactionCancellation::default(),
     )
     .await
@@ -2470,7 +2465,6 @@ async fn compaction_resumes_from_the_manifest_after_interruption() {
         .engine()
         .compact_metadata_unit(
             None,
-            loonfs_types::CompactorEpoch(0),
             &crate::compaction::MetadataCompactionCancellation::default(),
         )
         .await
@@ -2650,7 +2644,6 @@ async fn over_budget_compaction_aborts_without_publishing() {
     .engine()
     .compact_metadata_unit(
         None,
-        loonfs_types::CompactorEpoch(0),
         &crate::compaction::MetadataCompactionCancellation::default(),
     )
     .await
@@ -2679,7 +2672,6 @@ async fn over_budget_compaction_aborts_without_publishing() {
     .engine()
     .compact_metadata_unit(
         None,
-        loonfs_types::CompactorEpoch(0),
         &crate::compaction::MetadataCompactionCancellation::default(),
     )
     .await
@@ -2718,7 +2710,7 @@ async fn plan_window<S: ObjectStore + ?Sized>(
     (group, spec)
 }
 
-/// Runs one size-tiered compaction unit with compactor epoch 0.
+/// Runs one size-tiered compaction unit.
 async fn compact_with<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -2736,7 +2728,6 @@ async fn compact_with<S: ObjectStore + ?Sized>(
     .engine()
     .compact_metadata_unit(
         None,
-        loonfs_types::CompactorEpoch(0),
         &crate::compaction::MetadataCompactionCancellation::default(),
     )
     .await

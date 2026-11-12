@@ -671,7 +671,6 @@ async fn manifest_run_rejects_rows_after_run_seq() {
         status: loonfs_types::format::control::NamespaceStatus::Active {},
         writer: None,
         folded_wal_no: loonfs_types::WalNo(0),
-        compactor_epoch: loonfs_types::CompactorEpoch(0),
         namespace_id: namespace_id.clone(),
         manifest_no: manifest_no(materialization.head.seq),
 

@@ -1,5 +1,5 @@
 //! Publishes the run that one metadata compaction unit wrote in place of
-//! the runs it replaces, fenced by the compactor epoch.
+//! the runs it replaces.
 
 use super::group_compaction::GroupCompactionReport;
 use super::plan::{group_run_descriptors, CompactionPlacement, MetadataCompactionSpec};
@@ -19,11 +19,10 @@ use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{
     MetadataRunRef, MetadataSegmentRef, NamespaceManifestPayload,
 };
-use loonfs_types::{CommitSeq, CompactorEpoch, NamespaceId};
+use loonfs_types::{CommitSeq, NamespaceId};
 use std::collections::BTreeSet;
 
 pub(crate) struct CompactionPublication {
-    pub(crate) compactor_epoch: CompactorEpoch,
     pub(crate) compaction: OperationClock,
     pub(crate) publication: OperationClock,
 }
@@ -73,9 +72,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     let previous = current.payload();
                     if previous.status.is_deleted() {
                         return settled(CompactionUnitOutcome::Abandoned);
-                    }
-                    if previous.compactor_epoch != publication.compactor_epoch {
-                        return settled(CompactionUnitOutcome::Fenced);
                     }
                     if input_segment_keys(&runs_newest_first(previous), spec).as_ref()
                         != Some(input_keys)

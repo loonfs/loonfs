@@ -2,7 +2,7 @@
 
 LoonFS stores metadata in immutable runs. WAL folds add delta runs, and compaction rewrites selected runs into a more efficient layout. Every compaction runs as one "unit": it plans a window from the current manifest, rewrites the window incrementally, writes each segment as it fills, and publishes the completed output in one numbered manifest. Readers keep using the earlier manifest's runs until that publication succeeds.
 
-[Retention and compaction](../specs/format.md#10-retention-and-compaction) in the storage format defines window placement, row retention, the compactor epoch, and the publication checks. This note explains planning, resource use, and the tradeoffs in how a unit runs.
+[Retention and compaction](../specs/format.md#10-retention-and-compaction) in the storage format defines window placement, row retention, and the publication checks. This note explains planning, resource use, and the tradeoffs in how a unit runs.
 
 ## Selecting a window
 
@@ -75,11 +75,11 @@ The published manifest must also pass the manifest validation in [Manifests, run
 
 ## Publication and restart
 
-This section describes how a compaction publishes its output, and what happens when a unit is fenced, abandoned, or stopped.
+This section describes how a compaction publishes its output, and what happens when a unit is abandoned or stopped.
 
-A runtime claims the compactor epoch before its first eligible compaction, and a newer claim fences it (see [Streaming compaction](../specs/format.md#104-streaming-compaction)). Every writer session and `Maintenance` value in one runtime shares that claim, and so do concurrent family groups. A fenced runtime forgets its claim, and its next compaction claims the role again. A session's next compaction runs after its next fold, and the host's next compaction runs in its next metadata step.
+A unit claims nothing before it runs (see [Streaming compaction](../specs/format.md#104-streaming-compaction)). A session's next compaction runs after its next fold, and the host's next compaction runs in its next metadata step.
 
-Before every publication of its output, a unit finds the current manifest and checks the manifest's epoch, the unit's selected inputs, and the unit's elapsed time. While those checks still pass, a unit makes up to eight publication attempts, the bound every manifest publication shares (`MAX_CONTENTION_ATTEMPTS`). An attempt whose put loses to a fold, a retention window change, or another group's compaction builds the replacement over the manifest that won and tries again. A unit whose inputs a compaction of the same group replaced returns `abandoned`, and so does a unit that loses all eight attempts. Two deadlines limit those attempts:
+Before every publication of its output, a unit finds the current manifest and checks the unit's selected inputs and the unit's elapsed time. While those checks still pass, a unit makes up to eight publication attempts, the bound every manifest publication shares (`MAX_CONTENTION_ATTEMPTS`). An attempt whose put loses to a fold, a retention window change, or another group's compaction builds the replacement over the manifest that won and tries again. A unit whose inputs a compaction of the same group replaced returns `abandoned`, and so does a unit that loses all eight attempts. Two deadlines limit those attempts:
 
 - **Unit deadline.** The unit starts its last attempt within `METADATA_COMPACTION_BUDGET_MS` of its own start. A unit past that bound returns `abandoned`.
 - **Publication deadline.** Every attempt of the unit's finalization runs under one 15-minute metadata publication budget, which starts when finalization starts. An attempt past that budget fails with the publication budget error.

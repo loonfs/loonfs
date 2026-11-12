@@ -266,10 +266,7 @@ impl LoonFsBuilder<Writable> {
             .ok_or_else(|| Error::Config("`writer_id` is required".to_owned()))?;
         let runtime = owning_runtime()?;
         let core = self.core.open()?;
-        let writer = Arc::new(WriterState {
-            writer_id,
-            compactor_epochs: tokio::sync::Mutex::default(),
-        });
+        let writer = Arc::new(WriterState { writer_id });
         let publisher = PublisherRegistry::new(core.clone(), Arc::downgrade(&writer), runtime);
         core.set_head_positions(publisher.head_positions());
         Ok(LoonFs {

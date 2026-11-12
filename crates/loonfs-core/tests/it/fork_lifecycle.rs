@@ -804,7 +804,6 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
             .engine()
             .compact_metadata_unit(
                 None,
-                loonfs_types::CompactorEpoch(0),
                 &loonfs_core::MetadataCompactionCancellation::default(),
             )
             .await

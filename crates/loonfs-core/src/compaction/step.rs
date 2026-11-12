@@ -10,8 +10,7 @@
 //! [`MetadataRunPolicy`](crate::segment::MetadataRunPolicy) sets which runs a
 //! group compacts, and when: a tier of similar-size runs once it has
 //! `min_compaction_runs` runs, and a group's newest runs once it has
-//! `max_delta_runs` delta runs. A unit publishes under the compactor epoch
-//! that [`NamespaceEngine::claim_compactor`] claims.
+//! `max_delta_runs` delta runs.
 
 use super::group_compaction::run_metadata_compaction;
 use super::plan::{plan_compaction, select_family_group, MetadataCompactionSpec};
@@ -19,15 +18,13 @@ use super::publication::{input_segment_keys, CompactionPublication};
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::Result;
 use crate::manifest::load::metadata_basis_from_manifest;
-use crate::manifest::publish::ManifestChange;
-use crate::manifest::published::{PublicationReport, PublishedManifest};
+use crate::manifest::published::PublishedManifest;
 use crate::namespace::control::{ensure_namespace_live, LoadedManifest};
 use crate::namespace::PublicationBasis;
 use crate::phase::Phase;
 use crate::segment::runs::{runs_newest_first, MetadataFamilyGroup};
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::manifest::NamespaceManifestPayload;
-use loonfs_types::{CompactorEpoch, MetadataSkippedWork, NamespaceId};
+use loonfs_types::{MetadataSkippedWork, NamespaceId};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Notify;
@@ -64,8 +61,6 @@ pub enum CompactionUnitOutcome {
     /// The unit's inputs changed, its time bound passed, or every publication
     /// attempt lost.
     Abandoned,
-    /// Another process claimed the namespace compactor role.
-    Fenced,
 }
 
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
@@ -81,7 +76,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         .is_some()
     }
 
-    /// Runs one metadata compaction unit under the claimed compactor epoch.
+    /// Runs one metadata compaction unit.
     ///
     /// The unit plans from `basis`, a manifest that the caller already has,
     /// or from the current manifest that it loads when `basis` is `None`, and
@@ -105,7 +100,6 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     pub async fn compact_metadata_unit(
         &self,
         basis: Option<PublicationBasis>,
-        compactor_epoch: CompactorEpoch,
         cancellation: &MetadataCompactionCancellation,
     ) -> Result<CompactionUnitOutcome> {
         let compaction = self.namespace.start_clock();
@@ -121,9 +115,6 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         };
         let current = &basis.manifest;
         let payload = current.payload();
-        if payload.compactor_epoch != compactor_epoch {
-            return Ok(CompactionUnitOutcome::Fenced);
-        }
         ensure_namespace_live(&payload.namespace_id, payload.status)?;
         // The unit reads its input runs without the cache, and the compaction inserts
         // its output into the cache.
@@ -166,7 +157,6 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                         compacted,
                         cancellation,
                         &CompactionPublication {
-                            compactor_epoch,
                             compaction,
                             publication: self.namespace.start_clock(),
                         },
@@ -222,12 +212,6 @@ fn log_unit_outcome(
             families = ?spec.families(),
             "metadata compaction unit abandoned"
         ),
-        CompactionUnitOutcome::Fenced => tracing::warn!(
-            namespace_id = namespace_id.as_str(),
-            job_id = spec.job_id().as_str(),
-            families = ?spec.families(),
-            "metadata compaction unit fenced"
-        ),
         CompactionUnitOutcome::NotNeeded => {}
     }
 }
@@ -272,29 +256,5 @@ impl MetadataCompactionCancellation {
             return;
         }
         woken.await;
-    }
-}
-
-impl<S: ObjectStore> NamespaceEngine<S, Writable> {
-    /// Claims the namespace compactor epoch for a maintenance runtime. The
-    /// report includes the manifest that records the claim.
-    pub async fn claim_compactor(&self) -> Result<PublicationReport<CompactorEpoch>> {
-        let clock = self.namespace.start_clock();
-        let update = self
-            .namespace
-            .update_live_manifest(
-                None,
-                &clock,
-                |mut payload: NamespaceManifestPayload| async move {
-                    payload.compactor_epoch =
-                        CompactorEpoch(payload.compactor_epoch.0.checked_add(1).expect(
-                            "compactor epoch should be bounded by the manifest number write stop",
-                        ));
-                    let epoch = payload.compactor_epoch;
-                    Ok(ManifestChange::Next(Box::new(payload), epoch))
-                },
-            )
-            .await?;
-        Ok(update.into_report())
     }
 }

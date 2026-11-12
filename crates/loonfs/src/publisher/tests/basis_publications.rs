@@ -333,9 +333,9 @@ async fn write_until_compaction_waits<'a>(
     panic!("each write's fold adds a run, so compaction should become due");
 }
 
-/// Checks that a session's compaction unit, after the runtime's compactor
-/// claim, plans from the session's position, and puts the position's
-/// successor without a request first and without reading the hint.
+/// Checks that a session's compaction unit plans from the session's
+/// position, and puts the position's successor without a request first and
+/// without reading the hint.
 #[tokio::test]
 async fn a_session_compaction_unit_puts_on_its_basis_and_reads_no_hint() {
     // The fold threshold is one WAL object, so each write is folded.
@@ -349,14 +349,6 @@ async fn a_session_compaction_unit_puts_on_its_basis_and_reads_no_hint() {
     })
     .await;
     let mut files = 0;
-    // The first unit claims the compactor epoch, which loads the current
-    // manifest through the hint.
-    drop(write_until_compaction_waits(&fixture, &mut files).await);
-    fixture
-        .writer
-        .drain()
-        .await
-        .expect("the first unit settles");
     let permits = write_until_compaction_waits(&fixture, &mut files).await;
     let next = fixture
         .current_manifest_no()

@@ -5,7 +5,7 @@
 //! modules.
 
 use crate::id_macros::{numeric_id, string_id, validation_error};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::fmt;
 use thiserror::Error;
 
@@ -621,11 +621,6 @@ numeric_id! {
     schema_description = "The counter that LoonFS uses to reject writes from an older writer."
 }
 
-numeric_id! {
-    /// Counter used to reject publications from an older compactor.
-    CompactorEpoch
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
@@ -682,12 +677,6 @@ mod tests {
         assert_range!(WalNo);
         assert_range!(RunNo);
         assert_range!(WriterEpoch);
-
-        assert_eq!(
-            serde_json::from_str::<crate::CompactorEpoch>(&u64::MAX.to_string())
-                .expect("compactor epochs retain the full u64 range"),
-            crate::CompactorEpoch(u64::MAX)
-        );
     }
 
     #[test]

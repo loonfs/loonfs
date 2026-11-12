@@ -6,7 +6,6 @@ use crate::control::{ForkBasis, NamespaceStatus, WriterBlock};
 use crate::envelope::EnvelopeCodecError;
 use crate::metadata_rows::MetadataRowFamily;
 use crate::segment_blocks::BlockHandle;
-use crate::CompactorEpoch;
 use crate::PoolId;
 use crate::{AccessGrants, ActorId, CommitSeq, ManifestNo, MetadataSegmentId, NamespaceId, RunNo};
 use crate::{ExtensionName, IndexSegmentId, PrincipalScope, WalNo, WriterEpoch};
@@ -347,11 +346,6 @@ pub struct NamespaceManifestPayload {
     pub folded_wal_no: WalNo,
     /// Positive publication number matching the manifest object key.
     pub manifest_no: ManifestNo,
-    /// Stops a stale streaming compactor at its next check when a newer runtime claims it.
-    /// Streaming compaction rebuilds a whole family group and publishes once at the end.
-    /// Grep publishes the steps of one maintenance interval together, so a lost race costs
-    /// that interval's steps.
-    pub compactor_epoch: CompactorEpoch,
     /// Folded head, or the final namespace sequence on deletion.
     pub head_seq: CommitSeq,
     /// Activity committed in this namespace through `head_seq`.
@@ -421,7 +415,6 @@ impl NamespaceManifestPayload {
             status: NamespaceStatus::Active {},
             writer: None,
             manifest_no: ManifestNo(1),
-            compactor_epoch: CompactorEpoch(0),
             head_seq: CommitSeq(0),
             activity: ManifestActivity::default(),
             writer_epoch: WriterEpoch(0),
@@ -481,7 +474,6 @@ impl NamespaceManifestPayload {
             writer: self.writer.clone(),
             folded_wal_no: self.folded_wal_no,
             manifest_no: self.manifest_no.successor()?,
-            compactor_epoch: self.compactor_epoch,
             head_seq: self.head_seq,
             activity: self.activity,
             writer_epoch: self.writer_epoch,
@@ -576,9 +568,6 @@ impl NamespaceManifestPayload {
         }
         if successor.writer_epoch < self.writer_epoch {
             return invalid("writer_epoch");
-        }
-        if successor.compactor_epoch < self.compactor_epoch {
-            return invalid("compactor_epoch");
         }
         if successor.head_seq < self.head_seq {
             return invalid("head_seq");
@@ -675,7 +664,6 @@ mod tests {
         encode_namespace_manifest_json, BlockHandle, MetadataRowFamily, MetadataRunRef,
         MetadataSegmentRef, NamespaceManifestPayload, RunTier,
     };
-    use crate::CompactorEpoch;
     use crate::{CommitSeq, ManifestNo, MetadataSegmentId, NamespaceId, RunNo, WriterEpoch};
     use std::assert_matches;
 
@@ -912,7 +900,6 @@ mod tests {
             status: crate::control::NamespaceStatus::Active {},
             writer: None,
             folded_wal_no: crate::WalNo(0),
-            compactor_epoch: CompactorEpoch(0),
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
             manifest_no: ManifestNo(10),
 
@@ -958,7 +945,6 @@ mod tests {
             status: crate::control::NamespaceStatus::Active {},
             writer: None,
             folded_wal_no: crate::WalNo(0),
-            compactor_epoch: CompactorEpoch(0),
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
             manifest_no: ManifestNo(12),
 

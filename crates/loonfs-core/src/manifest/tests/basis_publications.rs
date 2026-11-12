@@ -190,25 +190,25 @@ async fn a_lost_put_probes_above_the_basis_and_publishes_on_the_newest_manifest(
         republish(&gate, &namespace_id, Some(basis), &deadline),
         async {
             gate.wait_until_blocked().await;
-            for _ in 0..2 {
+            for window_ms in [60_000, 120_000] {
                 crate::test_support::NamespaceFixture::new(
                     &other,
                     &namespace_id,
                     &crate::test_support::writer_at("test-writer", 0),
                 )
                 .engine()
-                .claim_compactor()
+                .set_retention_window(std::num::NonZeroU64::new(window_ms))
                 .await
-                .expect("another process claims the compactor");
+                .expect("another process sets the retention window");
             }
             gate.release();
         }
     );
     assert_eq!(published.manifest().manifest_no, ManifestNo(5));
     assert_eq!(
-        published.compactor_epoch(),
-        loonfs_types::CompactorEpoch(2),
-        "the publication builds on the newest claim"
+        published.payload().retention_window_ms,
+        std::num::NonZeroU64::new(120_000),
+        "the publication builds on the newest window change"
     );
     let mut expected = vec![("put", manifest(3))];
     // The put lost, so the attempt probes the numbers above its basis, and

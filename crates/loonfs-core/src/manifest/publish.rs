@@ -619,8 +619,6 @@ fn classify_current(
         } else {
             ManifestPublicationOutcome::CoveredByCurrent(current.clone())
         }
-    } else if current.compactor_epoch() > candidate.compactor_epoch() {
-        ManifestPublicationOutcome::PredecessorChanged(current.clone())
     } else if current.folded_wal_no() >= candidate.folded_wal_no()
         && (current.manifest().head_seq, current.manifest().manifest_no)
             >= (
