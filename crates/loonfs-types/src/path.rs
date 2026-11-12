@@ -521,9 +521,6 @@ pub enum InodeKind {
     /// A file, which has a revision history.
     File,
     /// A directory, which has child bindings.
-    ///
-    /// The wire value is always `"dir"`, and only the Rust variant name spells out the whole word.
-    #[serde(rename = "dir")]
     Directory,
 }
 
@@ -532,7 +529,7 @@ impl InodeKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::File => "file",
-            Self::Directory => "dir",
+            Self::Directory => "directory",
         }
     }
 }

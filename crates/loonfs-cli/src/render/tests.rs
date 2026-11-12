@@ -221,7 +221,7 @@ fn human_stat_omits_the_absent_root_name() {
     for line in [
         "path: /",
         "inode: ino_00000000000000000000000000",
-        "kind: dir",
+        "kind: directory",
         "seq: 3",
         "created_by: loonfs",
         "created: 2025-07-16 00:00:00Z",

@@ -3649,12 +3649,12 @@ func identityOf(entry *loonfs.PathEntry) pathEntryIdentity {
 	if entry == nil {
 		return pathEntryIdentity{}
 	}
-	if entry.Dir != nil {
+	if entry.Directory != nil {
 		return pathEntryIdentity{
-			path:           string(entry.Dir.Path),
-			inodeID:        string(entry.Dir.InodeID),
-			displayName:    optionalString(entry.Dir.DisplayName),
-			bindingVersion: optionalString(entry.Dir.BindingVersion),
+			path:           string(entry.Directory.Path),
+			inodeID:        string(entry.Directory.InodeID),
+			displayName:    optionalString(entry.Directory.DisplayName),
+			bindingVersion: optionalString(entry.Directory.BindingVersion),
 		}
 	}
 	if entry.File != nil {

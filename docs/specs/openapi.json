@@ -2887,7 +2887,7 @@
         "description": "The kind of a filesystem item, which is a file or a directory.",
         "enum": [
           "file",
-          "dir"
+          "directory"
         ],
         "type": "string"
       },
@@ -3731,7 +3731,7 @@
         "description": "The metadata for one path, as stat and directory listings return it.\n\nThe response includes attribute fields only when the request asks for them.\n\nA newer server can return an inode kind that isn't listed here. Clients should read only the\nfields that every entry includes.",
         "discriminator": {
           "mapping": {
-            "dir": "#/components/schemas/PathEntryDirectory",
+            "directory": "#/components/schemas/PathEntryDirectory",
             "file": "#/components/schemas/PathEntryFile"
           },
           "propertyName": "inode_kind"
@@ -3795,7 +3795,7 @@
           "inode_kind": {
             "description": "Whether the entry is a file or a directory.",
             "enum": [
-              "dir"
+              "directory"
             ],
             "type": "string"
           },
