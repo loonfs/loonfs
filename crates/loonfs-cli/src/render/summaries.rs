@@ -133,18 +133,19 @@ pub(super) fn grep_index_state_summary(state: &GrepIndexStatus) -> String {
 /// Formats a snapshot owner for the table view.
 ///
 /// User snapshots show their label. Fork snapshots show their target namespace
-/// because users can't delete them.
+/// because users can't delete them, and operation snapshots show their owner kind.
 pub(super) fn snapshot_record_owner_label(owner: &SnapshotRecordOwner) -> String {
     match owner {
         SnapshotRecordOwner::User { name } => name.clone(),
         SnapshotRecordOwner::Fork {
             target_namespace_id,
         } => format!("fork -> {target_namespace_id}"),
+        SnapshotRecordOwner::Operation => "operation".to_owned(),
         SnapshotRecordOwner::Unknown => "owner unknown to this CLI".to_owned(),
     }
 }
 
-fn gc_deleted_counts(report: &GcResponse) -> [(&'static str, u64); 6] {
+fn gc_deleted_counts(report: &GcResponse) -> [(&'static str, u64); 7] {
     let deleted = &report.deleted;
     let snapshots = &report.deleted_snapshots_by_owner;
     [
@@ -154,6 +155,7 @@ fn gc_deleted_counts(report: &GcResponse) -> [(&'static str, u64); 6] {
         ("manifests", deleted.manifests),
         ("fork snapshots", snapshots.fork),
         ("snapshots", snapshots.user),
+        ("operation snapshots", snapshots.operation),
     ]
 }
 

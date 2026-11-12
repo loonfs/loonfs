@@ -18,7 +18,7 @@ use crate::entry::{GrepEntry, GrepIndexStatus};
 use crate::reads::NamespaceReads;
 use crate::{GrepError, GrepStepBudget, Result};
 use loonfs::engine::{next_run_no_after, DecodedBlockCacheConfig, DecodedBlockCacheStats};
-use loonfs::{CoreError, CreateSnapshotOptions, LoonFs, Maintenance, ReadOnly, Writable};
+use loonfs::{CoreError, LoonFs, Maintenance, ReadOnly, SnapshotRecord, Writable};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::segment_blocks::{
     DEFAULT_MAX_DELTA_RUNS, DEFAULT_MAX_ROWS_PER_SEGMENT, DEFAULT_TARGET_BLOCK_BYTES,
@@ -36,7 +36,6 @@ use std::sync::Arc;
 pub(crate) const GREP_BACKFILL_SNAPSHOT_TTL_MS: NonZeroU64 =
     NonZeroU64::new(24 * 60 * 60 * 1000).expect("a day is a nonzero lifetime");
 
-const GREP_BACKFILL_SNAPSHOT_NAME: &str = "loonfs-grep-backfill";
 /// Content bytes one backfill step ingests before it records its cursor.
 /// This budgets ingestion, not index reorganization — it happens to share a value
 /// with the metadata compaction input limit, and must stay independent
@@ -347,19 +346,11 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         })
     }
 
-    async fn create_backfill_snapshot(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<loonfs_types::Snapshot> {
+    async fn create_backfill_snapshot(&self, namespace_id: &NamespaceId) -> Result<SnapshotRecord> {
         Ok(self
             .writer
             .open_namespace(namespace_id)?
-            .create_snapshot_with_options(
-                GREP_BACKFILL_SNAPSHOT_NAME,
-                &CreateSnapshotOptions {
-                    ttl_ms: Some(GREP_BACKFILL_SNAPSHOT_TTL_MS),
-                },
-            )
+            .create_operation_snapshot(GREP_BACKFILL_SNAPSHOT_TTL_MS)
             .await?)
     }
 
@@ -372,7 +363,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         snapshot_id: &SnapshotId,
     ) {
         let deleted = match self.writer.open_namespace(namespace_id) {
-            Ok(namespace) => namespace.delete_snapshot(snapshot_id).await.map(drop),
+            Ok(namespace) => namespace.delete_operation_snapshot(snapshot_id).await,
             Err(error) => Err(error),
         };
         match deleted {
@@ -411,7 +402,7 @@ impl<S: ObjectStore + Clone> GrepSteps<'_, S> {
     async fn start_backfill(
         &mut self,
         expected: Option<&GrepEntry>,
-    ) -> Result<Option<loonfs_types::Snapshot>> {
+    ) -> Result<Option<SnapshotRecord>> {
         if self.is_changed() && self.publish().await? == GrepPublishOutcome::Superseded {
             return Ok(None);
         }
@@ -448,7 +439,7 @@ impl<S: ObjectStore + Clone> GrepSteps<'_, S> {
 }
 
 /// The status of a backfill that starts at the beginning of `snapshot`.
-fn backfill_status(snapshot: &loonfs_types::Snapshot) -> GrepIndexStatus {
+fn backfill_status(snapshot: &SnapshotRecord) -> GrepIndexStatus {
     GrepIndexStatus::Backfilling {
         captured_seq: snapshot.captured_seq,
         cursor_inode_id: None,

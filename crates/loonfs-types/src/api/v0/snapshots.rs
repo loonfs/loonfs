@@ -49,6 +49,10 @@ pub enum SnapshotRecordOwner {
         /// namespace exists.
         target_namespace_id: NamespaceId,
     },
+    /// A snapshot that keeps the state one LoonFS operation reads, such as a merge's plan. The
+    /// operation deletes it when it ends, and garbage collection deletes it after it expires.
+    #[cfg_attr(feature = "openapi", schema(title = "SnapshotRecordOwnerOperation"))]
+    Operation,
     /// An owner kind from a newer server. This variant doesn't include the kind's own fields.
     #[serde(other)]
     Unknown,

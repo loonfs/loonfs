@@ -170,7 +170,8 @@ impl LiveSet {
                         }
                         SnapshotSweep::Gone
                         | SnapshotSweep::DeleteUser
-                        | SnapshotSweep::DeleteFork => continue,
+                        | SnapshotSweep::DeleteFork
+                        | SnapshotSweep::DeleteOperation => continue,
                     }
                 }
             }

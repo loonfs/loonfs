@@ -727,6 +727,7 @@ impl HeapBytes for SnapshotPayload {
                 SnapshotOwner::Fork {
                     target_namespace_id,
                 } => target_namespace_id.heap_bytes(),
+                SnapshotOwner::Operation { .. } => 0,
             }
     }
 }

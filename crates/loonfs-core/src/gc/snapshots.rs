@@ -14,8 +14,10 @@ use loonfs_types::NamespaceId;
 pub(super) enum SnapshotSweep {
     DeleteFork,
     DeleteUser,
+    DeleteOperation,
     Gone,
-    /// Kept. `reclaimable_at_ms` is when a user snapshot becomes deletable.
+    /// Kept. `reclaimable_at_ms` is when a user snapshot or an operation snapshot becomes
+    /// deletable.
     Retain {
         reclaimable_at_ms: Option<u64>,
     },
@@ -50,6 +52,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     ) -> Result<SnapshotSweep> {
         let deletion = match &record.owner {
             SnapshotOwner::User { .. } => SnapshotSweep::DeleteUser,
+            SnapshotOwner::Operation { .. } => SnapshotSweep::DeleteOperation,
             SnapshotOwner::Fork {
                 target_namespace_id,
             } => {

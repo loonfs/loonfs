@@ -14,6 +14,7 @@ pub(crate) fn snapshot_record_summary(record: SnapshotPayload) -> SnapshotRecord
         } => SnapshotRecordOwner::Fork {
             target_namespace_id,
         },
+        SnapshotOwner::Operation { .. } => SnapshotRecordOwner::Operation,
     };
     SnapshotRecord {
         namespace_id: record.namespace_id,
@@ -27,7 +28,7 @@ pub(crate) fn snapshot_record_summary(record: SnapshotPayload) -> SnapshotRecord
 }
 
 /// Converts a user snapshot record to the snapshot the API returns, or returns
-/// `None` for a fork snapshot.
+/// `None` for a fork snapshot or an operation snapshot.
 pub(crate) fn user_snapshot(record: SnapshotPayload) -> Option<Snapshot> {
     let SnapshotOwner::User {
         name,

@@ -1062,6 +1062,20 @@ fn control_objects_match_golden_bytes() {
         },
     );
     check_control_golden(
+        "control_snapshot_operation.v1.json",
+        ControlObjectKind::Snapshot,
+        SnapshotPayload {
+            snapshot_id: snapshot_id("snp_00000000000000000005-00000000000000000000000005"),
+            namespace_id: namespace_id(),
+            head_seq: (sample_manifest_ref(5)).head_seq,
+            payload_checksum: (sample_manifest_ref(5)).payload_checksum.clone(),
+            created_at_ms: 3_000,
+            owner: SnapshotOwner::Operation {
+                expires_at_ms: 4_000,
+            },
+        },
+    );
+    check_control_golden(
         "control_upload_session.v1.json",
         ControlObjectKind::UploadSession,
         UploadSessionPayload {

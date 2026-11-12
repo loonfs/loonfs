@@ -9,7 +9,7 @@ use crate::namespace::store::NamespaceStore;
 use crate::time::OperationClock;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::{ManifestRef, SnapshotOwner, SnapshotPayload};
-use loonfs_types::{Snapshot, SnapshotId};
+use loonfs_types::{Snapshot, SnapshotId, SnapshotRecord};
 
 /// Longest accepted snapshot name. A label bound, not a durable format
 /// limit.
@@ -42,6 +42,24 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             )
             .await
             .map(super::snapshot_summary)
+    }
+
+    /// Creates an operation snapshot of `manifest` that expires at
+    /// `expires_at_ms`, as [`Self::create_snapshot`] creates a user snapshot,
+    /// for a LoonFS operation that reads through the manifest.
+    pub async fn create_operation_snapshot(
+        &self,
+        expires_at_ms: u64,
+        manifest: ManifestRef,
+    ) -> Result<SnapshotRecord> {
+        self.namespace
+            .create_snapshot_record(
+                SnapshotOwner::Operation { expires_at_ms },
+                manifest,
+                &self.namespace.start_clock(),
+            )
+            .await
+            .map(super::snapshot_record_summary)
     }
 }
 
@@ -100,7 +118,7 @@ fn validate_snapshot_owner(owner: &SnapshotOwner) -> Result<()> {
             }
             Ok(())
         }
-        SnapshotOwner::Fork { .. } => Ok(()),
+        SnapshotOwner::Fork { .. } | SnapshotOwner::Operation { .. } => Ok(()),
     }
 }
 

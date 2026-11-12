@@ -482,7 +482,7 @@ async fn restart_confirms_its_snapshot_after_an_ambiguous_manifest_write() {
     host.writer
         .open_namespace(&namespace_id)
         .expect("open namespace")
-        .delete_snapshot(&previous_snapshot_id)
+        .delete_operation_snapshot(&previous_snapshot_id)
         .await
         .expect("make the current backfill restart");
 
@@ -584,7 +584,7 @@ async fn retention_gap_and_vanished_snapshot_restart_fresh_backfill() {
     // mid-backfill. The enumeration says so out loud instead of quietly
     // answering current state, and the worker starts over again.
     namespace
-        .delete_snapshot(&gap_snapshot_id)
+        .delete_operation_snapshot(&gap_snapshot_id)
         .await
         .expect("remove snapshot mid-backfill");
     let vanished = worker
@@ -790,10 +790,10 @@ async fn an_expired_backfill_snapshot_restarts_the_backfill_from_a_fresh_snapsho
         record.owner.expires_at_ms().is_some(),
         "the backfill snapshot carries a ttl"
     );
-    let SnapshotOwner::User { expires_at_ms, .. } = &mut record.owner else {
-        panic!("the backfill snapshot is user-owned");
+    let SnapshotOwner::Operation { expires_at_ms } = &mut record.owner else {
+        panic!("the backfill snapshot is an operation snapshot");
     };
-    *expires_at_ms = Some(record.created_at_ms);
+    *expires_at_ms = record.created_at_ms;
     let expired = record;
     replace_object(
         &store,

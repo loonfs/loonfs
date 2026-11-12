@@ -117,7 +117,12 @@ impl<S: ObjectStore> NamespaceStore<S> {
         options: ListSnapshotFilesOptions,
     ) -> Result<SnapshotFilesPage> {
         let now_ms = self.wall_clock.now_ms();
-        let record = ensure_unexpired(self.load_user_snapshot(snapshot_id).await?, now_ms)?.state;
+        let Some(loaded) = self.load_snapshot_record(snapshot_id).await? else {
+            return Err(CoreError::SnapshotNotFound {
+                snapshot_id: snapshot_id.clone(),
+            });
+        };
+        let record = ensure_unexpired(loaded, now_ms)?.state;
         let SnapshotBasis { manifest, segments } =
             load_snapshot_basis(&self.store, &self.segment_cache, record).await?;
 

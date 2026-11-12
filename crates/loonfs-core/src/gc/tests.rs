@@ -2349,6 +2349,9 @@ async fn expiry_and_creation_grace_delete_snapshots_without_a_released_state() {
         SnapshotOwner::Fork {
             target_namespace_id: target.clone(),
         },
+        SnapshotOwner::Operation {
+            expires_at_ms: 2_000,
+        },
     ] {
         let namespace = crate::test_support::namespace_store(&store, &namespace_id);
         snapshots.push(
@@ -2393,9 +2396,11 @@ async fn expiry_and_creation_grace_delete_snapshots_without_a_released_state() {
         .await
         .expect("expiry grace");
     assert_eq!(expired.deleted_snapshots_by_owner.user, 2);
+    assert_eq!(expired.deleted_snapshots_by_owner.operation, 1);
     assert!(snapshot_record_exists(&store, &namespace_id, &snapshots[0].snapshot_id).await);
     assert!(!snapshot_record_exists(&store, &namespace_id, &snapshots[1].snapshot_id).await);
     assert!(!snapshot_record_exists(&store, &namespace_id, &snapshots[2].snapshot_id).await);
+    assert!(!snapshot_record_exists(&store, &namespace_id, &snapshots[4].snapshot_id).await);
     create_snapshot(&store, &namespace_id, &setup)
         .await
         .expect("second permanent snapshot");

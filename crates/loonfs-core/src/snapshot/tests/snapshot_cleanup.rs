@@ -16,6 +16,9 @@ async fn abandoned_snapshots_with_collected_bases_can_be_reaped_after_failed_cle
         SnapshotOwner::Fork {
             target_namespace_id: NamespaceId::parse("never-published").expect("target"),
         },
+        SnapshotOwner::Operation {
+            expires_at_ms: 2_000,
+        },
     ] {
         let directory = tempdir().expect("directory");
         let namespace_id = NamespaceId::parse("demo").expect("namespace");
@@ -107,10 +110,8 @@ async fn abandoned_snapshots_with_collected_bases_can_be_reaped_after_failed_cle
             )
             .await
             .expect("reap abandoned snapshot once owner rules permit deletion");
-        assert_eq!(
-            collected.deleted_snapshots_by_owner.user + collected.deleted_snapshots_by_owner.fork,
-            1
-        );
+        let deleted = collected.deleted_snapshots_by_owner;
+        assert_eq!(deleted.user + deleted.fork + deleted.operation, 1);
         assert!(store.head(&snapshots[0]).await.expect("snapshot").is_none());
         crate::test_support::namespace_store(&store, &namespace_id)
             .gc(

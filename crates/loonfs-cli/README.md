@@ -469,8 +469,9 @@ Maintenance
 
   loonfs maintenance snapshot list [--limit <n>] [--page-size <n>]
                              [--cursor <cursor>] [--all] [--jsonl]
-    List every snapshot in snapshot ID order: user snapshots and the fork
-    snapshots that forks keep on their source. This is the inventory of what
+    List every snapshot in snapshot ID order: user snapshots, the fork
+    snapshots that forks keep on their source, and the operation snapshots
+    that LoonFS takes for its own operations. This is the inventory of what
     keeps old manifests from garbage collection. Expired snapshots remain
     listed until garbage collection deletes them.
 

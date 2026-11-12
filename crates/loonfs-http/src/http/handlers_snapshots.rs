@@ -254,7 +254,7 @@ pub(super) struct SnapshotPathParams {
         path = "/v0/maintenance/namespaces/{namespace_id}/snapshots",
         tag = "maintenance",
         summary = "List snapshot records",
-        description = "Lists every snapshot, user snapshots and fork snapshots, in snapshot ID order. This is the inventory of what keeps manifests from garbage collection. An expired snapshot stays in the list until garbage collection deletes it, after its expiry plus the grace window. A cursor continues the listing against the current set of snapshots.",
+        description = "Lists every snapshot, user, fork, and operation snapshots, in snapshot ID order. This is the inventory of what keeps manifests from garbage collection. An expired snapshot stays in the list until garbage collection deletes it, after its expiry plus the grace window. A cursor continues the listing against the current set of snapshots.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             PageQuery

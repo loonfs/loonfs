@@ -130,14 +130,22 @@ pub struct DeletedSnapshotsByOwner {
     pub user: u64,
     /// The fork snapshots that the collection deleted because their target namespaces no longer exist.
     pub fork: u64,
+    /// The operation snapshots that the collection deleted after they expired or their namespace
+    /// was deleted.
+    pub operation: u64,
 }
 
 impl DeletedSnapshotsByOwner {
     /// Adds counts from another collection.
     pub fn add(&mut self, other: &Self) {
-        let Self { user, fork } = other;
+        let Self {
+            user,
+            fork,
+            operation,
+        } = other;
         self.user += user;
         self.fork += fork;
+        self.operation += operation;
     }
 }
 
@@ -430,7 +438,7 @@ mod tests {
         assert!(gc_json.get("skipped").is_none());
         assert_eq!(
             gc_json["deleted_snapshots_by_owner"],
-            serde_json::json!({"user": 0, "fork": 0})
+            serde_json::json!({"user": 0, "fork": 0, "operation": 0})
         );
         assert_eq!(gc_json["listed_bytes"], 0);
         let gc: GcResponse =

@@ -1256,7 +1256,11 @@ fn openapi_names_tagged_one_of_alternatives() {
         ),
         (
             "SnapshotRecordOwner",
-            &["SnapshotRecordOwnerUser", "SnapshotRecordOwnerFork"][..],
+            &[
+                "SnapshotRecordOwnerUser",
+                "SnapshotRecordOwnerFork",
+                "SnapshotRecordOwnerOperation",
+            ][..],
         ),
         (
             "CompleteUploadBody",

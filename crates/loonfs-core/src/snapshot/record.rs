@@ -125,8 +125,9 @@ impl<S: ObjectStore> NamespaceStore<S> {
         }
     }
 
-    /// Loads the user snapshot `snapshot_id`. A missing snapshot, or a fork snapshot, returns
-    /// `snapshot_not_found`, because the snapshot API reads only user snapshots.
+    /// Loads the user snapshot `snapshot_id`. A missing snapshot, a fork snapshot, or an
+    /// operation snapshot returns `snapshot_not_found`, because the snapshot API reads only user
+    /// snapshots.
     pub(crate) async fn load_user_snapshot(
         &self,
         snapshot_id: &SnapshotId,

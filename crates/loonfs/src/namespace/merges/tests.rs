@@ -459,8 +459,8 @@ async fn a_merge_reads_the_fork_at_its_folds_manifest() {
     }
 }
 
-/// Checks that a merge's plan takes a snapshot of the fork's folded manifest while the
-/// merge runs, and that the merge deletes the snapshot once it commits. The
+/// Checks that a merge's plan takes an operation snapshot of the fork's folded manifest
+/// while the merge runs, and that the merge deletes the snapshot once it commits. The
 /// request's commit ID is the longest that the commit ID grammar accepts.
 #[tokio::test]
 async fn a_merge_releases_the_snapshot_its_plan_took_on_the_fork() {
@@ -468,18 +468,22 @@ async fn a_merge_releases_the_snapshot_its_plan_took_on_the_fork() {
     let request = family.request(&"m".repeat(128));
     let planned = family.plan(&request).await;
     let page = family
-        .fork
-        .list_snapshots()
+        .main
+        .maintenance()
+        .list_snapshot_records(family.fork.id())
         .page()
         .await
         .expect("the fork's snapshots while the merge is planned");
     assert_eq!(
         page.snapshots
             .iter()
-            .map(|snapshot| snapshot.snapshot_id.clone())
+            .map(|snapshot| (snapshot.snapshot_id.clone(), snapshot.owner.clone()))
             .collect::<Vec<_>>(),
-        vec![planned.merge_snapshot.clone()],
-        "the plan takes a snapshot of the fork"
+        vec![(
+            planned.merge_snapshot.clone(),
+            crate::SnapshotRecordOwner::Operation
+        )],
+        "the plan takes an operation snapshot of the fork"
     );
     let mut replans = 0;
     family
@@ -492,8 +496,9 @@ async fn a_merge_releases_the_snapshot_its_plan_took_on_the_fork() {
         .expect("the merge");
     assert_eq!(replans, 0, "the plan commits");
     let released = family
-        .fork
-        .list_snapshots()
+        .main
+        .maintenance()
+        .list_snapshot_records(family.fork.id())
         .page()
         .await
         .expect("the fork's snapshots after the merge");

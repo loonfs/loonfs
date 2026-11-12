@@ -233,7 +233,7 @@ The full registry (`ErrorCode` in `loonfs-types`) lists every error code and its
 | `namespace_not_found` | 404 | The namespace has no installed manifest, so it doesn't exist. |
 | `pool_not_found` | 404 | The pool has no pool record, so the pool's collection deletes nothing. |
 | `namespace_deleted` | 410 | The namespace ID is deleted, and it can never be created or forked into again. Ordinary operations fail. The response's details identify the deleted namespace. |
-| `snapshot_not_found` | 404 | The snapshot ID doesn't identify a snapshot that the operation can use. Either no snapshot exists under it, the snapshot is a fork snapshot and the operation isn't a read, or a read, fork, or extension found the snapshot expired. The snapshot inventory's retrieve also returns this code for an ID with no snapshot. Refresh state or choose another snapshot. |
+| `snapshot_not_found` | 404 | The snapshot ID doesn't identify a snapshot that the operation can use. Either no snapshot exists under it, the snapshot is a fork snapshot or an operation snapshot and the operation isn't a read, or a read, fork, or extension found the snapshot expired. The snapshot inventory's retrieve also returns this code for an ID with no snapshot. Refresh state or choose another snapshot. |
 | `path_not_found` | 404 | No visible entry exists at the path. In an ACL namespace, the server also returns this code for a checked entry on which the subject has no rights. |
 | `inode_not_found` | 404 | The requested visible or retained inode doesn't exist. In an ACL namespace, the server also returns this code for a checked inode on which the subject has no rights. |
 | `revision_not_found` | 404 | The file has no such revision. |
@@ -786,7 +786,7 @@ The status, enable, and disable routes all return the same flat grep index objec
 | `status` | Fields | Means |
 | --- | --- | --- |
 | `disabled` | None | No index is maintained for the namespace. This is also the status of a namespace that has never enabled an index. |
-| `backfilling` | `captured_seq`, `cursor_inode_id`, `snapshot_id` | The initial walk over the files of a snapshot is running, and `snapshot_id` is that snapshot's ID. `captured_seq` is the namespace sequence that the snapshot captured, and the backfill is complete when the walk reaches it. Nothing is searchable yet, and there's no watermark to report. |
+| `backfilling` | `captured_seq`, `cursor_inode_id`, `snapshot_id` | The initial walk over the files of an operation snapshot is running, and `snapshot_id` is that snapshot's ID. `captured_seq` is the namespace sequence that the snapshot captured, and the backfill is complete when the walk reaches it. Nothing is searchable yet, and there's no watermark to report. |
 | `active` | `built_through_seq`, `next_event_index` | The index follows the change feed. Commits at or below `built_through_seq` are searchable, except when `next_event_index` is non-zero. In that case, the rest of the commit at `built_through_seq` isn't indexed yet. |
 
 For example:
@@ -923,7 +923,7 @@ A GC response includes `listed_bytes`: the bytes of every object that the collec
 A namespace's GC response groups related counts:
 
 - `deleted` contains `wal_objects`, `metadata_segments`, `extension_segments`, and `manifests`. `extension_segments` counts the extension segments (such as the grep index's segments) that no retained manifest lists (see [Extensions](format.md#124-extensions)).
-- `deleted_snapshots_by_owner` contains `user` and `fork` counts for the snapshots deleted in the collection. `user` counts user snapshots. Their sum is the total number of snapshots deleted.
+- `deleted_snapshots_by_owner` contains `user`, `fork`, and `operation` counts for the snapshots deleted in the collection. `user` counts user snapshots, and `operation` counts operation snapshots. Their sum is the total number of snapshots deleted.
 
 A pool's GC response has no `deleted_snapshots_by_owner`, and its `deleted` contains these counts:
 
@@ -961,7 +961,7 @@ A pool's GC response also includes `skipped` when the collection stopped part of
 For example, a namespace's job that deletes three WAL objects and two grep segments returns this result:
 
 ```json
-{"kind":"gc","namespace_id":"demo","deleted":{"wal_objects":3,"metadata_segments":0,"extension_segments":2,"manifests":0},"deleted_snapshots_by_owner":{"user":0,"fork":0},"retained":{"referenced":12,"within_grace_window":4,"no_provider_timestamp":0,"unrecognized_key":0,"snapshot_not_deletable":0},"listed_bytes":1048576}
+{"kind":"gc","namespace_id":"demo","deleted":{"wal_objects":3,"metadata_segments":0,"extension_segments":2,"manifests":0},"deleted_snapshots_by_owner":{"user":0,"fork":0,"operation":0},"retained":{"referenced":12,"within_grace_window":4,"no_provider_timestamp":0,"unrecognized_key":0,"snapshot_not_deletable":0},"listed_bytes":1048576}
 ```
 
 A pool's job that deletes two content objects and the records of one upload session, and keeps one session whose completed-content grace hasn't ended, returns this result:
@@ -972,7 +972,7 @@ A pool's job that deletes two content objects and the records of one upload sess
 
 ### Snapshots
 
-A "snapshot" is a stored record that keeps one manifest of a namespace, and the segments it lists, so that version of the namespace stays readable (see [Snapshots](format.md#8-snapshots)). Every snapshot has an owner. A caller creates and deletes a "user snapshot", and a fork keeps a "fork snapshot" on its source until the fork is retired. The snapshot routes manage only user snapshots. For example, a sandbox can create a snapshot before an agent edits it, and then read the snapshot, or fork it into a new namespace, after the edits. A snapshot's `snapshot_id` is its ID, and its `captured_seq` is the namespace sequence it captured.
+A "snapshot" is a stored record that keeps one manifest of a namespace, and the segments it lists, so that version of the namespace stays readable (see [Snapshots](format.md#8-snapshots)). Every snapshot has an owner. A caller creates and deletes a "user snapshot", and a fork keeps a "fork snapshot" on its source until the fork is retired. LoonFS creates an "operation snapshot" for one of its own operations that reads through a manifest, such as a merge's plan or a grep backfill, and the operation deletes the snapshot when it ends. The snapshot routes manage only user snapshots. For example, a sandbox can create a snapshot before an agent edits it, and then read the snapshot, or fork it into a new namespace, after the edits. A snapshot's `snapshot_id` is its ID, and its `captured_seq` is the namespace sequence it captured.
 
 A create request requires `name`, and it accepts `ttl_ms`. The name is a label, not a key. Every create call writes a new record, so several snapshots can have the same name. Creating a snapshot first folds any WAL tail after the current manifest, and then writes a snapshot that keeps the resulting manifest. A snapshot with `ttl_ms` expires that many milliseconds after the server's current time, and a snapshot without it doesn't expire. A `ttl_ms` of zero returns `invalid_request`.
 
@@ -986,7 +986,7 @@ An expired snapshot can't be read, forked, or extended. Each of those requests r
 
 An extension measures its requested `ttl_ms` from the server's current time, and it moves an unexpired snapshot's expiry to that time. It never moves the expiry earlier, so extending a snapshot without an expiry returns the snapshot unchanged.
 
-`GET /v0/namespaces/{ns}/snapshots?limit=100&cursor=...` returns the namespace's snapshots in ascending `snapshot_id` order, including expired snapshots, and it leaves out fork snapshots. `GET /v0/namespaces/{ns}/snapshots/{snapshot_id}` returns one snapshot, as the same object the listing returns. A missing ID, or the ID of a fork snapshot, returns `snapshot_not_found`.
+`GET /v0/namespaces/{ns}/snapshots?limit=100&cursor=...` returns the namespace's snapshots in ascending `snapshot_id` order, including expired snapshots, and it leaves out fork snapshots and operation snapshots. `GET /v0/namespaces/{ns}/snapshots/{snapshot_id}` returns one snapshot, as the same object the listing returns. A missing ID, or the ID of a fork snapshot or an operation snapshot, returns `snapshot_not_found`.
 
 Deleting a snapshot removes its record and returns the addressed namespace and snapshot:
 
@@ -994,7 +994,7 @@ Deleting a snapshot removes its record and returns the addressed namespace and s
 {"namespace_id":"demo","snapshot_id":"snp_00000000000000000009-00000000000000000000000009"}
 ```
 
-Deleting a missing snapshot, including one that was already deleted, returns the same response, so a client can retry a delete safely. The ID of a fork snapshot returns `snapshot_not_found`, because only garbage collection deletes a fork snapshot. Deletion stays available after the namespace is deleted (see [`DELETE /v0/namespaces/{ns}`](#63-delete-v0namespacesns)).
+Deleting a missing snapshot, including one that was already deleted, returns the same response, so a client can retry a delete safely. The ID of a fork snapshot or an operation snapshot returns `snapshot_not_found`, because only garbage collection deletes a fork snapshot, and only the operation that created an operation snapshot and garbage collection delete an operation snapshot. Deletion stays available after the namespace is deleted (see [`DELETE /v0/namespaces/{ns}`](#63-delete-v0namespacesns)).
 
 In an ACL namespace, creating, retrieving, listing, extending, and deleting snapshots requires an administrator subject. A request with no subject context acts as the token holder. A snapshot read requires `read` and `history` on the historical inode, evaluated at the current head.
 
@@ -1006,13 +1006,13 @@ When an embedded read sets `snapshot_id` in its options, the read opens a read v
 
 A directory cursor from a read view of a snapshot identifies that snapshot. A read view of the same snapshot can resume the cursor, and a live listing or any other read view rejects it with `invalid_request`.
 
-A snapshot read requires an unexpired user snapshot or a fork snapshot. A read of a missing snapshot, or of a deleted or expired snapshot, returns `snapshot_not_found`, and the read never falls back to the current namespace state.
+A snapshot read requires an unexpired user snapshot, a fork snapshot, or an unexpired operation snapshot. A read of a missing snapshot, or of a deleted or expired snapshot, returns `snapshot_not_found`, and the read never falls back to the current namespace state.
 
 Why does an expired snapshot stay listed when it can't be read? A snapshot's expiry controls whether it can be read, and garbage collection deletes the snapshot later, after the grace window. Until then, the snapshot still keeps its manifest and segments, so the listing shows the snapshot as one of the records that keep old data.
 
 ### Snapshot inventory
 
-The snapshot inventory lists every snapshot of a namespace, so an operator can see what keeps old manifests from garbage collection. It includes user snapshots, whose `owner.kind` is `user`, and fork snapshots, whose `owner.kind` is `fork`. The inventory has no create or delete routes. User snapshots are created and deleted through the snapshot routes (see [Snapshots](#snapshots)), and garbage collection deletes a fork snapshot once its target namespace no longer reads through it.
+The snapshot inventory lists every snapshot of a namespace, so an operator can see what keeps old manifests from garbage collection. It includes user snapshots, whose `owner.kind` is `user`, fork snapshots, whose `owner.kind` is `fork`, and operation snapshots, whose `owner.kind` is `operation`. The inventory has no create or delete routes. User snapshots are created and deleted through the snapshot routes (see [Snapshots](#snapshots)), and garbage collection deletes a fork snapshot once its target namespace no longer reads through it. The operation that created an operation snapshot deletes the snapshot when the operation ends, and garbage collection deletes an operation snapshot after its expiry plus the grace window.
 
 Each entry is a snapshot record, which contains `namespace_id`, `snapshot_id`, `owner`, `created_at_ms`, an optional `expires_at_ms`, `captured_seq`, and `manifest_no`. For a user snapshot, `owner` contains its `name`.
 
@@ -2763,7 +2763,7 @@ To merge a fork, the server:
 3. Checks that the fork was made from this namespace, and reads the fork point.
 4. Refuses a fork point below this namespace's retention floor with `rebootstrap_required`.
 5. Reads this namespace's [merge index](glossary.md#merge-index) for the fork's newest merge, which sets where the range starts, and refuses a start below the fork's own retention floor with `rebootstrap_required`.
-6. Folds the fork, so that each content reference in the merge's commit has a layout in the fork's manifest, and takes a user snapshot named `merge` of the fork's folded manifest, which keeps the content that the merge refers to. The server deletes the snapshot after the commit at step 9, and the snapshot expires 15 minutes after the plan started if the delete fails.
+6. Folds the fork, so that each content reference in the merge's commit has a layout in the fork's manifest, and takes an operation snapshot of the fork's folded manifest, which keeps the content that the merge refers to. The server deletes the snapshot after the commit at step 9, and the snapshot expires 15 minutes after the plan started if the delete fails.
 7. Computes the fork's net change over the range and the commit's planned size, and returns `merge_too_large` with a split hint (described below) if the range's commits touched more inodes than one WAL object could contain an operation for, or if the commit wouldn't fit one WAL object or the merge allowance.
 8. Classifies the change against this namespace's head under the conflict rule ([Validation](format.md#62-validation)), and returns `merge_conflict` if any inode conflicts.
 9. Commits the merge as the only commit in its WAL object. If the commit fails because this namespace changed after the plan, with a code from the table below, the server keeps the reservation, goes back to step 1, and plans the same range again, up to three times, before it returns the commit's error. A later plan reports a row that changed in between, and that isn't the fork's own, as `merge_conflict`. For example, a name that another inode took is a `name` conflict. Another merge of the fork that committed in between makes the later plan return `merge_range_conflict`.

@@ -121,6 +121,13 @@ pub enum SnapshotOwner {
         /// Fork namespace whose continued existence keeps the source basis.
         target_namespace_id: NamespaceId,
     },
+    /// Keeps the manifest that one LoonFS operation, such as a merge's plan,
+    /// reads through. The operation deletes it when it ends, and garbage
+    /// collection deletes it after its expiry.
+    Operation {
+        /// When the snapshot expires.
+        expires_at_ms: u64,
+    },
 }
 
 impl SnapshotOwner {
@@ -130,6 +137,7 @@ impl SnapshotOwner {
         match self {
             Self::User { expires_at_ms, .. } => *expires_at_ms,
             Self::Fork { .. } => None,
+            Self::Operation { expires_at_ms } => Some(*expires_at_ms),
         }
     }
 }

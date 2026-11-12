@@ -43,7 +43,7 @@ type GcKind<R> = (&'static str, fn(&R) -> u64);
 
 /// Counts each deletion of a namespace's collection once, with snapshots grouped by
 /// owner.
-const GC_CATEGORIES: [GcKind<GcResponse>; 6] = [
+const GC_CATEGORIES: [GcKind<GcResponse>; 7] = [
     ("deleted_wal_objects", |gc| gc.deleted.wal_objects),
     ("deleted_metadata_segments", |gc| {
         gc.deleted.metadata_segments
@@ -57,6 +57,9 @@ const GC_CATEGORIES: [GcKind<GcResponse>; 6] = [
     }),
     ("deleted_expired_snapshots", |gc| {
         gc.deleted_snapshots_by_owner.user
+    }),
+    ("deleted_operation_snapshots", |gc| {
+        gc.deleted_snapshots_by_owner.operation
     }),
 ];
 

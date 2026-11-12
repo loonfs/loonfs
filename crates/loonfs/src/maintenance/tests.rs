@@ -101,7 +101,7 @@ async fn a_maintenance_gc_step_records_the_collection_counters_once() {
         gc.retained.total(),
         "the collection records its retained count exactly once"
     );
-    assert_eq!(snapshot.by_name("loonfs.gc.reclaimed").count(), 9);
+    assert_eq!(snapshot.by_name("loonfs.gc.reclaimed").count(), 10);
     for (category, reclaimed) in [
         ("deleted_wal_objects", gc.deleted.wal_objects),
         ("deleted_metadata_segments", gc.deleted.metadata_segments),
@@ -111,6 +111,10 @@ async fn a_maintenance_gc_step_records_the_collection_counters_once() {
         (
             "deleted_expired_snapshots",
             gc.deleted_snapshots_by_owner.user,
+        ),
+        (
+            "deleted_operation_snapshots",
+            gc.deleted_snapshots_by_owner.operation,
         ),
     ] {
         assert_eq!(

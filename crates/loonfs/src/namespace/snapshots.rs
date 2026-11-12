@@ -5,7 +5,7 @@ use crate::publisher::NamespaceChange;
 use crate::trace::{self, operation_span};
 use crate::{
     CreateSnapshotOptions, DeleteSnapshotResponse, Error, ListSnapshotsResponse, Namespace, Result,
-    Snapshot, Writable,
+    Snapshot, SnapshotRecord, Writable,
 };
 use loonfs_core::SnapshotPageCursor;
 use loonfs_types::PageRequest;
@@ -124,6 +124,35 @@ impl Namespace<Writable> {
         .await
     }
 
+    /// Creates an operation snapshot of the current namespace state that
+    /// expires `ttl_ms` from now, for an extension's operation that reads
+    /// through the snapshot, such as a grep backfill.
+    ///
+    /// The snapshot isn't listed, and the snapshot API refuses its ID, so
+    /// only the operation and garbage collection delete it. The call folds
+    /// first, as [`Self::create_snapshot_with_options`] does.
+    pub async fn create_operation_snapshot(&self, ttl_ms: NonZeroU64) -> Result<SnapshotRecord> {
+        trace::in_operation(
+            operation_span!(self.core, "create_operation_snapshot", self.namespace_id),
+            async {
+                let expires_at_ms = expires_at_ms(self.core.now_ms(), ttl_ms);
+                self.ensure_administrator().await?;
+                self.mode
+                    .publisher
+                    .snapshot_after_fold(&self.namespace_id, |manifest| {
+                        let engine = self.engine();
+                        async move {
+                            engine
+                                .create_operation_snapshot(expires_at_ms, manifest)
+                                .await
+                        }
+                    })
+                    .await
+            },
+        )
+        .await
+    }
+
     /// Moves an unexpired snapshot's expiry to `ttl_ms` from now. The expiry
     /// never moves earlier, so a snapshot without an expiry is returned
     /// unchanged. An expired or missing snapshot returns
@@ -148,8 +177,8 @@ impl Namespace<Writable> {
     }
 
     /// Deletes a snapshot. Deleting a missing snapshot succeeds, so a retry
-    /// returns the same response. The id of a fork snapshot returns
-    /// `snapshot_not_found`.
+    /// returns the same response. The id of a fork snapshot or an operation
+    /// snapshot returns `snapshot_not_found`.
     ///
     /// Deletion works after the namespace is deleted, so a snapshot without
     /// an expiry can still be released.
@@ -161,6 +190,23 @@ impl Namespace<Writable> {
         self.ensure_administrator().await?;
         let result = self.engine()
             .delete_snapshot(snapshot_id)
+            .await
+            .map_err(Error::from);
+        self.mode
+            .publisher
+            .finish_namespace_mutation(&self.namespace_id, result, |_| NamespaceChange::Unchanged)
+            .await
+    }).await
+    }
+
+    /// Deletes an operation snapshot that [`Self::create_operation_snapshot`]
+    /// created. Deleting a missing snapshot succeeds, and another owner's ID
+    /// returns `snapshot_not_found`.
+    pub async fn delete_operation_snapshot(&self, snapshot_id: &SnapshotId) -> Result<()> {
+        trace::in_operation(operation_span!(self.core, "delete_operation_snapshot", self.namespace_id, snapshot_id = %snapshot_id), async {
+        self.ensure_administrator().await?;
+        let result = self.engine()
+            .delete_operation_snapshot(snapshot_id)
             .await
             .map_err(Error::from);
         self.mode

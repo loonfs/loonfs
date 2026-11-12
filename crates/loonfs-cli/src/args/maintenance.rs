@@ -19,7 +19,7 @@ pub(crate) enum MaintenanceCommand {
     /// Fold the WAL tail whatever its length, and compact metadata until
     /// nothing is due.
     Fold,
-    /// List the snapshot inventory: every snapshot, user snapshots and fork snapshots.
+    /// List the snapshot inventory: every snapshot, user, fork, and operation snapshots.
     Snapshot {
         #[command(subcommand)]
         command: MaintenanceSnapshotCommand,
@@ -59,7 +59,7 @@ pub(crate) struct MaintenanceRecoverAdministratorArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum MaintenanceSnapshotCommand {
-    /// List every snapshot in snapshot ID order, user snapshots and fork snapshots.
+    /// List every snapshot in snapshot ID order, user, fork, and operation snapshots.
     ///
     /// Expired snapshots remain listed until garbage collection deletes them.
     List(MaintenanceSnapshotListArgs),

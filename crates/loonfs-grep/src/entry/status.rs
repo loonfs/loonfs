@@ -28,7 +28,7 @@ pub enum GrepIndexStatus {
         /// inode id, so one id is the whole resume position.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cursor_inode_id: Option<InodeId>,
-        /// The user snapshot whose manifest this backfill walks.
+        /// The operation snapshot whose manifest this backfill walks.
         snapshot_id: SnapshotId,
     },
     /// Backfill is complete and changes are consumed incrementally.

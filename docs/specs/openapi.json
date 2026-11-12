@@ -1084,6 +1084,12 @@
             "minimum": 0,
             "type": "integer"
           },
+          "operation": {
+            "description": "The operation snapshots that the collection deleted after they expired or their namespace\nwas deleted.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
           "user": {
             "description": "The user snapshots that the collection deleted after they expired or their namespace was deleted.",
             "format": "int64",
@@ -1093,7 +1099,8 @@
         },
         "required": [
           "user",
-          "fork"
+          "fork",
+          "operation"
         ],
         "type": "object"
       },
@@ -4749,6 +4756,7 @@
         "discriminator": {
           "mapping": {
             "fork": "#/components/schemas/SnapshotRecordOwnerFork",
+            "operation": "#/components/schemas/SnapshotRecordOwnerOperation",
             "user": "#/components/schemas/SnapshotRecordOwnerUser"
           },
           "propertyName": "kind"
@@ -4759,6 +4767,9 @@
           },
           {
             "$ref": "#/components/schemas/SnapshotRecordOwnerFork"
+          },
+          {
+            "$ref": "#/components/schemas/SnapshotRecordOwnerOperation"
           }
         ]
       },
@@ -4778,6 +4789,21 @@
         },
         "required": [
           "target_namespace_id",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "SnapshotRecordOwnerOperation": {
+        "description": "A snapshot that keeps the state one LoonFS operation reads, such as a merge's plan. The\noperation deletes it when it ends, and garbage collection deletes it after it expires.",
+        "properties": {
+          "kind": {
+            "enum": [
+              "operation"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
           "kind"
         ],
         "type": "object"
@@ -5837,7 +5863,7 @@
     },
     "/v0/maintenance/namespaces/{namespace_id}/snapshots": {
       "get": {
-        "description": "Lists every snapshot, user snapshots and fork snapshots, in snapshot ID order. This is the inventory of what keeps manifests from garbage collection. An expired snapshot stays in the list until garbage collection deletes it, after its expiry plus the grace window. A cursor continues the listing against the current set of snapshots.",
+        "description": "Lists every snapshot, user, fork, and operation snapshots, in snapshot ID order. This is the inventory of what keeps manifests from garbage collection. An expired snapshot stays in the list until garbage collection deletes it, after its expiry plus the grace window. A cursor continues the listing against the current set of snapshots.",
         "operationId": "list_snapshot_records",
         "parameters": [
           {

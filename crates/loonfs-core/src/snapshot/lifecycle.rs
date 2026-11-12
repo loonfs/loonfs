@@ -137,29 +137,40 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         .await?
     }
 
-    /// Deletes a snapshot. Deleting a missing snapshot succeeds without a
-    /// write, so a retried delete returns the same response. A fork snapshot returns
-    /// `snapshot_not_found`, because only garbage collection deletes it.
+    /// Deletes a user snapshot. Deleting a missing snapshot succeeds without a write, so a retry
+    /// returns the same response, and a fork or operation snapshot returns `snapshot_not_found`.
     pub async fn delete_snapshot(
         &self,
         snapshot_id: &SnapshotId,
     ) -> Result<DeleteSnapshotResponse> {
-        match self.namespace.load_snapshot_record(snapshot_id).await? {
-            None => {}
-            Some(loaded) => match loaded.state.owner {
-                SnapshotOwner::User { .. } => {
-                    self.namespace.delete_snapshot_record(snapshot_id).await?
-                }
-                SnapshotOwner::Fork { .. } => {
-                    return Err(CoreError::SnapshotNotFound {
-                        snapshot_id: snapshot_id.clone(),
-                    })
-                }
-            },
-        }
+        let user = |owner: &_| matches!(owner, SnapshotOwner::User { .. });
+        self.delete_snapshot_of_owner(snapshot_id, user).await?;
         Ok(DeleteSnapshotResponse {
             namespace_id: self.namespace.namespace_id.clone(),
             snapshot_id: snapshot_id.clone(),
         })
+    }
+
+    /// Deletes an operation snapshot, which [`Self::create_operation_snapshot`] created. Deleting a
+    /// missing snapshot succeeds, and another owner's ID returns `snapshot_not_found`.
+    pub async fn delete_operation_snapshot(&self, snapshot_id: &SnapshotId) -> Result<()> {
+        let operation = |owner: &_| matches!(owner, SnapshotOwner::Operation { .. });
+        self.delete_snapshot_of_owner(snapshot_id, operation).await
+    }
+
+    /// Deletes a snapshot whose owner `deletable` accepts, as the two deletes above describe.
+    async fn delete_snapshot_of_owner(
+        &self,
+        snapshot_id: &SnapshotId,
+        deletable: impl Fn(&SnapshotOwner) -> bool,
+    ) -> Result<()> {
+        let loaded = self.namespace.load_snapshot_record(snapshot_id).await?;
+        match loaded.map(|loaded| deletable(&loaded.state.owner)) {
+            None => Ok(()),
+            Some(true) => self.namespace.delete_snapshot_record(snapshot_id).await,
+            Some(false) => Err(CoreError::SnapshotNotFound {
+                snapshot_id: snapshot_id.clone(),
+            }),
+        }
     }
 }

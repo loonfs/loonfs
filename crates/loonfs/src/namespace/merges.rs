@@ -334,10 +334,10 @@ impl Namespace<Writable> {
         self.session().submit_merge(candidate, reservation).await
     }
 
-    /// Folds the fork, takes a snapshot of the manifest that covers its tail, and reads the
-    /// fork through the snapshot, so the merge's range ends at the fork's folded
-    /// head. The snapshot keeps that manifest, its segments, and the content its
-    /// layouts refer to while the merge plans and commits, as a snapshot
+    /// Folds the fork, takes an operation snapshot of the manifest that covers
+    /// its tail, and reads the fork through the snapshot, so the merge's range
+    /// ends at the fork's folded head. The snapshot keeps that manifest, its
+    /// segments, and the content its layouts refer to while the merge plans and commits, as a snapshot
     /// does: a fold, a retention advance, and a compaction of the fork in
     /// between can replace the manifest, and the collector keeps only what
     /// the current manifest and the snapshots' manifests refer to. The snapshot
@@ -352,7 +352,7 @@ impl Namespace<Writable> {
         fork_id: &NamespaceId,
         prepared_at_ms: u64,
     ) -> Result<(PinnedRead, SnapshotId)> {
-        let expires_at_ms = Some(prepared_at_ms + DIRECT_TRANSFER_URL_TTL_MS);
+        let expires_at_ms = prepared_at_ms + DIRECT_TRANSFER_URL_TTL_MS;
         let snapshot = self
             .mode
             .publisher
@@ -362,7 +362,7 @@ impl Namespace<Writable> {
                     .writer_engine(&self.mode.writer.writer_id, fork_id);
                 async move {
                     engine
-                        .create_snapshot("merge".to_owned(), expires_at_ms, manifest)
+                        .create_operation_snapshot(expires_at_ms, manifest)
                         .await
                 }
             })
@@ -397,7 +397,7 @@ impl Namespace<Writable> {
         let engine = self
             .core
             .writer_engine(&self.mode.writer.writer_id, fork_id);
-        if let Err(error) = engine.delete_snapshot(merge_snapshot).await {
+        if let Err(error) = engine.delete_operation_snapshot(merge_snapshot).await {
             tracing::warn!(
                 namespace_id = %fork_id,
                 snapshot_id = %merge_snapshot,

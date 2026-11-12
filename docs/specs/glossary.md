@@ -252,12 +252,13 @@ The verified set of metadata runs, from the current manifest, that a read starts
 
 ### Snapshot
 
-A stored record that keeps one manifest, and every segment it lists, from being deleted after newer manifests are published, so the namespace stays readable as it was at that point in its history. Every snapshot has one of two owners:
+A stored record that keeps one manifest, and every segment it lists, from being deleted after newer manifests are published, so the namespace stays readable as it was at that point in its history. Every snapshot has one of three owners:
 
-- A "user snapshot" is a snapshot whose owner is `user`. A caller creates it and can delete it, and it may expire. Its ID is the `snapshot_id` that the read routes and forks accept, and the snapshot routes manage only user snapshots. A user snapshot can have an expiry time, or none. An expired user snapshot can't be read or forked, and it stays listed until garbage collection deletes it. For example, a sandbox can create a snapshot before an agent edits it, and then read or fork the snapshot after the edits. A merge or a rebase also creates a user snapshot of the fork while it plans, and deletes the snapshot after its commit.
+- A "user snapshot" is a snapshot whose owner is `user`. A caller creates it and can delete it, and it may expire. Its ID is the `snapshot_id` that the read routes and forks accept, and the snapshot routes manage only user snapshots. A user snapshot can have an expiry time, or none. An expired user snapshot can't be read or forked, and it stays listed until garbage collection deletes it. For example, a sandbox can create a snapshot before an agent edits it, and then read or fork the snapshot after the edits.
 - A "fork snapshot" is a snapshot whose owner is `fork`. It keeps the source manifest that a fork reads through, until the fork is retired. A read of the source accepts a fork snapshot's ID as `snapshot_id`, so a client can read the source as it was at the fork point.
+- An "operation snapshot" is a snapshot whose owner is `operation`. LoonFS creates it for one of its own operations that reads through a manifest, and the operation deletes it when the operation ends. For example, a merge or a rebase creates an operation snapshot of the fork while it plans, and deletes the snapshot after its commit, and a grep backfill reads the files of an operation snapshot. Every operation snapshot expires, so garbage collection deletes the snapshot of an operation that crashed. The snapshot routes don't list or accept an operation snapshot.
 
-The maintenance API's snapshot inventory lists every snapshot of a namespace, user and fork, so an operator can see what keeps old manifests. See [Snapshots](format.md#8-snapshots).
+The maintenance API's snapshot inventory lists every snapshot of a namespace, of all three owners, so an operator can see what keeps old manifests. See [Snapshots](format.md#8-snapshots).
 
 ### Fork
 

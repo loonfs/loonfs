@@ -73,6 +73,9 @@ impl<S: ObjectStore> Sweep<'_, S> {
         let counter: Counter<GcResponse> = match decision {
             SnapshotSweep::DeleteFork => |report| &mut report.deleted_snapshots_by_owner.fork,
             SnapshotSweep::DeleteUser => |report| &mut report.deleted_snapshots_by_owner.user,
+            SnapshotSweep::DeleteOperation => {
+                |report| &mut report.deleted_snapshots_by_owner.operation
+            }
             SnapshotSweep::Gone => return Ok(Decision::Gone),
             SnapshotSweep::Retain { reclaimable_at_ms } => {
                 return Ok(self.retain(RetainedReason::SnapshotNotDeletable, reclaimable_at_ms));
