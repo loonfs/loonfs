@@ -151,8 +151,7 @@ async fn reorganize_with_cache(warm_cache: bool) -> usize {
             .collect(),
     )
     .expect("valid entry");
-    crate::common::publish_grep_entry(&host.maintenance, &namespace_id, entry.encode(), RunNo(8))
-        .await;
+    crate::common::publish_grep_entry(&host.maintenance, &namespace_id, entry.encode()).await;
     if warm_cache {
         for (position, segment) in segments.iter().enumerate() {
             if position % 2 == 0 {

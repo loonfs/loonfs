@@ -24,7 +24,7 @@ use loonfs_core::{
     RetentionPlan, SnapshotRecordPageCursor,
 };
 use loonfs_types::format::manifest::ExtensionEntry;
-use loonfs_types::{u64_from_usize, CommitSeq, ExtensionName, PageRequest, RunNo, WriterId};
+use loonfs_types::{u64_from_usize, CommitSeq, ExtensionName, PageRequest, WriterId};
 use std::num::NonZeroU64;
 use std::sync::Arc;
 
@@ -672,14 +672,11 @@ impl Maintenance {
     /// Publishes a change to the entry of extension `name` in the manifest
     /// after `basis`.
     ///
-    /// `entry_at` returns the changed entry and the next run number, with the
-    /// change's new runs numbered from the run number it's called with,
-    /// which is the `next_run_no` of the manifest that the change is
-    /// published over. The publication changes nothing else and claims no
-    /// epoch, like a fold's. When another manifest follows `basis` first with
-    /// the same entry of `name`, such as a fold or a compaction, the change
-    /// is published over that manifest. When that manifest's entry differs,
-    /// the call publishes nothing and returns
+    /// The publication lists `entry` as the extension's entry, changes
+    /// nothing else and claims no epoch, like a fold's. When another manifest
+    /// follows `basis` first with the same entry of `name`, such as a fold or
+    /// a compaction, the change is published over that manifest. When that
+    /// manifest's entry differs, the call publishes nothing and returns
     /// [`ExtensionPublication::Superseded`], and the extension plans its next
     /// change from the current manifest. After a publication, this runtime's
     /// next read of the namespace starts from the published manifest or a
@@ -689,7 +686,7 @@ impl Maintenance {
         &self,
         basis: &ExtensionBasis,
         name: &ExtensionName,
-        entry_at: impl FnMut(RunNo) -> (ExtensionEntry, RunNo),
+        entry: ExtensionEntry,
     ) -> Result<ExtensionPublication> {
         let namespace_id = &basis.manifest().namespace_id;
         trace::in_operation(
@@ -697,7 +694,7 @@ impl Maintenance {
             async {
                 let result = self
                     .engine(namespace_id)
-                    .publish_extension(basis, name, entry_at)
+                    .publish_extension(basis, name, entry)
                     .await
                     .map_err(Error::from);
                 self.publisher

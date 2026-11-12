@@ -129,7 +129,9 @@ pub struct GrepReorganizeState {
     pub row_key_cursor: String,
     /// Level stamped on every output segment of this reorganize.
     pub output_level: u32,
-    /// Run number stamped on every output segment of this reorganize.
+    /// Number of the run that the outputs of this reorganize form, which
+    /// grep takes like a new run's number when the reorganize starts. The
+    /// run has no segment before the first step writes one.
     pub run_no: RunNo,
     /// The revisions whose content values and `content_revisions` rows a
     /// reorganization into the base level keeps. Its first step records

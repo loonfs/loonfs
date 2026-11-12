@@ -6,14 +6,14 @@ use super::*;
 use crate::manifest::tests::extensions::{extension_run, extension_segment};
 use loonfs_objectstore::keys::{extension_prefix, extension_segment_object_key};
 use loonfs_types::format::manifest::{ExtensionEntry, ExtensionSegmentRef};
-use loonfs_types::ExtensionName;
+use loonfs_types::{ExtensionName, RunNo};
 
 fn grep() -> ExtensionName {
     ExtensionName::parse("grep").expect("extension name")
 }
 
 /// Publishes the grep entry with one run of `segment` over the current
-/// manifest, numbered from its next run number.
+/// manifest.
 async fn publish_run(
     store: &LocalFsStore,
     namespace_id: &NamespaceId,
@@ -23,16 +23,15 @@ async fn publish_run(
         crate::test_support::NamespaceFixture::new(store, namespace_id, &context(1_000)).engine();
     let basis = engine.load_extension_basis().await.expect("basis");
     let published = engine
-        .publish_extension(&basis, &grep(), |base| {
-            (
-                ExtensionEntry::new(
-                    1,
-                    vec![extension_run(base, vec![segment.clone()])],
-                    serde_json::Map::new(),
-                ),
-                base.successor().expect("run"),
-            )
-        })
+        .publish_extension(
+            &basis,
+            &grep(),
+            ExtensionEntry::new(
+                1,
+                vec![extension_run(RunNo(0), vec![segment])],
+                serde_json::Map::new(),
+            ),
+        )
         .await
         .expect("publish");
     assert!(published.published.is_some());

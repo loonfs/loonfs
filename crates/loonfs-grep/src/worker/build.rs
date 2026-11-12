@@ -122,7 +122,7 @@ impl<S: ObjectStore + Clone> GrepSteps<'_, S> {
         let mut runs = entry.runs().to_vec();
         let mut segments_written = 0;
         if !rows.is_empty() {
-            let run_no = self.pending().await?.allocate_run_no()?;
+            let run_no = entry.next_run_no()?;
             let segments = GrepSegments {
                 store: &self.worker.store,
                 namespace_id: &self.namespace_id,

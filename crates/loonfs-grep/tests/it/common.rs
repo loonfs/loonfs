@@ -264,22 +264,19 @@ pub(crate) mod control {
     }
 }
 
-/// Publishes `entry` as grep's entry in the namespace's next manifest, with
-/// `next_run_no` as the next run number, whatever grep would make of it.
+/// Publishes `entry` as grep's entry in the namespace's next manifest,
+/// whatever grep would make of it.
 pub(crate) async fn publish_grep_entry(
     maintenance: &Maintenance,
     namespace_id: &NamespaceId,
     entry: loonfs_types::format::manifest::ExtensionEntry,
-    next_run_no: loonfs_types::RunNo,
 ) {
     let basis = maintenance
         .load_extension_basis(namespace_id)
         .await
         .expect("load the basis");
     let published = maintenance
-        .publish_extension(&basis, &loonfs_grep::entry::grep_extension_name(), |_| {
-            (entry.clone(), next_run_no)
-        })
+        .publish_extension(&basis, &loonfs_grep::entry::grep_extension_name(), entry)
         .await
         .expect("publish grep's entry");
     assert!(

@@ -215,9 +215,9 @@ pub use error::{
 };
 pub use gc::GcOptions;
 pub use manifest::{
-    next_run_no_after, ExtensionBasis, ExtensionPublication, FloorObjectReport, FoldWalOutcome,
-    FoldWalResponse, FoldedWalTail, ManifestLoadError, PublicationReport, PublishedManifest,
-    RetentionPlan, RetentionTarget,
+    ExtensionBasis, ExtensionPublication, FloorObjectReport, FoldWalOutcome, FoldWalResponse,
+    FoldedWalTail, ManifestLoadError, PublicationReport, PublishedManifest, RetentionPlan,
+    RetentionTarget,
 };
 pub use merge::{
     MergeAllowance, MergePlan, MergeRequest, MergeReservation, ReplayPlan, MERGE_COMMITS_PAGE_BYTES,

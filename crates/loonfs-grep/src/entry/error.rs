@@ -19,8 +19,8 @@ pub enum GrepEntryError {
     DisabledHasRuns,
     #[error("disabled grep entry has an in-progress reorganization")]
     DisabledHasReorganize,
-    #[error("grep reorganization uses run `{run_no}` but the next run number is `{next_run_no}`")]
-    UnallocatedReorganizeRunNo { run_no: RunNo, next_run_no: RunNo },
+    #[error("grep entry lists run number `{run_no}` twice")]
+    DuplicateRunNo { run_no: RunNo },
     #[error("grep reorganization repeats segment id `{segment_id}`")]
     DuplicateReorganizeSegmentId { segment_id: IndexSegmentId },
     #[error("grep reorganization input references missing segment `{segment_id}`")]

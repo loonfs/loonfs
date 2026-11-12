@@ -17,14 +17,14 @@ use crate::cache::GrepBlockCache;
 use crate::entry::{GrepEntry, GrepIndexStatus};
 use crate::reads::NamespaceReads;
 use crate::{GrepError, GrepStepBudget, Result};
-use loonfs::engine::{next_run_no_after, DecodedBlockCacheConfig, DecodedBlockCacheStats};
+use loonfs::engine::{DecodedBlockCacheConfig, DecodedBlockCacheStats};
 use loonfs::{CoreError, CreateSnapshotOptions, LoonFs, Maintenance, ReadOnly, Writable};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::segment_blocks::{
     DEFAULT_MAX_DELTA_RUNS, DEFAULT_MAX_ROWS_PER_SEGMENT, DEFAULT_TARGET_BLOCK_BYTES,
 };
 use loonfs_types::GrepIndex;
-use loonfs_types::{CommitSeq, NamespaceId, RunNo, SnapshotId};
+use loonfs_types::{CommitSeq, NamespaceId, SnapshotId};
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
 
@@ -469,14 +469,4 @@ fn below_retention_floor(error: &GrepError) -> bool {
                 | CoreError::SnapshotUnavailable(_)
         ))
     )
-}
-
-/// Returns the run number after `current`, which a change took.
-fn next_index_run_no(current: RunNo) -> Result<RunNo> {
-    next_run_no_after(current).map_err(|_| GrepError::IndexCorrupt {
-        message: format!(
-            "the manifest's next run number is {current}, the largest run number, so no run can \
-             follow it"
-        ),
-    })
 }

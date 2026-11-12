@@ -8,7 +8,7 @@ use loonfs::{LoonFs, SharedObjectStore, Writable};
 use loonfs_grep::entry::GrepIndexStatus;
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepBuildOutcome, GrepEnableOutcome, GrepError, GrepPublicationStats,
-    GrepPublishOutcome, GrepReorganizeOutcome,
+    GrepPublishOutcome,
 };
 use loonfs_objectstore::keys::metadata_manifest_prefix;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -353,99 +353,6 @@ async fn a_step_that_loses_its_put_to_another_change_of_its_entry_publishes_noth
         .await
         .expect("query");
     assert_eq!(found.matches.len(), 2);
-}
-
-/// Checks that a reorganization that starts in a change whose publication is
-/// rebuilt over a fold gets its run number when the change is published,
-/// after the run that the fold took the provisional number for.
-#[tokio::test]
-async fn a_reorganization_that_starts_in_a_rebuilt_change_gets_its_run_number_at_publication() {
-    let directory = tempfile::tempdir().expect("directory");
-    let store: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
-    let namespace_id = namespace_id("rebuilt-reorganization");
-    let writer = seed(&store, &namespace_id, &["/a", "/b", "/c"]).await;
-    let host = GrepHost::new(&store, "rebuilt-reorganization").await;
-    let policy = GramIndexBuildPolicy {
-        max_delta_runs: NonZeroUsize::new(2).expect("two"),
-        max_decoded_input_rows_per_step: NonZeroUsize::MIN,
-        ..one_file_steps()
-    };
-    host.worker.enable(&namespace_id).await.expect("enable");
-    let mut steps = host.worker.steps(&namespace_id, u64::MAX);
-    while !matches!(
-        steps.build_step(policy).await.expect("step"),
-        GrepBuildOutcome::UpToDate { .. }
-    ) {}
-    assert_eq!(
-        steps.publish().await.expect("publish the build"),
-        GrepPublishOutcome::Published
-    );
-    let provisional = control::metadata_manifest(&store, &namespace_id)
-        .await
-        .payload()
-        .next_run_no;
-    assert_matches!(
-        steps.reorganize_step(policy).await,
-        Ok(GrepReorganizeOutcome::UnitWritten {
-            completed: false,
-            ..
-        })
-    );
-
-    writer
-        .open_namespace(&namespace_id)
-        .expect("open namespace")
-        .put_file("/d", b"needle\n", &loonfs_test_support::test_actor())
-        .await
-        .expect("file");
-    writer
-        .maintenance(loonfs_test_support::ids::writer_id("publication-seed"))
-        .fold_wal(&namespace_id)
-        .await
-        .expect("a fold publishes over the change's basis");
-    let fold = control::metadata_manifest(&store, &namespace_id).await;
-    assert!(fold
-        .payload()
-        .runs
-        .iter()
-        .any(|run| run.run_no == provisional));
-    assert_eq!(
-        steps.publish().await.expect("publish the reorganization"),
-        GrepPublishOutcome::Published
-    );
-    let published = control::metadata_manifest(&store, &namespace_id).await;
-    let entry = control::grep_entry(&store, &namespace_id)
-        .await
-        .expect("grep's entry");
-    let reorganize = entry.reorganize().expect("the reorganization continues");
-    assert_eq!(reorganize.run_no, fold.payload().next_run_no);
-    let output = entry
-        .runs()
-        .iter()
-        .find(|run| run.run_no == reorganize.run_no)
-        .expect("the reorganization's output run");
-    assert_eq!(output.level, reorganize.output_level);
-    assert_eq!(
-        published.payload().next_run_no,
-        reorganize.run_no.successor().expect("run")
-    );
-
-    host.enable_grep_index(&namespace_id)
-        .await
-        .expect("index the fold's commit");
-    while !matches!(
-        host.worker
-            .steps(&namespace_id, 0)
-            .reorganize_step(policy)
-            .await
-            .expect("reorganize"),
-        GrepReorganizeOutcome::NotNeeded { .. }
-    ) {}
-    let found = host
-        .grep(&namespace_id, &needle(), page_request(None, 10))
-        .await
-        .expect("query");
-    assert_eq!(found.matches.len(), 4);
 }
 
 /// Checks that an enable whose publication loses its put to another

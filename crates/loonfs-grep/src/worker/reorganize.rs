@@ -38,8 +38,8 @@ pub(super) const INDEX_GRAMS_BASE_LEVEL: u32 = 2;
 /// call for none.
 enum ReorganizePlan {
     Continue(GrepReorganizeState),
-    /// A new reorganization, whose provisional run number the step takes
-    /// from the pending change.
+    /// A new reorganization, whose run number the step takes from the
+    /// entry.
     Start(GrepReorganizeState),
     NotNeeded {
         delta_runs: usize,
@@ -79,7 +79,7 @@ impl<S: ObjectStore + Clone> GrepSteps<'_, S> {
         let mut reorganize = match plan_reorganize(&entry, policy) {
             ReorganizePlan::Continue(reorganize) => reorganize,
             ReorganizePlan::Start(start) => GrepReorganizeState {
-                run_no: pending.allocate_run_no()?,
+                run_no: entry.next_run_no()?,
                 ..start
             },
             ReorganizePlan::NotNeeded {
@@ -317,8 +317,7 @@ fn plan_reorganize(entry: &GrepEntry, policy: GramIndexBuildPolicy) -> Reorganiz
         output_segment_ids: Vec::new(),
         row_key_cursor: String::new(),
         output_level,
-        // The step takes the run's provisional number from the pending
-        // change.
+        // The step takes the run's number from the entry.
         run_no: RunNo(0),
         pruning: None,
     })

@@ -275,13 +275,9 @@ async fn exhausted_run_numbers_fail_as_index_corruption_without_writing_the_mani
     let current = control::grep_entry(&store, &namespace_id)
         .await
         .expect("current entry");
-    crate::common::publish_grep_entry(
-        &host.maintenance,
-        &namespace_id,
-        current.encode(),
-        RunNo(MAX_PUBLIC_INTEGER),
-    )
-    .await;
+    let mut entry = current.encode();
+    entry.runs.last_mut().expect("a run").run_no = RunNo(MAX_PUBLIC_INTEGER);
+    crate::common::publish_grep_entry(&host.maintenance, &namespace_id, entry).await;
 
     namespace
         .put_file(
@@ -323,13 +319,6 @@ async fn exhausted_run_numbers_fail_as_index_corruption_without_writing_the_mani
         );
     }
 
-    assert_eq!(
-        control::metadata_manifest(&store, &namespace_id)
-            .await
-            .payload()
-            .next_run_no,
-        RunNo(MAX_PUBLIC_INTEGER)
-    );
     assert_eq!(
         store
             .list_prefix(&metadata_manifest_prefix(&namespace_id))
@@ -1619,8 +1608,7 @@ async fn publish_edited_entry(
     let mut document = serde_json::to_value(current).expect("encode the entry");
     edit(&mut document);
     let entry: ExtensionEntry = serde_json::from_value(document).expect("core decodes the entry");
-    let next_run_no = manifest.payload().next_run_no;
-    crate::common::publish_grep_entry(&host.maintenance, namespace_id, entry, next_run_no).await;
+    crate::common::publish_grep_entry(&host.maintenance, namespace_id, entry).await;
 }
 
 /// Publishes grep's entry with a version this build doesn't read.

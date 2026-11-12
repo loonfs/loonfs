@@ -184,8 +184,7 @@ impl ExtensionEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExtensionRunRef {
-    /// The run's number, allocated from the manifest's `next_run_no` like a
-    /// metadata run's number.
+    /// The run's number, which only the extension interprets.
     pub run_no: RunNo,
     /// The run's level, which only the extension interprets.
     pub level: u32,
@@ -358,7 +357,7 @@ pub struct NamespaceManifestPayload {
     pub activity: ManifestActivity,
     /// Current writer fencing epoch.
     pub writer_epoch: WriterEpoch,
-    /// Run number the next producer allocates. Every run's `run_no` is below it.
+    /// Run number the next producer allocates. Every metadata run's `run_no` is below it.
     pub next_run_no: RunNo,
     /// Earliest sequence for which retained history remains readable.
     pub retention_floor_seq: CommitSeq,

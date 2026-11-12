@@ -2736,7 +2736,7 @@ async fn publish_grep_entry(
         .await
         .expect("load the basis");
     let published = maintenance
-        .publish_extension(&basis, &grep_extension_name(), |base| (entry.clone(), base))
+        .publish_extension(&basis, &grep_extension_name(), entry)
         .await
         .expect("publish the entry");
     assert!(matches!(

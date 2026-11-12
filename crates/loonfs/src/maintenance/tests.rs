@@ -1345,7 +1345,7 @@ async fn a_read_after_an_extension_publication_sends_no_request() {
         .await
         .expect("load the basis");
     let published = maintenance
-        .publish_extension(&basis, &name, |base| (entry.clone(), base))
+        .publish_extension(&basis, &name, entry.clone())
         .await
         .expect("publish the entry");
     let loonfs_core::ExtensionPublication::Published(published) = published else {
