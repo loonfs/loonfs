@@ -3,7 +3,6 @@
 use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
 use crate::gc::GcOptions;
-use crate::storage::content::content_object_key_for_ref;
 use crate::test_support::WriterAt;
 use loonfs_test_support::stores::{BlockingStore, MetadataMapStore, OperationSelector};
 
@@ -72,7 +71,7 @@ async fn gc_keeps_inline_wal_until_fold_publication_then_reads_use_objects() {
         .await
         .expect("list WAL");
     assert!(!wal_before.is_empty());
-    let key = content_object_key_for_ref(&pool_id(&store).await, values[1].content_ref());
+    let key = folded_key(&pool_id(&store).await, values[1].content_ref());
     let blocked = BlockingStore::new(
         store.clone(),
         KeyPredicate::exact(&key),

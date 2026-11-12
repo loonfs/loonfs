@@ -613,7 +613,7 @@ async fn folded_inline_values_remain_readable_after_all_folded_wal_is_deleted() 
                 Vec::new()
             } else {
                 vec![(
-                    location.object_key().to_owned(),
+                    location.single_object_key().expect("one object").to_owned(),
                     Some((0, value.bytes().len() as u64)),
                 )]
             };
@@ -652,7 +652,7 @@ async fn a_reference_with_unfolded_pieces_reads_its_layout_then_the_pieces() {
     )
     .await;
     let pool_id = pool_id(&store).await;
-    let key = content_blob(&pool_id, &original.content_id);
+    let key = loonfs_objectstore::keys::content_span(&pool_id, &original.content_id, 0, 5);
     let engine =
         NamespaceEngine::reader(crate::test_support::namespace_store(&store, &namespace_id));
     let read_context = fresh_context(&store, &namespace_id).await;

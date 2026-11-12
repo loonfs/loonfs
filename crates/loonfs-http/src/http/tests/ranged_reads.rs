@@ -8,7 +8,7 @@ use axum::body::{Body, Bytes};
 use axum::http::{header, HeaderMap, Request, StatusCode};
 use loonfs::{LoonFs, SharedObjectStore};
 use loonfs_client::{Client, ClientConfig, ClientError, NamespacePath, ReadRange};
-use loonfs_objectstore::keys::{content_blob, content_prefix};
+use loonfs_objectstore::keys::{content_prefix, content_span};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_test_support::ids::{namespace_id, writer_id};
@@ -111,7 +111,7 @@ async fn fixture(configure: impl FnOnce(&mut TestOptions)) -> Fixture {
     .await
     .expect("app");
     Fixture {
-        folded_object: content_blob(&pool_id, &content_ref.content_id),
+        folded_object: content_span(&pool_id, &content_ref.content_id, 0, FOLDED_BYTES as u64),
         _directory: directory,
         recording,
         router,

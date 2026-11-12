@@ -15,9 +15,6 @@ use loonfs_types::{ContentExtent, ContentId, ContentRef, ExtentObject, Namespace
 #[async_trait::async_trait]
 pub(crate) trait LayoutLookup: Sync {
     async fn content_layout(&self, content_id: &ContentId) -> Result<Option<ContentLayoutRecord>>;
-    /// Whether an unfolded revision names the content at a size other than
-    /// `content_ref.size_bytes`.
-    fn content_has_other_size(&self, content_ref: &ContentRef) -> bool;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

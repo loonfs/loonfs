@@ -28,10 +28,6 @@ impl LayoutLookup for Layout {
     async fn content_layout(&self, _: &ContentId) -> Result<Option<ContentLayoutRecord>> {
         Ok(Some(self.0.clone()))
     }
-
-    fn content_has_other_size(&self, _: &ContentRef) -> bool {
-        false
-    }
 }
 
 fn piece_commit(reference: &ContentRef, offset: u64, bytes: Vec<u8>, seq: u64) -> WalCommitPayload {
