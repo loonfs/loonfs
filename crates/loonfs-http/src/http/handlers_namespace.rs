@@ -192,7 +192,7 @@ pub(super) async fn get_capabilities(
         path = "/v0/namespaces",
         tag = "namespaces",
         summary = "Create namespace",
-        description = "Creates a new empty namespace.",
+        description = "Creates a new empty namespace. Without `namespace_id` in the request, LoonFS generates an ID. The response's `namespace_id` is the new namespace's ID.",
         request_body = CreateNamespaceRequest,
         responses(
             (status = 200, description = "Namespace created", body = loonfs_types::NamespaceMetadata),
@@ -214,7 +214,7 @@ pub(super) async fn create_namespace(
     let namespace = state
         .runtime
         .create_namespace_with_options(
-            &request.namespace_id,
+            &request.namespace_id.unwrap_or_else(NamespaceId::generate),
             &actor_id,
             &CreateNamespaceOptions {
                 access: request.access,
@@ -351,7 +351,7 @@ pub(super) async fn delete_namespace(
         path = "/v0/namespaces/{namespace_id}/forks",
         tag = "namespaces",
         summary = "Fork namespace",
-        description = "Creates a new namespace from the source namespace's current head or from an unexpired snapshot.",
+        description = "Creates a new namespace from the source namespace's current head or from an unexpired snapshot. Without `new_namespace_id` in the request, LoonFS generates an ID. The response's `namespace_id` is the new namespace's ID.",
         params(("namespace_id" = String, Path, description = "The source namespace ID.")),
         request_body = ForkNamespaceRequest,
         responses(
@@ -378,7 +378,9 @@ pub(super) async fn fork_namespace(
     let namespace = runtime
         .fork_namespace_with_options(
             &source_namespace_id,
-            &request.new_namespace_id,
+            &request
+                .new_namespace_id
+                .unwrap_or_else(NamespaceId::generate),
             &actor_id,
             &loonfs::ForkNamespaceOptions {
                 snapshot_id: request.snapshot_id,

@@ -46,8 +46,9 @@ pub(crate) enum NamespaceAccessArg {
 pub(crate) struct NamespaceCreateArgs {
     #[command(flatten)]
     pub actor: ActorSelectorArgs,
+    /// ID of the new namespace. When omitted, the CLI generates an ID.
     #[arg(value_hint = ValueHint::Other)]
-    pub namespace_id: NamespaceId,
+    pub namespace_id: Option<NamespaceId>,
     /// Access mode. It can't be changed after the namespace is created.
     #[arg(long, value_enum, default_value_t = NamespaceAccessArg::Unrestricted)]
     pub access: NamespaceAccessArg,
@@ -83,8 +84,9 @@ pub(crate) struct NamespaceForkArgs {
     pub actor: ActorSelectorArgs,
     #[arg(value_hint = ValueHint::Other)]
     pub source_namespace_id: NamespaceId,
+    /// ID of the new namespace. When omitted, the CLI generates an ID.
     #[arg(value_hint = ValueHint::Other)]
-    pub new_namespace_id: NamespaceId,
+    pub new_namespace_id: Option<NamespaceId>,
     /// Fork from an unexpired snapshot instead of the current head.
     #[arg(long = "snapshot", value_name = "id")]
     pub snapshot_id: Option<SnapshotId>,

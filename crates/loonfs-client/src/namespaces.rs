@@ -44,7 +44,7 @@ impl Client {
                     .header(headers::ACTOR, actor.as_str())
                     .json(&CreateNamespaceRequest {
                         access: options.access.clone(),
-                        namespace_id: namespace_id.clone(),
+                        namespace_id: Some(namespace_id.clone()),
                         retention_window_ms: options.retention_window_ms,
                     })?,
             )
@@ -130,7 +130,7 @@ impl Client {
             self.request(operations::FORK_NAMESPACE, &url)
                 .header(headers::ACTOR, actor.as_str())
                 .json(&ForkNamespaceRequest {
-                    new_namespace_id: new_namespace_id.clone(),
+                    new_namespace_id: Some(new_namespace_id.clone()),
                     snapshot_id: options.snapshot_id.clone(),
                 })?,
         )

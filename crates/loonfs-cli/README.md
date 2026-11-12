@@ -168,23 +168,28 @@ Profile management
     Make a profile the default
 
 Namespace management
-  loonfs namespace create <namespace> [--access acl --principal-scope <scope> --administrator <principal>...]
+  loonfs namespace create [namespace] [--access acl --principal-scope <scope> --administrator <principal>...]
                             [--retention-window-ms <ms>] [--actor-id <stable-id>]
-    Create a new empty namespace. --retention-window-ms sets how many
-    milliseconds of the namespace's history the server's maintenance sweep
-    keeps. Without this option, the namespace's window is the server's
-    retention_window_ms setting, if the server has that setting
+    Create a new empty namespace. Without a namespace ID, the CLI generates
+    an ID, prints it on stderr before it sends the request, and shows it
+    with the new namespace. With --json, the ID appears only in the result.
+    --retention-window-ms sets how many milliseconds of the namespace's
+    history the server's maintenance sweep keeps. Without this option, the
+    namespace's window is the server's retention_window_ms setting, if the
+    server has that setting
 
   loonfs namespace show [namespace]
     Show the selected namespace's status, creator, retention window, and
     pool ID
 
-  loonfs namespace fork <source> <new-namespace> [--snapshot <id>] [--actor-id <stable-id>]
-    Fork a namespace into a new one. The fork shares the source's existing
-    content and metadata objects without copying the filesystem. Forking
-    the current head might first fold the source's outstanding WAL tail.
-    Use --snapshot to fork from an unexpired snapshot instead of the current
-    head.
+  loonfs namespace fork <source> [new-namespace] [--snapshot <id>] [--actor-id <stable-id>]
+    Fork a namespace into a new one. Without a new namespace ID, the CLI
+    generates an ID, prints it on stderr before it sends the request, and
+    shows it with the new namespace. With --json, the ID appears only in the
+    result. The fork shares the source's existing content and metadata
+    objects without copying the filesystem. Forking the current head might
+    first fold the source's outstanding WAL tail. Use --snapshot to fork
+    from an unexpired snapshot instead of the current head.
 
   loonfs namespace delete <namespace> [--expected-head-seq <seq>] [--yes]
     Delete a namespace and retire its ID. The deletion can't be undone. To
