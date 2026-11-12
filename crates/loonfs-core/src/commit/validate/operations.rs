@@ -356,7 +356,7 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
             },
         )?;
         let deletion = self
-            .resolve_recoverable_deletion(inode_id, deletion_seq)
+            .resolve_tombstone_in_trash(inode_id, deletion_seq)
             .await?;
         let name_key = self
             .resolve_name_absent(

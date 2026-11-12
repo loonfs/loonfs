@@ -76,7 +76,7 @@ async fn commits_after(
 /// Checks that a retention advance expires every deletion at or below the
 /// new floor without a commit: the trash leaves them out, a restore of
 /// one returns `not_deleted`, and the deletion above the floor stays
-/// recoverable.
+/// in the trash.
 #[tokio::test]
 async fn a_retention_advance_expires_every_deletion_at_or_below_the_floor_without_a_commit() {
     let temp_dir = tempdir().expect("tempdir");

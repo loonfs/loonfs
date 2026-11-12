@@ -49,7 +49,7 @@ Context and configuration:
 Inspection:
   stat          Describe one visible path or inode
   revisions     List a file's revision history
-  trash         List recoverable deletions
+  trash         List the trash
   changes       List committed changes
   maintenance   Run maintenance operations
   capabilities  Show the selected deployment's protocol capabilities
@@ -263,7 +263,7 @@ pub(crate) enum Command {
     Mv(FilesystemTransferArgs),
     /// Copy a file (or directory tree with -r) to another path.
     Cp(FilesystemTransferArgs),
-    /// List recoverable deletions: what was deleted, when, and the exact
+    /// List the trash: what was deleted, when, and the exact
     /// handle `restore` needs.
     Trash(TrashArgs),
     /// List committed changes after a sequence number.

@@ -256,7 +256,7 @@ pub struct ListInodeChildrenResponse {
     pub next_cursor: Option<String>,
 }
 
-/// One recoverable deletion and the directory binding that it removed.
+/// One trash entry: a deletion and the directory binding that it removed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct TrashEntry {
@@ -276,7 +276,7 @@ pub struct TrashEntry {
     pub deleted_binding: DirectoryBinding,
 }
 
-/// One page of the namespace's recoverable deletions.
+/// One page of the namespace's trash.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ListTrashResponse {
@@ -284,7 +284,7 @@ pub struct ListTrashResponse {
     pub namespace_id: NamespaceId,
     /// The head sequence that this page was evaluated at.
     pub head_seq: CommitSeq,
-    /// The recoverable deletions, oldest first.
+    /// The trash entries, oldest deletion first.
     pub entries: Vec<TrashEntry>,
     /// The cursor for the next page. It's present when another page follows.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -1405,7 +1405,7 @@ const RETENTION_HISTORY: [RetentionStep; 9] = [
 ];
 
 /// The scenario's retention floor, at the deletion of `/a`, so that deletion
-/// expires and the later deletion of `/b` stays recoverable.
+/// expires and the later deletion of `/b` stays in the trash.
 const RETENTION_FLOOR: CommitSeq = CommitSeq(5);
 
 /// The rows of `/a` and `/a/one.txt`, which compaction removes once a commit
@@ -1445,7 +1445,7 @@ async fn reads_at_or_above_the_retention_floor_match_the_model_after_compaction(
             .load_statistics()
             .await
             .expect("statistics");
-        // A base compaction keeps every row of a visible or recoverable inode,
+        // A base compaction keeps every row of a visible inode or one in the trash,
         // and a kept inode filter false positive can keep an expired inode's
         // row too (the low bits of an inode ID are random), so the count is
         // within that bound.

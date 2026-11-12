@@ -9,7 +9,7 @@
 //! removes every row of the inodes that an expired deletion hides
 //! ([format section 10.3](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#103-row-retention-during-a-base-compaction)).
 //! The filter contains every inode that's visible at the basis's head or
-//! under a kept deletion, which is a deletion above the retention floor.
+//! under a deletion in the trash, which is a deletion above the retention floor.
 //! A walk of the basis's directory tree finds those inodes.
 
 use super::plan::{group_run_descriptors, MetadataCompactionSpec};
@@ -17,19 +17,19 @@ use super::step::{CompactionUnitOutcome, MetadataCompactionCancellation};
 use crate::bloom_filter::BloomFilter;
 use crate::error::{CoreError, Result};
 use crate::limits::{DIRECTORY_PAGE_RAW_SCAN_LIMIT, MAX_KEPT_INODE_WALK_DEPTH};
-use crate::metadata::manifest_index::{active_deletions_page, direntry_binds_page, slot_edge_end};
-use crate::metadata::{ActiveDeletionRecord, DirentryBindingRecord};
+use crate::metadata::manifest_index::{direntry_binds_page, slot_edge_end, trash_rows_page};
+use crate::metadata::{DirentryBindingRecord, TrashRecord};
 use crate::segment::runs::MetadataFamilyGroup;
 use crate::segment::scan::VerifiedMetadataSegments;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::manifest::{lookup_keys, ActiveDeletionRowAction, MetadataRow};
+use loonfs_types::format::manifest::{lookup_keys, MetadataRow, TrashRowAction};
 use loonfs_types::format::segment_blocks::string_prefix_upper_bound;
 use loonfs_types::{CommitSeq, InodeId, InodeKind, NamespaceId, ROOT_INODE_ID};
 use std::collections::VecDeque;
 use std::ops::ControlFlow;
 
 /// Rows one scan of the walk reads, from a directory's slot index or from
-/// `active_deletions`.
+/// the `trash` family.
 const KEPT_INODE_SCAN_ROWS: usize = DIRECTORY_PAGE_RAW_SCAN_LIMIT;
 
 /// The inodes whose rows a base compaction keeps.
@@ -66,7 +66,7 @@ impl KeptInodeFilter {
             // binding event together.
             MetadataRow::DirentryBinding(record) => record.parent_inode_id,
             MetadataRow::Tombstone(_)
-            | MetadataRow::ActiveDeletion(_)
+            | MetadataRow::Trash(_)
             | MetadataRow::CommitReceipt(_)
             | MetadataRow::Commit(_)
             | MetadataRow::Merge(_)
@@ -89,7 +89,7 @@ fn removes_hidden_rows(group: MetadataFamilyGroup) -> bool {
         | MetadataFamilyGroup::Access
         | MetadataFamilyGroup::Bindings => true,
         MetadataFamilyGroup::Tombstones
-        | MetadataFamilyGroup::ActiveDeletions
+        | MetadataFamilyGroup::Trash
         | MetadataFamilyGroup::Commits
         | MetadataFamilyGroup::ContentLayouts => false,
     }
@@ -103,7 +103,7 @@ fn removes_hidden_rows(group: MetadataFamilyGroup) -> bool {
 /// no deletion in that basis is at or below the floor, and the floor never
 /// decreases, so no earlier compaction treated a deletion in it as expired
 /// either. Any other basis builds the filter, because a base compaction of
-/// `active_deletions` removes an expired deletion's `listed` row on its own
+/// the `trash` family removes an expired deletion's `listed` row on its own
 /// schedule, so the other groups can't tell from that family whether they
 /// still store rows that the deletion hides.
 ///
@@ -175,14 +175,14 @@ impl WalkFrame {
     }
 }
 
-/// Reads the deletions in a range of the basis's `active_deletions` that
+/// Reads the deletions in a range of the basis's `trash` family that
 /// have a `listed` row and no `removed` row, a page at a time.
-struct ListedDeletions {
+struct TrashScan {
     lower_bound: String,
     /// `None` reads to the end of the family.
     upper_bound: Option<String>,
     /// The rows of the last page that the reader hasn't returned yet.
-    unread: VecDeque<ActiveDeletionRecord>,
+    unread: VecDeque<TrashRecord>,
     /// Whether the last page reached the end of the range.
     scanned_to_end: bool,
     /// The last removal read. A removal sorts just before the listed row it
@@ -190,12 +190,12 @@ struct ListedDeletions {
     removed: Option<(CommitSeq, InodeId)>,
 }
 
-impl ListedDeletions {
+impl TrashScan {
     /// The deletions above `after_seq`.
     fn above(after_seq: CommitSeq) -> Self {
         Self {
-            lower_bound: lookup_keys::active_deletion_key_after_seq(after_seq),
-            upper_bound: string_prefix_upper_bound(lookup_keys::ACTIVE_DELETION_ROW_PREFIX),
+            lower_bound: lookup_keys::trash_key_after_seq(after_seq),
+            upper_bound: string_prefix_upper_bound(lookup_keys::TRASH_ROW_PREFIX),
             unread: VecDeque::new(),
             scanned_to_end: false,
             removed: None,
@@ -213,16 +213,14 @@ impl ListedDeletions {
             while let Some(deletion) = self.unread.pop_front() {
                 let identity = (deletion.deletion_seq, deletion.root_inode_id);
                 match deletion.action {
-                    ActiveDeletionRowAction::Removed { .. } => self.removed = Some(identity),
-                    ActiveDeletionRowAction::Listed { inode_kind, .. }
-                        if self.removed != Some(identity) =>
-                    {
+                    TrashRowAction::Removed { .. } => self.removed = Some(identity),
+                    TrashRowAction::Listed { inode_kind, .. } if self.removed != Some(identity) => {
                         return Ok(ControlFlow::Continue(Some((
                             deletion.root_inode_id,
                             inode_kind,
                         ))));
                     }
-                    ActiveDeletionRowAction::Listed { .. } => {}
+                    TrashRowAction::Listed { .. } => {}
                 }
             }
             if self.scanned_to_end {
@@ -231,7 +229,7 @@ impl ListedDeletions {
             if cancellation.is_cancelled() {
                 return Ok(ControlFlow::Break(WalkStop::Cancelled));
             }
-            let rows = active_deletions_page(
+            let rows = trash_rows_page(
                 segments,
                 &self.lower_bound,
                 self.upper_bound.as_deref(),
@@ -261,26 +259,26 @@ struct KeptInodeWalk<'a, 'c, S: ObjectStore + ?Sized> {
 
 impl<S: ObjectStore + ?Sized> KeptInodeWalk<'_, '_, S> {
     /// Inserts every inode that's visible at the basis's head, and then every
-    /// inode under a kept deletion.
+    /// inode under a deletion in the trash.
     ///
     /// Deleting an item unbinds it, so the walk from the root inode doesn't
     /// reach a deleted subtree. An expired deletion isn't a starting point,
     /// and its root is unbound, so no walk reaches the inodes it hides. An
-    /// inner deletion is older than the deletion around it, so no kept
-    /// deletion is inside an expired one, and the two walks reach every
-    /// ancestor through which the rights on an item under a kept
-    /// deletion are evaluated.
+    /// inner deletion is older than the deletion around it, so no deletion
+    /// in the trash is inside an expired one, and the two walks reach every
+    /// ancestor through which the rights on an item under a deletion in the
+    /// trash are evaluated.
     async fn reach_kept_inodes(&mut self) -> Result<ControlFlow<WalkStop>> {
         if let ControlFlow::Break(stop) = self.reach(ROOT_INODE_ID, InodeKind::Directory).await? {
             return Ok(ControlFlow::Break(stop));
         }
-        self.reach_kept_deletions().await
+        self.reach_trash().await
     }
 
     /// Reaches every deletion above the retention floor that has a
-    /// `listed` row and no `removed` row in the basis's `active_deletions`.
-    async fn reach_kept_deletions(&mut self) -> Result<ControlFlow<WalkStop>> {
-        let mut kept = ListedDeletions::above(self.retention_floor_seq);
+    /// `listed` row and no `removed` row in the basis's `trash` family.
+    async fn reach_trash(&mut self) -> Result<ControlFlow<WalkStop>> {
+        let mut kept = TrashScan::above(self.retention_floor_seq);
         loop {
             let (root_inode_id, inode_kind) =
                 match kept.next(&self.segments, self.cancellation).await? {

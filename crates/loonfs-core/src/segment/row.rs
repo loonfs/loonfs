@@ -1,9 +1,9 @@
 //! Converts in-memory metadata state into manifest rows, per family and in
 //! row-key order.
 
-use crate::metadata::{active_deletion_from_tombstone, MetadataState};
-use loonfs_types::format::manifest::{ActiveDeletionRowAction, MetadataRow, MetadataRowFamily};
+use crate::metadata::{trash_record_from_tombstone, MetadataState};
 use loonfs_types::format::manifest::{ContentLayoutRecord, MergeIndexRecord};
+use loonfs_types::format::manifest::{MetadataRow, MetadataRowFamily, TrashRowAction};
 use loonfs_types::{CommitSeq, ContentId};
 use std::collections::HashMap;
 
@@ -53,11 +53,11 @@ pub(crate) fn manifest_rows_for_family(
             .cloned()
             .map(MetadataRow::Tombstone)
             .collect::<Vec<_>>(),
-        MetadataRowFamily::ActiveDeletions => metadata_state
+        MetadataRowFamily::Trash => metadata_state
             .subtree_tombstones()
             .iter()
-            .map(active_deletion_from_tombstone)
-            .map(MetadataRow::ActiveDeletion)
+            .map(trash_record_from_tombstone)
+            .map(MetadataRow::Trash)
             .collect::<Vec<_>>(),
         MetadataRowFamily::ContentLayouts => metadata_state
             .content_layouts()
@@ -136,9 +136,9 @@ pub(crate) fn manifest_row_commit_seq(row: &MetadataRow) -> CommitSeq {
         MetadataRow::Tombstone(record) => record.committed_seq,
         // A removal marker belongs to the run of the restore that produced
         // it, not to the run of the deletion whose key it repeats.
-        MetadataRow::ActiveDeletion(record) => match &record.action {
-            ActiveDeletionRowAction::Listed { .. } => record.deletion_seq,
-            ActiveDeletionRowAction::Removed { removed_seq } => *removed_seq,
+        MetadataRow::Trash(record) => match &record.action {
+            TrashRowAction::Listed { .. } => record.deletion_seq,
+            TrashRowAction::Removed { removed_seq } => *removed_seq,
         },
         MetadataRow::CommitReceipt(record) => record.committed_seq,
         MetadataRow::Commit(record) => record.committed_seq,
@@ -156,7 +156,7 @@ pub(crate) fn manifest_row_kind(row: &MetadataRow) -> &'static str {
         MetadataRow::DirentryBinding(_) => "direntry_binding",
         MetadataRow::FileRevision(_) => "file_revision",
         MetadataRow::Tombstone(_) => "tombstone",
-        MetadataRow::ActiveDeletion(_) => "active_deletion",
+        MetadataRow::Trash(_) => "trash",
         MetadataRow::CommitReceipt(_) => "commit_receipt",
         MetadataRow::Commit(_) => "commit",
         MetadataRow::Merge(_) => "merge",

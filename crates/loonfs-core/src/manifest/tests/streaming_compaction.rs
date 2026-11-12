@@ -127,7 +127,7 @@ async fn seed_bindings_workload(store: &LocalFsStore, namespace_id: &NamespaceId
             .await
             .expect("move file");
     }
-    // One deleted directory, so a tombstone and an active deletion travel
+    // One deleted directory, so a tombstone and a trash row travel
     // with the bindings the job drops.
     crate::test_support::NamespaceFixture::new(store, namespace_id, &context)
         .delete_path("/d5", None)
@@ -788,7 +788,7 @@ async fn compaction_keeps_retained_revisions_and_their_layouts() {
         .await
         .expect("checkpoint the deletion");
     // The floor stops just below the deletion, so the deletion stays
-    // recoverable.
+    // in the trash.
     crate::test_support::NamespaceFixture::new(
         &store,
         &namespace_id,
@@ -866,7 +866,7 @@ async fn compaction_keeps_retained_revisions_and_their_layouts() {
         assert_eq!(
             kept, expected,
             "each file keeps the revisions above the floor and its newest at or below it, \
-             and the recoverably deleted file keeps its newest"
+             and the file in the trash keeps its newest"
         );
         assert!(
             after[&ApiMetadataRowFamily::Revisions]

@@ -1,7 +1,6 @@
 //! Manifest, cache, index, recovery, and retention tests.
 
 mod access;
-mod active_deletions;
 mod attributes;
 mod basis_publications;
 mod block_fetches;
@@ -22,6 +21,7 @@ mod newest_first_lookups;
 mod pools;
 mod retention;
 mod streaming_compaction;
+mod trash;
 mod views_below_the_head;
 
 use super::error::ManifestLoadError;

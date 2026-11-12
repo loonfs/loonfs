@@ -2,16 +2,15 @@
 //! scans.
 
 use super::row_decode::{
-    access_revision_from_manifest_row, active_deletion_from_manifest_row,
-    attributes_revision_from_manifest_row, commit_from_manifest_row,
-    commit_receipt_from_manifest_row, direntry_binding_from_manifest_row, inode_from_manifest_row,
-    merge_index_from_manifest_row, revision_from_manifest_row, tombstone_from_manifest_row,
+    access_revision_from_manifest_row, attributes_revision_from_manifest_row,
+    commit_from_manifest_row, commit_receipt_from_manifest_row, direntry_binding_from_manifest_row,
+    inode_from_manifest_row, merge_index_from_manifest_row, revision_from_manifest_row,
+    tombstone_from_manifest_row, trash_from_manifest_row,
 };
 use crate::error::Result;
 use crate::metadata::{
-    AccessRevisionRecord, ActiveDeletionRecord, AttributesRevisionRecord, CommitReceiptRecord,
-    ContentLayoutRecord, DirentryBindingRecord, InodeRecord, RevisionRecord,
-    SubtreeTombstoneRecord,
+    AccessRevisionRecord, AttributesRevisionRecord, CommitReceiptRecord, ContentLayoutRecord,
+    DirentryBindingRecord, InodeRecord, RevisionRecord, SubtreeTombstoneRecord, TrashRecord,
 };
 use crate::segment::{BlocksPerRefill, PageBounds, VerifiedMetadataSegments};
 use loonfs_objectstore::ObjectStore;
@@ -340,19 +339,19 @@ pub(super) async fn revisions_page<S: ObjectStore + ?Sized>(
         .collect()
 }
 
-/// One key-ordered page of the derived active-deletion family, with each
+/// One key-ordered page of the derived trash family, with each
 /// row's stored key. The trash listing's whole durable read: the family is
 /// keyed by deletion position, so a page is a range scan whose cost follows
 /// the page, not the namespace's deletion history.
-pub(crate) async fn active_deletions_page<S: ObjectStore + ?Sized>(
+pub(crate) async fn trash_rows_page<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     lower_bound: &str,
     upper_bound: Option<&str>,
     limit: usize,
-) -> Result<Vec<(String, ActiveDeletionRecord)>> {
+) -> Result<Vec<(String, TrashRecord)>> {
     segments
         .scan_range(
-            MetadataRowFamily::ActiveDeletions,
+            MetadataRowFamily::Trash,
             lower_bound,
             upper_bound,
             limit,
@@ -361,7 +360,7 @@ pub(crate) async fn active_deletions_page<S: ObjectStore + ?Sized>(
         )
         .await?
         .into_iter()
-        .map(|(row_key, row)| Ok((row_key, active_deletion_from_manifest_row(row)?)))
+        .map(|(row_key, row)| Ok((row_key, trash_from_manifest_row(row)?)))
         .collect()
 }
 

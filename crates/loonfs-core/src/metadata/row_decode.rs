@@ -6,9 +6,8 @@
 
 use crate::error::{CoreError, Result};
 use crate::metadata::{
-    AccessRevisionRecord, ActiveDeletionRecord, AttributesRevisionRecord, CommitReceiptRecord,
-    ContentLayoutRecord, DirentryBindingRecord, InodeRecord, RevisionRecord,
-    SubtreeTombstoneRecord,
+    AccessRevisionRecord, AttributesRevisionRecord, CommitReceiptRecord, ContentLayoutRecord,
+    DirentryBindingRecord, InodeRecord, RevisionRecord, SubtreeTombstoneRecord, TrashRecord,
 };
 use loonfs_types::format::manifest::{MergeIndexRecord, MetadataRow};
 use loonfs_types::format::wal::WalCommitPayload;
@@ -52,10 +51,10 @@ pub(crate) fn tombstone_from_manifest_row(row: MetadataRow) -> Result<SubtreeTom
     }
 }
 
-pub(crate) fn active_deletion_from_manifest_row(row: MetadataRow) -> Result<ActiveDeletionRecord> {
+pub(crate) fn trash_from_manifest_row(row: MetadataRow) -> Result<TrashRecord> {
     match row {
-        MetadataRow::ActiveDeletion(record) => Ok(record),
-        other => Err(foreign_row("active_deletion", &other)),
+        MetadataRow::Trash(record) => Ok(record),
+        other => Err(foreign_row("trash", &other)),
     }
 }
 
