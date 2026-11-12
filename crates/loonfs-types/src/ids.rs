@@ -327,21 +327,28 @@ string_id! {
     ///
     /// Reuse the same commit ID when you retry the same request. A commit ID is 1 to 128 lowercase
     /// ASCII letters, digits, dots, underscores, or hyphens, and it starts with a letter or digit.
-    /// Generated commit IDs have the form `c_` followed by 26 lowercase Crockford base 32
+    /// Generated commit IDs have the form `cmt_` followed by 26 lowercase Crockford base 32
     /// characters, but callers can supply any value that follows these rules.
     CommitId,
     error = CommitIdValidationError,
     validate = validate_commit_id,
     schema(
         pattern = r"^[a-z0-9][a-z0-9._-]{0,127}$",
-        example = "c_7kn71d9dq885x91hejz3gvf9p0"
+        example = "cmt_7kn71d9dq885x91hejz3gvf9p0"
     )
+}
+
+impl NamespaceId {
+    /// Generates a valid random namespace ID.
+    pub fn generate() -> Self {
+        Self(generated_id("ns"))
+    }
 }
 
 impl CommitId {
     /// Generates a valid random commit id.
     pub fn generate() -> Self {
-        Self(generated_id("c"))
+        Self(generated_id("cmt"))
     }
 }
 
