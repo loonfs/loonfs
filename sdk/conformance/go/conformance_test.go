@@ -3778,9 +3778,10 @@ func listChanges(t *testing.T, sdk *server.Client, namespaceID string) *loonfs.L
 
 func createNamespace(t *testing.T, sdk *server.Client, namespaceID string, actorID loonfs.ActorID) {
 	t.Helper()
+	id := loonfs.NamespaceID(namespaceID)
 	_, err := sdk.Namespaces.Create(
 		context.Background(),
-		&loonfs.CreateNamespaceRequest{NamespaceID: loonfs.NamespaceID(namespaceID)},
+		&loonfs.CreateNamespaceRequest{NamespaceID: &id},
 		option.WithHTTPHeader(http.Header{"Loonfs-Actor": []string{string(actorID)}}),
 	)
 	if err != nil {

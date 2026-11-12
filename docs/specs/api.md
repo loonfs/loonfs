@@ -727,7 +727,7 @@ The following table lists v0 operations, with their retry classes and representa
 | Check server health | `get_health` | `idempotent` | `GET /health` |
 | Check server readiness | `get_readiness` | `idempotent` | `GET /readiness` |
 | Read deployment capabilities | `get_capabilities` | `idempotent` | `GET /v0/capabilities` |
-| Create a namespace | `create_namespace` | `not_idempotent` | `POST /v0/namespaces`. Requires the `Loonfs-Actor` header, and accepts the optional `access` and `retention_window_ms` body fields. |
+| Create a namespace | `create_namespace` | `not_idempotent` | `POST /v0/namespaces`. Requires the `Loonfs-Actor` header, and accepts the optional `namespace_id`, `access`, and `retention_window_ms` body fields. |
 | Read a namespace | `get_namespace` | `idempotent` | `GET /v0/namespaces/{ns}` |
 | Read a path entry | `get_path_entry` | `idempotent` | `GET /v0/namespaces/{ns}/filesystem/entry?path=/docs/report.txt&include_attributes=false&snapshot_id=...` (`include_attributes` is optional and defaults to `true`, and `snapshot_id` is optional) |
 | Read an inode | `get_inode` | `idempotent` | `GET /v0/namespaces/{ns}/inodes/{inode_id}?include_attributes=false&snapshot_id=...` (`include_attributes` is optional and defaults to `true`, and `snapshot_id` is optional) |
@@ -1305,13 +1305,17 @@ The response contains the new namespace's initial state. A new namespace starts 
 }
 ```
 
-A fork request identifies the target namespace with `new_namespace_id`. Route placeholders such as `{ns}`, `{source_ns}`, and an implementation-internal `:namespace` are path parameter names, and each one takes the same namespace ID value. v0 doesn't accept or return a namespace `name` alias.
+A fork request identifies the target namespace with `new_namespace_id`.
+
+A create request can leave out `namespace_id`, and a fork request can leave out `new_namespace_id`. LoonFS then generates an ID, which is `ns_` followed by the standard 26-character random part, and returns that ID as the response's `namespace_id`. A namespace with a generated ID behaves exactly like a namespace with a chosen ID. Create and fork aren't idempotent, so a caller that has to be safe against a lost first response sends its own ID. (If the first response were lost, the caller wouldn't know the generated ID, and a retry without an ID would create a second namespace.)
+
+Route placeholders such as `{ns}`, `{source_ns}`, and an implementation-internal `:namespace` are path parameter names, and each one takes the same namespace ID value. v0 doesn't accept or return a namespace `name` alias.
 
 Create and fork install the hint and then manifest 1. Between the hint and manifest 1, a plain create writes the record of the pool that it generates (`pools/{pool_id}/pool.json`), so a create of an existing namespace writes no pool record. A fork writes no pool record. The conditional put of the hint determines whether the namespace ID is new (see [Namespace lifecycle and forks](format.md#9-namespace-lifecycle-and-forks)). A create or fork that loses that write to another active namespace returns `namespace_exists` (409). A create or fork into a deleted ID returns `namespace_deleted` (410). A namespace is never left partially created.
 
 [Namespaces and identity](format.md#11-namespaces-and-identity) defines a namespace's lifetime. An application that reuses a human-readable name MUST keep its own map from names to namespace IDs, and generate a new namespace ID for each lifetime.
 
-If a creation acknowledgement is lost, a new request returns `namespace_exists`, unless the request explicitly allows an existing namespace. Within the original attempt, after an unknown transport outcome, an exact read-back of the manifest confirms a plain create and a fork. A plain create's manifest records a pool ID that only that attempt generated, and a fork's manifest refers to the fork's unique fork snapshot.
+If a creation acknowledgement is lost, a new request with the same ID returns `namespace_exists`, unless the request explicitly allows an existing namespace. Within the original attempt, after an unknown transport outcome, an exact read-back of the manifest confirms a plain create and a fork. A plain create's manifest records a pool ID that only that attempt generated, and a fork's manifest refers to the fork's unique fork snapshot.
 
 ### 6.1 `GET /v0/capabilities`
 
@@ -2653,6 +2657,8 @@ Representative request:
   "new_namespace_id": "demo-branch"
 }
 ```
+
+The request can leave out `new_namespace_id`, and LoonFS then generates the new namespace's ID (see [Creating and forking namespaces](#creating-and-forking-namespaces)).
 
 Representative response:
 

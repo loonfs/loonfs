@@ -290,7 +290,6 @@ async fn a_retention_window_is_set_at_creation_changed_by_runs_and_copied_by_a_f
     )
     .await
     .expect("app");
-    let windowed = namespace_id("windowed");
     let window = |body: &serde_json::Value| body.get("retention_window_ms").cloned();
     let rejected = |(status, body): (StatusCode, serde_json::Value)| {
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
@@ -316,10 +315,12 @@ async fn a_retention_window_is_set_at_creation_changed_by_runs_and_copied_by_a_f
         &router,
         "POST",
         "/v0/namespaces",
-        r#"{"namespace_id":"windowed","retention_window_ms":86400000}"#,
+        r#"{"retention_window_ms":86400000}"#,
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{created}");
+    let windowed = NamespaceId::parse(created["namespace_id"].as_str().expect("namespace ID"))
+        .expect("the generated namespace ID is valid");
     assert_eq!(window(&created), Some(serde_json::json!(86_400_000)));
 
     rejected(
@@ -339,15 +340,15 @@ async fn a_retention_window_is_set_at_creation_changed_by_runs_and_copied_by_a_f
     assert_eq!(status, StatusCode::OK, "{changed}");
     assert_eq!(
         changed,
-        serde_json::json!({"kind": "retention_window", "namespace_id": "windowed", "retention_window_ms": 3_600_000})
+        serde_json::json!({"kind": "retention_window", "namespace_id": windowed.as_str(), "retention_window_ms": 3_600_000})
     );
-    let (_, shown) = send(&router, "GET", "/v0/namespaces/windowed", "").await;
+    let (_, shown) = send(&router, "GET", &format!("/v0/namespaces/{windowed}"), "").await;
     assert_eq!(window(&shown), Some(serde_json::json!(3_600_000)));
     let (status, forked) = send(
         &router,
         "POST",
-        "/v0/namespaces/windowed/forks",
-        r#"{"new_namespace_id":"forked"}"#,
+        &format!("/v0/namespaces/{windowed}/forks"),
+        "{}",
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{forked}");
@@ -371,7 +372,7 @@ async fn a_retention_window_is_set_at_creation_changed_by_runs_and_copied_by_a_f
         assert_eq!(status, StatusCode::OK, "{cleared}");
         assert_eq!(
             cleared,
-            serde_json::json!({"kind": "retention_window", "namespace_id": "windowed"})
+            serde_json::json!({"kind": "retention_window", "namespace_id": windowed.as_str()})
         );
     }
     assert_eq!(
@@ -379,9 +380,13 @@ async fn a_retention_window_is_set_at_creation_changed_by_runs_and_copied_by_a_f
         before.map(|number| number.0 + 1),
         "the first clear publishes a manifest, and the second finds nothing to change"
     );
-    let (_, shown) = send(&router, "GET", "/v0/namespaces/windowed", "").await;
+    let (_, shown) = send(&router, "GET", &format!("/v0/namespaces/{windowed}"), "").await;
     assert_eq!(window(&shown), None);
-    let (_, shown) = send(&router, "GET", "/v0/namespaces/forked", "").await;
+    let forked_uri = format!(
+        "/v0/namespaces/{}",
+        forked["namespace_id"].as_str().expect("ID")
+    );
+    let (_, shown) = send(&router, "GET", &forked_uri, "").await;
     assert_eq!(
         window(&shown),
         Some(serde_json::json!(3_600_000)),

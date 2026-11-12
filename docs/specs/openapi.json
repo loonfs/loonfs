@@ -858,7 +858,7 @@
           },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
-            "description": "The durable ID of the new namespace."
+            "description": "The durable ID of the new namespace. Without this field, LoonFS generates an ID. The\nresponse's `namespace_id` is the new namespace's ID."
           },
           "retention_window_ms": {
             "description": "The namespace's retention window, in milliseconds, which must be positive. The reference\nserver's maintenance sweep uses this window for the namespace. Without this field, the\nnamespace's window is the server's `retention_window_ms` setting, if the server has that\nsetting. A `retention_window` maintenance job can change or clear the window later.",
@@ -867,9 +867,6 @@
             "type": "integer"
           }
         },
-        "required": [
-          "namespace_id"
-        ],
         "type": "object"
       },
       "CreateRevisionDownloadByInodeRequest": {
@@ -2647,16 +2644,13 @@
         "properties": {
           "new_namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
-            "description": "The durable ID of the new namespace that the fork creates."
+            "description": "The durable ID of the new namespace that the fork creates. Without this field, LoonFS\ngenerates an ID. The response's `namespace_id` is the new namespace's ID."
           },
           "snapshot_id": {
             "$ref": "#/components/schemas/SnapshotId",
             "description": "An unexpired snapshot to fork from. Without it, the fork starts from the current head."
           }
         },
-        "required": [
-          "new_namespace_id"
-        ],
         "type": "object"
       },
       "GcSkippedWork": {
@@ -6191,7 +6185,7 @@
     },
     "/v0/namespaces": {
       "post": {
-        "description": "Creates a new empty namespace.",
+        "description": "Creates a new empty namespace. Without `namespace_id` in the request, LoonFS generates an ID. The response's `namespace_id` is the new namespace's ID.",
         "operationId": "create_namespace",
         "requestBody": {
           "content": {
@@ -7821,7 +7815,7 @@
     },
     "/v0/namespaces/{namespace_id}/forks": {
       "post": {
-        "description": "Creates a new namespace from the source namespace's current head or from an unexpired snapshot.",
+        "description": "Creates a new namespace from the source namespace's current head or from an unexpired snapshot. Without `new_namespace_id` in the request, LoonFS generates an ID. The response's `namespace_id` is the new namespace's ID.",
         "operationId": "fork_namespace",
         "parameters": [
           {

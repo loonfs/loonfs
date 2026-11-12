@@ -139,12 +139,19 @@ root = "./store"
     assert_success(&run(&["profile", "list"]));
     assert_success(&run(&["profile", "show", "dev"]));
     harness.add_embedded_profile("other");
-    assert_success(&run(&["namespace", "create", "demo", "--profile", "other"]));
+    let created = run(&["namespace", "create", "--profile", "other"]);
+    assert_success(&created);
+    let stdout = stdout_string(&created);
+    let generated = stdout.split(' ').next().expect("namespace ID");
+    assert_eq!(
+        stderr_string(&created),
+        format!("creating namespace `{generated}`\n")
+    );
     assert_success(&run(&[
         "ls",
         "/",
         "--namespace",
-        "demo",
+        generated,
         "--profile",
         "other",
     ]));

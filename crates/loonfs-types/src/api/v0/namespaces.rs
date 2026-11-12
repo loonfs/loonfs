@@ -16,8 +16,11 @@ pub struct CreateNamespaceRequest {
     /// default is unrestricted.
     #[serde(default = "NamespaceAccess::unrestricted")]
     pub access: NamespaceAccess,
-    /// The durable ID of the new namespace.
-    pub namespace_id: NamespaceId,
+    /// The durable ID of the new namespace. Without this field, LoonFS generates an ID. The
+    /// response's `namespace_id` is the new namespace's ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub namespace_id: Option<NamespaceId>,
     /// The namespace's retention window, in milliseconds, which must be positive. The reference
     /// server's maintenance sweep uses this window for the namespace. Without this field, the
     /// namespace's window is the server's `retention_window_ms` setting, if the server has that
@@ -35,8 +38,11 @@ pub struct CreateNamespaceRequest {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ForkNamespaceRequest {
-    /// The durable ID of the new namespace that the fork creates.
-    pub new_namespace_id: NamespaceId,
+    /// The durable ID of the new namespace that the fork creates. Without this field, LoonFS
+    /// generates an ID. The response's `namespace_id` is the new namespace's ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub new_namespace_id: Option<NamespaceId>,
     /// An unexpired snapshot to fork from. Without it, the fork starts from the current head.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
