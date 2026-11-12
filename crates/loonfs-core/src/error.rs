@@ -291,15 +291,12 @@ pub enum CoreError {
     },
     #[error("the outcome of the write to `{object_key}` is unknown: {message}")]
     OutcomeUnknown { object_key: String, message: String },
-    /// A bounded loop on a control object used every attempt it was allowed.
+    /// An operation on a control object used every attempt it was allowed.
     /// Concurrent writers changed the object, a read found a newer manifest
     /// or ran past its revalidation bound, or, on snapshot renewal, a
     /// transport failure left an attempt's outcome unconfirmed. Retrying can
     /// succeed.
-    #[error(
-        "the operation on `{object_key}` used every one of its {} attempts",
-        crate::limits::MAX_CONTENTION_ATTEMPTS
-    )]
+    #[error("the operation on `{object_key}` used every attempt it was allowed")]
     StoreContention { object_key: String },
     #[error("namespace `{namespace_id}` does not exist")]
     NamespaceNotFound { namespace_id: NamespaceId },

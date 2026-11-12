@@ -159,7 +159,7 @@ Every error response has a JSON body in this form:
 {
   "code": "writer_fenced",
   "message": "writer session fenced: epoch 3 was fenced by epoch 4 (writer `server-b`, acquired at 1739459200000 ms)",
-  "request_id": "req_9c2f4a1b7d8e4f21a0b3c4d5e6f70819",
+  "request_id": "req_4k8m2v9qx7d3hn5tbwa6jc1rfe",
   "details": {
     "fenced_writer_epoch": 3,
     "active_writer_epoch": 4,
@@ -1746,7 +1746,7 @@ The first operation that fails aborts the whole request, and nothing that it or 
 {
   "code": "path_conflict",
   "message": "destination `/reports/2026/january.pdf` already exists",
-  "request_id": "req_9c2f4a1b7d8e4f21a0b3c4d5e6f70819",
+  "request_id": "req_4k8m2v9qx7d3hn5tbwa6jc1rfe",
   "details": {
     "commit_id": "c_2a41d0c6b9f34e7d8a1b5c9e0f234567",
     "operation_index": 1
@@ -2763,7 +2763,7 @@ To merge a fork, the server:
 3. Checks that the fork was made from this namespace, and reads the fork point.
 4. Refuses a fork point below this namespace's retention floor with `rebootstrap_required`.
 5. Reads this namespace's [merge index](glossary.md#merge-index) for the fork's newest merge, which sets where the range starts, and refuses a start below the fork's own retention floor with `rebootstrap_required`.
-6. Folds the fork, so that each content reference in the merge's commit has a layout in the fork's manifest, and pins the folded manifest with a snapshot of the fork named `merge <commit_id>`, which keeps the content that the merge refers to. The server deletes the snapshot after the commit at step 9, and the snapshot expires 15 minutes after the plan started if the delete fails.
+6. Folds the fork, so that each content reference in the merge's commit has a layout in the fork's manifest, and pins the folded manifest with a snapshot of the fork named `merge`, which keeps the content that the merge refers to. The server deletes the snapshot after the commit at step 9, and the snapshot expires 15 minutes after the plan started if the delete fails.
 7. Computes the fork's net change over the range and the commit's planned size, and returns `merge_too_large` with a split hint (described below) if the range's commits touched more inodes than one WAL object could contain an operation for, or if the commit wouldn't fit one WAL object or the merge allowance.
 8. Classifies the change against this namespace's head under the conflict rule ([Validation](format.md#62-validation)), and returns `merge_conflict` if any inode conflicts.
 9. Commits the merge as the only commit in its WAL object. If the commit fails because this namespace changed after the plan, with a code from the table below, the server keeps the reservation, goes back to step 1, and plans the same range again, up to three times, before it returns the commit's error. A later plan reports a row that changed in between, and that isn't the fork's own, as `merge_conflict`. For example, a name that another inode took is a `name` conflict. Another merge of the fork that committed in between makes the later plan return `merge_range_conflict`.

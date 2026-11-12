@@ -10,7 +10,7 @@ use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome, GrepWorker};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
 use loonfs_objectstore::SharedObjectStore;
-use loonfs_server::{app, AppConfig, GarbageCollection, JobMode, ServerConfig, StoreConfig};
+use loonfs_server::{app, AppConfig, JobMode, ServerConfig, StoreConfig};
 use loonfs_types::GrepIndex;
 use loonfs_types::{
     CapabilityDocument, CommitSeq, ErrorResponse, GrepResponse, NamespaceId,
@@ -806,7 +806,7 @@ async fn sweep(server: &loonfs_server::AppState) {
         .scheduler
         .as_ref()
         .expect("a maintaining server has a scheduler")
-        .run_sweep(GarbageCollection::Skip)
+        .run_sweep()
         .await
         .expect("list the namespaces");
 }

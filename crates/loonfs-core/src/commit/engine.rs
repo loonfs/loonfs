@@ -6,7 +6,6 @@ use super::batch::{PublishBatchReport, PublishViewEffect};
 use super::publish_view::WriterPosition;
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, MetadataProjectionLoadError, Result, WriterFence};
-use crate::limits::MAX_CONTENTION_ATTEMPTS;
 use crate::manifest::retention::verify_manifest_segments_exist;
 use crate::manifest::{FloorObjectReport, ManifestLoadError, PublishedManifest};
 use crate::namespace::control::LoadedManifest;
@@ -296,13 +295,12 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
     /// after the same tip confirmation that a commit's put gets, and within
     /// `WAL_PUBLISH_BUDGET_MS` of the tip observation. The position then
     /// replays the floor object, so its tip is the floor object's number and
-    /// its floor is raised. A put that finds the number taken, or that the
-    /// budget refuses, drops the position, and the next attempt runs
-    /// discovery, for at most `MAX_CONTENTION_ATTEMPTS` attempts. A session
-    /// without its writer epoch has no position, so it creates the floor
-    /// object as a process without a session does (see
-    /// [`NamespaceStore::publish_floor_object`]), and the advance claims no
-    /// epoch. A session that discovery finds fenced does the same. The call
+    /// its floor is raised. A session without its writer epoch has no
+    /// position, so it creates the floor object as a process without a
+    /// session does (see [`NamespaceStore::publish_floor_object`]), and the
+    /// advance claims no epoch. A session that discovery finds fenced does
+    /// the same, and so does a session whose put finds the number taken or
+    /// is refused by the budget, after the put drops the position. The call
     /// writes nothing when the view's floor is already at or above `target`.
     pub async fn publish_floor_object(
         &mut self,
@@ -318,38 +316,30 @@ impl<S: ObjectStore> NamespaceCommitEngine<S> {
         if !acquired {
             return self.namespace.publish_floor_object_at_tip(target).await;
         }
-        let mut last_error = None;
-        for _attempt in 0..MAX_CONTENTION_ATTEMPTS {
-            let Self {
-                namespace,
-                writer_id,
-                position,
-            } = self;
-            let loaded = match position
-                .load_publish_view(namespace, writer_id, clock)
-                .await
-            {
-                Ok(loaded) => loaded,
-                Err(CoreError::WriterFenced(_)) => {
-                    return namespace.publish_floor_object_at_tip(target).await
-                }
-                Err(error) => return Err(error),
-            };
-            match position
-                .publish_floor_object_against(namespace, loaded, target)
-                .await
-            {
-                Ok(report) => return Ok(report),
-                Err(
-                    error @ CoreError::WalPublish(
-                        WalPublishError::NumberTaken
-                        | WalPublishError::PublishBudgetExceeded { .. },
-                    ),
-                ) => last_error = Some(error),
-                Err(error) => return Err(error),
+        let Self {
+            namespace,
+            writer_id,
+            position,
+        } = self;
+        let loaded = match position
+            .load_publish_view(namespace, writer_id, clock)
+            .await
+        {
+            Ok(loaded) => loaded,
+            Err(CoreError::WriterFenced(_)) => {
+                return namespace.publish_floor_object_at_tip(target).await
             }
+            Err(error) => return Err(error),
+        };
+        match position
+            .publish_floor_object_against(namespace, loaded, target)
+            .await
+        {
+            Err(CoreError::WalPublish(
+                WalPublishError::NumberTaken | WalPublishError::PublishBudgetExceeded { .. },
+            )) => namespace.publish_floor_object_at_tip(target).await,
+            result => result,
         }
-        Err(last_error.expect("every attempt should have failed with an error"))
     }
 
     /// Publishes `candidates` as one batch. Retries share `clock`, so the

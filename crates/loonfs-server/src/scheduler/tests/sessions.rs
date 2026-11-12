@@ -5,7 +5,6 @@ use super::{
     SchedulerServer, DAY_MS,
 };
 use crate::scheduler::retries::MaintenanceCall;
-use crate::scheduler::GarbageCollection;
 use loonfs::SharedObjectStore;
 use loonfs_grep::GrepWorkerConfig;
 use loonfs_http::WriterSessions as _;
@@ -305,11 +304,7 @@ async fn a_sweep_folds_every_idle_tail() {
     );
     assert!(server.wal_tail_objects(&positioned).await > 0);
     server.clock.advance_ms(idle_fold_after_ms(&config));
-    server
-        .scheduler
-        .run_sweep(GarbageCollection::Skip)
-        .await
-        .expect("sweep");
+    server.scheduler.run_sweep().await.expect("sweep");
     for namespace_id in [&positioned, &unpositioned, &unheld] {
         assert_eq!(
             server.wal_tail_objects(namespace_id).await,
@@ -461,14 +456,7 @@ async fn session_steps_leave_unheld_namespaces_for_the_sweep() {
     }
     assert!(store.take().is_empty());
     assert!(server.wal_tail_objects(&namespace_id).await > 0);
-    assert_eq!(
-        server
-            .scheduler
-            .run_sweep(GarbageCollection::Collect)
-            .await
-            .expect("sweep"),
-        1
-    );
+    assert_eq!(server.scheduler.run_sweep().await.expect("sweep"), 1);
     assert_eq!(server.wal_tail_objects(&namespace_id).await, 0);
 }
 
