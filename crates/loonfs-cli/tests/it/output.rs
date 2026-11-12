@@ -437,7 +437,7 @@ fn json_all_is_invalid_usage_even_with_a_limit() {
         vec![
             "--json",
             "maintenance",
-            "checkpoint",
+            "snapshot",
             "list",
             "--all",
             "--limit",

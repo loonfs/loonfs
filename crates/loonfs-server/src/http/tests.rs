@@ -480,11 +480,8 @@ async fn every_route_except_health_and_readiness_requires_authorization() {
         ("POST", "/v0/namespaces/demo/uploads/upl_test/abort"),
         ("GET", "/v0/namespaces/demo/uploads/upl_test"),
         ("GET", "/v0/namespaces/demo/changes"),
-        ("GET", "/v0/maintenance/namespaces/demo/checkpoints"),
-        (
-            "GET",
-            "/v0/maintenance/namespaces/demo/checkpoints/snp_test",
-        ),
+        ("GET", "/v0/maintenance/namespaces/demo/snapshots"),
+        ("GET", "/v0/maintenance/namespaces/demo/snapshots/snp_test"),
         ("POST", "/v0/maintenance/namespaces/demo/jobs"),
         ("POST", "/v0/maintenance/store/probe"),
     ];

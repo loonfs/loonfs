@@ -17,7 +17,7 @@ use loonfs_server::{
     TlsServerConfig, TransportConfig,
 };
 use loonfs_test_support::http::raw_agent;
-use loonfs_types::{ErrorCode, ListCheckpointsResponse, ListPathEntriesResponse, NamespaceId};
+use loonfs_types::{ErrorCode, ListPathEntriesResponse, ListSnapshotRecordsResponse, NamespaceId};
 use std::collections::BTreeMap;
 use std::io::Read as _;
 use std::net::SocketAddr;
@@ -39,15 +39,15 @@ pub(crate) async fn collect_path_entries(
     Ok(response)
 }
 
-pub(crate) async fn collect_checkpoints(
+pub(crate) async fn collect_snapshot_records(
     client: &Client,
     namespace_id: &NamespaceId,
-) -> loonfs_client::Result<ListCheckpointsResponse> {
-    let mut pager = client.list_checkpoints(namespace_id);
+) -> loonfs_client::Result<ListSnapshotRecordsResponse> {
+    let mut pager = client.list_snapshot_records(namespace_id);
     let mut response = pager.next().await.expect("first page")?;
     while let Some(page) = pager.next().await {
         let page = page?;
-        response.checkpoints.extend(page.checkpoints);
+        response.snapshots.extend(page.snapshots);
         response.next_cursor = page.next_cursor;
     }
     Ok(response)

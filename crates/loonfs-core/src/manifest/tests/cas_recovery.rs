@@ -783,7 +783,7 @@ async fn a_fold_whose_manifest_put_succeeds_without_an_answer_reports_published(
 }
 
 #[tokio::test]
-async fn a_checkpoint_losing_manifest_publication_keeps_the_winner() {
+async fn a_snapshot_losing_manifest_publication_keeps_the_winner() {
     let directory = tempdir().expect("directory");
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
     let store = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
@@ -802,23 +802,23 @@ async fn a_checkpoint_losing_manifest_publication_keeps_the_winner() {
         OperationSelector::Put,
     );
     blocked.block_next();
-    let losing = create_checkpoint(&blocked, &namespace_id, &context);
+    let losing = create_snapshot(&blocked, &namespace_id, &context);
     let winning = async {
         blocked.wait_until_blocked().await;
-        let checkpoint = create_checkpoint(&store, &namespace_id, &context).await;
+        let snapshot = create_snapshot(&store, &namespace_id, &context).await;
         blocked.release();
-        checkpoint
+        snapshot
     };
     let (losing, winning) = futures::join!(losing, winning);
     let losing = losing.expect("losing publication still keeps the winner");
     let winning = winning.expect("winner");
     let losing = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_snapshot_record(&losing.checkpoint_id)
+        .load_snapshot_record(&losing.snapshot_id)
         .await
         .expect("record")
         .expect("present");
     let winning = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_snapshot_record(&winning.checkpoint_id)
+        .load_snapshot_record(&winning.snapshot_id)
         .await
         .expect("record")
         .expect("present");
@@ -930,9 +930,9 @@ async fn namespace_status_and_change_feed_reload_a_head_behind_the_floor() {
         .write_file_bytes("/docs/hello.txt", b"hello\n", None)
         .await
         .expect("write hello");
-    create_checkpoint(&inner, &namespace_id, &context)
+    create_snapshot(&inner, &namespace_id, &context)
         .await
-        .expect("create checkpoint");
+        .expect("create snapshot");
     crate::test_support::NamespaceFixture::new(
         &inner,
         &namespace_id,

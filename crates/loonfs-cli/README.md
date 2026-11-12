@@ -241,7 +241,7 @@ Snapshot management
 
 Pagination
   ls, grep, revisions, trash, changes, snapshot list, and maintenance
-  checkpoint list return one page by default. --limit sets the total
+  snapshot list return one page by default. --limit sets the total
   maximum across pages, --page-size sets the size of each request, and
   --cursor resumes a previous result. --all fetches every page for human
   output. --json returns a bounded document and can't be combined with
@@ -467,9 +467,9 @@ Maintenance
 
     A pool with no pool record returns `pool_not_found`.
 
-  loonfs maintenance checkpoint list [--limit <n>] [--page-size <n>]
-                               [--cursor <cursor>] [--all] [--jsonl]
-    List every snapshot in checkpoint ID order: user snapshots and the fork
+  loonfs maintenance snapshot list [--limit <n>] [--page-size <n>]
+                             [--cursor <cursor>] [--all] [--jsonl]
+    List every snapshot in snapshot ID order: user snapshots and the fork
     snapshots that forks keep on their source. This is the inventory of what
     keeps old manifests from garbage collection. Expired snapshots remain
     listed until garbage collection deletes them.

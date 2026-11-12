@@ -257,7 +257,7 @@ A stored record that keeps one manifest, and every segment it lists, from being 
 - A "user snapshot" is a snapshot whose owner is `user`. A caller creates it and can delete it, and it may expire. Its ID is the `snapshot_id` that the read routes and forks accept, and the snapshot routes manage only user snapshots. A user snapshot can have an expiry time, or none. An expired user snapshot can't be read or forked, and it stays listed until garbage collection deletes it. For example, a sandbox can create a snapshot before an agent edits it, and then read or fork the snapshot after the edits. A merge or a rebase also creates a user snapshot of the fork while it plans, and deletes the snapshot after its commit.
 - A "fork snapshot" is a snapshot whose owner is `fork`. It keeps the source manifest that a fork reads through, until the fork is retired. A read of the source accepts a fork snapshot's ID as `snapshot_id`, so a client can read the source as it was at the fork point.
 
-The maintenance API's "checkpoint" inventory lists every snapshot of a namespace, user and fork, so an operator can see what keeps old manifests, and the inventory calls each snapshot's ID a `checkpoint_id`. See [Snapshots](format.md#8-snapshots).
+The maintenance API's snapshot inventory lists every snapshot of a namespace, user and fork, so an operator can see what keeps old manifests. See [Snapshots](format.md#8-snapshots).
 
 ### Fork
 

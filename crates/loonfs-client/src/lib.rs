@@ -44,7 +44,7 @@ use transport::{StdMonotonicTimer, TransportRetryPolicy, DEFAULT};
 pub use body::Body;
 pub use config::ClientConfig;
 pub use error::ClientError;
-pub use maintenance::CheckpointsPager;
+pub use maintenance::SnapshotRecordsPager;
 pub use payload::{PayloadSource, PayloadStream};
 pub use query::GrepPager;
 pub use ranged_reads::FileRangeStream;

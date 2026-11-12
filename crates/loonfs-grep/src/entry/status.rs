@@ -20,11 +20,11 @@ use serde::{Deserialize, Serialize};
 pub enum GrepIndexStatus {
     /// The initial build is walking the files that a snapshot keeps.
     Backfilling {
-        /// Namespace sequence the checkpoint captured. The walk ends
+        /// Namespace sequence the snapshot captured. The walk ends
         /// at exactly this state however far the namespace has moved since.
         captured_seq: CommitSeq,
         /// Inode the next backfill step resumes strictly after; absent means
-        /// the start. Checkpoint file enumeration is ordered by ascending
+        /// the start. Snapshot file enumeration is ordered by ascending
         /// inode id, so one id is the whole resume position.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cursor_inode_id: Option<InodeId>,
@@ -102,7 +102,7 @@ impl From<&GrepIndexStatus> for loonfs_types::GrepIndexStatus {
             } => Self::Backfilling {
                 captured_seq: *captured_seq,
                 cursor_inode_id: *cursor_inode_id,
-                checkpoint_id: snapshot_id.clone(),
+                snapshot_id: snapshot_id.clone(),
             },
             GrepIndexStatus::Active {
                 built_through_seq,

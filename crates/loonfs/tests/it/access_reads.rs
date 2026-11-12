@@ -536,31 +536,29 @@ async fn a_stat_batch_returns_readable_unknown_and_unreadable_inodes_in_request_
 }
 
 #[tokio::test]
-async fn listing_a_checkpoints_files_requires_an_administrator() {
+async fn listing_a_snapshots_files_requires_an_administrator() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
     let writer = LoonFs::builder_with_store(store)
-        .writer_id(loonfs_test_support::ids::writer_id(
-            "checkpoint-files-access",
-        ))
+        .writer_id(loonfs_test_support::ids::writer_id("snapshot-files-access"))
         .build()
         .await
         .expect("writer");
-    let namespace_id = namespace_id("checkpoint-files-access");
+    let namespace_id = namespace_id("snapshot-files-access");
     publish_team_and_private_files(&writer, &namespace_id, 1).await;
-    let checkpoint = writer
+    let snapshot = writer
         .open_namespace(&namespace_id)
         .expect("open namespace")
         .with_subject(subject("prn_root"))
-        .create_snapshot("checkpoint")
+        .create_snapshot("snapshot")
         .await
-        .expect("create checkpoint");
+        .expect("create snapshot");
     let list = |principal: &str| {
         writer
             .read_only()
             .with_subject(subject(principal))
             .namespace(&namespace_id)
-            .list_snapshot_files(&checkpoint.snapshot_id)
+            .list_snapshot_files(&snapshot.snapshot_id)
             .page()
     };
 

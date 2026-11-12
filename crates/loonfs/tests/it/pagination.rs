@@ -82,7 +82,7 @@ fn directory_pages_use_canonical_name_key_order() {
         .expect("put file");
     }
     fs.create_snapshot_blocking(&namespace_id)
-        .expect("checkpoint");
+        .expect("snapshot");
 
     let limit = page_limit(2);
     let first = block_on(fs.list(&namespace_id, "/docs").page_limit(limit).page())
@@ -141,7 +141,7 @@ fn file_revision_pages_merge_manifest_and_wal_tail_newest_first() {
     )
     .expect("put v2");
     fs.create_snapshot_blocking(&namespace_id)
-        .expect("checkpoint after v2");
+        .expect("snapshot after v2");
     fs.put_file_with_options_blocking(
         &namespace_id,
         "/doc.txt",
@@ -312,7 +312,7 @@ fn directory_cursor_resumes_across_a_wal_fold() {
     )
     .expect("put later file");
     fs.create_snapshot_blocking(&namespace_id)
-        .expect("checkpoint newer snapshot");
+        .expect("snapshot newer snapshot");
 
     // Materializing the newer state into the manifest does not retire the
     // cursor either: retained rows answer the resume at the current head.

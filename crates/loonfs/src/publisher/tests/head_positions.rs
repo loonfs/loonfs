@@ -261,16 +261,16 @@ async fn a_manifest_published_during_a_publish_moves_the_read_position_when_it_e
         .writer_position(&namespace_id)
         .expect("a position after a commit");
     store.block_next();
-    let (during, checkpoint) = futures::join!(
+    let (during, snapshot) = futures::join!(
         namespace.commit_candidate(CommitCandidate::new(create_directory_request(
             "during", "during"
         ))),
         async {
             store.wait_until_blocked().await;
-            let (checkpoint, ()) = futures::join!(
+            let (snapshot, ()) = futures::join!(
                 namespace.create_snapshot_with_options("during", &options),
                 async {
-                    // The checkpoint's manifest is durable, and its move of
+                    // The snapshot's manifest is durable, and its move of
                     // the position waits for the publish's engine.
                     bounded(Duration::from_secs(10), async {
                         let shared = store.clone() as SharedStore;
@@ -281,7 +281,7 @@ async fn a_manifest_published_during_a_publish_moves_the_read_position_when_it_e
                         }
                     })
                     .await
-                    .expect("the checkpoint publishes its manifest");
+                    .expect("the snapshot publishes its manifest");
                     let kept = writer
                         .core
                         .writer_position(&namespace_id)
@@ -293,7 +293,7 @@ async fn a_manifest_published_during_a_publish_moves_the_read_position_when_it_e
                     store.release();
                 }
             );
-            checkpoint.expect("checkpoint")
+            snapshot.expect("snapshot")
         }
     );
     let during = during.expect("the publish succeeds");
@@ -303,7 +303,7 @@ async fn a_manifest_published_during_a_publish_moves_the_read_position_when_it_e
         .expect("a position after the publish");
     assert_eq!(
         after.read_basis.basis.manifest_no(),
-        checkpoint.snapshot_id.manifest_no()
+        snapshot.snapshot_id.manifest_no()
     );
     assert_eq!(after.read_basis.head.seq, during.committed_seq);
     writer.shutdown().await.expect("shutdown");

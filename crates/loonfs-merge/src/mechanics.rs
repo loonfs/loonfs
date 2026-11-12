@@ -1,7 +1,7 @@
 //! The server operations that the merge loop uses, and their implementation
 //! by the HTTP client.
 
-use loonfs_client::{CheckpointsPager, Client, Result};
+use loonfs_client::{Client, Result, SnapshotRecordsPager};
 use loonfs_types::options::MergeForkOptions;
 use loonfs_types::{
     ActorId, Commit, DeleteNamespaceResponse, NamespaceId, NamespaceMetadata,
@@ -59,8 +59,8 @@ pub trait Mechanics: Send + Sync {
     ) -> impl Future<Output = Result<NamespaceMetadata>> + Send;
 
     /// Lists the namespace's snapshots, whose fork snapshots identify the namespace's
-    /// forks (see [`Client::list_checkpoints`]).
-    fn list_checkpoints(&self, namespace_id: &NamespaceId) -> CheckpointsPager;
+    /// forks (see [`Client::list_snapshot_records`]).
+    fn list_snapshot_records(&self, namespace_id: &NamespaceId) -> SnapshotRecordsPager;
 }
 
 impl Mechanics for Client {
@@ -113,7 +113,7 @@ impl Mechanics for Client {
         Client::get_namespace(self, namespace_id).await
     }
 
-    fn list_checkpoints(&self, namespace_id: &NamespaceId) -> CheckpointsPager {
-        Client::list_checkpoints(self, namespace_id)
+    fn list_snapshot_records(&self, namespace_id: &NamespaceId) -> SnapshotRecordsPager {
+        Client::list_snapshot_records(self, namespace_id)
     }
 }

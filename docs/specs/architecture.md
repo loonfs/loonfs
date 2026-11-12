@@ -101,7 +101,7 @@ A "fork" is a new namespace that starts as a copy of another namespace at one po
 
 A fork joins its source's [pool](glossary.md#pool), the set of namespaces that share one set of content objects, and every member of the pool stores its content objects under the pool's prefix. So the fork reads inherited content and its own content with the same kind of key, and a merge of the fork refers to the fork's content without copying bytes. When the fork publishes its own manifests, the inherited objects stay where they are. The source keeps its fork snapshot for the fork until the fork is deleted and retired.
 
-A caller can also create a snapshot (a user snapshot) to keep one version of a namespace readable, and the read endpoints and forks accept its `snapshot_id`. A snapshot can have an expiry time, or none. Each create call writes a new snapshot with a new ID, so a snapshot's name is a label, not a key (two snapshots can have the same name). The maintenance API's checkpoint inventory lists every snapshot, user snapshots and fork snapshots, so an operator can see what keeps old manifests.
+A caller can also create a snapshot (a user snapshot) to keep one version of a namespace readable, and the read endpoints and forks accept its `snapshot_id`. A snapshot can have an expiry time, or none. Each create call writes a new snapshot with a new ID, so a snapshot's name is a label, not a key (two snapshots can have the same name). The maintenance API's snapshot inventory lists every snapshot, user snapshots and fork snapshots, so an operator can see what keeps old manifests.
 
 | Snapshot | Readable | Removed |
 | --- | --- | --- |

@@ -31,7 +31,7 @@ async fn deleted_namespace_uses_its_deletion_clock_without_publishing_a_manifest
     assert_eq!(reclaimed.next_reclamation_at_ms, None);
     // The first member of a pool has no fork snapshot, so its retirement deletes
     // nothing, and its content stays for the pool's collection.
-    assert_eq!(reclaimed.deleted_checkpoints_by_owner, Default::default());
+    assert_eq!(reclaimed.deleted_snapshots_by_owner, Default::default());
     assert_eq!(store.counts().deletes, 0);
     for key in &keys {
         assert!(store.head(key).await.expect("content").is_some());
@@ -109,7 +109,7 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
         .expect("release fork snapshot with retained session");
     // A fork's retirement deletes its fork snapshot and nothing else, and makes
     // no request under its pool's prefix.
-    assert_eq!(first.deleted_checkpoints_by_owner.fork, 1);
+    assert_eq!(first.deleted_snapshots_by_owner.fork, 1);
     assert_eq!(store.take(), []);
     assert!(!snapshot_record_exists(&store, &source, source_snapshot).await);
     assert!(read_upload_session(&store, &target, &upload.upload_id)
@@ -136,7 +136,7 @@ async fn retired_fork_reclaims_without_reading_inherited_segments() {
         .gc(&options(), &context(expired_at_ms).clock())
         .await
         .expect("repeat retirement after source collection");
-    assert_eq!(repeated.deleted_checkpoints_by_owner.fork, 0);
+    assert_eq!(repeated.deleted_snapshots_by_owner.fork, 0);
     assert!(store
         .snapshot()
         .iter()

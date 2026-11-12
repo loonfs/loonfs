@@ -1,4 +1,4 @@
-//! Checkpoint secondary-index parity and manifest descriptor validation.
+//! Snapshot secondary-index parity and manifest descriptor validation.
 
 use super::*;
 use loonfs_test_support::stores::replace_object;
@@ -162,9 +162,9 @@ async fn seed_compacted_base_with_a_delta_run(store: &LocalFsStore, namespace_id
         .write_file_bytes("/docs/first.txt", b"first\n", None)
         .await
         .expect("write the seed file");
-    create_checkpoint(store, namespace_id, &context)
+    create_snapshot(store, namespace_id, &context)
         .await
-        .expect("checkpoint the seed");
+        .expect("snapshot the seed");
     drain_compaction(
         store,
         namespace_id,
@@ -178,9 +178,9 @@ async fn seed_compacted_base_with_a_delta_run(store: &LocalFsStore, namespace_id
         .write_file_bytes("/docs/second.txt", b"second\n", None)
         .await
         .expect("write a file above the base");
-    create_checkpoint(store, namespace_id, &context)
+    create_snapshot(store, namespace_id, &context)
         .await
-        .expect("checkpoint a delta run above the base");
+        .expect("snapshot a delta run above the base");
 }
 
 /// Loads a copy of the current manifest payload.
@@ -221,9 +221,9 @@ async fn a_base_rebuild_drops_what_the_floor_covers_and_keeps_what_it_does_not()
         .delete_path("/docs/tmp.txt", None)
         .await
         .expect("delete tmp");
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("create checkpoint");
+        .expect("create snapshot");
     let advanced = crate::test_support::NamespaceFixture::new(
         &store,
         &namespace_id,
@@ -249,11 +249,11 @@ async fn a_base_rebuild_drops_what_the_floor_covers_and_keeps_what_it_does_not()
             .write_file_bytes(&format!("/docs/file-{round}.txt"), b"body\n", None)
             .await
             .expect("write");
-        create_checkpoint(&store, &namespace_id, &context)
+        create_snapshot(&store, &namespace_id, &context)
             .await
-            .expect("create checkpoint");
+            .expect("create snapshot");
     }
-    // Checkpoints only append; dropping happens when compaction rewrites
+    // Snapshots only append; dropping happens when compaction rewrites
     // the runs against the advanced floor.
     let compacted_manifest_no = drain_compaction(
         &store,
@@ -511,16 +511,15 @@ async fn manifest_load_rejects_a_child_index_with_more_rows_than_the_slot_index(
         .write_file_bytes("/docs/hello.txt", b"hello\n", None)
         .await
         .expect("write hello");
-    let checkpoint = create_checkpoint(&store, &namespace_id, &context)
+    let snapshot = create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("create checkpoint");
+        .expect("create snapshot");
 
     // The file's revision wrote a summary row to the slot index alone.
-    let manifest =
-        load_manifest_state_for_inspection(&store, &namespace_id, checkpoint.manifest_no)
-            .await
-            .expect("a slot index with summary rows loads")
-            .manifest;
+    let manifest = load_manifest_state_for_inspection(&store, &namespace_id, snapshot.manifest_no)
+        .await
+        .expect("a slot index with summary rows loads")
+        .manifest;
     let mut payload = manifest.payload().clone();
     let rows_of = |payload: &NamespaceManifestPayload, family| {
         payload
@@ -577,14 +576,13 @@ async fn manifest_load_rejects_unequal_commit_and_receipt_counts() {
         .write_file_bytes("/docs/hello.txt", b"hello\n", None)
         .await
         .expect("write hello");
-    let checkpoint = create_checkpoint(&store, &namespace_id, &context)
+    let snapshot = create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("create checkpoint");
-    let manifest =
-        load_manifest_state_for_inspection(&store, &namespace_id, checkpoint.manifest_no)
-            .await
-            .expect("load manifest")
-            .manifest;
+        .expect("create snapshot");
+    let manifest = load_manifest_state_for_inspection(&store, &namespace_id, snapshot.manifest_no)
+        .await
+        .expect("load manifest")
+        .manifest;
     let mut payload = manifest.payload().clone();
     let descriptor = payload
         .runs
@@ -628,7 +626,7 @@ async fn manifest_rejects_segment_whose_index_fails_its_descriptor_checksum() {
         .await
         .expect("write hello");
 
-    let compacted_manifest_no = checkpoint_then_compact(
+    let compacted_manifest_no = snapshot_then_compact(
         &store,
         &namespace_id,
         &context,
@@ -685,11 +683,11 @@ async fn manifest_load_names_the_segment_codec_for_a_pre_commit_id_row() {
         .write_file_bytes("/docs/hello.txt", b"hello\n", None)
         .await
         .expect("write hello");
-    let checkpoint = create_checkpoint(&store, &namespace_id, &context)
+    let snapshot = create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("checkpoint");
+        .expect("snapshot");
     let materialized =
-        load_manifest_state_for_inspection(&store, &namespace_id, checkpoint.manifest_no)
+        load_manifest_state_for_inspection(&store, &namespace_id, snapshot.manifest_no)
             .await
             .expect("load manifest before replacing a row");
 
@@ -777,7 +775,7 @@ async fn manifest_writes_and_validates_direntry_child_bind_index() {
         .await
         .expect("write hello");
 
-    let manifest_no = checkpoint_then_compact(
+    let manifest_no = snapshot_then_compact(
         &store,
         &namespace_id,
         &context,
@@ -834,7 +832,7 @@ async fn manifest_rejects_child_bind_index_that_diverges_from_canonical_binds() 
         .await
         .expect("write other");
 
-    let manifest_no = checkpoint_then_compact(
+    let manifest_no = snapshot_then_compact(
         &store,
         &namespace_id,
         &context,
@@ -903,7 +901,7 @@ async fn lookups_find_rows_in_a_segment_whose_last_row_closed_a_block() {
             .expect("write file");
     }
     // Compact the delta runs so every inode row is written to one base segment.
-    let manifest_no = checkpoint_then_compact(
+    let manifest_no = snapshot_then_compact(
         &store,
         &namespace_id,
         &context,
@@ -1003,9 +1001,9 @@ async fn manifest_validation_rejects_unsupported_segment_encoding() {
         .write_file_bytes("/hello.txt", b"hello", None)
         .await
         .expect("write file");
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("checkpoint");
+        .expect("snapshot");
     let manifest = crate::test_support::namespace_store(&store, &namespace_id)
         .load_current_manifest()
         .await
@@ -1053,9 +1051,9 @@ async fn manifest_load_rejects_descriptors_off_the_frozen_segment_layout() {
         .write_file_bytes("/docs/hello.txt", b"hello\n", None)
         .await
         .expect("write hello");
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("create checkpoint");
+        .expect("create snapshot");
     let manifest_number = current_manifest_number(&store, &namespace_id).await;
     let segments =
         load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest_number)
@@ -1135,9 +1133,9 @@ async fn an_extent_filter_belongs_to_layout_segments_alone() {
         .write_file_bytes("/docs/hello.txt", b"hello\n", None)
         .await
         .expect("write hello");
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("create checkpoint");
+        .expect("create snapshot");
     let manifest_number = current_manifest_number(&store, &namespace_id).await;
     let payload =
         load_manifest_segments_for_inspection(&store, None, &namespace_id, &manifest_number)

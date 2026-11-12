@@ -138,7 +138,7 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
         .await
 }
 
-pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
+pub(crate) async fn create_snapshot<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &WriterAt,

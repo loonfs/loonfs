@@ -82,8 +82,8 @@ pub(crate) const GET_NEXT_MERGE_RANGE: Operation = Operation::retry(Method::GET)
 pub(crate) const REBASE_FORK: Operation = Operation::retry(Method::POST);
 pub(crate) const DELETE_NAMESPACE: Operation = Operation::once(Method::DELETE);
 pub(crate) const GET_NAMESPACE_DIAGNOSTICS: Operation = Operation::retry(Method::GET);
-pub(crate) const LIST_CHECKPOINTS: Operation = Operation::retry(Method::GET);
-pub(crate) const GET_CHECKPOINT: Operation = Operation::retry(Method::GET);
+pub(crate) const LIST_SNAPSHOT_RECORDS: Operation = Operation::retry(Method::GET);
+pub(crate) const GET_SNAPSHOT_RECORD: Operation = Operation::retry(Method::GET);
 pub(crate) const RUN_MAINTENANCE_JOB: Operation = Operation::once(Method::POST);
 pub(crate) const RUN_POOL_MAINTENANCE_JOB: Operation = Operation::once(Method::POST);
 pub(crate) const PROBE_STORE: Operation = Operation::once(Method::POST);
@@ -143,8 +143,8 @@ mod tests {
         ("rebase_fork", REBASE_FORK),
         ("delete_namespace", DELETE_NAMESPACE),
         ("get_namespace_diagnostics", GET_NAMESPACE_DIAGNOSTICS),
-        ("list_checkpoints", LIST_CHECKPOINTS),
-        ("get_checkpoint", GET_CHECKPOINT),
+        ("list_snapshot_records", LIST_SNAPSHOT_RECORDS),
+        ("get_snapshot_record", GET_SNAPSHOT_RECORD),
         ("run_maintenance_job", RUN_MAINTENANCE_JOB),
         ("run_pool_maintenance_job", RUN_POOL_MAINTENANCE_JOB),
         ("probe_store", PROBE_STORE),

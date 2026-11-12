@@ -1,7 +1,7 @@
 //! The derived trash family: its reducer, the compaction that collapses
 //! cancelled deletions, and the bounded trash listing it backs.
 //!
-//! The family is materialized by checkpoint publication, so it lives with the
+//! The family is materialized by snapshot publication, so it lives with the
 //! other manifest-family tests; the listing is its only consumer and is
 //! exercised here against real manifests rather than in isolation.
 
@@ -580,9 +580,9 @@ async fn the_family_backed_listing_equals_the_old_tombstone_walk_on_every_step()
         // Half the steps materialize into a manifest, so the comparison sees
         // both a WAL-tail-only listing and a durable one.
         if step % 2 == 1 {
-            create_checkpoint(&store, &namespace_id, &context)
+            create_snapshot(&store, &namespace_id, &context)
                 .await
-                .expect("create checkpoint");
+                .expect("create snapshot");
             assert_listing_matches_the_old_walk(&store, &namespace_id, step).await;
         }
     }
@@ -673,7 +673,7 @@ async fn the_listing_is_ordered_oldest_deletion_first() {
             EntryInodeKind::Directory
         ]
     );
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
         .expect("fold deletions");
     assert_eq!(trash_entries(&store, &namespace_id, 10).await, entries);
@@ -709,9 +709,9 @@ async fn trash_pages_resume_after_the_position_the_cursor_names() {
             .await
             .expect("delete path");
     }
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("create checkpoint");
+        .expect("create snapshot");
 
     let first = trash_page(&store, &namespace_id, 2, None).await;
     assert_eq!(
@@ -836,9 +836,9 @@ async fn delete_below_the_floor<S: ObjectStore>(
         )
         .await;
     }
-    create_checkpoint(store, namespace_id, context)
+    create_snapshot(store, namespace_id, context)
         .await
-        .expect("create checkpoint");
+        .expect("create snapshot");
     crate::test_support::NamespaceFixture::new(
         store,
         namespace_id,
@@ -993,9 +993,9 @@ async fn a_trash_page_costs_the_page_not_the_namespaces_deletion_history() {
                 .await
                 .expect("delete path");
         }
-        create_checkpoint(&store, &namespace_id, &context)
+        create_snapshot(&store, &namespace_id, &context)
             .await
-            .expect("create checkpoint");
+            .expect("create snapshot");
         drain_compaction(
             &store,
             &namespace_id,
@@ -1108,9 +1108,9 @@ async fn a_deletion_committed_after_the_last_manifest_lists_immediately() {
         .delete_path("/durable.txt", None)
         .await
         .expect("delete path");
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("create checkpoint");
+        .expect("create snapshot");
 
     // This pair is committed after the manifest and is only in the WAL tail.
     write_test_file(
@@ -1196,9 +1196,9 @@ async fn a_change_feed_page_costs_the_page_not_the_namespaces_history() {
             )
             .await;
         }
-        create_checkpoint(&store, &namespace_id, &context)
+        create_snapshot(&store, &namespace_id, &context)
             .await
-            .expect("create checkpoint");
+            .expect("create snapshot");
         drain_compaction(
             &store,
             &namespace_id,

@@ -43,27 +43,26 @@ async fn a_snapshot_of_a_manifest_replaced_before_verification_is_refused_and_de
             .await
             .expect("selected manifest");
         store.block_next();
-        let (created, ()) =
-            tokio::join!(create_checkpoint(&store, &namespace_id, &context), async {
-                store.wait_until_blocked().await;
-                if advance_head {
-                    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
-                        .write_file_bytes("/three", b"data", None)
-                        .await
-                        .expect("advance head");
-                    crate::test_support::namespace_store(&store, &namespace_id)
-                        .fold_wal()
-                        .await
-                        .expect("fold newer head");
-                }
-                let current =
-                    compact_and_collect_replaced_segments(&store, &namespace_id, &selected).await;
-                assert_eq!(
-                    selected.manifest().head_seq != current.head_seq,
-                    advance_head
-                );
-                store.release();
-            });
+        let (created, ()) = tokio::join!(create_snapshot(&store, &namespace_id, &context), async {
+            store.wait_until_blocked().await;
+            if advance_head {
+                crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
+                    .write_file_bytes("/three", b"data", None)
+                    .await
+                    .expect("advance head");
+                crate::test_support::namespace_store(&store, &namespace_id)
+                    .fold_wal()
+                    .await
+                    .expect("fold newer head");
+            }
+            let current =
+                compact_and_collect_replaced_segments(&store, &namespace_id, &selected).await;
+            assert_eq!(
+                selected.manifest().head_seq != current.head_seq,
+                advance_head
+            );
+            store.release();
+        });
         let error = created.expect_err("the selected manifest is no longer current");
         assert_eq!(error.code(), ErrorCode::CheckpointUnavailable);
         assert!(store
@@ -226,11 +225,11 @@ async fn snapshot_verification_checks_manifest_identity_with_only_the_current_ma
     bootstrap_namespace(&store, &namespace_id, &context)
         .await
         .expect("bootstrap");
-    let checkpoint = create_checkpoint(&store, &namespace_id, &context)
+    let snapshot = create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("checkpoint");
+        .expect("snapshot");
     let record = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_snapshot_record(&checkpoint.checkpoint_id)
+        .load_snapshot_record(&snapshot.snapshot_id)
         .await
         .expect("load snapshot")
         .expect("snapshot exists")
@@ -286,7 +285,7 @@ async fn a_snapshot_write_that_is_stored_and_fails_its_read_back_leaves_no_snaps
         .await
         .expect("bootstrap");
     store.fail_next(2);
-    let error = create_checkpoint(&store, &namespace_id, &context)
+    let error = create_snapshot(&store, &namespace_id, &context)
         .await
         .expect_err("an unconfirmed snapshot write fails creation");
     assert_matches!(error, CoreError::Store { .. });

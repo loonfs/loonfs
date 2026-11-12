@@ -351,12 +351,12 @@ fn a_restore_of_an_ancestor_keeps_independently_deleted_children_hidden() {
 }
 
 #[test]
-fn a_restore_survives_checkpoints_and_reopen_in_both_orders() {
+fn a_restore_survives_snapshots_and_reopen_in_both_orders() {
     let temp_dir = tempdir().expect("tempdir");
     let object_store = store(temp_dir.path());
     let namespace_id = namespace_id("demo");
 
-    // Order one: delete + restore in the WAL tail, then checkpoint,
+    // Order one: delete + restore in the WAL tail, then snapshot,
     // then reopen cold from object storage.
     let deletion = {
         let fs = open_runtime(object_store.clone(), "restore-persist-a");
@@ -391,13 +391,13 @@ fn a_restore_survives_checkpoints_and_reopen_in_both_orders() {
             &loonfs_test_support::test_actor(),
             &restore_deleted_at("/docs/report.txt"),
         ))
-        .expect("restore before checkpoint");
+        .expect("restore before snapshot");
         // The default threshold (32 WAL objects) would answer NotNeeded for
         // this short history; force the fold so reopen reads Set and
         // Revoke rows out of durable segments, not WAL replay.
         let step = fs
             .maintain_metadata_blocking(&namespace_id, metadata_options(1))
-            .expect("checkpoint the revoke into durable segments");
+            .expect("snapshot the revoke into durable segments");
         assert_matches!(
             step.wal_fold,
             Some(loonfs::FoldWalResponse {
@@ -413,12 +413,12 @@ fn a_restore_survives_checkpoints_and_reopen_in_both_orders() {
         let fs = open_runtime(object_store.clone(), "restore-persist-b");
         assert_eq!(
             fs.read_file_blocking(&namespace_id, "/docs/report.txt")
-                .expect("recovered file survives checkpoint and reopen")
+                .expect("recovered file survives snapshot and reopen")
                 .bytes,
             b"persisted"
         );
 
-        // Order two: delete, checkpoint, reopen, THEN restore — the
+        // Order two: delete, snapshot, reopen, THEN restore — the
         // revoke must resolve a deletion that lives in durable segments,
         // not the WAL tail.
         let inode_id = fs
@@ -436,7 +436,7 @@ fn a_restore_survives_checkpoints_and_reopen_in_both_orders() {
         assert!(second_deletion > deletion);
         let step = fs
             .maintain_metadata_blocking(&namespace_id, metadata_options(1))
-            .expect("checkpoint the deletion");
+            .expect("snapshot the deletion");
         assert_matches!(
             step.wal_fold,
             Some(loonfs::FoldWalResponse {
@@ -457,10 +457,10 @@ fn a_restore_survives_checkpoints_and_reopen_in_both_orders() {
             &loonfs_test_support::test_actor(),
             &restore_deleted_at("/docs/report.txt"),
         ))
-        .expect("restore a checkpointed deletion after reopen");
+        .expect("restore a deletion the snapshot captured after reopen");
         let step = fs
             .maintain_metadata_blocking(&namespace_id, metadata_options(1))
-            .expect("checkpoint the second revoke");
+            .expect("snapshot the second revoke");
         assert_matches!(
             step.wal_fold,
             Some(loonfs::FoldWalResponse {

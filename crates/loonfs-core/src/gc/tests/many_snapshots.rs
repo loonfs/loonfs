@@ -25,11 +25,11 @@ async fn one_collection_deletes_an_aged_upload_and_every_expired_snapshot_among_
         .await
         .expect("bootstrap")
         .pool_id;
-    let permanent = create_checkpoint(&store, &namespace_id, &setup)
+    let permanent = create_snapshot(&store, &namespace_id, &setup)
         .await
         .expect("permanent snapshot");
     let basis = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_snapshot_record(&permanent.checkpoint_id)
+        .load_snapshot_record(&permanent.snapshot_id)
         .await
         .expect("snapshot")
         .expect("record")
@@ -67,8 +67,8 @@ async fn one_collection_deletes_an_aged_upload_and_every_expired_snapshot_among_
         .gc(&options(), &now.clock())
         .await
         .expect("complete collection");
-    assert_eq!(report.deleted_checkpoints_by_owner.user, 1025);
-    assert_eq!(report.retained.checkpoint_not_deletable, 1);
+    assert_eq!(report.deleted_snapshots_by_owner.user, 1025);
+    assert_eq!(report.retained.snapshot_not_deletable, 1);
     assert_eq!(store.counts().deletes, 1025);
     let operations = store.take();
     assert_eq!(
@@ -132,6 +132,6 @@ async fn one_collection_deletes_an_aged_upload_and_every_expired_snapshot_among_
             .list_prefix(&snapshot_prefix(&namespace_id))
             .await
             .expect("remaining snapshots"),
-        vec![snapshot_record(&namespace_id, &permanent.checkpoint_id)],
+        vec![snapshot_record(&namespace_id, &permanent.snapshot_id)],
     );
 }

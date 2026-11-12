@@ -148,7 +148,7 @@ impl Eq for Observation {}
 
 /// Reads the wall clock as unix milliseconds.
 ///
-/// Every timestamp that reaches durable state — commit, checkpoint, upload
+/// Every timestamp that reaches durable state — commit, snapshot, upload
 /// session, maintenance schedule — is stamped here and then passed on as a
 /// value, so replay below this boundary stays deterministic.
 pub fn current_time_ms() -> u64 {

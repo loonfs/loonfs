@@ -79,13 +79,13 @@ impl<S: ObjectStore + Clone> GrepSteps<'_, S> {
         let planned = match planned {
             Ok(planned) => planned,
             Err(error) if rebootstrap_required(&error) => {
-                let Some(checkpoint) = self.start_backfill(Some(&entry)).await? else {
+                let Some(snapshot) = self.start_backfill(Some(&entry)).await? else {
                     return Ok(GrepBuildOutcome::Superseded);
                 };
                 return self
                     .finish_step(
                         GrepBuildOutcome::BackfillRestarted {
-                            captured_seq: checkpoint.captured_seq,
+                            captured_seq: snapshot.captured_seq,
                         },
                         GrepBuildOutcome::Superseded,
                     )

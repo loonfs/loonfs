@@ -1,4 +1,4 @@
-//! The checkpoint inventory, maintenance jobs, store probes, and grep
+//! The snapshot inventory, maintenance jobs, store probes, and grep
 //! maintenance.
 
 use crate::operations;
@@ -6,18 +6,18 @@ use crate::transport::QueryBuilder;
 use crate::{Client, ClientError, Result};
 use loonfs_types::options::GcOptions;
 use loonfs_types::{
-    headers, ActorId, AdvanceRetentionRequest, AdvanceRetentionResponse, Checkpoint, GcRequest,
-    GcResponse, ListCheckpointsResponse, MetadataMaintenanceRequest, MetadataMaintenanceResponse,
+    headers, ActorId, AdvanceRetentionRequest, AdvanceRetentionResponse, GcRequest, GcResponse,
+    ListSnapshotRecordsResponse, MetadataMaintenanceRequest, MetadataMaintenanceResponse,
     NamespaceDiagnostics, NamespaceId, PageRequest, Pager, PoolGcResponse, PoolId, PrincipalId,
     RecoverAdministratorRequest, RecoverAdministratorResponse, RunMaintenanceJobRequest,
     RunMaintenanceJobResponse, RunPoolMaintenanceJobRequest, RunPoolMaintenanceJobResponse,
-    SetRetentionWindowRequest, SetRetentionWindowResponse, SnapshotId,
+    SetRetentionWindowRequest, SetRetentionWindowResponse, SnapshotId, SnapshotRecord,
 };
 use loonfs_types::{GrepIndex, StoreProbeRequest, StoreProbeResponse};
 use std::num::NonZeroU64;
 
-/// A pager over existing checkpoints.
-pub type CheckpointsPager = Pager<ListCheckpointsResponse, ClientError>;
+/// A pager over existing snapshots.
+pub type SnapshotRecordsPager = Pager<ListSnapshotRecordsResponse, ClientError>;
 
 /// Returns the response of the job that a typed maintenance method asked
 /// for, or a protocol error when the server ran a different one.
@@ -47,45 +47,45 @@ impl Client {
             .await
     }
 
-    /// Lists every snapshot as a checkpoint, including fork snapshots and expired
+    /// Lists every snapshot, including fork snapshots and expired
     /// snapshots that garbage collection has not yet deleted (maintenance API
     /// group).
-    pub fn list_checkpoints(&self, namespace_id: &NamespaceId) -> CheckpointsPager {
+    pub fn list_snapshot_records(&self, namespace_id: &NamespaceId) -> SnapshotRecordsPager {
         Pager::with_state(
             (self.clone(), namespace_id.clone()),
             |(client, namespace_id), request| async move {
-                client.checkpoints_page(&namespace_id, request).await
+                client.snapshot_records_page(&namespace_id, request).await
             },
         )
     }
 
-    async fn checkpoints_page(
+    async fn snapshot_records_page(
         &self,
         namespace_id: &NamespaceId,
         request: PageRequest<String>,
-    ) -> Result<ListCheckpointsResponse> {
+    ) -> Result<ListSnapshotRecordsResponse> {
         let mut query = QueryBuilder::new(format!(
-            "{}/v0/maintenance/namespaces/{namespace_id}/checkpoints",
+            "{}/v0/maintenance/namespaces/{namespace_id}/snapshots",
             self.base_url
         ));
         query.pagination(Some(request.limit.get()), request.cursor.as_deref());
-        self.send_json(self.request(operations::LIST_CHECKPOINTS, &query.build()))
+        self.send_json(self.request(operations::LIST_SNAPSHOT_RECORDS, &query.build()))
             .await
     }
 
-    /// Returns one existing snapshot of any owner, as the checkpoint listing returns it,
+    /// Returns one existing snapshot of any owner, as the snapshot inventory returns it,
     /// through the maintenance API. A missing id returns
     /// `snapshot_not_found`.
-    pub async fn get_checkpoint(
+    pub async fn get_snapshot_record(
         &self,
         namespace_id: &NamespaceId,
-        checkpoint_id: &SnapshotId,
-    ) -> Result<Checkpoint> {
+        snapshot_id: &SnapshotId,
+    ) -> Result<SnapshotRecord> {
         let url = format!(
-            "{}/v0/maintenance/namespaces/{namespace_id}/checkpoints/{checkpoint_id}",
+            "{}/v0/maintenance/namespaces/{namespace_id}/snapshots/{snapshot_id}",
             self.base_url
         );
-        self.send_json(self.request(operations::GET_CHECKPOINT, &url))
+        self.send_json(self.request(operations::GET_SNAPSHOT_RECORD, &url))
             .await
     }
 

@@ -33,11 +33,11 @@ use std::sync::Arc;
 /// If the snapshot expires before backfill finishes, reads through it
 /// return `snapshot_not_found` and the worker restarts from a fresh
 /// snapshot. The worker does not extend an old snapshot.
-pub(crate) const GREP_BACKFILL_CHECKPOINT_TTL_MS: NonZeroU64 =
+pub(crate) const GREP_BACKFILL_SNAPSHOT_TTL_MS: NonZeroU64 =
     NonZeroU64::new(24 * 60 * 60 * 1000).expect("a day is a nonzero lifetime");
 
-const GREP_BACKFILL_CHECKPOINT_NAME: &str = "loonfs-grep-backfill";
-/// Content bytes one backfill step ingests before it checkpoints its cursor.
+const GREP_BACKFILL_SNAPSHOT_NAME: &str = "loonfs-grep-backfill";
+/// Content bytes one backfill step ingests before it records its cursor.
 /// This budgets ingestion, not index reorganization — it happens to share a value
 /// with the metadata compaction input limit, and must stay independent
 /// so a compaction policy change cannot silently change backfill behavior.
@@ -269,7 +269,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             });
         }
         let expected = pending.entry.clone();
-        let Some(checkpoint) = steps.start_backfill(expected.as_ref()).await? else {
+        let Some(snapshot) = steps.start_backfill(expected.as_ref()).await? else {
             // Another process changed the entry while the snapshot was
             // created.
             return Ok(match steps.pending().await?.enabled_entry() {
@@ -283,7 +283,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             GrepPublishOutcome::Superseded => GrepEnableOutcome::Superseded,
             GrepPublishOutcome::Published | GrepPublishOutcome::NothingPending => {
                 GrepEnableOutcome::Enabled {
-                    state: backfill_status(&checkpoint),
+                    state: backfill_status(&snapshot),
                 }
             }
         })
@@ -347,7 +347,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         })
     }
 
-    async fn create_backfill_checkpoint(
+    async fn create_backfill_snapshot(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<loonfs_types::Snapshot> {
@@ -355,9 +355,9 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             .writer
             .open_namespace(namespace_id)?
             .create_snapshot_with_options(
-                GREP_BACKFILL_CHECKPOINT_NAME,
+                GREP_BACKFILL_SNAPSHOT_NAME,
                 &CreateSnapshotOptions {
-                    ttl_ms: Some(GREP_BACKFILL_CHECKPOINT_TTL_MS),
+                    ttl_ms: Some(GREP_BACKFILL_SNAPSHOT_TTL_MS),
                 },
             )
             .await?)
@@ -415,19 +415,19 @@ impl<S: ObjectStore + Clone> GrepSteps<'_, S> {
         if self.is_changed() && self.publish().await? == GrepPublishOutcome::Superseded {
             return Ok(None);
         }
-        let checkpoint = self
+        let snapshot = self
             .worker
-            .create_backfill_checkpoint(&self.namespace_id)
+            .create_backfill_snapshot(&self.namespace_id)
             .await?;
         self.reload_unless_changed();
         let pending = self.pending().await?;
         if pending.entry.as_ref() != expected {
             self.worker
-                .delete_snapshot_if_present(&self.namespace_id, &checkpoint.snapshot_id)
+                .delete_snapshot_if_present(&self.namespace_id, &snapshot.snapshot_id)
                 .await;
             return Ok(None);
         }
-        pending.record_created_snapshot(checkpoint.snapshot_id.clone());
+        pending.record_created_snapshot(snapshot.snapshot_id.clone());
         let previous_snapshot_id = pending
             .entry
             .as_ref()
@@ -440,19 +440,19 @@ impl<S: ObjectStore + Clone> GrepSteps<'_, S> {
             |entry| (entry.reorganize().cloned(), entry.runs().to_vec()),
         );
         pending.set_entry(
-            GrepEntry::new(backfill_status(&checkpoint), reorganize, runs)
+            GrepEntry::new(backfill_status(&snapshot), reorganize, runs)
                 .expect("a backfill should keep a valid entry's segments"),
         );
-        Ok(Some(checkpoint))
+        Ok(Some(snapshot))
     }
 }
 
-/// The status of a backfill that starts at the beginning of `checkpoint`.
-fn backfill_status(checkpoint: &loonfs_types::Snapshot) -> GrepIndexStatus {
+/// The status of a backfill that starts at the beginning of `snapshot`.
+fn backfill_status(snapshot: &loonfs_types::Snapshot) -> GrepIndexStatus {
     GrepIndexStatus::Backfilling {
-        captured_seq: checkpoint.captured_seq,
+        captured_seq: snapshot.captured_seq,
         cursor_inode_id: None,
-        snapshot_id: checkpoint.snapshot_id.clone(),
+        snapshot_id: snapshot.snapshot_id.clone(),
     }
 }
 

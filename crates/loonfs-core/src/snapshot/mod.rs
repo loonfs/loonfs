@@ -17,8 +17,8 @@ mod tests;
 pub use self::files::{
     ListSnapshotFilesOptions, SnapshotFile, SnapshotFilesPage, SnapshotFilesPageCursor,
 };
-pub use self::list::{CheckpointPageCursor, SnapshotPageCursor};
+pub use self::list::{SnapshotPageCursor, SnapshotRecordPageCursor};
 
 pub(crate) use self::lifecycle::ensure_unexpired;
 pub(crate) use self::read_basis::load_snapshot_basis;
-pub(crate) use self::summary::{checkpoint_summary, snapshot_summary, user_snapshot};
+pub(crate) use self::summary::{snapshot_record_summary, snapshot_summary, user_snapshot};

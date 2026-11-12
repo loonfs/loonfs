@@ -24,7 +24,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .expect("eligible namespace should have a tombstone");
         if let Some(basis) = &tombstone.fork_basis {
             if self.delete_source_snapshot(basis).await? {
-                report.deleted_checkpoints_by_owner.fork += 1;
+                report.deleted_snapshots_by_owner.fork += 1;
             }
         }
         Ok(())

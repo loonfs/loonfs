@@ -1,5 +1,5 @@
 //! The maintenance capability of a writable runtime: namespace diagnostics,
-//! operator checkpoints, WAL folds, metadata compaction, garbage
+//! operator snapshots, WAL folds, metadata compaction, garbage
 //! collection, retention, and the publications of an extension's entry.
 //!
 //! Derived indexes aren't in this module or this crate. `loonfs-grep` builds
@@ -7,21 +7,21 @@
 //! publishes its entry through [`Maintenance::publish_extension`], and its
 //! hosts drive it.
 
-use crate::pagers::{decode_page_request, encode_next_cursor, CheckpointsPager};
+use crate::pagers::{decode_page_request, encode_next_cursor, SnapshotRecordsPager};
 use crate::publisher::{FoldWhen, NamespaceChange, NamespaceFold, PublisherRegistry};
 use crate::runtime_core::RuntimeCore;
 use crate::trace::{self, operation_span};
 use crate::{
-    AdvanceRetentionFloorOptions, AdvanceRetentionResponse, Checkpoint, FoldWalResponse,
-    ListCheckpointsResponse, MaintainMetadataOptions, MetadataMaintenanceOutcome,
+    AdvanceRetentionFloorOptions, AdvanceRetentionResponse, FoldWalResponse,
+    ListSnapshotRecordsResponse, MaintainMetadataOptions, MetadataMaintenanceOutcome,
     MetadataMaintenanceResponse, NamespaceDiagnostics, NamespaceId, PoolId,
-    SetRetentionWindowResponse, SnapshotId, WriterState,
+    SetRetentionWindowResponse, SnapshotId, SnapshotRecord, WriterState,
 };
 use crate::{Error, Result};
 use loonfs_core::control::{LoadedManifest, NamespaceStorageDiagnostics};
 use loonfs_core::{
-    CheckpointPageCursor, ExtensionBasis, ExtensionPublication, FloorObjectReport,
-    MetadataCompactionCancellation, RetentionPlan,
+    ExtensionBasis, ExtensionPublication, FloorObjectReport, MetadataCompactionCancellation,
+    RetentionPlan, SnapshotRecordPageCursor,
 };
 use loonfs_types::format::manifest::ExtensionEntry;
 use loonfs_types::{u64_from_usize, CommitSeq, ExtensionName, PageRequest, RunNo, WriterId};
@@ -39,7 +39,7 @@ pub use reports::{
     MetadataMaintenanceReport,
 };
 
-/// Explicit maintenance: namespace diagnostics, operator checkpoints, WAL
+/// Explicit maintenance: namespace diagnostics, operator snapshots, WAL
 /// folds, metadata compaction, garbage collection, and retention.
 ///
 /// Get one from [`LoonFs::maintenance`](crate::LoonFs::maintenance). Each
@@ -436,38 +436,38 @@ impl Maintenance {
         .await
     }
 
-    /// Lists every snapshot as a checkpoint, in ascending id order, including
+    /// Lists every snapshot, in ascending id order, including
     /// fork snapshots and expired snapshots that garbage collection has not yet
     /// deleted. This is the inventory of what keeps manifests from
     /// collection. The cursor resumes a live listing.
-    pub fn list_checkpoints(&self, namespace_id: &NamespaceId) -> CheckpointsPager {
+    pub fn list_snapshot_records(&self, namespace_id: &NamespaceId) -> SnapshotRecordsPager {
         loonfs_types::Pager::with_state(
             (self.clone(), namespace_id.clone()),
             |(maintenance, namespace_id), request| async move {
                 maintenance
-                    .checkpoints_page(&namespace_id, decode_page_request(request)?)
+                    .snapshot_records_page(&namespace_id, decode_page_request(request)?)
                     .await
             },
         )
     }
 
-    async fn checkpoints_page(
+    async fn snapshot_records_page(
         &self,
         namespace_id: &NamespaceId,
-        request: PageRequest<CheckpointPageCursor>,
-    ) -> Result<ListCheckpointsResponse> {
+        request: PageRequest<SnapshotRecordPageCursor>,
+    ) -> Result<ListSnapshotRecordsResponse> {
         trace::in_operation(
-            operation_span!(self.core, "list_checkpoints", namespace_id),
+            operation_span!(self.core, "list_snapshot_records", namespace_id),
             async {
                 let _permit = self.core.read_permit().await;
                 let page = self
                     .engine(namespace_id)
-                    .list_checkpoints_page(request)
+                    .list_snapshot_records_page(request)
                     .await
                     .map_err(Error::from)?;
-                Ok(ListCheckpointsResponse {
+                Ok(ListSnapshotRecordsResponse {
                     namespace_id: namespace_id.clone(),
-                    checkpoints: page.items,
+                    snapshots: page.items,
                     next_cursor: encode_next_cursor(page.next_cursor.as_ref())?,
                 })
             },
@@ -475,20 +475,20 @@ impl Maintenance {
         .await
     }
 
-    /// Returns one existing snapshot of any owner, as the checkpoint listing
+    /// Returns one existing snapshot of any owner, as the snapshot inventory
     /// returns it, including an expired snapshot that garbage collection has
     /// not yet deleted. A missing id returns `snapshot_not_found`.
-    pub async fn get_checkpoint(
+    pub async fn get_snapshot_record(
         &self,
         namespace_id: &NamespaceId,
-        checkpoint_id: &SnapshotId,
-    ) -> Result<Checkpoint> {
+        snapshot_id: &SnapshotId,
+    ) -> Result<SnapshotRecord> {
         trace::in_operation(
-            operation_span!(self.core, "get_checkpoint", namespace_id),
+            operation_span!(self.core, "get_snapshot_record", namespace_id),
             async {
                 let _permit = self.core.read_permit().await;
                 self.engine(namespace_id)
-                    .get_checkpoint(checkpoint_id)
+                    .get_snapshot_record(snapshot_id)
                     .await
                     .map_err(Error::from)
             },

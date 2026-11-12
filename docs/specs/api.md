@@ -19,7 +19,7 @@ An "API group" is a coherent area of responsibility with its own set of endpoint
 | API group | Operations | Status |
 | --- | --- | --- |
 | `filesystem/v0` | Path and inode reads, path and inode mutations, uploads, namespace lifecycle, snapshots, the change feed, namespace state, capability discovery, and standard errors. Inline commit content and direct transfers are features. | Mandatory for any conforming deployment |
-| `maintenance/v0` | Namespace diagnostics, the checkpoint inventory, one-shot metadata maintenance, retention-floor advancement, garbage collection, and grep index maintenance (as a feature). | Optional |
+| `maintenance/v0` | Namespace diagnostics, the snapshot inventory, one-shot metadata maintenance, retention-floor advancement, garbage collection, and grep index maintenance (as a feature). | Optional |
 | `query/v0` | Content search over derived indexes, as the `query.grep` feature. | Optional |
 
 API groups are client contracts, and they don't describe node roles or deployment topology.
@@ -233,7 +233,7 @@ The full registry (`ErrorCode` in `loonfs-types`) lists every error code and its
 | `namespace_not_found` | 404 | The namespace has no installed manifest, so it doesn't exist. |
 | `pool_not_found` | 404 | The pool has no pool record, so the pool's collection deletes nothing. |
 | `namespace_deleted` | 410 | The namespace ID is deleted, and it can never be created or forked into again. Ordinary operations fail. The response's details identify the deleted namespace. |
-| `snapshot_not_found` | 404 | The snapshot ID doesn't identify a snapshot that the operation can use. Either no snapshot exists under it, the snapshot is a fork snapshot and the operation isn't a read, or a read, fork, or extension found the snapshot expired. The checkpoint inventory's retrieve also returns this code for an ID with no snapshot. Refresh state or choose another snapshot. |
+| `snapshot_not_found` | 404 | The snapshot ID doesn't identify a snapshot that the operation can use. Either no snapshot exists under it, the snapshot is a fork snapshot and the operation isn't a read, or a read, fork, or extension found the snapshot expired. The snapshot inventory's retrieve also returns this code for an ID with no snapshot. Refresh state or choose another snapshot. |
 | `path_not_found` | 404 | No visible entry exists at the path. In an ACL namespace, the server also returns this code for a checked entry on which the subject has no rights. |
 | `inode_not_found` | 404 | The requested visible or retained inode doesn't exist. In an ACL namespace, the server also returns this code for a checked inode on which the subject has no rights. |
 | `revision_not_found` | 404 | The file has no such revision. |
@@ -268,7 +268,7 @@ The full registry (`ErrorCode` in `loonfs-types`) lists every error code and its
 | `store_contention` | 503 | A write to one of the namespace's control objects used every compare-and-swap attempt it was allowed, usually because concurrent writers changed the object. Back off before retrying the request. |
 | `deadline_exceeded` | 503 | The server cancelled a bounded request at its configured `request_deadline_ms`. A commit might still take effect after this response, so reconcile it by commit ID before retrying. |
 | `content_not_materialized` | 503 | The file is committed, but this deployment can't write its pending content pieces for a direct download. Read through the proxied content route, or retry after a fold writes the pieces. |
-| `checkpoint_unavailable` | 503 | Required checkpoint state is unavailable: the snapshot exists but its manifest is gone, snapshot creation couldn't verify its basis, or a metadata publication ran past its budget before publishing. Retry after maintenance. |
+| `checkpoint_unavailable` | 503 | Required snapshot state is unavailable: the snapshot exists but its manifest is gone, snapshot creation couldn't verify its basis, or a metadata publication ran past its budget before publishing. Retry after maintenance. |
 | `maintenance_required` | 503 | The namespace's metadata needs maintenance before the request can be served. Run maintenance and retry. A new commit at the WAL write-stop threshold waits for a fold, and if the [write-stop wait](format.md#73-recovery-material-and-maintenance-policy) passes first, it returns this code and isn't committed. A request with a commit ID that the namespace already knows still returns the result recorded in its receipt. |
 | `index_lagging` | 503 | The grep index is further behind the head than the exhaustive-scan budget allows. Run maintenance or set `allow_stale`, then retry. |
 | `storage_permission_denied` | 503 | The object store rejected the deployment's storage credentials for this operation. Fix the storage credentials or bucket policy, because an unchanged retry won't succeed. |
@@ -302,9 +302,9 @@ A generated client accepts a default actor when it's constructed, and a per-requ
 
 Generated SDKs use schema names as public type names:
 
-- A resource body uses the resource name, such as `Checkpoint` or `UploadSession`.
+- A resource body uses the resource name, such as `SnapshotRecord` or `UploadSession`.
 - The namespace body is `NamespaceMetadata`, because `Namespace` is the name of the embedded handle.
-- A response envelope uses `<Verb><Noun>Response`, such as `ListCheckpointsResponse`.
+- A response envelope uses `<Verb><Noun>Response`, such as `ListSnapshotRecordsResponse`.
 - An operation's request and response schemas share its verb, as in `CreateDownloadRequest` for `create_download`.
 
 Namespace-owned resources include `namespace_id`.
@@ -336,7 +336,7 @@ The runtime and the client also follow these rules:
 - A mutation takes the actor as an argument, and the remote client sends it in the `Loonfs-Actor` header. An option struct contains only optional settings and has a default, so each mutation has a plain form and a form that takes options.
 - Unsupported operations and features are typed. An individual operation returns the `not_supported` error with its `feature` name, so the gating logic (check the capability document, and fall back on `not_supported`) is the same with either backend.
 
-Generated SDKs group operations by resource, not by API group. `capabilities`, `namespaces`, `snapshots`, `commits`, `changes`, `files`, `inodes`, `trash`, and `uploads` are at the client root. The `maintenance` API group keeps its prefix as a nested group, as in `maintenance.checkpoints.list`, because a hosted deployment can hide the whole API group. Methods follow these naming rules:
+Generated SDKs group operations by resource, not by API group. `capabilities`, `namespaces`, `snapshots`, `commits`, `changes`, `files`, `inodes`, `trash`, and `uploads` are at the client root. The `maintenance` API group keeps its prefix as a nested group, as in `maintenance.snapshots.list`, because a hosted deployment can hide the whole API group. Methods follow these naming rules:
 
 - A method on a group's own resource is a bare verb: `create`, `retrieve`, `list`, `delete`, or the action, as in `fork` and `grep`.
 - A method for a sub-resource of one file or inode is a verb plus a noun on the parent, as in `files.listRevisions` and `inodes.listChildren`.
@@ -760,8 +760,8 @@ The following table lists v0 operations, with their retry classes and representa
 | Rebase a fork | `rebase_fork` | `replayable` | `POST /v0/namespaces/{ns}/rebases`. Requires the `Loonfs-Actor` header. |
 | Delete a namespace | `delete_namespace` | `not_idempotent` | `DELETE /v0/namespaces/{ns}?expected_head_seq=418` (the precondition is optional) |
 | Read namespace diagnostics | `get_namespace_diagnostics` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/diagnostics` |
-| List checkpoints | `list_checkpoints` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/checkpoints?limit=100&cursor=...` |
-| Read a checkpoint | `get_checkpoint` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/checkpoints/{checkpoint_id}` (returns any snapshot the listing returns, and a missing ID returns `snapshot_not_found`) |
+| List snapshot records | `list_snapshot_records` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/snapshots?limit=100&cursor=...` |
+| Read a snapshot record | `get_snapshot_record` | `idempotent` | `GET /v0/maintenance/namespaces/{ns}/snapshots/{snapshot_id}` (returns any snapshot the listing returns, and a missing ID returns `snapshot_not_found`) |
 | Run one maintenance job | `run_maintenance_job` | `not_idempotent` | `POST /v0/maintenance/namespaces/{ns}/jobs`. The body identifies one job with `kind`. |
 | Run one maintenance job on a pool | `run_pool_maintenance_job` | `not_idempotent` | `POST /v0/maintenance/pools/{pool_id}/jobs`. The body identifies one job with `kind`, and `gc` is the pool's one job. |
 | Probe the store contract | `probe_store` | `not_idempotent` | `POST /v0/maintenance/store/probe`. The body contains the probe options, and `{}` uses the defaults. |
@@ -786,7 +786,7 @@ The status, enable, and disable routes all return the same flat grep index objec
 | `status` | Fields | Means |
 | --- | --- | --- |
 | `disabled` | None | No index is maintained for the namespace. This is also the status of a namespace that has never enabled an index. |
-| `backfilling` | `captured_seq`, `cursor_inode_id`, `checkpoint_id` | The initial walk over the files of a snapshot is running, and `checkpoint_id` is that snapshot's ID. `captured_seq` is the namespace sequence that the snapshot captured, and the backfill is complete when the walk reaches it. Nothing is searchable yet, and there's no watermark to report. |
+| `backfilling` | `captured_seq`, `cursor_inode_id`, `snapshot_id` | The initial walk over the files of a snapshot is running, and `snapshot_id` is that snapshot's ID. `captured_seq` is the namespace sequence that the snapshot captured, and the backfill is complete when the walk reaches it. Nothing is searchable yet, and there's no watermark to report. |
 | `active` | `built_through_seq`, `next_event_index` | The index follows the change feed. Commits at or below `built_through_seq` are searchable, except when `next_event_index` is non-zero. In that case, the rest of the commit at `built_through_seq` isn't indexed yet. |
 
 For example:
@@ -796,7 +796,7 @@ For example:
 ```
 
 ```json
-{"namespace_id":"demo","status":"backfilling","captured_seq":12,"cursor_inode_id":"ino_000000j000000tz7yc2z8ypbmf","checkpoint_id":"snp_00000000000000000009-00000000000000000000000009","reorganize_pending":false}
+{"namespace_id":"demo","status":"backfilling","captured_seq":12,"cursor_inode_id":"ino_000000j000000tz7yc2z8ypbmf","snapshot_id":"snp_00000000000000000009-00000000000000000000000009","reorganize_pending":false}
 ```
 
 So a backfilling index never reports a `built_through_seq`, and an active index never reports a `captured_seq`. `reorganize_pending` reports whether a partitioned segment reorganization is in progress. The routes read the index from the namespace's current manifest, so the status reports the index's last publication. (The server publishes an index's progress about once per maintenance interval, five seconds by default, and when a run of steps ends.) A client that waits for the index to catch up captures one sequence before it starts waiting, and it stops waiting when the index reaches that sequence, instead of waiting for a head that keeps moving.
@@ -923,9 +923,9 @@ A GC response includes `listed_bytes`: the bytes of every object that the collec
 A namespace's GC response groups related counts:
 
 - `deleted` contains `wal_objects`, `metadata_segments`, `extension_segments`, and `manifests`. `extension_segments` counts the extension segments (such as the grep index's segments) that no retained manifest lists (see [Extensions](format.md#124-extensions)).
-- `deleted_checkpoints_by_owner` contains `user` and `fork` counts for the snapshots deleted in the collection. `user` counts user snapshots. Their sum is the total number of snapshots deleted.
+- `deleted_snapshots_by_owner` contains `user` and `fork` counts for the snapshots deleted in the collection. `user` counts user snapshots. Their sum is the total number of snapshots deleted.
 
-A pool's GC response has no `deleted_checkpoints_by_owner`, and its `deleted` contains these counts:
+A pool's GC response has no `deleted_snapshots_by_owner`, and its `deleted` contains these counts:
 
 - `content_objects` counts the content objects that no retained view of any member references, which the collection deleted once they were older than the grace window.
 - `upload_sessions` counts the upload sessions whose records the collection deleted.
@@ -943,7 +943,7 @@ Every core GC response also includes `retained`, which counts the candidates the
 | `within_grace_window` | Unreferenced, but younger than `grace_window_ms` by the object's own provider timestamp. |
 | `no_provider_timestamp` | Unreferenced, and the provider reported no last-modified time, so the object's age is unknown and it's treated as young. |
 | `unrecognized_key` | A key under a listed family that the collector doesn't recognize as one of its own. The collector never deletes it, whatever its age. |
-| `checkpoint_not_deletable` | A snapshot that's kept by its owner or by its grace window. |
+| `snapshot_not_deletable` | A snapshot that's kept by its owner or by its grace window. |
 | `upload_session_window` | An upload session that's waiting for a window that ends at a known time. These are the same waits that `next_reclamation_at_ms` reports. |
 | `upload_session_undecided` | An upload session that's kept for a reason that doesn't end at a known time: a lost compare-and-swap, a record that disappeared during the collection, or a content cleanup failure. |
 
@@ -961,7 +961,7 @@ A pool's GC response also includes `skipped` when the collection stopped part of
 For example, a namespace's job that deletes three WAL objects and two grep segments returns this result:
 
 ```json
-{"kind":"gc","namespace_id":"demo","deleted":{"wal_objects":3,"metadata_segments":0,"extension_segments":2,"manifests":0},"deleted_checkpoints_by_owner":{"user":0,"fork":0},"retained":{"referenced":12,"within_grace_window":4,"no_provider_timestamp":0,"unrecognized_key":0,"checkpoint_not_deletable":0},"listed_bytes":1048576}
+{"kind":"gc","namespace_id":"demo","deleted":{"wal_objects":3,"metadata_segments":0,"extension_segments":2,"manifests":0},"deleted_snapshots_by_owner":{"user":0,"fork":0},"retained":{"referenced":12,"within_grace_window":4,"no_provider_timestamp":0,"unrecognized_key":0,"snapshot_not_deletable":0},"listed_bytes":1048576}
 ```
 
 A pool's job that deletes two content objects and the records of one upload session, and keeps one session whose completed-content grace hasn't ended, returns this result:
@@ -1010,25 +1010,25 @@ A snapshot read requires an unexpired user snapshot or a fork snapshot. A read o
 
 Why does an expired snapshot stay listed when it can't be read? A snapshot's expiry controls whether it can be read, and garbage collection deletes the snapshot later, after the grace window. Until then, the snapshot still keeps its manifest and segments, so the listing shows the snapshot as one of the records that keep old data.
 
-### Checkpoint inventory
+### Snapshot inventory
 
-The checkpoint inventory lists every snapshot of a namespace, so an operator can see what keeps old manifests from garbage collection. It includes user snapshots, whose `owner.kind` is `user`, and fork snapshots, whose `owner.kind` is `fork`. The inventory has no create or delete routes. User snapshots are created and deleted through the snapshot routes (see [Snapshots](#snapshots)), and garbage collection deletes a fork snapshot once its target namespace no longer reads through it.
+The snapshot inventory lists every snapshot of a namespace, so an operator can see what keeps old manifests from garbage collection. It includes user snapshots, whose `owner.kind` is `user`, and fork snapshots, whose `owner.kind` is `fork`. The inventory has no create or delete routes. User snapshots are created and deleted through the snapshot routes (see [Snapshots](#snapshots)), and garbage collection deletes a fork snapshot once its target namespace no longer reads through it.
 
-Each entry is a checkpoint object, which contains `namespace_id`, `checkpoint_id`, `owner`, `created_at_ms`, an optional `expires_at_ms`, `captured_seq`, and `manifest_no`. For a snapshot, `checkpoint_id` is its `snapshot_id`, and `owner` contains its `name`.
+Each entry is a snapshot record, which contains `namespace_id`, `snapshot_id`, `owner`, `created_at_ms`, an optional `expires_at_ms`, `captured_seq`, and `manifest_no`. For a user snapshot, `owner` contains its `name`.
 
-A checkpoint ID has the form `snp_{manifest_no:020}-{26 lowercase Crockford base 32 characters}`. It identifies the manifest that a snapshot read uses, and every snapshot is assigned a new ID.
+A snapshot ID has the form `snp_{manifest_no:020}-{26 lowercase Crockford base 32 characters}`. It identifies the manifest that a snapshot read uses, and every snapshot is assigned a new ID.
 
-`GET /v0/maintenance/namespaces/{ns}/checkpoints?limit=100&cursor=...` returns existing snapshots in ascending `checkpoint_id` order. For example, a namespace with one user snapshot and one fork returns:
+`GET /v0/maintenance/namespaces/{ns}/snapshots?limit=100&cursor=...` returns existing snapshots in ascending `snapshot_id` order. For example, a namespace with one user snapshot and one fork returns:
 
 ```json
-{"namespace_id":"demo","checkpoints":[{"namespace_id":"demo","checkpoint_id":"snp_00000000000000000009-00000000000000000000000009","owner":{"kind":"user","name":"release"},"created_at_ms":1752623000000,"expires_at_ms":1752626600000,"captured_seq":12,"manifest_no":9},{"namespace_id":"demo","checkpoint_id":"snp_00000000000000000009-000000000000000000000000a1","owner":{"kind":"fork","target_namespace_id":"demo-copy"},"created_at_ms":1752623100000,"captured_seq":12,"manifest_no":9}]}
+{"namespace_id":"demo","snapshots":[{"namespace_id":"demo","snapshot_id":"snp_00000000000000000009-00000000000000000000000009","owner":{"kind":"user","name":"release"},"created_at_ms":1752623000000,"expires_at_ms":1752626600000,"captured_seq":12,"manifest_no":9},{"namespace_id":"demo","snapshot_id":"snp_00000000000000000009-000000000000000000000000a1","owner":{"kind":"fork","target_namespace_id":"demo-copy"},"created_at_ms":1752623100000,"captured_seq":12,"manifest_no":9}]}
 ```
 
-`GET /v0/maintenance/namespaces/{ns}/checkpoints/{checkpoint_id}` returns one existing snapshot, as the same object the listing returns for it, including an expired snapshot that collection hasn't deleted. A missing ID returns `snapshot_not_found`.
+`GET /v0/maintenance/namespaces/{ns}/snapshots/{snapshot_id}` returns one existing snapshot, as the same object the listing returns for it, including an expired snapshot that collection hasn't deleted. A missing ID returns `snapshot_not_found`.
 
 `limit` follows the advertised pagination limits, and the response leaves out `next_cursor` after the final page. Cursors are opaque and tied to this namespace and operation, so clients should pass them back unchanged. A namespace-scoped cursor from another namespace returns `invalid_request`.
 
-The checkpoint listing is live, not a point-in-time view. Snapshots that are created, deleted, or collected while a client is paging can change later pages.
+The snapshot inventory is live, not a point-in-time view. Snapshots that are created, deleted, or collected while a client is paging can change later pages.
 
 An expired snapshot stays listed until GC deletes it, after its expiry plus the grace window. A snapshot without an expiry, on a live namespace, stays until it's explicitly deleted. [Records and owners](format.md#81-records-and-owners) defines reads and removal for each snapshot owner.
 
@@ -1074,7 +1074,7 @@ When the server shuts down, its scheduler doesn't start any new steps, and a com
 
 A deployment needs to keep the provider's lifecycle rule for incomplete multipart uploads. Provider upload state can exist outside object listings, so deleting a pool's content objects doesn't replace session abort and provider cleanup. Deleting a key also doesn't erase physical versions that bucket versioning or retention locks keep.
 
-The `retained` counts in a GC response show what a collection kept. To find the checkpoints that block reclamation, an operator lists them with `GET /v0/maintenance/namespaces/{ns}/checkpoints`.
+The `retained` counts in a GC response show what a collection kept. To find the snapshots that block reclamation, an operator lists them with `GET /v0/maintenance/namespaces/{ns}/snapshots`.
 
 ### Uploads
 
@@ -1423,7 +1423,7 @@ Deletes a namespace. In an ACL namespace, this operation requires an administrat
 
 Deletion runs in the namespace's writer session, and it's a fenced manifest publication (see [Deleting a namespace](format.md#94-deleting-a-namespace)). The deletion is linearized at the manifest put, so commits acknowledged before that put stay committed. These requests fail with `namespace_deleted` (410) once they observe the deletion: reads, commits, forks from the namespace ID, status requests, another deletion, and creating or forking a namespace into that ID. The namespace tombstone stays the current manifest after the namespace's content is reclaimed.
 
-The checkpoint inventory and snapshot deletion are explicit exceptions, and they stay available after deletion. Deleting a fork snapshot's ID through the snapshot route still returns `snapshot_not_found`.
+The snapshot inventory and snapshot deletion are explicit exceptions, and they stay available after deletion. Deleting a fork snapshot's ID through the snapshot route still returns `snapshot_not_found`.
 
 Deletion itself doesn't reclaim anything. [Retirement](format.md#95-retirement) defines when a deleted namespace is eligible for retirement, [Reference roots](format.md#112-reference-roots) defines the roots that garbage collection keeps, and [Retiring an eligible tombstone](format.md#118-retiring-an-eligible-tombstone) defines what retirement deletes. The namespace's content is stored in its [pool](glossary.md#pool), and the pool's collection deletes that content once no member refers to it (see [Garbage collection jobs](#garbage-collection-jobs)).
 
@@ -1444,7 +1444,7 @@ A commit can succeed without its acknowledgement reaching the caller, and deleti
 - Requests admitted after the delete fail with `namespace_deleted`.
 - If the delete ends up failing its precondition, no request is rejected because of it.
 
-Why do the checkpoint inventory and snapshot deletion still work after deletion? A snapshot without an expiry keeps its manifest until it's deleted, so it has to stay discoverable and deletable after the namespace is deleted.
+Why do the snapshot inventory and snapshot deletion still work after deletion? A snapshot without an expiry keeps its manifest until it's deleted, so it has to stay discoverable and deletable after the namespace is deleted.
 
 ### 6.4 `GET /filesystem/entry` and `GET /inodes/{inode_id}`
 
@@ -2099,7 +2099,7 @@ Names belong to the directory, so a subject with `read` on a directory sees ever
 
 The trash listing filters out entries whose saved original parent the subject can't read. A filtered page can be short and still include `next_cursor`. Grep filters out candidates that the subject can't read before it reads their content, but those candidates still count against the page's candidate budget.
 
-When a subject is supplied, change feed reads, diff reads, reads of a fork's next merge range, and bare content reference reads require an administrator. With no subject headers, these operations act as the token holder, but every per-subject read operation returns `invalid_request` and identifies `Loonfs-Principals` in the error. The checkpoint inventory and maintenance operations still read as the service.
+When a subject is supplied, change feed reads, diff reads, reads of a fork's next merge range, and bare content reference reads require an administrator. With no subject headers, these operations act as the token holder, but every per-subject read operation returns `invalid_request` and identifies `Loonfs-Principals` in the error. The snapshot inventory and maintenance operations still read as the service.
 
 Why does a snapshot read of an expired subtree require an administrator? LoonFS evaluates a snapshot read's rights on the access rows at the current head, and after a deletion expires, base compactions remove the head's rows under it a family group at a time. So at the head, a boundary row can be gone while a grant above it is still stored, and evaluating another subject's rights on those rows could widen them. An administrator's rights don't depend on those rows.
 
@@ -3046,7 +3046,7 @@ Returns metrics about what the process has been doing, in Prometheus text exposi
 
 Unlike `/health` and `/readiness`, `/metrics` requires the deployment's bearer token. A scrape sends the same `Authorization: Bearer` header that a client does, and an unauthorized scrape returns `401 unauthorized` in the standard error envelope.
 
-Metric names have the form `loonfs_<subsystem>_<metric>`. They cover the object-store calls the process made, the maintenance steps and sweeps it finished, the publications it batched, what garbage collection reclaimed, and the requests this server served. Label values come only from closed vocabularies. For example, a request is labeled by the route template it matched (`/v0/namespaces/{namespace_id}`), never by its own path, so no namespace, upload, commit, or checkpoint ID ever appears in a label. Values are per process, and they reset when the process restarts, which is the usual contract for a counter that a scraper reads.
+Metric names have the form `loonfs_<subsystem>_<metric>`. They cover the object-store calls the process made, the maintenance steps and sweeps it finished, the publications it batched, what garbage collection reclaimed, and the requests this server served. Label values come only from closed vocabularies. For example, a request is labeled by the route template it matched (`/v0/namespaces/{namespace_id}`), never by its own path, so no namespace, upload, commit, or snapshot ID ever appears in a label. Values are per process, and they reset when the process restarts, which is the usual contract for a counter that a scraper reads.
 
 The metric set isn't part of the v0 wire contract. Metric names might be added or changed as the runtime's instrumentation grows, and clients MUST NOT depend on any particular series existing.
 

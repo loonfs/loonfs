@@ -23,7 +23,7 @@ fn global_selectors_work_before_between_and_after_subcommands() {
         "maintenance",
         "--profile",
         "prod",
-        "checkpoint",
+        "snapshot",
         "--namespace",
         "demo",
         "list",
@@ -244,7 +244,7 @@ fn every_paginated_listing_accepts_the_shared_flags() {
         &[
             "loonfs",
             "maintenance",
-            "checkpoint",
+            "snapshot",
             "list",
             "--limit",
             "5",
@@ -301,7 +301,7 @@ fn all_json_is_rejected_for_every_paginated_listing() {
             "loonfs",
             "--json",
             "maintenance",
-            "checkpoint",
+            "snapshot",
             "list",
             "--all",
             "--limit",
@@ -356,7 +356,7 @@ fn management_command_model_uses_noun_families() {
             "recover-administrator",
             "metadata",
             "fold",
-            "checkpoint",
+            "snapshot",
             "index",
             "retention",
             "gc",
@@ -364,7 +364,7 @@ fn management_command_model_uses_noun_families() {
             "store",
         ],
     );
-    assert_subcommands(subcommand(maintenance, "checkpoint"), &["list"]);
+    assert_subcommands(subcommand(maintenance, "snapshot"), &["list"]);
     assert_subcommands(
         subcommand(maintenance, "index"),
         &["enable", "disable", "status"],

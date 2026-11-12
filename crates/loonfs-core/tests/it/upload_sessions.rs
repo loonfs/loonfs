@@ -337,9 +337,9 @@ async fn begin_upload_reads_manifest_authority_without_replaying_wal() {
         )
         .await
         .expect("create file");
-    create_checkpoint(&setup_store, &namespace_id, &context)
+    create_snapshot(&setup_store, &namespace_id, &context)
         .await
-        .expect("checkpoint");
+        .expect("snapshot");
     NamespaceFixture::new(&setup_store, &namespace_id, &context)
         .put_file(
             "/docs/hello.txt",

@@ -2371,16 +2371,16 @@ func runSnapshots(t *testing.T, h *harness, testCase conformanceCase) {
 	if retrieved.SnapshotID != snapshotID || retrieved.ExpiresAtMs == nil || *retrieved.ExpiresAtMs != *extended.ExpiresAtMs {
 		t.Errorf("retrieved snapshot = %#v, want the extended snapshot %#v", retrieved, extended)
 	}
-	checkpoint, err := h.client.Maintenance.Checkpoints.Retrieve(ctx, &maintenance.GetCheckpointRequest{
-		NamespaceID:  request.NamespaceID,
-		CheckpointID: snapshotID,
+	record, err := h.client.Maintenance.Snapshots.Retrieve(ctx, &maintenance.GetSnapshotRecordRequest{
+		NamespaceID: request.NamespaceID,
+		SnapshotID:  snapshotID,
 	})
 	if err != nil {
-		t.Fatalf("retrieve the snapshot's checkpoint: %v", err)
+		t.Fatalf("retrieve the snapshot's record: %v", err)
 	}
-	if checkpoint.CheckpointID != snapshotID || int64(checkpoint.CapturedSeq) != expected.SnapshotHeadSeq ||
-		checkpoint.ExpiresAtMs == nil || *checkpoint.ExpiresAtMs != *extended.ExpiresAtMs {
-		t.Errorf("retrieved checkpoint = %#v, want the snapshot", checkpoint)
+	if record.SnapshotID != snapshotID || int64(record.CapturedSeq) != expected.SnapshotHeadSeq ||
+		record.ExpiresAtMs == nil || *record.ExpiresAtMs != *extended.ExpiresAtMs {
+		t.Errorf("retrieved snapshot record = %#v, want the snapshot", record)
 	}
 
 	listed, err := h.client.Snapshots.List(ctx, &loonfs.ListSnapshotsRequest{

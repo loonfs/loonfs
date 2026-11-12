@@ -130,30 +130,30 @@ pub(super) fn grep_index_state_summary(state: &GrepIndexStatus) -> String {
     }
 }
 
-/// Formats a checkpoint owner for the table view.
+/// Formats a snapshot owner for the table view.
 ///
-/// Snapshots show their label. Fork checkpoints show their target namespace
+/// User snapshots show their label. Fork snapshots show their target namespace
 /// because users can't delete them.
-pub(super) fn checkpoint_owner_label(owner: &CheckpointOwner) -> String {
+pub(super) fn snapshot_record_owner_label(owner: &SnapshotRecordOwner) -> String {
     match owner {
-        CheckpointOwner::User { name } => name.clone(),
-        CheckpointOwner::Fork {
+        SnapshotRecordOwner::User { name } => name.clone(),
+        SnapshotRecordOwner::Fork {
             target_namespace_id,
         } => format!("fork -> {target_namespace_id}"),
-        CheckpointOwner::Unknown => "owner unknown to this CLI".to_owned(),
+        SnapshotRecordOwner::Unknown => "owner unknown to this CLI".to_owned(),
     }
 }
 
 fn gc_deleted_counts(report: &GcResponse) -> [(&'static str, u64); 6] {
     let deleted = &report.deleted;
-    let checkpoints = &report.deleted_checkpoints_by_owner;
+    let snapshots = &report.deleted_snapshots_by_owner;
     [
         ("wal objects", deleted.wal_objects),
         ("metadata segments", deleted.metadata_segments),
         ("extension segments", deleted.extension_segments),
         ("manifests", deleted.manifests),
-        ("fork checkpoints", checkpoints.fork),
-        ("snapshots", checkpoints.user),
+        ("fork snapshots", snapshots.fork),
+        ("snapshots", snapshots.user),
     ]
 }
 

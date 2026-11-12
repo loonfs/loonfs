@@ -2,8 +2,8 @@
 //! use.
 
 use crate::{
-    CommitSeq, CoreError, Error, InodeId, ListChangesResponse, ListCheckpointsResponse,
-    ListFileRevisionsResponse, ListInodeChildrenResponse, ListOptions, ListPathEntriesResponse,
+    CommitSeq, CoreError, Error, InodeId, ListChangesResponse, ListFileRevisionsResponse,
+    ListInodeChildrenResponse, ListOptions, ListPathEntriesResponse, ListSnapshotRecordsResponse,
     ListSnapshotsResponse, NamespaceId, SnapshotFilesPage,
 };
 use loonfs_types::{
@@ -25,8 +25,8 @@ pub type ChangesPager = loonfs_types::Pager<ListChangesResponse, Error>;
 pub type SnapshotFilesPager = loonfs_types::Pager<SnapshotFilesPage, Error>;
 /// A pager over every retained file revision in a read view.
 pub type RetainedRevisionsPager = loonfs_types::Pager<loonfs_core::RetainedRevisionsPage, Error>;
-/// A pager over existing checkpoints.
-pub type CheckpointsPager = loonfs_types::Pager<ListCheckpointsResponse, Error>;
+/// A pager over existing snapshots.
+pub type SnapshotRecordsPager = loonfs_types::Pager<ListSnapshotRecordsResponse, Error>;
 /// A pager over snapshots.
 pub type SnapshotsPager = loonfs_types::Pager<ListSnapshotsResponse, Error>;
 
