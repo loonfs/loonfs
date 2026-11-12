@@ -2050,7 +2050,7 @@ These tables list the durable payload fields. The protocol sections define how t
 | Upload outcome record | `namespace_id`, `upload_id`, `outcome` |
 | Pool record | `pool_id`, `first_member_id`, `created_at_ms` |
 
-Namespace status is `{"kind":"active"}`, or `{"kind":"deleted"}` with a required `deleted_at_ms` (only on the deleted variant). A missing status is invalid. The genesis commit ID is `c_00000000000000000000000000000000`.
+Namespace status is `{"kind":"active"}`, or `{"kind":"deleted"}` with a required `deleted_at_ms` (only on the deleted variant). A missing status is invalid. The genesis commit ID is `cmt_00000000000000000000000000`.
 
 Snapshot owners have the fields in [Records and owners](#81-records-and-owners), and a snapshot has no status field. Upload records use these tagged variants, and both use `kind` tags:
 

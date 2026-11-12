@@ -7,9 +7,7 @@ use crate::{
     ConflictReport, Mechanics, MergeError, MergeFailure, MergeSessionOutcome, MergeSessionState,
     MergeSessionStatus, PendingCommit, Resolver, Result,
 };
-use loonfs_types::{
-    generated_id, CommitSeq, ErrorResponse, MergeConflict, NamespaceId, NextMergeRangeOutcome,
-};
+use loonfs_types::{CommitSeq, ErrorResponse, MergeConflict, NamespaceId, NextMergeRangeOutcome};
 
 /// The most new forks that one session's rebases create.
 ///
@@ -339,10 +337,7 @@ impl<M: Mechanics, R: Resolver> MergeSession<M, R> {
 /// Returns a new fork ID for a rebase to create, or `None` when
 /// `new_fork_ids` already lists [`MAX_NEW_FORKS`].
 pub(crate) fn new_fork_id(new_fork_ids: &[NamespaceId]) -> Option<NamespaceId> {
-    (new_fork_ids.len() < MAX_NEW_FORKS).then(|| {
-        NamespaceId::parse(generated_id("rebase"))
-            .expect("a generated ID should be a valid namespace ID")
-    })
+    (new_fork_ids.len() < MAX_NEW_FORKS).then(NamespaceId::generate)
 }
 
 /// Returns the transition to the request that follows `request` after the
