@@ -56,7 +56,7 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
     /// validates against a floor that only its own epoch raises, so no
     /// restore of a deletion at or below the floor is accepted after the
     /// floor moves.
-    pub(super) async fn resolve_recoverable_deletion(
+    pub(super) async fn resolve_tombstone_in_trash(
         &self,
         inode_id: InodeId,
         deletion_seq: CommitSeq,
@@ -64,7 +64,7 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
         if deletion_seq <= self.view().retention_floor_seq() {
             return Err(CommitValidationError::RestoreDeletedTargetNotDeleted { inode_id }.into());
         }
-        let Some(deletion) = self.view().recoverable_deletion(inode_id).await? else {
+        let Some(deletion) = self.view().tombstone_in_trash(inode_id).await? else {
             return Err(CommitValidationError::RestoreDeletedTargetNotDeleted { inode_id }.into());
         };
         if deletion.committed_seq >= self.committed_seq {
@@ -76,7 +76,7 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
             return Err(CommitValidationError::RestoreDeletedSequenceMismatch {
                 inode_id,
                 requested_seq: deletion_seq,
-                active_seq: deletion.committed_seq,
+                actual_deletion_seq: deletion.committed_seq,
             }
             .into());
         }

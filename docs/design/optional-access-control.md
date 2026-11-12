@@ -123,7 +123,7 @@ A restore to a destination other than the original parent uses the same rule, wi
 
 ## Recursive deletion
 
-Deleting a directory writes one subtree tombstone and doesn't inspect any descendants. So a limited-access boundary protects confidentiality, but it doesn't stop an authorized manager of an ancestor from making the subtree unavailable with a recoverable deletion.
+Deleting a directory writes one subtree tombstone and doesn't inspect any descendants. So a limited-access boundary protects confidentiality, but it doesn't stop an authorized manager of an ancestor from making the subtree unavailable by deleting it, although a restore can bring the subtree back while the deletion is in the trash.
 
 The deleter never sees the restricted subtree's bytes or names. Anyone with `remove` on the original parent can restore the deletion. A restricted descendant's manager might need an ancestor's manager or an administrator to restore the deletion root, because only the root of a deletion can be restored. Permanent erasure is outside this permission model.
 

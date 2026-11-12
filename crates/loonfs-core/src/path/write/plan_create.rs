@@ -96,7 +96,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
         deletion_seq: CommitSeq,
         destination: RestoreDeletedDestination,
     ) -> Result<CompiledFilesystemOperation> {
-        let deletion = self.view.metadata.recoverable_deletion(inode_id).await?;
+        let deletion = self.view.metadata.tombstone_in_trash(inode_id).await?;
         let deleted_binding = match deletion.map(|record| record.action) {
             Some(TombstoneRowAction::Set {
                 deleted_binding, ..

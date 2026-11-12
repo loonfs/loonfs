@@ -281,8 +281,8 @@ pub(crate) enum CommandData {
         committed_seq: CommitSeq,
         commit_id: CommitId,
         /// Inode the mutation acted on, when the command resolved one —
-        /// `rm` reports it so the deletion stays recoverable via
-        /// `loonfs restore`.
+        /// `rm` reports it so `loonfs restore` can bring the deletion back
+        /// from the trash.
         #[serde(
             skip_serializing_if = "Option::is_none",
             with = "loonfs_types::inode_id::public::option"

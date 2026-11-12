@@ -110,7 +110,7 @@ async fn an_expired_subtree_is_an_unknown_inode_on_every_inode_route() {
     .await
     .expect("app");
 
-    for (inode, recoverable) in [(kept, true), (notes, false)] {
+    for (inode, in_trash) in [(kept, true), (notes, false)] {
         for (method, route, history) in INODE_ROUTES {
             let uri = format!("/v0/namespaces/demo/inodes/{inode}{route}");
             let mut request = Request::builder()
@@ -131,8 +131,8 @@ async fn an_expired_subtree_is_an_unknown_inode_on_every_inode_route() {
                 .await
                 .expect("body");
             // A deleted inode has no current entry or content, so only the
-            // history routes serve a recoverable deletion.
-            if recoverable && history {
+            // history routes serve a deletion in the trash.
+            if in_trash && history {
                 assert_eq!(status, StatusCode::OK, "{method} {uri}");
                 continue;
             }

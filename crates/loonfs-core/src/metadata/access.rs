@@ -19,7 +19,7 @@ struct AccessWalk {
 ///
 /// The walk starts at the inode, follows current parent bindings, and
 /// stops after a row whose boundary is set or at the root. A deletion root
-/// has no current binding; while the deletion is recoverable (above the
+/// has no current binding; while the deletion is in the trash (above the
 /// view's retention floor), its `set` event's saved parent repairs that one
 /// edge, so a deleted item's own row and boundary are evaluated before the
 /// walk continues. The walk stops at the root of an expired deletion, so an
@@ -38,7 +38,7 @@ where
     let mut last = inode_id;
     loop {
         let Some(current) = walk.next(reads).await? else {
-            // A recoverable deletion's root has no current binding, and its
+            // The root of a deletion in the trash has no current binding, and its
             // `set` event's saved parent repairs that one edge.
             match reads.find_hiding_subtree_tombstone(last).await? {
                 Some(tombstone) if tombstone.committed_seq > reads.retention_floor_seq() => {

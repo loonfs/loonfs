@@ -382,7 +382,7 @@ fn validate_run_index_parity(
                 MetadataRowFamily::Revisions
                 | MetadataRowFamily::Inodes
                 | MetadataRowFamily::Tombstones
-                | MetadataRowFamily::ActiveDeletions
+                | MetadataRowFamily::Trash
                 | MetadataRowFamily::ContentLayouts
                 | MetadataRowFamily::Attributes
                 | MetadataRowFamily::Access

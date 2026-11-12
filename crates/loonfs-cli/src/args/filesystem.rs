@@ -116,7 +116,7 @@ pub(crate) struct FilesystemRmArgs {
     #[arg(value_hint = ValueHint::Other)]
     pub path: String,
     /// Delete a directory and everything under it, as one commit. The whole
-    /// subtree stays recoverable through the printed restore command.
+    /// subtree goes to the trash, and the printed restore command brings it back.
     #[arg(short, long)]
     pub recursive: bool,
     #[command(flatten)]

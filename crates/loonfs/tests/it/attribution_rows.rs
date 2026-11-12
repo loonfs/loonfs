@@ -217,7 +217,7 @@ fn attributes_root_forks_and_trash_report_their_row_attribution() {
     assert_eq!(forked.attributes, source_before_fork.attributes);
 
     // The floor advances before the deletion below, so the deletion stays
-    // recoverable and listed after the advance. The advance takes the writer
+    // in the trash after the advance. The advance takes the writer
     // epoch, so the writes after it open a new writer session.
     drop(namespace);
     fs.advance_retention_floor_blocking(&source_id)

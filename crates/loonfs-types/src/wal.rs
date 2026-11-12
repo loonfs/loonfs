@@ -264,7 +264,7 @@ pub enum WalDelta {
         /// Inode at the root of the newly hidden subtree.
         root_inode_id: InodeId,
         /// Classification copied from the root's inode, which the
-        /// deletion's `listed` active-deletion row stores.
+        /// deletion's `listed` trash row stores.
         root_kind: InodeKind,
         /// The binding the delete removed, included so the deleted name
         /// survives on the immortal tombstone row after unbind rows age out.

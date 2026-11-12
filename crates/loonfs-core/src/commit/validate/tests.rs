@@ -987,7 +987,7 @@ async fn a_restore_of_a_deleted_item_applies_only_while_its_deletion_is_the_root
             CommitValidationError::RestoreDeletedSequenceMismatch {
                 inode_id: InodeId(2),
                 requested_seq: CommitSeq(2),
-                active_seq: CommitSeq(4),
+                actual_deletion_seq: CommitSeq(4),
             },
         ),
     ];

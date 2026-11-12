@@ -562,7 +562,7 @@ fn index_pair(group: MetadataFamilyGroup) -> Option<(MetadataRowFamily, Metadata
         MetadataFamilyGroup::Revisions
         | MetadataFamilyGroup::Inodes
         | MetadataFamilyGroup::Tombstones
-        | MetadataFamilyGroup::ActiveDeletions
+        | MetadataFamilyGroup::Trash
         | MetadataFamilyGroup::Commits
         | MetadataFamilyGroup::ContentLayouts
         | MetadataFamilyGroup::Attributes

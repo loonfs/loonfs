@@ -379,7 +379,7 @@ History and recovery
 
   loonfs trash [--limit <n>] [--page-size <n>] [--cursor <cursor>]
                [--all] [--jsonl]
-    List recoverable deletions, including when each item was deleted and the
+    List the trash, including when each item was deleted and the
     exact `loonfs restore` command that restores it
 
   loonfs changes [--after <seq>] [--limit <n>] [--page-size <n>]

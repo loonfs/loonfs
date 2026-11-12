@@ -360,7 +360,7 @@ pub struct ListFileRevisionsOptions {
     pub consistency: Option<Consistency>,
 }
 
-/// Options for listing the namespace's recoverable deletions.
+/// Options for listing the namespace's trash.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ListTrashOptions {
     /// How recently each page confirms the live head, or `None` for the
