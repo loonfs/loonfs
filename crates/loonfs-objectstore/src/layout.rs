@@ -47,7 +47,7 @@ pub enum DurableObjectFamily {
     /// Classifies the record of how an upload session ended.
     UploadOutcome,
     /// Classifies the record that a pool's create call writes.
-    PoolRecord,
+    Pool,
     /// Classifies immutable whole-file content bytes.
     ContentBlob,
     /// Classifies a temporary object that an assembly writes and deletes.
@@ -103,7 +103,7 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
     let segments: Vec<_> = key.split('/').collect();
     match segments.as_slice() {
         [POOLS_DIRECTORY, pool_id, POOL_RECORD_NAME] => Some(parsed(
-            DurableObjectFamily::PoolRecord,
+            DurableObjectFamily::Pool,
             KeyPrefix::Pool(pool_id),
             None,
         )),
@@ -517,12 +517,7 @@ mod tests {
                 namespace,
                 Some(pin_id.as_str()),
             ),
-            (
-                pool_record(&pool_id),
-                DurableObjectFamily::PoolRecord,
-                pool,
-                None,
-            ),
+            (pool_record(&pool_id), DurableObjectFamily::Pool, pool, None),
             (
                 upload_session(&pool_id, &upload_id),
                 DurableObjectFamily::UploadSession,

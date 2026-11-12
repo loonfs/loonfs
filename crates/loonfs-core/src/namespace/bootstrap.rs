@@ -5,7 +5,7 @@ use crate::error::{CoreError, Result};
 use crate::metadata::{AccessRevisionRecord, InodeRecord, MetadataState};
 use crate::options::CreateNamespaceOptions;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::control::PoolRecordPayload;
+use loonfs_types::format::control::PoolPayload;
 use loonfs_types::format::manifest::{NamespaceAccess, NamespaceManifestPayload};
 use loonfs_types::{
     AccessRevisionNo, AccessRight, ActorId, CommitSeq, InodeKind, NamespaceMetadata, PoolId,
@@ -34,7 +34,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             }
         }
         let clock = self.namespace.start_clock();
-        let pool = PoolRecordPayload {
+        let pool = PoolPayload {
             pool_id: PoolId::generate(),
             first_member_id: self.namespace.namespace_id.clone(),
             created_at_ms: clock.request_at_ms(),

@@ -279,7 +279,7 @@ pub(crate) async fn write_pool_record<S: ObjectStore>(
     created_at_ms: u64,
 ) {
     namespace_store(store, first_member_id)
-        .write_pool_record(&loonfs_types::format::control::PoolRecordPayload {
+        .write_pool_record(&loonfs_types::format::control::PoolPayload {
             pool_id: pool_id.clone(),
             first_member_id: first_member_id.clone(),
             created_at_ms,

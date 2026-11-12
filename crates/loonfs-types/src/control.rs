@@ -27,7 +27,7 @@ pub enum ControlObjectKind {
     /// Records how one upload session ended.
     UploadOutcome,
     /// Records the creation of one pool.
-    PoolRecord,
+    Pool,
 }
 
 impl ControlObjectKind {
@@ -37,7 +37,7 @@ impl ControlObjectKind {
         Self::Pin,
         Self::UploadSession,
         Self::UploadOutcome,
-        Self::PoolRecord,
+        Self::Pool,
     ];
 
     /// Returns the durable format version for this control object kind.
@@ -52,7 +52,7 @@ impl ControlObjectKind {
             Self::Pin => 1,
             Self::UploadSession => 1,
             Self::UploadOutcome => 1,
-            Self::PoolRecord => 1,
+            Self::Pool => 1,
         }
     }
 
@@ -63,7 +63,7 @@ impl ControlObjectKind {
             Self::Pin => "pin",
             Self::UploadSession => "upload_session",
             Self::UploadOutcome => "upload_outcome",
-            Self::PoolRecord => "pool_record",
+            Self::Pool => "pool",
         }
     }
 
@@ -412,7 +412,7 @@ pub struct UploadOutcomePayload {
 /// See [pools and pool records](https://github.com/loonfs/loonfs/blob/main/docs/design/pools.md#pools-and-pool-records).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PoolRecordPayload {
+pub struct PoolPayload {
     /// The pool that the record describes.
     pub pool_id: PoolId,
     /// The namespace that was created with the pool, the pool's first member.

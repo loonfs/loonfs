@@ -15,7 +15,7 @@ use loonfs_test_support::stores::{
     BlockingStore, FailStore, InjectedError, KeyPredicate, OperationSelector, RecordedOperation,
     RecordingStore,
 };
-use loonfs_types::format::control::PoolRecordPayload;
+use loonfs_types::format::control::PoolPayload;
 use loonfs_types::options::AttributeInclusion;
 use loonfs_types::{ErrorCode, ManifestNo, NamespaceId};
 use std::assert_matches;
@@ -44,8 +44,7 @@ async fn pool_record_keys<S: ObjectStore>(store: &S) -> Vec<String> {
         .expect("list the pools")
         .into_iter()
         .filter(|key| {
-            parse_object_key(key)
-                .is_some_and(|parsed| parsed.family() == DurableObjectFamily::PoolRecord)
+            parse_object_key(key).is_some_and(|parsed| parsed.family() == DurableObjectFamily::Pool)
         })
         .collect()
 }
@@ -161,7 +160,7 @@ async fn a_new_namespace_returns_the_state_its_first_manifest_records() {
             .load_pool_record()
             .await
             .expect("load the pool record"),
-        Some(PoolRecordPayload {
+        Some(PoolPayload {
             pool_id: created.pool_id.clone(),
             first_member_id: source.clone(),
             created_at_ms: created.created_at_ms,
@@ -284,7 +283,7 @@ async fn a_lost_pool_record_put_is_sent_again_and_a_lost_manifest_put_keeps_the_
     let namespace_id = NamespaceId::parse("created").expect("namespace");
     let manifest_key = metadata_manifest_object(&namespace_id, &ManifestNo(1));
     for (keys, creates) in [
-        (KeyPredicate::family(DurableObjectFamily::PoolRecord), true),
+        (KeyPredicate::family(DurableObjectFamily::Pool), true),
         (KeyPredicate::exact(&manifest_key), false),
     ] {
         let directory = tempdir().expect("directory");

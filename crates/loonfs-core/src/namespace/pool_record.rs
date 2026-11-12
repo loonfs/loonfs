@@ -6,15 +6,15 @@ use crate::namespace::store::NamespaceStore;
 use bytes::Bytes;
 use loonfs_objectstore::keys::pool_record;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::control::{encode_control_state, ControlObjectKind, PoolRecordPayload};
+use loonfs_types::format::control::{encode_control_state, ControlObjectKind, PoolPayload};
 
 impl<S: ObjectStore> NamespaceStore<S> {
     /// Writes `record` under its freshly generated pool ID (format spec,
     /// "Creating a namespace"), with
     /// [`create_control_object_under_generated_id`].
-    pub(crate) async fn write_pool_record(&self, record: &PoolRecordPayload) -> Result<()> {
+    pub(crate) async fn write_pool_record(&self, record: &PoolPayload) -> Result<()> {
         let object_key = pool_record(&record.pool_id);
-        let bytes = encode_control_state(ControlObjectKind::PoolRecord, record)
+        let bytes = encode_control_state(ControlObjectKind::Pool, record)
             .expect("a pool record should encode");
         create_control_object_under_generated_id(&self.store, &object_key, Bytes::from(bytes))
             .await?;
@@ -25,11 +25,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// namespace's current manifest records another pool.
     ///
     /// A failed reload or deletion is only logged, and the record stays.
-    pub(crate) async fn delete_unused_pool_record(
-        &self,
-        record: &PoolRecordPayload,
-        error: &CoreError,
-    ) {
+    pub(crate) async fn delete_unused_pool_record(&self, record: &PoolPayload, error: &CoreError) {
         let records_other_pool = match self.load_current_manifest_if_present().await {
             Ok(current) => {
                 current.is_some_and(|current| current.payload().pool_id != record.pool_id)

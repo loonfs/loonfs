@@ -17,7 +17,7 @@ use content::ContentFilters;
 use futures::{stream, StreamExt, TryStreamExt};
 use loonfs_objectstore::keys::{pool_record, temporary_prefix};
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::control::PoolRecordPayload;
+use loonfs_types::format::control::PoolPayload;
 use loonfs_types::PoolGcResponse;
 pub(crate) use members::MemberState;
 use members::PoolRoots;
@@ -117,7 +117,7 @@ impl<S: ObjectStore> PoolStore<S> {
     /// collection can't tell from a failed one.
     async fn collect_pool_record(
         &self,
-        record: &PoolRecordPayload,
+        record: &PoolPayload,
         grace_window_ms: u64,
         clock: &OperationClock,
         report: &mut PoolGcResponse,
