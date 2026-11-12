@@ -248,8 +248,8 @@ pub(crate) fn append_rows_to_metadata(
             // Derived from the tombstone rows above, like the secondary
             // indexes: decoding proves the row belongs to the family, and
             // materialization re-derives it.
-            MetadataRowFamily::ActiveDeletions => {
-                row_decode::active_deletion_from_manifest_row(row.clone()).map_err(mismatch)?;
+            MetadataRowFamily::Trash => {
+                row_decode::trash_from_manifest_row(row.clone()).map_err(mismatch)?;
             }
             // Derived from the commit rows, the same way.
             MetadataRowFamily::Merges => {

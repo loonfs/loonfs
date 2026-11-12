@@ -231,7 +231,7 @@ impl ErrorCode {
             // The namespace's access mode is unrestricted, so it has no access rows.
             | ErrorCode::NamespaceUnrestricted
             | ErrorCode::BindingVersionMismatch
-            // A restore's target is not the root of a live deletion: a
+            // A restore's target is not the root of a deletion in the trash: a
             // state conflict, resolved by re-reading namespace state.
             | ErrorCode::NotDeleted
             | ErrorCode::WriterFenced

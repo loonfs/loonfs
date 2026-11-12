@@ -1,7 +1,7 @@
 //! Reads by inode ID of an expired subtree whose bindings a base compaction
 //! has already removed, while the revisions group still stores its rows.
 
-use super::active_deletions::tombstone_set;
+use super::trash::tombstone_set;
 use super::*;
 use crate::authorize::{Absence, Authorizer, ReadAccess};
 use crate::metadata::{DirentryBindingRecord, RevisionRecord};
@@ -17,7 +17,7 @@ const ROOT: InodeId = ROOT_INODE_ID;
 const OLD: InodeId = InodeId(2);
 /// `/old/notes.txt`.
 const NOTES: InodeId = InodeId(3);
-/// `/keep`, whose deletion is recoverable.
+/// `/keep`, whose deletion is in the trash.
 const KEEP: InodeId = InodeId(4);
 /// `/keep/a.txt`.
 const KEPT_FILE: InodeId = InodeId(5);
@@ -80,7 +80,7 @@ fn grants(principal: &str, rights: &[AccessRight]) -> AccessRevisionRecord {
 /// The state after `/old` was deleted at sequence 3 and `/keep` at sequence
 /// 5, and a base compaction of the bindings group removed `/old`'s edge and
 /// every edge under it. With the floor at [`FLOOR`], the deletion of `/old`
-/// has expired and the deletion of `/keep` is recoverable. Ada has a direct
+/// has expired and the deletion of `/keep` is in the trash. Ada has a direct
 /// grant on `/old/notes.txt`, which the access group still stores, and one
 /// on `/keep`.
 fn compacted_bindings_state() -> MetadataState {
@@ -201,11 +201,11 @@ async fn a_read_by_inode_whose_ancestry_was_compacted_away_is_refused_for_every_
                 "{principal}"
             );
         }
-        // The walk from `/keep/a.txt` stops at `/keep`'s recoverable tombstone.
+        // The walk from `/keep/a.txt` stops at the tombstone of `/keep`, which is in the trash.
         let kept = view
             .authorized_revision_by_inode(KEPT_FILE, RevisionNo(1), &live)
             .await
-            .expect("a recoverable deletion's descendant");
+            .expect("a descendant of a deletion in the trash");
         assert_eq!(kept.inode_id, KEPT_FILE, "{principal}");
 
         // A snapshot read evaluates the same chain at the head.

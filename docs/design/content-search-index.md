@@ -63,7 +63,7 @@ Grep segments use the layout described in [Metadata block storage](metadata-bloc
 
 ```text
 namespaces/{owner_namespace_id}/extensions/grep/
-└── segments/{segment_id}.sst.zst
+└── segments/{segment_id}.sst
 ```
 
 The index's state is grep's entry in the namespace manifest (see [Extensions](../specs/format.md#124-extensions)). The entry contains the lifecycle state, the index's runs with their segment descriptors, and any in-progress reorganization. The index's run numbers are allocated from the manifest's `next_run_no` when grep publishes a change. Every core publication copies the entry forward, so the index needs no manifests, hint, or discovery of its own. [Grep across a pool](grep-across-a-pool.md) explains why.

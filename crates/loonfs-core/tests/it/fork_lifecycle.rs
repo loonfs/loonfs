@@ -901,7 +901,7 @@ async fn a_fork_removes_an_inherited_deletions_rows_without_a_writer_session() {
     assert_eq!(
         inode_rows(&store, &source_namespace_id).await,
         source_rows,
-        "the source keeps the rows of its recoverable deletion"
+        "the source keeps the rows of its deletion in the trash"
     );
     let after_compaction = head_state(&store, &fork_namespace_id).await;
     assert_eq!(after_compaction.seq, fork_head.seq);

@@ -1082,7 +1082,7 @@ fn commit_messages_ride_the_feed_over_the_remote_transport() {
 }
 
 #[test]
-fn trash_lists_recoverable_deletions_with_their_handles() {
+fn trash_lists_its_entries_with_their_handles() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
     assert_success(&harness.run(&["namespace", "create", "demo"]));

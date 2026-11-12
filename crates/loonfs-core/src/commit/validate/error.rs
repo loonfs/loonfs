@@ -115,19 +115,19 @@ pub enum CommitValidationError {
         inode_id: InodeId,
         new_parent_inode_id: InodeId,
     },
-    #[error("restore target inode `{inode_id}` is not the root of a recoverable deletion")]
+    #[error("restore target inode `{inode_id}` is not the root of a deletion in the trash")]
     RestoreDeletedTargetNotDeleted { inode_id: InodeId },
     #[error(
         "restore of inode `{inode_id}` targets a deletion made in the same commit, not an earlier one"
     )]
     RestoreDeletedTargetsCurrentCommit { inode_id: InodeId },
     #[error(
-        "restore of inode `{inode_id}` targets the deletion at seq `{requested_seq}`, but the recoverable deletion is at seq `{active_seq}`"
+        "restore of inode `{inode_id}` targets the deletion at seq `{requested_seq}`, but the deletion in the trash is at seq `{actual_deletion_seq}`"
     )]
     RestoreDeletedSequenceMismatch {
         inode_id: InodeId,
         requested_seq: CommitSeq,
-        active_seq: CommitSeq,
+        actual_deletion_seq: CommitSeq,
     },
     #[error(
         "cannot add a revision to inode `{inode_id}` because revision `{base_revision_no}` is already at the maximum 9007199254740991"
@@ -231,11 +231,11 @@ impl CommitValidationError {
             Self::RestoreDeletedSequenceMismatch {
                 inode_id,
                 requested_seq,
-                active_seq,
+                actual_deletion_seq,
             } => Some(ErrorDetails {
                 inode_id: Some(*inode_id),
                 expected_deletion_seq: Some(*requested_seq),
-                actual_deletion_seq: Some(*active_seq),
+                actual_deletion_seq: Some(*actual_deletion_seq),
                 ..ErrorDetails::default()
             }),
             Self::UpdateAttributesBaseRevisionMismatch {

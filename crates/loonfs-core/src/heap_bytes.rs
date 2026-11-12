@@ -16,11 +16,11 @@ use loonfs_types::format::control::{
 };
 use loonfs_types::format::envelope::VerifiedEnvelope;
 use loonfs_types::format::manifest::{
-    AccessRevisionRecord, ActiveDeletionRecord, ActiveDeletionRowAction, AttributesRevisionRecord,
-    CommitReceiptRecord, ContentLayoutRecord, DeletedBinding, DirentryBindingRecord,
-    ExtensionEntry, ExtensionRunRef, ExtensionSegmentRef, InodeRecord, MergeIndexRecord,
-    MetadataRow, MetadataRunRef, MetadataSegmentRef, NamespaceAccess, NamespaceManifestEnvelope,
-    NamespaceManifestPayload, RevisionRecord, SubtreeTombstoneRecord, TombstoneRowAction,
+    AccessRevisionRecord, AttributesRevisionRecord, CommitReceiptRecord, ContentLayoutRecord,
+    DeletedBinding, DirentryBindingRecord, ExtensionEntry, ExtensionRunRef, ExtensionSegmentRef,
+    InodeRecord, MergeIndexRecord, MetadataRow, MetadataRunRef, MetadataSegmentRef,
+    NamespaceAccess, NamespaceManifestEnvelope, NamespaceManifestPayload, RevisionRecord,
+    SubtreeTombstoneRecord, TombstoneRowAction, TrashRecord, TrashRowAction,
 };
 use loonfs_types::format::segment_blocks::{DecodedDataBlock, SegmentIndexEntry};
 use loonfs_types::format::wal::{
@@ -449,7 +449,7 @@ impl HeapBytes for MetadataRow {
             MetadataRow::DirentryBinding(record) => record.heap_bytes(),
             MetadataRow::FileRevision(record) => record.heap_bytes(),
             MetadataRow::Tombstone(record) => record.heap_bytes(),
-            MetadataRow::ActiveDeletion(record) => record.heap_bytes(),
+            MetadataRow::Trash(record) => record.heap_bytes(),
             MetadataRow::CommitReceipt(record) => record.heap_bytes(),
             MetadataRow::Merge(record) => record.heap_bytes(),
             MetadataRow::Commit(record) => record.heap_bytes(),
@@ -497,15 +497,15 @@ impl HeapBytes for SubtreeTombstoneRecord {
     }
 }
 
-impl HeapBytes for ActiveDeletionRecord {
+impl HeapBytes for TrashRecord {
     fn heap_bytes(&self) -> usize {
         match &self.action {
-            ActiveDeletionRowAction::Listed {
+            TrashRowAction::Listed {
                 deleted_by,
                 deleted_binding,
                 ..
             } => deleted_by.heap_bytes() + deleted_binding.heap_bytes(),
-            ActiveDeletionRowAction::Removed { .. } => 0,
+            TrashRowAction::Removed { .. } => 0,
         }
     }
 }

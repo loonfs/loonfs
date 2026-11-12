@@ -239,7 +239,7 @@ pub struct RebasedFrom {
     pub resume_after_seq: CommitSeq,
 }
 
-const GENESIS_COMMIT_ID: &str = "c_00000000000000000000000000000000";
+const GENESIS_COMMIT_ID: &str = "cmt_00000000000000000000000000";
 
 /// Returns the commit id every namespace's sequence zero has, before any
 /// commit is published.

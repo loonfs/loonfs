@@ -6,8 +6,8 @@
 use super::durable_cache::ParentNameCacheKey;
 use super::visibility::{self, MetadataVisibilityReads};
 use super::{
-    AccessRevisionRecord, ActiveDeletionRange, DirentryBindingRecord, InodeRecord, MetadataView,
-    RecoverableDeletion, ResolvedVisiblePath, RevisionRecord, SubtreeTombstoneRecord,
+    AccessRevisionRecord, DirentryBindingRecord, InodeRecord, ListedTrashEntry, MetadataView,
+    ResolvedVisiblePath, RevisionRecord, SubtreeTombstoneRecord, TrashRange,
 };
 use crate::error::{CoreError, Result};
 use crate::metadata::children_page::VisibleChildEntry;
@@ -544,13 +544,13 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
     /// One page of the namespace's deletions in `range` that no restore has
     /// cancelled, oldest deletion first. Uncached: one call serves one trash
     /// listing page.
-    pub(crate) async fn active_deletions_page(
+    pub(crate) async fn trash_entries_page(
         &mut self,
-        range: &ActiveDeletionRange,
+        range: &TrashRange,
         limit: usize,
-    ) -> Result<Vec<RecoverableDeletion>> {
+    ) -> Result<Vec<ListedTrashEntry>> {
         self.counters.scan_range_page_calls = self.counters.scan_range_page_calls.saturating_add(1);
-        self.base.active_deletions_page(range, limit).await
+        self.base.trash_entries_page(range, limit).await
     }
 
     pub(crate) async fn hiding_subtree_tombstone(

@@ -401,15 +401,15 @@ impl<M: crate::Mode> Namespace<M> {
         .await
     }
 
-    /// Lists the namespace's recoverable deletions, oldest deletion first.
-    /// A deletion stays listed until it's restored, or until the retention
+    /// Lists the namespace's trash, oldest deletion first.
+    /// A deletion stays in the trash until it's restored, or until the retention
     /// floor reaches it and it expires.
     pub fn list_trash(&self) -> TrashPager {
         self.list_trash_with_options(&ListTrashOptions::default())
     }
 
-    /// Lists the namespace's recoverable deletions, oldest deletion first,
-    /// as `options` asks.
+    /// Lists the namespace's trash, oldest deletion first, as `options`
+    /// asks.
     pub fn list_trash_with_options(&self, options: &ListTrashOptions) -> TrashPager {
         loonfs_types::Pager::with_state(
             (self.read_only(), options.consistency),

@@ -203,19 +203,19 @@ A tombstone is a series of events, stored as rows. Each row records its own posi
 
 At a given sequence, the latest event for the deletion's root inode determines the state of the root and everything below it. After a `set`, the tombstone hides the subtree, and after a `revoke`, the tombstone hides nothing. A restore commits its `revoke` together with a new binding for the item, so the subtree reappears. A `set` after a revoked deletion of the same inode is a new deletion.
 
-A deletion's "deletion sequence" (`deletion_seq`) is the sequence of the commit that committed its `set`. A deletion has "expired" in a view when its deletion sequence is at or below the view's retention floor, which is the manifest's floor raised by any "[floor objects](glossary.md#floor-object)" in the view's WAL tail (a floor object is a WAL object with no commits that records a new floor, see [Advancing the retention floor](#101-advancing-the-retention-floor)). A deletion is "recoverable" when its `set` is the root's latest event and its deletion sequence is above that floor. An expired deletion can't be restored, its tombstone keeps hiding the subtree, and the trash listing leaves it out. Nothing is committed when a deletion expires. A retention advance moves the floor, and every view whose floor has reached the new floor treats the deletions that the floor passed as expired. A base compaction over such a manifest removes the rows that an expired deletion hides (see [Row retention during a base compaction](#103-row-retention-during-a-base-compaction)).
+A deletion's "deletion sequence" (`deletion_seq`) is the sequence of the commit that committed its `set`. A deletion has "expired" in a view when its deletion sequence is at or below the view's retention floor, which is the manifest's floor raised by any "[floor objects](glossary.md#floor-object)" in the view's WAL tail (a floor object is a WAL object with no commits that records a new floor, see [Advancing the retention floor](#101-advancing-the-retention-floor)). A deletion is "in the trash" when its `set` is the root's latest event and its deletion sequence is above that floor. Each deletion in the trash is a "trash entry", and together they are the namespace's [trash](glossary.md#trash). An expired deletion can't be restored, its tombstone keeps hiding the subtree, and the trash listing leaves it out. Nothing is committed when a deletion expires. A retention advance moves the floor, and every view whose floor has reached the new floor treats the deletions that the floor passed as expired. A base compaction over such a manifest removes the rows that an expired deletion hides (see [Row retention during a base compaction](#103-row-retention-during-a-base-compaction)).
 
 For example, suppose the directory `/old` is deleted at sequence 40, and a retention advance later moves the floor from 35 to 50. While the floor is 35, a restore can bring back `/old`. In every view whose floor is 50 or higher, `/old` and everything below it stay hidden, the trash listing leaves the deletion out, and a restore of the deletion returns `not_deleted`.
 
-A restore request identifies a deletion by its inode and the sequence it was committed at. Validation MUST confirm that this deletion is recoverable in the writer's [position](glossary.md#writer-position), which means that its `set` is the root's latest event and its deletion sequence is above the position's retention floor. A request for a deletion that isn't recoverable returns `not_deleted`, and it MUST NOT cancel a later deletion. (A request can't restore a deletion made earlier in the same request, because that deletion doesn't have a committed sequence yet.) A restore binds the item under the saved parent and name, unless the request provides a different destination. Only the root of a deletion can be restored, because the descendants it hides don't have deletions of their own. An item can't be deleted while a deletion above it hides it, so a deletion inside another deletion is always the older of the two, and no recoverable deletion is inside an expired one.
+A restore request identifies a deletion by its inode and the sequence it was committed at. Validation MUST confirm that this deletion is in the trash at the writer's [position](glossary.md#writer-position), which means that its `set` is the root's latest event and its deletion sequence is above the position's retention floor. A request for a deletion that isn't in the trash returns `not_deleted`, and it MUST NOT cancel a later deletion. (A request can't restore a deletion made earlier in the same request, because that deletion doesn't have a committed sequence yet.) A restore binds the item under the saved parent and name, unless the request provides a different destination. Only the root of a deletion can be restored, because the descendants it hides don't have deletions of their own. An item can't be deleted while a deletion above it hides it, so a deletion inside another deletion is always the older of the two, and no deletion in the trash is inside an expired one.
 
-The `active_deletions` family is a [query index](#19-row-families) over the tombstone events, which the trash listing reads in deletion-sequence order. Its actions are listing states, not events. A `set` event lists the deletion with a `listed` row, and the `revoke` event of a restore removes the deletion from the listing with a `removed` row for the same `(deletion_seq, root_inode_id)`. Removed rows sort before listed rows, so a scan can skip deletions that were restored. The family's keys begin with the deletion sequence, and a listing starts its scan above the view's retention floor, so an expired deletion never appears in it. The tombstone events remain the source of truth.
+The `trash` family is a [query index](#19-row-families) over the tombstone events, which the trash listing reads in deletion-sequence order. Its actions are listing states, not events. A `set` event lists the deletion with a `listed` row, and the `revoke` event of a restore removes the deletion from the listing with a `removed` row for the same `(deletion_seq, root_inode_id)`. Removed rows sort before listed rows, so a scan can skip deletions that were restored. The family's keys begin with the deletion sequence, and a listing starts its scan above the view's retention floor, so an expired deletion never appears in it. The tombstone events remain the source of truth.
 
-Deleting a file doesn't delete its content right away. In a live namespace, file revisions and recoverable deletions are kept under the rules in [Retention and compaction](#10-retention-and-compaction). Deleting a namespace is a separate operation, described in [Namespace lifecycle and forks](#9-namespace-lifecycle-and-forks).
+Deleting a file doesn't delete its content right away. In a live namespace, file revisions and the trash are kept under the rules in [Retention and compaction](#10-retention-and-compaction). Deleting a namespace is a separate operation, described in [Namespace lifecycle and forks](#9-namespace-lifecycle-and-forks).
 
-Why can a deletion stop being recoverable? LoonFS can't reclaim the rows and content that a deletion hides while a restore could still bring them back, so a deletion needs a point in the namespace's history after which it can't be undone.
+Why does a deletion leave the trash? LoonFS can't reclaim the rows and content that a deletion hides while a restore could still bring them back, so a deletion needs a point in the namespace's history after which it can't be undone.
 
-Why does a deletion expire at the retention floor, and not at a point of its own? The floor is the namespace's one bound on how far back history is kept, and a recoverable deletion is history that keeps its subtree's rows. With one bound, a client reads one number to know how far back it can restore anything.
+Why does a deletion expire at the retention floor, and not at a point of its own? The floor is the namespace's one bound on how far back history is kept, and a deletion in the trash is history that keeps its subtree's rows. With one bound, a client reads one number to know how far back it can restore anything.
 
 Why does the trash listing have its own index, with its own states? The listing reads deletions in deletion-sequence order, and the `tombstones` family is keyed by root inode, so it can't serve that order. The listing also needs each deletion's current state, listed or removed, and not the root's whole event history.
 
@@ -244,7 +244,7 @@ Every row that records an event copies its commit's actor and timestamp (as `com
 | Metadata | Actor and timestamp fields |
 | --- | --- |
 | Inode, file revision, tombstone event, attribute revision, access revision, commit | `committed_by`, `committed_at_ms` |
-| Listed active deletion | `deleted_by`, `deleted_at_ms` |
+| Trash entry (`listed` row) | `deleted_by`, `deleted_at_ms` |
 | Directory binding | `child_created_by`, `child_created_at_ms`, copied from the child inode |
 
 The root inode of a new namespace is attributed to the actor ID `loonfs`. A fork inherits its root inode from its source. The fork's manifest records the fork's own creation time, and the inherited inodes keep their original timestamps.
@@ -279,7 +279,7 @@ Every namespace has an "access mode", which is stored in its manifest and set wh
 
 A principal's effective rights on an inode are the union of its grants on the inode's own row and on each ancestor's row. LoonFS walks up the current parent bindings, and it stops after a row whose boundary flag is set, or at the root. For example, suppose a principal has `read` on `/projects`, and `/projects/secret` has its boundary flag set. That `read` doesn't apply inside `/projects/secret`, unless the row for `/projects/secret` (or a row below it) grants it.
 
-A deletion root has no current binding, so while its deletion is recoverable, its tombstone's saved parent is used for that step of the walk. The walk stops at the root of an expired deletion, so the inodes that an expired deletion hides inherit no grants from above its root. Visiting the same inode twice during the walk means the namespace is corrupt. `admin` on the root row grants every right on every item, and it's never inherited. A read by inode ID of an inode that an expired deletion hides, or whose ancestry is disconnected, returns `inode_not_found` before LoonFS evaluates any grant, so no principal can read the inode, an administrator included (see [Paths, listings, and revision reads](#44-paths-listings-and-revision-reads)). A snapshot from before the expiry still shows the inode, and in an ACL namespace, the [API specification][api-spec] allows only an administrator to read it through the snapshot.
+A deletion root has no current binding, so while its deletion is in the trash, its tombstone's saved parent is used for that step of the walk. The walk stops at the root of an expired deletion, so the inodes that an expired deletion hides inherit no grants from above its root. Visiting the same inode twice during the walk means the namespace is corrupt. `admin` on the root row grants every right on every item, and it's never inherited. A read by inode ID of an inode that an expired deletion hides, or whose ancestry is disconnected, returns `inode_not_found` before LoonFS evaluates any grant, so no principal can read the inode, an administrator included (see [Paths, listings, and revision reads](#44-paths-listings-and-revision-reads)). A snapshot from before the expiry still shows the inode, and in an ACL namespace, the [API specification][api-spec] allows only an administrator to read it through the snapshot.
 
 The `update_access` operation replaces an inode's access row, and it appears in the change feed as an `access_changed` event. The [API specification][api-spec] defines that operation, and how reads, commits, and upload sessions are authorized against access rows.
 
@@ -300,15 +300,15 @@ Each family is one of three kinds:
 
 - An "entity header" is a family with one immutable row for each entity, written when the entity is created (`inodes`, `commits`).
 - A "history family" stores the versions of one mutable part of an entity, keyed by the entity and then by version, newest first (`revisions`, `attributes`, `access`, `direntry_binds`, `direntry_child_binds`, `tombstones`). A row of a history family is a "history row". The entity of a binding family is an edge, and each of its rows is one version of the edge.
-- A "query index" is a family that stores a second key over facts that another family stores, for a read that the other family's key can't serve (`commit_receipts`, `active_deletions`, `content_layouts`, `merges`).
+- A "query index" is a family that stores a second key over facts that another family stores, for a read that the other family's key can't serve (`commit_receipts`, `trash`, `content_layouts`, `merges`).
 
-A row can also copy a field of another entity, so that a read doesn't look up that entity. Binding rows copy the child's kind and creation attribution, a bound file's row in the [slot index](#13-directory-bindings) copies the file's [revision summary](glossary.md#revision-summary), and a `listed` row in `active_deletions` copies the deletion root's kind and the deletion's binding, actor, and time.
+A row can also copy a field of another entity, so that a read doesn't look up that entity. Binding rows copy the child's kind and creation attribution, a bound file's row in the [slot index](#13-directory-bindings) copies the file's [revision summary](glossary.md#revision-summary), and a `listed` row in the `trash` family copies the deletion root's kind and the deletion's binding, actor, and time.
 
 Every family follows these rules:
 
 1. Every row is computed from one delta or one commit record, in a fold or a replay, without reading another row (except the rows listed above).
 2. An entity header is keyed by its entity's stable ID (an inode ID, or a commit's sequence). A history row is keyed by its entity's stable ID, then by its revision number if the family has one, and then by its position (`committed_seq` and `delta_index`). The binding families key by the edge instead, because the name key is part of the edge's identity, and a query index starts with the key of the read it serves.
-3. Every history family sorts each entity's rows newest first, so the current value is the first row, and the value at sequence `N` is the first row at or below `N`. The other families have their own orders: `commits` sorts by ascending sequence, `commit_receipts` by commit ID and then ascending sequence, `active_deletions` by deletion sequence, `content_layouts` by longest layout and then newest commit, and `merges` by fork and then newest commit.
+3. Every history family sorts each entity's rows newest first, so the current value is the first row, and the value at sequence `N` is the first row at or below `N`. The other families have their own orders: `commits` sorts by ascending sequence, `commit_receipts` by commit ID and then ascending sequence, `trash` by deletion sequence, `content_layouts` by longest layout and then newest commit, and `merges` by fork and then newest commit.
 4. Every history row records its commit's sequence, ID, actor, and time (`committed_seq`, `commit_id`, `committed_by`, and `committed_at_ms`). A query index row records the sequence of the commit it points to, and it records an actor or a time only as a copy.
 5. A row copies a field of another entity only if the field can't change, or if the delta that changes the field also writes the copy. LoonFS never changes a copy after the copy is written, and it never repairs a copy when it reads one.
 6. An entity header is kept for as long as its entity exists, so an inode row is kept until an expired deletion hides the inode and a base compaction removes the inode's rows, and a commit row until the [retention floor](glossary.md#retention-floor) moves above the commit's sequence. A history family keeps each entity's state at the retention floor and every later row (in the binding families, for each edge's binding events and summary rows separately), and a query index keeps the rows of the entities it indexes.
@@ -328,7 +328,7 @@ This table lists each family's kind, the first component of its key, and its ret
 | `direntry_child_binds` | History family | Child inode ID | Floor state and later |
 | `tombstones` | History family | Root inode ID | Every event |
 | `commit_receipts` | Query index | Commit ID | Floor commit and later |
-| `active_deletions` | Query index | Deletion sequence | Until restored or expired |
+| `trash` | Query index | Deletion sequence | Until restored or expired |
 | `content_layouts` | Query index | Content ID | Longest referenced layout |
 | `merges` | Query index | Fork's namespace ID | Floor commit and later |
 
@@ -353,9 +353,9 @@ namespaces/{namespace_id}/
 ├── hint.json
 ├── manifests/{manifest_no:020}.json.zst
 ├── wal/{wal_no:020}.wal.zst
-├── segments/{segment_id}.sst.zst
+├── segments/{segment_id}.sst
 ├── snapshots/{snapshot_id}.json
-└── extensions/{extension_name}/segments/{segment_id}.sst.zst
+└── extensions/{extension_name}/segments/{segment_id}.sst
 
 pools/{pool_id}/
 ├── pool.json
@@ -668,7 +668,7 @@ A directory edge's value at `N` is its first row in key order at or below `N`, w
 
 Resolving a path takes one slot-index lookup per component, and a lookup reads each edge of the slot as far as the edge's first row at or below `N`. A listing reads the parent's binding rows alone, in one scan of the parent's prefix in name order. It takes each edge's value and includes a bound entry if no tombstone hides the child. Each binding row includes a copy of the child inode's kind and creation attribution, which never change for the life of an inode, and a bound file row includes the file's revision summary at the row's sequence (see [Directory bindings](#13-directory-bindings)). So listings and path resolution don't read the child's inode row, a listing doesn't read the file's revision rows, and a listing reports no content reference. User snapshots apply these rules through their own manifests, at their captured sequences.
 
-A file's current content is its latest revision committed at or before `N`. Its attributes are the latest applicable complete attribute revision, or the initial empty map when there's no applicable attribute row. Listing recoverable deletions uses the derived active-deletion state, while evaluating a tombstone at a past sequence uses the tombstone events.
+A file's current content is its latest revision committed at or before `N`. Its attributes are the latest applicable complete attribute revision, or the initial empty map when there's no applicable attribute row. Listing the trash uses the derived trash rows, while evaluating a tombstone at a past sequence uses the tombstone events.
 
 ### 4.4 Paths, listings, and revision reads
 
@@ -676,12 +676,12 @@ A reader resolves a path from the root directory's inode. It maps each component
 
 A directory listing reads the parent's binding rows in one scan, and it reports each file's revision number, size, and revision attribution from the revision summary in the file's binding row. It doesn't report a file's content reference, which a read of the file's entry by path or by inode returns. It MUST NOT fetch and verify every file's content object just to list a directory.
 
-A path-based revision read first resolves the current inode at that path, and then it looks up the requested revision of that inode. It isn't a request for every file that has ever been at the path. An inode-based revision read reads the retained history of that inode directly, so it can read a file that has no current path, such as a file under a recoverable deletion.
+A path-based revision read first resolves the current inode at that path, and then it looks up the requested revision of that inode. It isn't a request for every file that has ever been at the path. An inode-based revision read reads the retained history of that inode directly, so it can read a file that has no current path, such as a file under a deletion in the trash.
 
 A read by inode ID MUST return `inode_not_found`, the error for an unknown inode, when the inode's ancestry refuses the read, whether it reads the inode's entry, its revisions, its attributes, or its content. To check the ancestry, the reader starts at the inode, follows the current bound bindings upward, and stops at the first tombstone that hides the inode or one of those ancestors (see [File and subtree deletion](#16-file-and-subtree-deletion)):
 
 - If that tombstone's deletion is at or below the view's [retention floor](glossary.md#retention-floor) (see [Replaying the visible WAL](#42-replaying-the-visible-wal)), the deletion has expired, and the read returns `inode_not_found`.
-- If its deletion is above that floor, the read is allowed, and the subject's rights are evaluated through the deletion's saved parent, as for any recoverable deletion (see [Access rows](#18-access-rows)).
+- If its deletion is above that floor, the read is allowed, and the subject's rights are evaluated through the deletion's saved parent, as for any deletion in the trash (see [Access rows](#18-access-rows)).
 - If the walk reaches the root inode without meeting a tombstone, the read is allowed.
 - If the walk reaches an inode with no bound binding before it meets a tombstone, the ancestry is disconnected, and the read returns `inode_not_found`.
 
@@ -903,7 +903,7 @@ If the merge's range starts below the fork's own retention floor, the fork no lo
 
 The rule has three cases:
 
-1. **An inode that exists in this namespace.** The inode MUST be visible at this namespace's head, which means that the inode has a name in its parent directory and isn't hidden by a tombstone on itself or on an ancestor. The one exception is an inode that the fork deleted, merged, and then restored. If a tombstone on the inode itself is the fork's own and its deletion is still recoverable in this namespace, the planner plans a restore, which replaces that tombstone row. The rows that the merge replaces MUST be the fork's own: the current revision for a content change, the current binding for a move, both for a delete, the current attribute or access row for a change to the inode's attributes or access, and the tombstone row for a restore. For a move, the destination parent MUST also be visible in this namespace or be created earlier by the same merge, and the name MUST be free in it.
+1. **An inode that exists in this namespace.** The inode MUST be visible at this namespace's head, which means that the inode has a name in its parent directory and isn't hidden by a tombstone on itself or on an ancestor. The one exception is an inode that the fork deleted, merged, and then restored. If a tombstone on the inode itself is the fork's own and its deletion is still in this namespace's trash, the planner plans a restore, which replaces that tombstone row. The rows that the merge replaces MUST be the fork's own: the current revision for a content change, the current binding for a move, both for a delete, the current attribute or access row for a change to the inode's attributes or access, and the tombstone row for a restore. For a move, the destination parent MUST also be visible in this namespace or be created earlier by the same merge, and the name MUST be free in it.
 2. **An inode that the fork created.** The planner plans a create under the fork's inode ID. The parent MUST be a directory that the same merge creates earlier (the merge creates parents before their children), or a directory that exists in this namespace and is visible there, and the name MUST be free in that directory. If an earlier merge of the fork already created the inode in this namespace, the planner applies the first case instead.
 3. **A directory that the fork deleted or moved.** This namespace may have added or changed something beneath the directory since the fork point, so the planner reads this namespace's diff from the fork point to the head over the directory, and each row in that diff MUST be the fork's own.
 
@@ -1066,7 +1066,7 @@ The WAL stores the resulting metadata changes ("deltas"), not the original reque
 | `bind_direntry` | A new directory binding, with the file's current revision summary when the child is a file. |
 | `unbind_direntry` | A removed directory binding. |
 | `append_file_revision` | A new file revision, with the file's current binding, under which replay writes the revision's summary row. |
-| `tombstone_subtree` | A deletion (a tombstone `set` event), with the deleted root's kind, which the deletion's `listed` row in `active_deletions` stores. |
+| `tombstone_subtree` | A deletion (a tombstone `set` event), with the deleted root's kind, which the deletion's `listed` row in the `trash` family stores. |
 | `revoke_subtree_tombstone` | A restore (a tombstone `revoke` event). |
 | `append_attributes_revision` | A new attribute revision. |
 | `append_access_revision` | A new access revision. |
@@ -1388,7 +1388,7 @@ Every commit adds metadata rows, and without a limit, old revisions, bindings, a
 
 ### 10.1 Advancing the retention floor
 
-The retention floor limits how far back these kinds of history are kept: incremental replay, superseded bindings, file revisions, old attribute states, and commit receipts. Above the floor, every file's history is complete. At or below it, each file that's visible or under a recoverable deletion keeps its newest revision, and a file that an expired deletion hides keeps none (see [Row retention during a base compaction](#103-row-retention-during-a-base-compaction)). The floor doesn't expire layout rows, and it doesn't keep WAL objects (garbage collection removes them once they're folded).
+The retention floor limits how far back these kinds of history are kept: incremental replay, superseded bindings, file revisions, old attribute states, and commit receipts. Above the floor, every file's history is complete. At or below it, each file that's visible or under a deletion in the trash keeps its newest revision, and a file that an expired deletion hides keeps none (see [Row retention during a base compaction](#103-row-retention-during-a-base-compaction)). The floor doesn't expire layout rows, and it doesn't keep WAL objects (garbage collection removes them once they're folded).
 
 The floor only moves when it's explicitly advanced, with a [floor object](glossary.md#floor-object) (described below), and automatic folds don't advance it on their own. Its initial value is 0 for a new namespace, and the fork point for a fork. The change feed returns only commits above the floor, so the commit row at the floor is kept, but it's never replayed. That's also why a fork's floor is its fork point, so that the source's commit at that sequence stays out of the fork's change feed.
 
@@ -1414,7 +1414,7 @@ A create request can set the window. A host can also have a default window (the 
 
 A snapshot below the new floor still protects its own manifest and runs.
 
-The floor also bounds how long a deletion stays recoverable. A deletion whose `deletion_seq` is at or below a view's floor has expired in that view: a restore of it returns `not_deleted`, the trash listing leaves it out, and no read reaches the inodes it hides (see [File and subtree deletion](#16-file-and-subtree-deletion) and [Paths, listings, and revision reads](#44-paths-listings-and-revision-reads)). The advance commits nothing for the deletions it passes. A fork's floor starts at its fork point, so every deletion that a fork inherits has expired in the fork from the fork's creation.
+The floor also bounds how long a deletion stays in the trash. A deletion whose `deletion_seq` is at or below a view's floor has expired in that view: a restore of it returns `not_deleted`, the trash listing leaves it out, and no read reaches the inodes it hides (see [File and subtree deletion](#16-file-and-subtree-deletion) and [Paths, listings, and revision reads](#44-paths-listings-and-revision-reads)). The advance commits nothing for the deletions it passes. A fork's floor starts at its fork point, so every deletion that a fork inherits has expired in the fork from the fork's creation.
 
 A floor object is a WAL object with no commit records, and its payload also sets `retention_floor_seq` to the new floor (see [WAL records](#a5-wal-records)). Like a fence, a floor object is created at the next WAL number and doesn't advance `head_seq`, so it adds no commit, no sequence number, and no change feed entry. For example, if the current manifest has writer epoch 3 and the [WAL tip](glossary.md#wal-tip) is WAL object 30 at sequence 140, a process that advances the floor to 20 creates WAL object 31 with writer epoch 3, `head_seq` 140, no records, and `retention_floor_seq` 20.
 
@@ -1524,7 +1524,7 @@ These rules apply only when the selected inputs include the group's oldest run. 
 | `direntry_binds`, `direntry_child_binds` | For each edge (a parent, a name key, and a child) and each kind of row (binding events, and the summary rows that the slot index alone stores), keep every row above the floor and the newest row at or below it. If the edge's newest binding event at or below the floor is unbound, drop the edge's rows of both kinds at or below the floor. Remove every row of an edge whose parent an expired deletion hides. |
 | `revisions` | For each file, keep every revision above the floor and the newest revision at or below it, and remove earlier revisions. Remove every revision of a file that an expired deletion hides. |
 | `tombstones` | Keep every `set` and `revoke` event. |
-| `active_deletions` | Remove a cancelled `listed` and `removed` pair together, and remove the `listed` row of a deletion at or below the floor. A deletion above the floor keeps its `listed` row. |
+| `trash` | Remove a cancelled `listed` and `removed` pair together, and remove the `listed` row of a deletion at or below the floor. A deletion above the floor keeps its `listed` row. |
 | `commits`, `commit_receipts`, `merges` | Remove rows strictly below the floor. The row at the floor is kept, and the change feed never replays it (in a fork, it's the source's commit at the fork point). |
 | `content_layouts` | Keep the first row for each content ID, ordered by longest layout and then newest commit. Drop chains that aren't in the basis's revision filter (see below). |
 | `attributes` | For each inode, keep every revision above the floor and the newest revision at or below it, and remove earlier revisions. Remove every revision of an inode that an expired deletion hides. |
@@ -1534,14 +1534,14 @@ Summary rows are versions of their edge for retention. The slot index keeps an e
 
 A bottom-anchored compaction of `content_layouts` also drops the rows of chains that no `revisions` row in its basis refers to. It checks each chain against a Bloom filter, which can err only toward keeping a row, and a later compaction drops what the filter kept. Every compaction scans the basis's revisions once before it rewrites layouts. The filter uses two xxh64 hashes and a seed from the output run number, it's sized as [Filter sizes](#filter-sizes) describes up to `MAX_BLOOM_FILTER_BYTES` (64 MiB), and its expected count is the sum of the revision segments' `row_count`. A filter at the maximum size has fewer bits per ID and uses fewer hash positions, so it reports more false positives, and a later compaction drops more of what it kept.
 
-A deletion has expired in a compaction's [metadata basis](#41-resolving-the-metadata-basis) when its deletion sequence is at or below the basis manifest's `retention_floor_seq`. No commit can restore such a deletion, folded or not (see [Advancing the retention floor](#101-advancing-the-retention-floor)). An expired deletion whose latest tombstone event in the basis is `set` hides its root and every descendant of the root, and a bottom-anchored compaction of the `inodes`, `revisions`, `attributes`, or `access` group, or of the bindings group, removes every row of those inodes. It tests a binding row by the edge's parent, so it removes every version of an edge whose parent is hidden. The root's own edge has a visible parent, and the binding rule above drops that edge, because its newest version at or below the floor is unbound. The other families don't need a rule of their own: `tombstones` keeps the deletion's events, `active_deletions` removes the root's `listed` row, and the revision filter drops the chains of the removed revisions.
+A deletion has expired in a compaction's [metadata basis](#41-resolving-the-metadata-basis) when its deletion sequence is at or below the basis manifest's `retention_floor_seq`. No commit can restore such a deletion, folded or not (see [Advancing the retention floor](#101-advancing-the-retention-floor)). An expired deletion whose latest tombstone event in the basis is `set` hides its root and every descendant of the root, and a bottom-anchored compaction of the `inodes`, `revisions`, `attributes`, or `access` group, or of the bindings group, removes every row of those inodes. It tests a binding row by the edge's parent, so it removes every version of an edge whose parent is hidden. The root's own edge has a visible parent, and the binding rule above drops that edge, because its newest version at or below the floor is unbound. The other families don't need a rule of their own: `tombstones` keeps the deletion's events, `trash` removes the root's `listed` row, and the revision filter drops the chains of the removed revisions.
 
-Before such a compaction rewrites its window, it builds a "kept inode filter", which is a Bloom filter of every inode that's visible or under a recoverable deletion in the basis. To build the filter, the compaction:
+Before such a compaction rewrites its window, it builds a "kept inode filter", which is a Bloom filter of every inode in the basis that's visible or under a deletion in the trash. To build the filter, the compaction:
 
 1. Walks the basis's directory tree from the root inode, depth first, with one cursor for the directory that it's reading and one for each ancestor directory that still has unread entries. It reads each directory's children from `direntry_binds`, and it inserts and follows the child of each edge whose first row, which is its newest version, is bound.
-2. Walks the subtree of every recoverable deletion the same way, starting at the deletion's root. It reads those roots from the `listed` rows in `active_deletions` that have no `removed` row and whose deletion sequence is above the floor.
+2. Walks the subtree of every deletion in the trash the same way, starting at the deletion's root. It reads those roots from the `listed` rows in the `trash` family that have no `removed` row and whose deletion sequence is above the floor.
 
-Deleting an item unbinds it, so the first walk doesn't reach a deleted subtree. An expired deletion isn't a starting point for the second walk, and its root is unbound, so neither walk reaches the inodes that the deletion hides. A deletion inside another deletion is the older of the two (see [File and subtree deletion](#16-file-and-subtree-deletion)), so no recoverable deletion is inside an expired one, and the two walks reach every ancestor through which the rights on an item under a recoverable deletion are evaluated. The compaction removes a row whose inode isn't in the filter, and it applies the rules in the table to a row whose inode is in the filter. The two binding indexes are rewritten in one compaction against the same filter, so the compaction keeps or removes each binding event the same way in both indexes. The walk reads the slot-index rows of every directory it reaches, so each of these compactions reads the bindings of the visible and recoverable tree once more.
+Deleting an item unbinds it, so the first walk doesn't reach a deleted subtree. An expired deletion isn't a starting point for the second walk, and its root is unbound, so neither walk reaches the inodes that the deletion hides. A deletion inside another deletion is the older of the two (see [File and subtree deletion](#16-file-and-subtree-deletion)), so no deletion in the trash is inside an expired one, and the two walks reach every ancestor through which the rights on an item under a deletion in the trash are evaluated. The compaction removes a row whose inode isn't in the filter, and it applies the rules in the table to a row whose inode is in the filter. The two binding indexes are rewritten in one compaction against the same filter, so the compaction keeps or removes each binding event the same way in both indexes. The walk reads the slot-index rows of every directory it reaches, so each of these compactions reads the bindings of the visible tree and the trash once more.
 
 The kept inode filter follows the layout filter's rules: two xxh64 hashes, a seed from the output run number, 10 bits per expected inode with the same minimum and maximum sizes, and an expected count that is the sum of the basis's `inodes` segments' `row_count`. A false positive keeps a hidden inode's rows for one compaction, and the next compaction of the group has a different output run number, so it removes them. The walk stops at `MAX_KEPT_INODE_WALK_DEPTH` (4,096) cursors. (Once the walk has read a directory's last row, it drops the directory's cursor before it descends into the directory's last child, so a chain of directories that each fit in one 64-row scan uses one cursor at any depth.) A compaction whose walk stops at the limit keeps every row that it would have tested against the filter, logs that choice, and reports `expired_row_removal_walk_limit` in the `metadata` job's result (see [Jobs and outcomes](api.md#jobs-and-outcomes)). A delta-only compaction doesn't build the filter, and it removes none of these rows. A base compaction over a manifest whose `retention_floor_seq` is 0 doesn't build the filter either, and it keeps every row, because no deletion in its basis has expired.
 
@@ -1561,7 +1561,7 @@ An empty attribute map, or an access row with no boundary and no grants, is kept
 
 A rewrite MUST refuse an ambiguous file revision, attribute, or access history, in which two rows for one inode have the same revision number at or below the retention floor. It can't choose one row and discard the other.
 
-An active-deletion removal marker sorts before the matching listed entry, so a bottom-anchored compaction can remove the pair without leaving an older entry that would reappear in a later read.
+A trash removal marker sorts before the matching listed entry, so a bottom-anchored compaction can remove the pair without leaving an older entry that would reappear in a later read.
 
 Compaction MUST preserve the visible metadata at every retained sequence. It publishes a complete replacement through the numbered manifest protocol. Its input objects stay available until no protected manifest or snapshot references them (a successful publication isn't permission to delete them right away).
 
@@ -1908,7 +1908,7 @@ The manifest's `extensions` member maps each extension's name to the extension's
 Core copies the entry's other members unchanged, as JSON values that it doesn't interpret, and the extension's own specification defines them. An extension's segments are stored under the prefix of the namespace that wrote them:
 
 ```text
-namespaces/{owner_namespace_id}/extensions/{extension_name}/segments/{segment_id}.sst.zst
+namespaces/{owner_namespace_id}/extensions/{extension_name}/segments/{segment_id}.sst
 ```
 
 Core handles an entry like this:
@@ -2050,7 +2050,7 @@ These tables list the durable payload fields. The protocol sections define how t
 | Upload outcome record | `namespace_id`, `upload_id`, `outcome` |
 | Pool record | `pool_id`, `first_member_id`, `created_at_ms` |
 
-Namespace status is `{"kind":"active"}`, or `{"kind":"deleted"}` with a required `deleted_at_ms` (only on the deleted variant). A missing status is invalid. The genesis commit ID is `c_00000000000000000000000000000000`.
+Namespace status is `{"kind":"active"}`, or `{"kind":"deleted"}` with a required `deleted_at_ms` (only on the deleted variant). A missing status is invalid. The genesis commit ID is `cmt_00000000000000000000000000`.
 
 Snapshot owners have the fields in [Records and owners](#81-records-and-owners), and a snapshot has no status field. Upload records use these tagged variants, and both use `kind` tags:
 
@@ -2184,7 +2184,7 @@ Rows are kind-tagged CBOR objects in the data blocks. The row-kind schema and th
 | `direntry_binding` | `parent_inode_id`, `name_key`, `child_inode_id`, `child_kind`, `child_created_by`, `child_created_at_ms`, `committed_seq`, `delta_index`, `commit_id`, `committed_by`, `committed_at_ms`, `bind_position`, `state` |
 | `file_revision` | `inode_id`, `revision_no`, `committed_seq`, `commit_id`, `committed_by`, `committed_at_ms`, `delta_index`, `content_ref` |
 | `tombstone` | `root_inode_id`, `committed_seq`, `delta_index`, `commit_id`, `action`, `committed_by`, `committed_at_ms` |
-| `active_deletion` | `root_inode_id`, `deletion_seq`, `action` |
+| `trash` | `root_inode_id`, `deletion_seq`, `action` |
 | `commit_receipt` | `commit_id`, `committed_seq` |
 | `commit` | `committed_seq`, `commit_id`, `committed_by`, `semantic_commit_fingerprint`, `committed_at_ms`, `message?`, `merge?`, `deltas` |
 | `merge` | `source_namespace_id`, `committed_seq`, `source_after_seq`, `source_through_seq` |
@@ -2202,7 +2202,7 @@ The two binding families store the same binding events, and the slot index also 
 
 For a tombstone, the top-level `committed_seq` and `delta_index` fields store the row's own position. A revoke target is a `DeltaPosition` value, `{seq, delta_index}`. A set action is `{"kind":"set","root_kind":...,"deleted_binding":...}`, and a revoke action is `{"kind":"revoke","target":...}`.
 
-An active-deletion `listed` action contains `inode_kind`, `deleted_at_ms`, `deleted_by`, and `deleted_binding`, and a `removed` action contains `removed_seq`, the sequence of the restore that removed the deletion from the listing. These are nested action fields, not extra top-level fields on every active-deletion row. The `inode_kind` is the `root_kind` of the deletion's `set` event, and a `listed` action without it fails decoding.
+A trash `listed` action contains `inode_kind`, `deleted_at_ms`, `deleted_by`, and `deleted_binding`, and a `removed` action contains `removed_seq`, the sequence of the restore that removed the deletion from the listing. These are nested action fields, not extra top-level fields on every trash row. The `inode_kind` is the `root_kind` of the deletion's `set` event, and a `listed` action without it fails decoding.
 
 Each row key starts with its family's prefix, followed by hyphen-separated components, and every family's keys follow the same rules (see [Row families](#19-row-families)). A generated ID is its 26-character body, without its prefix (a placeholder that ends in `_body`), so an inode ID leaves out `ino_` and a content ID leaves out `con_` (see [Numbered objects and generated IDs](#23-numbered-objects-and-generated-ids)). A client-chosen string is the lowercase hexadecimal encoding of its UTF-8 bytes (a placeholder that ends in `_hex`), because a client can put a hyphen in it. A name key is one, and so is a commit ID: a generated commit ID has the shape of a generated ID, but a client can supply any commit ID, such as `retry-1`. A counter is zero-padded decimal, 20 digits for an unsigned 64-bit value (`:020`) and 10 for an unsigned 32-bit value (`:010`), and a counter that sorts newest first is subtracted from its type's maximum value first (`u64::MAX - x`). A filter key is the family's prefix followed by the components that identify one entity, or one slot in `direntry_binds` and one child in `direntry_child_binds`, and `direntry_binds` also adds a parent probe.
 
@@ -2217,7 +2217,7 @@ In the following grammar, `u64::MAX - x` and `u32::MAX - x` mean subtraction bef
 | `direntry_child_binds` | `direntry-child-bind-{child_inode_id_body}-{parent_inode_id_body}-{name_key_hex}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` |
 | `revisions` | `revision-{inode_id_body}-{u64::MAX - revision_no:020}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` |
 | `tombstones` | `tombstone-{root_inode_id_body}-{u64::MAX - committed_seq:020}-{u32::MAX - delta_index:010}` |
-| `active_deletions` | `active-deletion-{deletion_seq:020}-{root_inode_id_body}-{sort_rank:010}` |
+| `trash` | `trash-{deletion_seq:020}-{root_inode_id_body}-{sort_rank:010}` |
 | `commit_receipts` | `commit-receipt-{commit_id_hex}-{committed_seq:020}` |
 | `commits` | `commit-{committed_seq:020}` |
 | `merges` | `merge-{source_namespace_id_hex}-{u64::MAX - committed_seq:020}` |
@@ -2234,7 +2234,7 @@ An edge's value at sequence `N` is the first row in key order whose `committed_s
 
 Compaction groups both families by edge, and it decides each row as it arrives, without keeping a row back. It also tracks the last edge bound at the floor, across the edges of one slot in the slot index, and across the edges of one child in the child index. Commit validation enforces one child per slot and one parent per child (see [Directory bindings](#13-directory-bindings)), so a second child bound in one slot at the floor, or a second parent bound for one child at the floor, is corruption, and compaction refuses it.
 
-Ascending byte order scans an inode's file revisions, attributes, and access rows newest first, because their keys subtract the revision number from the maximum value. It scans an edge's binding rows and a root's tombstone events newest first too, because their keys subtract the sequence and the delta index from the maximum values, and a fork's merges newest first, because their keys subtract the sequence. The active-deletion `sort_rank` is 0 for a removed entry and 1 for a listed entry, and it's still stored as ten digits.
+Ascending byte order scans an inode's file revisions, attributes, and access rows newest first, because their keys subtract the revision number from the maximum value. It scans an edge's binding rows and a root's tombstone events newest first too, because their keys subtract the sequence and the delta index from the maximum values, and a fork's merges newest first, because their keys subtract the sequence. The trash `sort_rank` is 0 for a removed entry and 1 for a listed entry, and it's still stored as ten digits.
 
 Bloom filters use these keys, which aren't always full row keys:
 
@@ -2245,7 +2245,7 @@ Bloom filters use these keys, which aren't always full row keys:
 | `direntry_child_binds` | `direntry-child-bind-{child_inode_id_body}` |
 | `revisions` | `revision-{inode_id_body}` |
 | `tombstones` | `tombstone-{root_inode_id_body}` |
-| `active_deletions` | `active-deletion-{deletion_seq:020}-{root_inode_id_body}` |
+| `trash` | `trash-{deletion_seq:020}-{root_inode_id_body}` |
 | `commit_receipts` | `commit-receipt-{commit_id_hex}` |
 | `commits` | The complete row key |
 | `merges` | `merge-{source_namespace_id_hex}` |
@@ -2274,7 +2274,7 @@ The family groups are:
 | `revisions` | `revisions` |
 | `inodes` | `inodes` |
 | `tombstones` | `tombstones` |
-| `active_deletions` | `active_deletions` |
+| `trash` | `trash` |
 | `commits` | `commits`, `commit_receipts`, `merges` |
 | `content_layouts` | `content_layouts` |
 | `attributes` | `attributes` |
@@ -2402,8 +2402,8 @@ These patterns define the core object families. A segment's owner can be differe
 | WAL objects | `namespaces/{namespace_id}/wal/{wal_no:020}.wal.zst` |
 | Namespace manifests | `namespaces/{namespace_id}/manifests/{manifest_no:020}.json.zst` |
 | Snapshot records | `namespaces/{namespace_id}/snapshots/{snapshot_id}.json` |
-| Metadata segments | `namespaces/{owner_namespace_id}/segments/{segment_id}.sst.zst` |
-| Extension segments | `namespaces/{owner_namespace_id}/extensions/{extension_name}/segments/{segment_id}.sst.zst` |
+| Metadata segments | `namespaces/{owner_namespace_id}/segments/{segment_id}.sst` |
+| Extension segments | `namespaces/{owner_namespace_id}/extensions/{extension_name}/segments/{segment_id}.sst` |
 | Upload sessions | `pools/{pool_id}/uploads/{upload_id}.json` |
 | Upload outcomes | `pools/{pool_id}/uploads/{upload_id}.outcome.json` |
 | Hint | `namespaces/{namespace_id}/hint.json` |

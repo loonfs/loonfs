@@ -1,5 +1,5 @@
 //! [`MetadataView`] lookups of directory bindings,
-//! subtree tombstones, and active deletions.
+//! subtree tombstones, and the trash.
 
 use super::durable_cache::{ParentNameCacheKey, SharedRows};
 use super::manifest_index;
@@ -9,9 +9,8 @@ use crate::error::Result;
 use crate::metadata::view::latest_visible_binding;
 use crate::metadata::view::MetadataView;
 use crate::metadata::{
-    active_deletion_from_tombstone, recoverable_deletion_from_active_record, ActiveDeletionRange,
-    ActiveDeletionRecord, DirentryBindingRecord, MetadataState, RecoverableDeletion,
-    SubtreeTombstoneRecord,
+    listed_trash_entry_from_record, trash_record_from_tombstone, DirentryBindingRecord,
+    ListedTrashEntry, MetadataState, SubtreeTombstoneRecord, TrashRange, TrashRecord,
 };
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::lookup_keys;
@@ -20,7 +19,7 @@ use loonfs_types::{CommitSeq, InodeId, NameKey, ROOT_INODE_ID};
 /// Rows one trash page fetches per manifest round-trip. A page's entries are
 /// listed rows; restore markers share the range until compaction removes
 /// each pair away, so the raw scan runs a little ahead of the page.
-const ACTIVE_DELETION_RAW_SCAN_LIMIT: usize = 64;
+const TRASH_RAW_SCAN_LIMIT: usize = 64;
 
 impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     pub(crate) async fn current_parent_binding_for_child(
@@ -96,11 +95,11 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         Ok(hiding)
     }
 
-    /// The `set` event of the root's recoverable deletion: its latest
+    /// The `set` event of the root's deletion in the trash: its latest
     /// tombstone event, when that event is a `set` above the view's
     /// retention floor
     /// ([format section 1.6](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#16-file-and-subtree-deletion)).
-    pub(crate) async fn recoverable_deletion(
+    pub(crate) async fn tombstone_in_trash(
         &self,
         root_inode_id: InodeId,
     ) -> Result<Option<SubtreeTombstoneRecord>> {
@@ -197,27 +196,27 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     /// entry. Reads stop as soon as `limit` entries are in hand.
     ///
     /// The listing serves a view at or above its manifest's head.
-    /// `active_deletions` is a query index, not history, and compaction
+    /// The `trash` family is a query index, not history, and compaction
     /// removes a deletion's row together with the row its restore adds, so
     /// filtering these rows can't return the deletions of a view below the
     /// head.
-    pub(super) async fn active_deletions_page(
+    pub(super) async fn trash_entries_page(
         &self,
-        range: &ActiveDeletionRange,
+        range: &TrashRange,
         limit: usize,
-    ) -> Result<Vec<RecoverableDeletion>> {
+    ) -> Result<Vec<ListedTrashEntry>> {
         if limit == 0 {
             return Ok(Vec::new());
         }
         let visible_seq = self.visible_seq();
 
-        let mut tail: Vec<(String, ActiveDeletionRecord)> = Vec::new();
+        let mut tail: Vec<(String, TrashRecord)> = Vec::new();
         for tombstone in self
             .row_states()
             .flat_map(|state| state.subtree_tombstones())
             .filter(|tombstone| tombstone.committed_seq <= visible_seq)
         {
-            let record = active_deletion_from_tombstone(tombstone);
+            let record = trash_record_from_tombstone(tombstone);
             let row_key = record.row_key();
             if range.contains(&row_key) {
                 tail.push((row_key, record));
@@ -226,10 +225,10 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         tail.sort_by(|(left, _), (right, _)| left.cmp(right));
 
         let segments = self.manifest_segments();
-        let raw_limit = limit.max(ACTIVE_DELETION_RAW_SCAN_LIMIT);
+        let raw_limit = limit.max(TRASH_RAW_SCAN_LIMIT);
         // A short page is the end of the range.
         let refill = |lower_bound: String| async move {
-            let rows = manifest_index::active_deletions_page(
+            let rows = manifest_index::trash_rows_page(
                 segments,
                 &lower_bound,
                 range.upper_bound.as_deref(),
@@ -250,7 +249,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
                 break;
             };
             let position = (record.deletion_seq, record.root_inode_id);
-            match recoverable_deletion_from_active_record(record) {
+            match listed_trash_entry_from_record(record) {
                 None => removed_position = Some(position),
                 Some(deletion) if removed_position != Some(position) => entries.push(deletion),
                 Some(_) => {}

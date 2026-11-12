@@ -587,7 +587,7 @@ fn the_feed_names_deleted_entries_and_their_writer() {
 }
 
 #[test]
-fn a_restore_that_misses_the_active_deletion_reports_both_sequences() {
+fn a_restore_that_misses_the_trash_entry_reports_both_sequences() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "restore-details-test");
     let namespace_id = namespace_id("demo");
@@ -797,7 +797,7 @@ async fn a_deleted_file_keeps_its_newest_revision_at_the_floor_and_a_restore_bri
         .await
         .expect("fold the deletion");
     // The floor stops just below the deletion, at the file's newest revision,
-    // so the deletion stays recoverable. The advance takes the writer epoch,
+    // so the deletion stays in the trash. The advance takes the writer epoch,
     // so the restore opens a new writer session.
     drop(namespace_writer);
     let advanced = fs

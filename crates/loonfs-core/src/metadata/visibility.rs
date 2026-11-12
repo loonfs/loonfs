@@ -267,7 +267,7 @@ impl AncestorWalk {
 
 /// The first hiding subtree tombstone rooted at `inode_id` or at any of its
 /// current ancestors (following current parent bindings upward). A
-/// recoverable deletion and an expired one both hide their subtree, so the
+/// deletion in the trash and an expired one both hide their subtree, so the
 /// rule doesn't read the retention floor. A parent-binding cycle is corrupt
 /// stored metadata: returning "not covered" could show a deleted subtree.
 pub(crate) async fn covering_subtree_tombstone<R: MetadataVisibilityReads>(
@@ -290,9 +290,10 @@ pub(crate) async fn covering_subtree_tombstone<R: MetadataVisibilityReads>(
 /// first tombstone that hides the inode or an ancestor (a `set`; a `revoke`
 /// hides nothing, so the walk passes it). A deletion at or below the view's
 /// retention floor has expired, which refuses the read. A deletion above the
-/// floor allows it, because a recoverable deletion's rights are judged on
-/// its saved ancestry, so the walk doesn't continue above a recoverable
-/// root. Reaching the root inode without a tombstone allows the read.
+/// floor allows it, because the rights on an item under a deletion in the
+/// trash are judged on the deletion's saved ancestry, so the walk doesn't
+/// continue above the root of a deletion in the trash. Reaching the root
+/// inode without a tombstone allows the read.
 /// Reaching an inode with no bound edge before any tombstone means the
 /// ancestry is disconnected, which refuses the read. Every live inode has
 /// bound edges up to the root, and every deleted inode has them up to its

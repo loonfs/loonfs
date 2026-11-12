@@ -437,14 +437,14 @@ pub(super) async fn get_file_content(
         extensions(("x-loonfs-retry" = json!("idempotent"))),
         path = "/v0/namespaces/{namespace_id}/filesystem/trash",
         tag = "filesystem",
-        summary = "List recoverable deletions",
-        description = "Returns the namespace's recoverable deletions, oldest first. A deletion leaves the list when it's restored, or when the namespace's retention floor reaches its `deletion_seq`. Each entry includes the inode ID and deletion sequence that a restore needs, and the directory binding that the delete removed.",
+        summary = "List the trash",
+        description = "Returns the namespace's trash entries, oldest deletion first. An entry leaves the trash when it's restored, or when the namespace's retention floor reaches its `deletion_seq`. Each entry includes the inode ID and deletion sequence that a restore needs, and the directory binding that the delete removed.",
         params(
             ("namespace_id" = String, Path, description = "The namespace ID."),
             LivePageQuery
         ),
         responses(
-            (status = 200, description = "Recoverable deletions", body = ListTrashResponse),
+            (status = 200, description = "Trash entries", body = ListTrashResponse),
             (status = 400, description = "Invalid limit or cursor", body = ErrorResponse),
             (status = 401, description = "Unauthorized", body = ErrorResponse),
             (status = 404, description = "Namespace not found", body = ErrorResponse),
