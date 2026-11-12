@@ -19,8 +19,8 @@
 
 use loonfs_types::format::control::{
     decode_control_object, ControlObjectEnvelope, ControlObjectKind, ForkBasis, HintPayload,
-    ManifestRef, NamespaceStatus, PinOwner, PinPayload, PoolRecordPayload, RebasedFrom,
-    UploadOutcome, UploadOutcomePayload, UploadSessionMode, UploadSessionPayload, WriterBlock,
+    ManifestRef, NamespaceStatus, PinOwner, PinPayload, PoolPayload, RebasedFrom, UploadOutcome,
+    UploadOutcomePayload, UploadSessionMode, UploadSessionPayload, WriterBlock,
 };
 use loonfs_types::format::envelope::EnvelopeCodecError;
 use loonfs_types::format::manifest::{
@@ -1143,9 +1143,9 @@ fn control_objects_match_golden_bytes() {
         },
     );
     check_control_golden(
-        "control_pool_record.v1.json",
-        ControlObjectKind::PoolRecord,
-        PoolRecordPayload {
+        "control_pool.v1.json",
+        ControlObjectKind::Pool,
+        PoolPayload {
             pool_id: loonfs_types::PoolId::parse("pool_3s0drmj8em84yb4mnetqkz2j0x")
                 .expect("valid pool id"),
             first_member_id: namespace_id(),

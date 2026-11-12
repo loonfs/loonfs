@@ -11,7 +11,7 @@ use crate::segment::{MetadataRunPolicy, MetadataSegmentCache};
 use crate::time::OperationClock;
 use loonfs_objectstore::keys::pool_record;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::control::{ControlObjectKind, PoolRecordPayload};
+use loonfs_types::format::control::{ControlObjectKind, PoolPayload};
 use loonfs_types::{MonotonicTimer, NamespaceId, PoolId, WallClock};
 use std::sync::Arc;
 
@@ -92,12 +92,12 @@ impl<S> PoolStore<S> {
 
 impl<S: ObjectStore> PoolStore<S> {
     /// Loads the pool's record, or returns `None` if it's missing.
-    pub(crate) async fn load_pool_record(&self) -> Result<Option<PoolRecordPayload>> {
+    pub(crate) async fn load_pool_record(&self) -> Result<Option<PoolPayload>> {
         let loaded = load_control_object(
             &self.store,
             pool_record(&self.pool_id),
-            ControlObjectKind::PoolRecord,
-            |object_key, record: &PoolRecordPayload| {
+            ControlObjectKind::Pool,
+            |object_key, record: &PoolPayload| {
                 expect_identity_field(
                     object_key,
                     "pool id",

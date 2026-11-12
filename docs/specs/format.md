@@ -1955,7 +1955,7 @@ This appendix is the field and encoding reference for the protocols above. Field
 
 ### A.1 Family versions
 
-There are five kinds of control object: `hint`, `pin`, `upload_session`, `upload_outcome`, and `pool_record`.
+There are five kinds of control object: `hint`, `pin`, `upload_session`, `upload_outcome`, and `pool`.
 
 | Object | Envelope kind | Encoding | Version |
 | --- | --- | --- | --- |
@@ -1966,7 +1966,7 @@ There are five kinds of control object: `hint`, `pin`, `upload_session`, `upload
 | Pin record | `pin` | Uncompressed JSON | 1 |
 | Upload session record | `upload_session` | Uncompressed JSON | 1 |
 | Upload outcome record | `upload_outcome` | Uncompressed JSON | 1 |
-| Pool record | `pool_record` | Uncompressed JSON | 1 |
+| Pool record | `pool` | Uncompressed JSON | 1 |
 | Content object | No envelope | Immutable extent bytes | Not versioned. A layout lists the whole and span objects for a `blob_v1` chain prefix. |
 | Grep segment | No envelope | Block sections with grep rows | 2, given by the grep entry's `version` |
 

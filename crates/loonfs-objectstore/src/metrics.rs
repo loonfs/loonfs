@@ -719,7 +719,7 @@ fn classify_key(key: &str) -> ObjectKeyKind {
         DurableObjectFamily::Pin => ObjectKeyKind::GcControl,
         DurableObjectFamily::UploadSession
         | DurableObjectFamily::UploadOutcome
-        | DurableObjectFamily::PoolRecord => ObjectKeyKind::Metadata,
+        | DurableObjectFamily::Pool => ObjectKeyKind::Metadata,
     }
 }
 
