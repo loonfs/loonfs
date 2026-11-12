@@ -2,48 +2,34 @@
 
 use crate::{PendingCommit, Result};
 use loonfs_client::ClientError;
-use loonfs_types::{u64_from_usize, CommitSeq, ErrorCode, ErrorKind, ErrorResponse};
-
-/// The attempts that one merge or rebase request gets when it fails with a
-/// transient error: the first attempt and three more.
-///
-/// A transient error is `commit_queue_full`, `server_busy`, or
-/// `shutting_down`, which the client has already retried with a backoff. An
-/// error from a commit that failed because the namespace changed after the
-/// plan (see [`ErrorCode::is_stale_plan`]) fails the session at once,
-/// because the server returns it after it planned the merge four times.
-pub const MAX_MERGE_ATTEMPTS: usize = 4;
+use loonfs_types::{CommitSeq, ErrorCode, ErrorKind, ErrorResponse};
 
 /// How the loop acts on an error that a merge or a rebase returned.
 pub(crate) enum Refusal {
-    /// The loop sends another request for the range or for a piece of it.
-    Next(NextRequest),
-    /// The merge conflicted.
-    Conflict,
-    /// The loop can't act on the error, or the request had its last attempt.
-    Fail,
-}
-
-/// The request that the loop sends after a refusal that it can act on.
-pub(crate) enum NextRequest {
     /// The request was too large, and the next request goes through the
     /// error's split hint.
     Split(CommitSeq),
-    /// The request failed with a transient error, and the same request goes
-    /// again.
-    Retry,
+    /// The merge conflicted.
+    Conflict,
+    /// The loop can't act on the error.
+    Fail,
 }
 
 /// Returns the server's error response for a merge or a rebase that it
 /// refused, or returns `error` when the request's outcome isn't known (a
-/// transport failure or an outcome-unknown error), so that the step leaves
-/// the state as it was and the next step sends the same request.
+/// transport failure or an outcome-unknown error) or the server refused the
+/// request with a transient error, so that the step leaves the state as it
+/// was and the next step sends the same request.
+///
+/// A transient error is `commit_queue_full`, `server_busy`, or
+/// `shutting_down` (see [`ErrorCode::retryable_without_operator_action`]),
+/// which the client has already retried with a backoff.
 pub(crate) fn refused(error: ClientError) -> Result<ErrorResponse> {
-    let outcome_unknown = error
-        .code()
-        .is_some_and(|code| code.kind() == ErrorKind::OutcomeUnknown);
+    let send_again = error.code().is_some_and(|code| {
+        code.kind() == ErrorKind::OutcomeUnknown || code.retryable_without_operator_action()
+    });
     match error {
-        ClientError::Api { response, .. } if !outcome_unknown => Ok(*response),
+        ClientError::Api { response, .. } if !send_again => Ok(*response),
         error => Err(error.into()),
     }
 }
@@ -59,18 +45,11 @@ pub(crate) fn refusal(request: &PendingCommit, error: &ErrorResponse) -> Refusal
             // A hint at or above the refused request's end wouldn't shorten
             // the range, and the loop would repeat the request without end.
             Some(split_at_seq) if split_at_seq < request.through_seq => {
-                Refusal::Next(NextRequest::Split(split_at_seq))
+                Refusal::Split(split_at_seq)
             }
             _ => Refusal::Fail,
         },
         ErrorCode::MergeConflict => Refusal::Conflict,
-        code if code.retryable_without_operator_action() => {
-            if request.failed_attempts + 1 < u64_from_usize(MAX_MERGE_ATTEMPTS) {
-                Refusal::Next(NextRequest::Retry)
-            } else {
-                Refusal::Fail
-            }
-        }
         _ => Refusal::Fail,
     }
 }

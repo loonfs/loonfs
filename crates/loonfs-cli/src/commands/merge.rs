@@ -46,10 +46,11 @@ pub(crate) async fn run_merge(
             .map_err(|error| context.fail(error))?;
     }
     let mut steps = Vec::new();
-    // The session's steps are bounded: each merge or rebase request gets at
-    // most `MAX_MERGE_ATTEMPTS` attempts, each split hint shortens the range,
-    // the session's rebases create at most `MAX_NEW_FORKS` new forks, and
-    // each cleanup step deletes one of them.
+    // The session's steps are bounded: a step whose request failed with a
+    // transient error or an unknown outcome returns the error, which ends the
+    // command, each split hint shortens the range, the session's rebases
+    // create at most `MAX_NEW_FORKS` new forks, and each cleanup step deletes
+    // one of them.
     while let Some(outcome) = session.step().await.map_err(|error| context.fail(error))? {
         record
             .save(&attempt, session.state())

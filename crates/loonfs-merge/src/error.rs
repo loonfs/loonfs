@@ -15,9 +15,10 @@ use thiserror::Error;
 #[derive(Debug, Clone, Error)]
 #[non_exhaustive]
 pub enum MergeError {
-    /// A request failed before its outcome was known: the transport failed,
+    /// A request failed before its outcome was known (the transport failed,
     /// the server returned an outcome-unknown error, or a read that the step
-    /// needs failed. Running the step again sends the same request.
+    /// needs failed), or the server refused a merge or a rebase with a
+    /// transient error. Running the step again sends the same request.
     #[error("merge session request failed: {0}")]
     Client(#[from] ClientError),
     /// The caller abandoned a session that isn't `failed`.
