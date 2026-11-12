@@ -84,11 +84,11 @@ An index is in one of three lifecycle states, and grep's entry records the state
 | State | Position and behavior |
 | --- | --- |
 | `disabled` | No segment set that queries can see, and no pending reorganization. |
-| `backfilling` | The ID of the backfill's snapshot (`snapshot_id`), `captured_seq`, and optionally the last inode consumed (`cursor_inode_id`). Queries are unavailable. |
+| `backfilling` | The sequence whose files the backfill reads (`captured_seq`), and optionally the last inode consumed (`cursor_inode_id`). Queries are unavailable. |
 | `active` | An incremental cursor made of `built_through_seq` and `next_event_index`. Queries can use the completed index plus the unindexed tail. |
 
 ```text
-                             +--- rebuild from a new snapshot ---+
+                             +--- rebuild from a new backfill ---+
                              v                                   |
 +----------+  enable  +-------------+  final backfill step  +--------+
 | disabled | -------> | backfilling | --------------------> | active |
@@ -106,23 +106,23 @@ Disabling the index publishes a `disabled` entry that lists no segments. The ope
 
 ## Building the index
 
-A worker builds the index in two phases, first with a backfill from a [snapshot](../specs/glossary.md#snapshot), and then incrementally from the change feed.
+A worker builds the index in two phases, first with a backfill of the files at one sequence, and then incrementally from the change feed.
 
 ### Initial backfill
 
-Enabling the index creates a snapshot of the namespace head with a 24-hour lifetime, and then publishes a `backfilling` entry with that snapshot's ID, the target sequence, and no inode cursor.
+Enabling the index reads the namespace's head sequence, and then publishes a `backfilling` entry with that sequence as the target and no inode cursor.
 
 Each bounded build step:
 
-1. Lists files from the snapshot in ascending inode order.
-2. Reads one current revision of each retained file, including deleted files.
+1. Lists the files as they were at the target sequence, in ascending inode order.
+2. Reads each retained file's revision at that sequence, including deleted files.
 3. Applies the eligibility rule and extracts grams.
 4. Writes new delta segments.
 5. Records the segment set and the last inode it consumed together in the pending entry, which is published in the next manifest.
 
-The final backfill step changes the lifecycle state to `active` at the captured sequence, and deletes the snapshot. Writes committed after that sequence are then processed through the change feed. They don't change the target of the backfill that's already in progress, which was set when the backfill started.
+The final backfill step changes the lifecycle state to `active` at the captured sequence. Writes committed after that sequence are then processed through the change feed. They don't change the target of the backfill that's already in progress, which was set when the backfill started.
 
-If the snapshot is deleted or expires, or the change history that the worker needs becomes unavailable, the worker abandons the incomplete build and starts another backfill from a new snapshot. It doesn't report the partial index as complete.
+If the retention floor passes the target sequence, or the change history that the worker needs becomes unavailable, the worker abandons the incomplete build and starts another backfill at the namespace's head. It doesn't report the partial index as complete.
 
 ### Incremental builds
 
@@ -132,7 +132,7 @@ Moves, deletes, and restores don't publish new content revisions in those events
 
 By default, the build budget is 256 files or 64 MiB per step. Each batch is bounded, but the total cost of backfilling a namespace still depends on how much eligible content it has. Failed attempts, or a restarted backfill, can read content again.
 
-The index doesn't stop the namespace's retention floor from advancing. If the change history that the worker needs has been removed, the worker rebuilds the index from a new snapshot.
+The index doesn't stop the namespace's retention floor from advancing. If the change history that the worker needs has been removed, the worker rebuilds the index from a new backfill.
 
 ## Maintenance scheduling
 
@@ -235,7 +235,7 @@ If the tail is larger than the query's budget:
 - By default, the query fails with an `index_lagging` error.
 - With `allow_stale`, the server can return indexed-only results and report `tail_scanned: false`, along with the index and head positions. Stale results still go through visibility checks and content verification, but they might leave out eligible revisions that aren't indexed yet.
 
-If the tail's change history is below the retention floor, the query returns `below_retention_floor`, with or without `allow_stale`. The worker's next step rebuilds the index from a new snapshot, and the rebuild keeps the index's segments, so it reads only the values that they don't record.
+If the tail's change history is below the retention floor, the query returns `below_retention_floor`, with or without `allow_stale`. The worker's next step rebuilds the index from a new backfill, and the rebuild keeps the index's segments, so it reads only the values that they don't record.
 
 Index maintenance reduces this gap when it runs. Core backpressure on the WAL tail doesn't limit grep lag by itself, because metadata can be folded while grep maintenance is still behind. When the gap is too large, the query's tail budget and the explicit stale-result option determine what happens.
 

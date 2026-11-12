@@ -334,7 +334,6 @@ impl ResolvedTarget {
         let grep_worker = GrepWorker::new(
             runtime.object_store(),
             runtime.read_only(),
-            runtime.clone(),
             maintenance.clone(),
             GrepStepBudget::default(),
         );

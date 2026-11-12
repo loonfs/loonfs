@@ -318,8 +318,8 @@ async fn run_maintenance_index_enable(
         // Nothing to wait for: the caller opted out, or the index is
         // disabled, which enable would have changed if it could.
         (true, _) | (_, GrepIndexStatus::Disabled | GrepIndexStatus::Unknown) => None,
-        // A backfill already names the namespace sequence its snapshot
-        // captured, and reaching it is what completes the backfill.
+        // A backfill already records the namespace sequence whose files it
+        // reads, and reaching it is what completes the backfill.
         (_, GrepIndexStatus::Backfilling { captured_seq, .. }) => Some(*captured_seq),
         // An active index is asked to catch up to where the namespace is
         // now: one read, before any stepping, so an index that is already

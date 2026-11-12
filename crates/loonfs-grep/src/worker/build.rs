@@ -1,5 +1,5 @@
 //! Grep index builds: planning one backfill or incremental step from the
-//! snapshot or the change feed, reading and indexing its content, and
+//! files at a sequence or the change feed, reading and indexing its content, and
 //! publishing the result.
 
 use super::index_rows::IndexRows;
@@ -21,14 +21,14 @@ use futures::{stream, StreamExt, TryFutureExt, TryStreamExt};
 use loonfs::{CoreError, SnapshotFilesPageCursor};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::manifest::{ExtensionRunRef, ExtensionSegmentRef};
-use loonfs_types::{CommitSeq, ContentRef, InodeId, RevisionNo, SnapshotId, MAX_PAGE_LIMIT};
+use loonfs_types::{CommitSeq, ContentRef, InodeId, RevisionNo, MAX_PAGE_LIMIT};
 use std::collections::{BTreeMap, BTreeSet};
 
 impl<S: ObjectStore + Clone> GrepSteps<'_, S> {
-    /// Runs one bounded snapshot-backfill or incremental build unit, from
-    /// the entry that the run's earlier steps left pending.
+    /// Runs one bounded backfill or incremental build unit, from the entry
+    /// that the run's earlier steps left pending.
     ///
-    /// The step first reads the snapshot listing or the change feed to
+    /// The step first reads the listing of files or the change feed to
     /// learn what content it needs. Only then does it wait for a step permit,
     /// which it keeps while it reads that content and writes its run. A
     /// step that finds the index up to date, or that restarts the backfill,
@@ -50,11 +50,7 @@ impl<S: ObjectStore + Clone> GrepSteps<'_, S> {
             GrepIndexStatus::Backfilling {
                 captured_seq,
                 cursor_inode_id,
-                snapshot_id,
-            } => {
-                plan_backfill_unit(&reads, snapshot_id, *captured_seq, *cursor_inode_id, policy)
-                    .await
-            }
+            } => plan_backfill_unit(&reads, *captured_seq, *cursor_inode_id, policy).await,
             status @ GrepIndexStatus::Active { .. } => {
                 let resume = status
                     .active_watermark()
@@ -79,14 +75,10 @@ impl<S: ObjectStore + Clone> GrepSteps<'_, S> {
         let planned = match planned {
             Ok(planned) => planned,
             Err(error) if below_retention_floor(&error) => {
-                let Some(snapshot) = self.start_backfill(Some(&entry)).await? else {
-                    return Ok(GrepBuildOutcome::Superseded);
-                };
+                let captured_seq = self.start_backfill().await?;
                 return self
                     .finish_step(
-                        GrepBuildOutcome::BackfillRestarted {
-                            captured_seq: snapshot.captured_seq,
-                        },
+                        GrepBuildOutcome::BackfillRestarted { captured_seq },
                         GrepBuildOutcome::Superseded,
                     )
                     .await;
@@ -138,11 +130,10 @@ impl<S: ObjectStore + Clone> GrepSteps<'_, S> {
                 segments: new_segments,
             });
         }
-        // A completed backfill is current through the sequence captured by
-        // its snapshot. The change feed resumes after that sequence.
-        let (status, completed_snapshot_id, built_through_seq) = match progress {
+        // A completed backfill is current through the sequence that it
+        // read the files at. The change feed resumes after that sequence.
+        let (status, built_through_seq) = match progress {
             CollectedProgress::Backfill {
-                snapshot_id,
                 captured_seq,
                 next_cursor,
             } => match next_cursor {
@@ -150,9 +141,7 @@ impl<S: ObjectStore + Clone> GrepSteps<'_, S> {
                     GrepIndexStatus::Backfilling {
                         captured_seq,
                         cursor_inode_id: Some(after_inode_id),
-                        snapshot_id,
                     },
-                    None,
                     captured_seq,
                 ),
                 None => (
@@ -161,7 +150,6 @@ impl<S: ObjectStore + Clone> GrepSteps<'_, S> {
                         built_through_seq: captured_seq,
                         next_event_index: 0,
                     },
-                    Some(snapshot_id),
                     captured_seq,
                 ),
             },
@@ -177,15 +165,10 @@ impl<S: ObjectStore + Clone> GrepSteps<'_, S> {
                     built_through_seq,
                     next_event_index,
                 },
-                None,
                 built_through_seq,
             ),
         };
-        let pending = self.pending().await?;
-        if let Some(snapshot_id) = completed_snapshot_id {
-            pending.record_released_snapshot(snapshot_id);
-        }
-        pending.set_entry(
+        self.pending().await?.set_entry(
             GrepEntry::new(status, entry.reorganize().cloned(), runs)
                 .expect("a build step's entry should keep a valid entry valid"),
         );
@@ -270,7 +253,6 @@ struct IndexingStats {
 /// prevents a backfill cursor from being paired with change-feed progress.
 enum CollectedProgress {
     Backfill {
-        snapshot_id: SnapshotId,
         captured_seq: CommitSeq,
         next_cursor: Option<InodeId>,
     },
@@ -280,11 +262,11 @@ enum CollectedProgress {
     },
 }
 
-/// Plans one backfill step from the files the snapshot keeps. Reads no file
+/// Plans one backfill step from the files at `captured_seq`. Reads no file
 /// content.
 ///
-/// The enumeration returns the snapshot's state directly (one current
-/// revision per retained file, deleted or not, in ascending inode order), so
+/// The listing returns the state at that sequence directly (one revision per
+/// retained file, deleted or not, in ascending inode order), so
 /// a step reads pages until one of its budgets is met and records the last
 /// inode it consumed. The budgets are the ones the step always had: at most
 /// `max_files_per_step` files examined, and content planning stops once
@@ -293,7 +275,6 @@ enum CollectedProgress {
 /// cap counts no content bytes, because the step never reads it.
 async fn plan_backfill_unit(
     reads: &NamespaceReads,
-    snapshot_id: &SnapshotId,
     captured_seq: CommitSeq,
     cursor: Option<InodeId>,
     policy: GramIndexBuildPolicy,
@@ -301,28 +282,18 @@ async fn plan_backfill_unit(
     let mut next_cursor = cursor;
     let mut pending = Vec::new();
     let mut planned_content_bytes = 0u64;
-    let mut files_remaining = policy.max_files_per_step.get();
-    let mut cursor = cursor.map(|after_inode_id| SnapshotFilesPageCursor { after_inode_id });
-    loop {
-        let page = reads
-            .list_snapshot_files(snapshot_id)
-            .page_limit(page_limit(files_remaining))
-            .cursor(cursor)
-            .page()
-            .await?;
-        if page.captured_seq != captured_seq {
-            return Err(GrepError::IndexCorrupt {
-                message: format!(
-                    "snapshot `{snapshot_id}` keeps sequence `{}` but the grep entry is \
-                 backfilling sequence `{captured_seq}`",
-                    page.captured_seq
-                ),
-            });
-        }
+    let max_files = policy.max_files_per_step.get();
+    let mut files = reads
+        .list_files_at(captured_seq)
+        .await?
+        .cursor(cursor.map(|after_inode_id| SnapshotFilesPageCursor { after_inode_id }))
+        .page_limit(page_limit(max_files))
+        .max_items(max_files);
+    while let Some(page) = files.next().await {
+        let page = page?;
         let page_exhausted_family = page.next_cursor.is_none();
         let mut budget_reached = false;
         for file in page.files {
-            files_remaining = files_remaining.saturating_sub(1);
             if file.size_bytes <= MAX_INDEX_GRAMS_FILE_BYTES {
                 planned_content_bytes += file.size_bytes;
             }
@@ -342,20 +313,15 @@ async fn plan_backfill_unit(
             break;
         }
         if page_exhausted_family {
-            // Every file the snapshot keeps is indexed, so the entry leaves
+            // Every file at the sequence is indexed, so the entry leaves
             // backfill for the change feed.
             next_cursor = None;
-            break;
-        }
-        cursor = page.next_cursor;
-        if files_remaining == 0 {
             break;
         }
     }
     Ok(PlannedIndexUnit {
         pending,
         progress: CollectedProgress::Backfill {
-            snapshot_id: snapshot_id.clone(),
             captured_seq,
             next_cursor,
         },

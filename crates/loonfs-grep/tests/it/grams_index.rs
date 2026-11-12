@@ -850,6 +850,12 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
         )
         .await
         .expect("write alpha");
+    // A fold writes alpha's inline bytes to a content object, so verifying
+    // alpha reads that object from the store.
+    host.maintenance
+        .fold_wal(&namespace_id)
+        .await
+        .expect("fold the WAL");
     host.enable_grep_index(&namespace_id).await.expect("enable");
     for _ in 0..2 {
         drive_worker_step(&host.worker, &namespace_id, GramIndexBuildPolicy::default()).await;

@@ -97,7 +97,6 @@ impl SchedulerServer {
             GrepWorker::new(
                 runtime.object_store(),
                 runtime.read_only(),
-                runtime.clone(),
                 maintenance.clone(),
                 loonfs_grep::GrepStepBudget::default(),
             )

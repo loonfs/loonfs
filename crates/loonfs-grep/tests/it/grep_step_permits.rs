@@ -90,7 +90,6 @@ fn worker_with(host: &GrepHost, budget: &GrepStepBudget) -> GrepWorker<SharedObj
     GrepWorker::new(
         host.store.clone(),
         host.reader.clone(),
-        host.writer.clone(),
         host.maintenance.clone(),
         budget.clone(),
     )

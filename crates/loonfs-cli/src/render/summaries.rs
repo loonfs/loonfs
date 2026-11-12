@@ -106,7 +106,6 @@ pub(super) fn grep_index_state_summary(state: &GrepIndexStatus) -> String {
         GrepIndexStatus::Backfilling {
             captured_seq,
             cursor_inode_id,
-            ..
         } => match cursor_inode_id {
             Some(inode_id) => format!(
                 "backfilling toward seq {}, walked through inode {inode_id}",

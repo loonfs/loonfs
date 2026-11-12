@@ -281,9 +281,10 @@ async fn a_fork_reads_the_gap_and_then_its_own_commits() {
     assert_eq!(found.built_through_seq, found.head_seq);
 }
 
-/// Checks that a fork restarts a backfill that it inherited, from a snapshot on
-/// its own head, with the inherited segments, so the restarted walk reads
-/// only the values that the inherited segments don't record.
+/// Checks that a fork restarts a backfill that it inherited at a sequence
+/// below the fork point, at its own head, with the inherited segments, so the
+/// restarted walk reads only the values that the inherited segments don't
+/// record.
 #[tokio::test]
 async fn a_fork_restarts_an_inherited_backfill_and_keeps_its_segments() {
     let fixture = ContentFixture::new("inherit-backfill").await;
@@ -310,14 +311,11 @@ async fn a_fork_restarts_an_inherited_backfill_and_keeps_its_segments() {
         .await
         .expect("index one file");
     let source_entry = entry(&fixture, &fixture.namespace_id).await;
-    let GrepIndexStatus::Backfilling {
-        snapshot_id: source_snapshot_id,
-        ..
-    } = source_entry.status().clone()
-    else {
-        panic!("the source is mid-backfill");
-    };
+    assert_matches!(source_entry.status(), GrepIndexStatus::Backfilling { .. });
     assert!(!source_entry.runs().is_empty());
+    // A commit after the backfill's sequence puts that sequence below the
+    // fork point, which is the fork's retention floor.
+    fixture.put("/d.txt", b"later file\n").await;
 
     let (fork_id, _fork_handle) = fork(&fixture).await;
     let fork_head = control::head(&fixture.store, &fork_id).await.seq;
@@ -327,26 +325,15 @@ async fn a_fork_restarts_an_inherited_backfill_and_keeps_its_segments() {
         Ok(GrepBuildOutcome::BackfillRestarted { captured_seq }) if captured_seq == fork_head
     );
     let restarted = entry(&fixture, &fork_id).await;
-    let GrepIndexStatus::Backfilling {
-        snapshot_id,
-        cursor_inode_id: None,
-        ..
-    } = restarted.status()
-    else {
-        panic!("the fork restarts the backfill from the beginning");
-    };
-    assert!(
-        control::snapshot_record(&fixture.store, &fork_id, snapshot_id)
-            .await
-            .is_some()
+    assert_matches!(
+        restarted.status(),
+        GrepIndexStatus::Backfilling {
+            cursor_inode_id: None,
+            ..
+        },
+        "the fork restarts the backfill from the beginning"
     );
     assert_eq!(restarted.runs(), source_entry.runs());
-    assert!(
-        control::snapshot_record(&fixture.store, &fixture.namespace_id, &source_snapshot_id)
-            .await
-            .is_some(),
-        "the source keeps its own backfill snapshot"
-    );
 
     fixture
         .host
@@ -355,8 +342,8 @@ async fn a_fork_restarts_an_inherited_backfill_and_keeps_its_segments() {
         .expect("finish the fork's backfill");
     assert_eq!(
         fixture.content_reads(),
-        2,
-        "the walk reads the two values that the inherited segments don't record"
+        3,
+        "the walk reads the three values that the inherited segments don't record"
     );
     assert_eq!(
         paths(&grep(&fixture, &fork_id, "backfill needle").await).len(),
@@ -440,8 +427,8 @@ async fn a_forks_first_step_clears_an_inherited_reorganization() {
 
 /// Checks that a fork whose first change both clears an inherited
 /// reorganization and restarts an inherited backfill, with an unfolded tail
-/// of its own, publishes the cleared entry before the backfill's snapshot folds
-/// the tail, so the restarted backfill and its steps publish.
+/// of its own, publishes that change, so the restarted backfill and its steps
+/// publish.
 #[tokio::test]
 async fn a_forks_restart_publishes_after_clearing_an_inherited_reorganization() {
     let fixture = ContentFixture::new("inherit-both").await;
@@ -476,6 +463,9 @@ async fn a_forks_restart_publishes_after_clearing_an_inherited_reorganization() 
     let source_entry = entry(&fixture, &fixture.namespace_id).await;
     assert_matches!(source_entry.status(), GrepIndexStatus::Backfilling { .. });
     assert!(source_entry.reorganize().is_some());
+    // A commit after the backfill's sequence puts that sequence below the
+    // fork point, so the fork restarts the backfill.
+    fixture.put("/d.txt", b"later file\n").await;
 
     let (fork_id, fork_handle) = fork(&fixture).await;
     fork_handle

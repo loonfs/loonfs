@@ -370,6 +370,75 @@ async fn snapshot_enumeration_answers_the_state_it_captured() {
     );
 }
 
+/// Checks that a read view at an earlier sequence lists the files as they
+/// were at that sequence: a file that a later commit replaced keeps its
+/// revision at the sequence, a file that a later commit deleted is listed,
+/// and a file that a later commit created isn't.
+#[tokio::test]
+async fn a_listing_at_a_sequence_lists_the_files_as_they_were() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = open_runtime_async(store(temp_dir.path()), "files-at-seq-test").await;
+    let namespace_id = namespace_id("demo");
+    let namespace = fs.reader.namespace(&namespace_id);
+    build_mixed_namespace(&fs, &namespace_id).await;
+    let at_seq = listed_files(&fs.reader, &namespace_id).await;
+    let seq = namespace.metadata().await.expect("metadata").head_seq;
+
+    fs.put_file(
+        &namespace_id,
+        "/docs/added-later.txt",
+        b"added later",
+        &loonfs_test_support::test_actor(),
+    )
+    .await
+    .expect("create a file after the sequence");
+    fs.put_file_with_options(
+        &namespace_id,
+        "/docs/alpha.txt",
+        b"alpha again",
+        &loonfs_test_support::test_actor(),
+        &PutFileOptions {
+            behavior: DestinationBehavior::Replace,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("replace a file after the sequence");
+    fs.writer
+        .open_namespace(&namespace_id)
+        .expect("open namespace")
+        .delete_path("/docs/deep/bravo.txt", &loonfs_test_support::test_actor())
+        .await
+        .expect("delete a file after the sequence");
+
+    let page = namespace
+        .read_view()
+        .await
+        .expect("read view")
+        .at_seq(seq)
+        .await
+        .expect("view at the sequence")
+        .list_files()
+        .page_limit(page_limit(100))
+        .page()
+        .await
+        .expect("list the files at the sequence");
+    assert_eq!(page.captured_seq, seq);
+    let listed: BTreeMap<InodeId, (RevisionNo, ContentRef)> = page
+        .files
+        .into_iter()
+        .map(|file| (file.inode_id, (file.revision_no, file.content_ref)))
+        .collect();
+    let expected: BTreeMap<InodeId, (RevisionNo, ContentRef)> = at_seq
+        .into_iter()
+        .map(|(inode_id, file)| (inode_id, (file.revision_no, file.content_ref)))
+        .collect();
+    assert_eq!(
+        listed, expected,
+        "the listing must contain the files and revisions visible at the sequence"
+    );
+}
+
 #[tokio::test]
 async fn snapshot_files_page_without_gaps_or_duplicates() {
     let temp_dir = tempdir().expect("tempdir");

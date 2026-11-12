@@ -3,6 +3,7 @@
 
 use super::durable_cache::{DurableVisibilityCache, DurableVisibilityCacheInner, SharedRows};
 use super::manifest_index;
+use super::manifest_tail_combiner::{ManifestPage, ManifestTailCombiner, TieOrder};
 use super::view_session::{LeafRevisionPreload, MetadataViewSession};
 use super::visibility::{self, MetadataVisibilityReads};
 use crate::error::{CoreError, Result};
@@ -12,10 +13,13 @@ use crate::metadata::{
     InodeRecord, MetadataState, ResolvedVisiblePath, SubtreeTombstoneRecord,
 };
 use crate::namespace::state::NamespaceReadState;
-use crate::segment::VerifiedMetadataSegments;
+use crate::segment::{BlocksPerRefill, VerifiedMetadataSegments};
 use crate::wal::ProjectedWalTail;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::manifest::MergeIndexRecord;
+use loonfs_types::format::manifest::{
+    lookup_keys, MergeIndexRecord, MetadataRow, MetadataRowFamily,
+};
+use loonfs_types::format::segment_blocks::string_prefix_upper_bound;
 use loonfs_types::format::wal::WalCommitPayload;
 use loonfs_types::{AbsolutePath, CommitId, CommitSeq, InodeId, NameKey, NamespaceId};
 use std::collections::HashMap;
@@ -378,6 +382,65 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
             cache.insert(|inner| &mut inner.inodes, inode_id, durable.clone());
         }
         Ok(durable)
+    }
+
+    /// Returns up to `limit` of the view's inode rows whose row keys are at
+    /// or after `lower_bound`, with their row keys, in inode order. The
+    /// manifest's rows combine with the WAL tail's rows, as in
+    /// [`Self::revisions_page`].
+    pub(crate) async fn inodes_page(
+        &self,
+        lower_bound: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, InodeRecord)>> {
+        let visible_seq = self.visible_seq();
+        let mut tail: Vec<(String, InodeRecord)> = self
+            .row_states()
+            .flat_map(MetadataState::inodes)
+            .map(|inode| (lookup_keys::inode_key(inode.inode_id), inode.clone()))
+            .filter(|(row_key, _)| row_key.as_str() >= lower_bound)
+            .collect();
+        tail.sort_by(|(left, _), (right, _)| left.cmp(right));
+        let segments = self.manifest_segments();
+        let upper_bound = string_prefix_upper_bound(lookup_keys::INODE_ROW_PREFIX);
+        let upper_bound = upper_bound.as_deref();
+        // A short page is the end of the range.
+        let refill = |lower_bound: String| async move {
+            let rows = segments
+                .scan_range(
+                    MetadataRowFamily::Inodes,
+                    &lower_bound,
+                    upper_bound,
+                    limit,
+                    None,
+                    BlocksPerRefill::KeyRange,
+                )
+                .await?;
+            Ok(ManifestPage {
+                more: rows.len() >= limit,
+                rows: rows
+                    .into_iter()
+                    .map(|(row_key, row)| match row {
+                        MetadataRow::Inode(inode) => Ok((row_key, inode)),
+                        _ => Err(CoreError::NamespaceCorrupt(format!(
+                            "inodes family returned a non-inode row at `{row_key}`"
+                        ))),
+                    })
+                    .collect::<Result<_>>()?,
+            })
+        };
+        let mut combiner =
+            ManifestTailCombiner::new(lower_bound.to_owned(), tail, TieOrder::TailFirst);
+        let mut rows = Vec::with_capacity(limit);
+        while rows.len() < limit {
+            let Some((row_key, inode)) = combiner.next(refill).await? else {
+                break;
+            };
+            if inode.committed_seq <= visible_seq {
+                rows.push((row_key, inode));
+            }
+        }
+        Ok(rows)
     }
 
     pub(crate) async fn find_commit_receipt(

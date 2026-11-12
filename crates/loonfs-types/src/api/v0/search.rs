@@ -1,6 +1,6 @@
 //! Content search requests and responses for the v0 HTTP API.
 
-use crate::{AbsolutePath, CommitSeq, InodeId, NamespaceId, RevisionNo, SnapshotId};
+use crate::{AbsolutePath, CommitSeq, InodeId, NamespaceId, RevisionNo};
 use serde::{Deserialize, Serialize};
 use xxhash_rust::xxh64::xxh64;
 
@@ -122,7 +122,8 @@ pub struct GrepResponse {
 pub enum GrepIndexStatus {
     /// No index is maintained for this namespace.
     Disabled,
-    /// An index that is running its initial scan of a snapshot and can't be searched yet.
+    /// An index that is running its initial scan of the files at one sequence and can't be
+    /// searched yet.
     Backfilling {
         /// The namespace sequence that completes the backfill when the index reaches it.
         captured_seq: CommitSeq,
@@ -134,8 +135,6 @@ pub enum GrepIndexStatus {
         )]
         #[cfg_attr(feature = "openapi", schema(nullable = false))]
         cursor_inode_id: Option<InodeId>,
-        /// The snapshot that keeps the state being scanned.
-        snapshot_id: SnapshotId,
     },
     /// An index that follows the change feed and can be searched through its watermark.
     Active {
@@ -217,16 +216,13 @@ mod tests {
         let backfilling = GrepIndexStatus::Backfilling {
             captured_seq: CommitSeq(9),
             cursor_inode_id: Some(InodeId(4)),
-            snapshot_id: SnapshotId::parse("snp_00000000000000000001-00000000000000000000000009")
-                .expect("snapshot id"),
         };
         assert_eq!(
             serde_json::to_value(&backfilling).expect("serialize backfilling"),
             serde_json::json!({
                 "status": "backfilling",
                 "captured_seq": 9,
-                "cursor_inode_id": InodeId(4).to_string(),
-                "snapshot_id": "snp_00000000000000000001-00000000000000000000000009"
+                "cursor_inode_id": InodeId(4).to_string()
             }),
             "a backfill reports its target and its walk, never a watermark"
         );
@@ -252,8 +248,6 @@ mod tests {
         let backfilling = GrepIndexStatus::Backfilling {
             captured_seq: CommitSeq(9),
             cursor_inode_id: None,
-            snapshot_id: SnapshotId::parse("snp_00000000000000000001-00000000000000000000000009")
-                .expect("snapshot id"),
         };
         assert!(
             !backfilling.is_built_through(CommitSeq(0)),
@@ -314,10 +308,6 @@ mod tests {
                 status: GrepIndexStatus::Backfilling {
                     captured_seq: CommitSeq(12),
                     cursor_inode_id: Some(InodeId(4)),
-                    snapshot_id: SnapshotId::parse(
-                        "snp_00000000000000000001-00000000000000000000000009"
-                    )
-                    .expect("snapshot id"),
                 },
                 reorganize_pending: false,
             })
@@ -327,7 +317,6 @@ mod tests {
                 "status": "backfilling",
                 "captured_seq": 12,
                 "cursor_inode_id": InodeId(4).to_string(),
-                "snapshot_id": "snp_00000000000000000001-00000000000000000000000009",
                 "reorganize_pending": false
             })
         );

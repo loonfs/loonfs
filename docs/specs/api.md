@@ -788,7 +788,7 @@ The status, enable, and disable routes all return the same flat grep index objec
 | `status` | Fields | Means |
 | --- | --- | --- |
 | `disabled` | None | No index is maintained for the namespace. This is also the status of a namespace that has never enabled an index. |
-| `backfilling` | `captured_seq`, `cursor_inode_id`, `snapshot_id` | The initial walk over the files of a snapshot is running, and `snapshot_id` is that snapshot's ID. `captured_seq` is the namespace sequence that the snapshot captured, and the backfill is complete when the walk reaches it. Nothing is searchable yet, and there's no watermark to report. |
+| `backfilling` | `captured_seq`, `cursor_inode_id` | The initial walk over the files as they were at `captured_seq` is running, and the backfill is complete when the walk reaches the last file. Nothing is searchable yet, and there's no watermark to report. |
 | `active` | `built_through_seq`, `next_event_index` | The index follows the change feed. Commits at or below `built_through_seq` are searchable, except when `next_event_index` is non-zero. In that case, the rest of the commit at `built_through_seq` isn't indexed yet. |
 
 For example:
@@ -798,7 +798,7 @@ For example:
 ```
 
 ```json
-{"namespace_id":"demo","status":"backfilling","captured_seq":12,"cursor_inode_id":"ino_000000j000000tz7yc2z8ypbmf","snapshot_id":"snp_00000000000000000009-00000000000000000000000009","reorganize_pending":false}
+{"namespace_id":"demo","status":"backfilling","captured_seq":12,"cursor_inode_id":"ino_000000j000000tz7yc2z8ypbmf","reorganize_pending":false}
 ```
 
 So a backfilling index never reports a `built_through_seq`, and an active index never reports a `captured_seq`. `reorganize_pending` reports whether a partitioned segment reorganization is in progress. The routes read the index from the namespace's current manifest, so the status reports the index's last publication. (The server publishes an index's progress about once per maintenance interval, five seconds by default, and when a run of steps ends.) A client that waits for the index to catch up captures one sequence before it starts waiting, and it stops waiting when the index reaches that sequence, instead of waiting for a head that keeps moving.

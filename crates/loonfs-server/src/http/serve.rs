@@ -95,7 +95,6 @@ pub async fn app(config: ValidatedServerConfig, options: AppConfig) -> Result<(R
         GrepWorker::new(
             runtime.object_store(),
             runtime.read_only(),
-            runtime.clone(),
             maintenance.clone(),
             loonfs_grep::GrepStepBudget::new(
                 std::num::NonZeroUsize::new(config.grep.worker.max_concurrent_steps)
