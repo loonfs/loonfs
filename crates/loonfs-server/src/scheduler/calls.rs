@@ -6,7 +6,6 @@ use crate::scheduler::contain;
 use crate::scheduler::lock;
 use crate::scheduler::retries::CallFailure;
 use crate::scheduler::retries::MaintenanceCall;
-use crate::scheduler::GarbageCollection;
 use crate::scheduler::GrepIndexing;
 use crate::scheduler::Scheduler;
 use crate::scheduler::SchedulerInner;
@@ -29,11 +28,7 @@ use tokio::sync::SemaphorePermit;
 
 impl Scheduler {
     /// Runs every step of one namespace for a sweep.
-    pub(super) async fn sweep_namespace(
-        &self,
-        namespace_id: NamespaceId,
-        garbage: GarbageCollection,
-    ) {
+    pub(super) async fn sweep_namespace(&self, namespace_id: NamespaceId) {
         let inner = &self.inner;
         let Some((claim, _permit)) = self
             .claim(&namespace_id, Overlap::LeaveRetentionAdvance)
@@ -53,9 +48,7 @@ impl Scheduler {
         // The advance reads only folded commits, so it runs after the
         // metadata call, which can fold an idle tail.
         self.advance_retention(&namespace_id, entry).await;
-        if garbage == GarbageCollection::Collect {
-            self.gc(&namespace_id, entry, seq).await;
-        }
+        self.gc(&namespace_id, entry, seq).await;
         self.finish_claim(claim).await;
     }
 

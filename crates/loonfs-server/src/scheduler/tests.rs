@@ -1,7 +1,7 @@
 //! Sweeps, session steps, and their store request costs.
 
 use super::retries::MaintenanceCall;
-use super::{GarbageCollection, GrepIndexing, Scheduler, SchedulerState, StepRetry};
+use super::{GrepIndexing, Scheduler, SchedulerState, StepRetry};
 use crate::config::{GrepConfig, JobMode, ServerConfig};
 use futures::TryStreamExt as _;
 use loonfs::metrics::{DefaultMetricsRecorder, MetricValue, MetricsRecorder};
@@ -362,11 +362,7 @@ async fn a_restart_then_one_sweep_folds_an_idle_tail_and_collects_garbage() {
     let server = SchedulerServer::start(store.clone(), &scheduler_config(None), now_ms).await;
     let tail = server.wal_tail_objects(&namespace_id).await;
     assert!(tail > 0);
-    server
-        .scheduler
-        .run_sweep(GarbageCollection::Collect)
-        .await
-        .expect("list namespaces");
+    server.scheduler.run_sweep().await.expect("list namespaces");
     assert_eq!(
         server.wal_tail_objects(&namespace_id).await,
         tail,
@@ -379,11 +375,7 @@ async fn a_restart_then_one_sweep_folds_an_idle_tail_and_collects_garbage() {
     );
 
     server.clock.advance_ms(2 * DAY_MS);
-    server
-        .scheduler
-        .run_sweep(GarbageCollection::Collect)
-        .await
-        .expect("list namespaces");
+    server.scheduler.run_sweep().await.expect("list namespaces");
     assert_eq!(server.wal_tail_objects(&namespace_id).await, 0);
     assert!(
         server.counter("loonfs.gc.reclaimed", &[("category", "deleted_manifests")]) > 0,
@@ -430,11 +422,7 @@ async fn a_sweep_retires_a_deleted_namespace_after_its_grace() {
         .expect("an object of a pool without a record");
 
     let server = SchedulerServer::start(store.clone(), &scheduler_config(None), now_ms).await;
-    server
-        .scheduler
-        .run_sweep(GarbageCollection::Collect)
-        .await
-        .expect("list namespaces");
+    server.scheduler.run_sweep().await.expect("list namespaces");
     assert!(
         !keys_under(store.as_ref(), &content_prefix).await.is_empty(),
         "content outlives the deletion until the retirement grace passes"
@@ -442,11 +430,7 @@ async fn a_sweep_retires_a_deleted_namespace_after_its_grace() {
 
     server.clock.advance_ms(DAY_MS);
     assert_eq!(
-        server
-            .scheduler
-            .run_sweep(GarbageCollection::Collect)
-            .await
-            .expect("list namespaces"),
+        server.scheduler.run_sweep().await.expect("list namespaces"),
         1,
         "a deleted namespace is still listed"
     );
@@ -490,11 +474,7 @@ async fn grep_gc_runs_in_a_sweep() {
     .await;
     let worker = server.grep_worker.as_ref().expect("grep worker");
     worker.enable(&namespace_id).await.expect("enable grep");
-    server
-        .scheduler
-        .run_sweep(GarbageCollection::Skip)
-        .await
-        .expect("list namespaces");
+    server.scheduler.run_sweep().await.expect("list namespaces");
     assert_matches!(
         server.grep_status(&namespace_id).await,
         GrepIndexStatus::Active { .. }
@@ -506,11 +486,7 @@ async fn grep_gc_runs_in_a_sweep() {
         .await
         .is_empty());
 
-    server
-        .scheduler
-        .run_sweep(GarbageCollection::Collect)
-        .await
-        .expect("list namespaces");
+    server.scheduler.run_sweep().await.expect("list namespaces");
     assert!(
         !keys_under(store.as_ref(), &segments_prefix)
             .await
@@ -518,11 +494,7 @@ async fn grep_gc_runs_in_a_sweep() {
         "a disabled index keeps its segments until the grace passes"
     );
     server.clock.advance_ms(2 * DAY_MS);
-    server
-        .scheduler
-        .run_sweep(GarbageCollection::Collect)
-        .await
-        .expect("list namespaces");
+    server.scheduler.run_sweep().await.expect("list namespaces");
     assert_eq!(
         keys_under(store.as_ref(), &segments_prefix).await,
         Vec::<String>::new()
@@ -571,22 +543,14 @@ async fn a_sweep_drives_a_grep_backfill_to_active() {
         .await
         .expect("enable grep");
 
-    server
-        .scheduler
-        .run_sweep(GarbageCollection::Skip)
-        .await
-        .expect("list namespaces");
+    server.scheduler.run_sweep().await.expect("list namespaces");
     assert_matches!(
         server.grep_status(&namespace_id).await,
         GrepIndexStatus::Backfilling { .. },
         "one index step runs at most {} build steps",
         super::MAX_GREP_STEPS_PER_INDEX_STEP
     );
-    server
-        .scheduler
-        .run_sweep(GarbageCollection::Skip)
-        .await
-        .expect("list namespaces");
+    server.scheduler.run_sweep().await.expect("list namespaces");
     let status = server.grep_status(&namespace_id).await;
     let watermark = status
         .active_watermark()
@@ -618,11 +582,7 @@ async fn a_sweep_survives_a_failing_namespace() {
     let server = SchedulerServer::start(store.clone(), &config, now_ms + 20 * MINUTE_MS).await;
 
     assert_eq!(
-        server
-            .scheduler
-            .run_sweep(GarbageCollection::Skip)
-            .await
-            .expect("list namespaces"),
+        server.scheduler.run_sweep().await.expect("list namespaces"),
         3
     );
     store.clear();
@@ -634,11 +594,7 @@ async fn a_sweep_survives_a_failing_namespace() {
         1
     );
 
-    server
-        .scheduler
-        .run_sweep(GarbageCollection::Skip)
-        .await
-        .expect("list namespaces");
+    server.scheduler.run_sweep().await.expect("list namespaces");
     assert_eq!(
         server.wal_tail_objects(&names[1]).await,
         0,
@@ -706,9 +662,15 @@ async fn a_panicking_call_is_backed_off_and_the_next_namespace_still_runs_its_st
         0,
         "the panic doesn't stop the steps of other namespaces"
     );
-    // The retention advance loads the same manifest, so it panics too.
-    assert_eq!(server.counter("loonfs.maintenance.sweep_panics", &[]), 2);
-    for call in [MaintenanceCall::Metadata, MaintenanceCall::Retention] {
+    // The retention advance and the collections of the namespace and its pool
+    // load the same manifest, so they panic too.
+    assert_eq!(server.counter("loonfs.maintenance.sweep_panics", &[]), 4);
+    for call in [
+        MaintenanceCall::Metadata,
+        MaintenanceCall::Retention,
+        MaintenanceCall::Gc,
+        MaintenanceCall::PoolGc,
+    ] {
         assert_eq!(server.call_failures(call), 1, "{call:?}");
     }
     assert_eq!(
@@ -815,10 +777,7 @@ impl SchedulerServer {
 
     async fn sweep_after(&self, elapsed_ms: u64) {
         self.clock.advance_ms(elapsed_ms);
-        self.scheduler
-            .run_sweep(GarbageCollection::Skip)
-            .await
-            .expect("list namespaces");
+        self.scheduler.run_sweep().await.expect("list namespaces");
     }
 
     /// Checks that the session steps make a held session's failing `call` again exactly
@@ -1019,7 +978,7 @@ async fn a_parked_namespace_does_not_hold_up_later_pages() {
     store.block_next();
     let sweep = tokio::spawn({
         let scheduler = server.scheduler.clone();
-        async move { scheduler.run_sweep(GarbageCollection::Skip).await }
+        async move { scheduler.run_sweep().await }
     });
     loonfs_test_support::clock::bounded(Duration::from_secs(10), async {
         store.wait_until_blocked().await;
@@ -1084,7 +1043,7 @@ async fn a_listing_failure_on_a_later_page_lets_started_namespaces_finish_and_fa
     store.block_next();
     let sweep = tokio::spawn({
         let scheduler = server.scheduler.clone();
-        async move { scheduler.run_sweep(GarbageCollection::Skip).await }
+        async move { scheduler.run_sweep().await }
     });
     loonfs_test_support::clock::bounded(Duration::from_secs(10), async {
         store.wait_until_blocked().await;
@@ -1132,21 +1091,20 @@ enum Grep {
     Enabled,
 }
 
-/// Requests one idle namespace costs in a sweep: a sweep that does not
-/// collect garbage, then one that does, and how many of the latter are lists.
-/// A collecting sweep includes the collection of the namespace's pool. The
+/// Requests one idle namespace costs in a sweep, and how many of them are
+/// lists. The sweep includes the collection of the namespace's pool. The
 /// retention advance plans from the view, so its share includes a GET of the
 /// WAL number after the manifest and a second manifest HEAD. The docs quote
 /// these numbers.
-const IDLE_SWEEP_REQUESTS: [(Grep, usize, usize, usize); 3] = [
-    (Grep::NotMaintained, 12, 35, 10),
-    (Grep::Maintained, 16, 39, 10),
-    (Grep::Enabled, 17, 40, 10),
+const IDLE_SWEEP_REQUESTS: [(Grep, usize, usize); 3] = [
+    (Grep::NotMaintained, 35, 10),
+    (Grep::Maintained, 39, 10),
+    (Grep::Enabled, 40, 10),
 ];
 
 #[tokio::test(start_paused = true)]
 async fn an_idle_sweep_costs_one_listing_per_page_and_a_fixed_number_of_requests_per_namespace() {
-    for (grep, requests, collecting_requests, collecting_lists) in IDLE_SWEEP_REQUESTS {
+    for (grep, per_namespace, lists_per_namespace) in IDLE_SWEEP_REQUESTS {
         let directory = tempdir().expect("tempdir");
         let base: SharedObjectStore = local_store(directory.path());
         let names = ["first", "second", "third"].map(namespace_id);
@@ -1181,10 +1139,7 @@ async fn an_idle_sweep_costs_one_listing_per_page_and_a_fixed_number_of_requests
         let scheduler = server.scheduler.page_limit(page_limit(2));
         // The first sweep collects what the seed left behind, so the sweeps
         // below find nothing to collect and nothing inside its grace.
-        scheduler
-            .run_sweep(GarbageCollection::Collect)
-            .await
-            .expect("list namespaces");
+        scheduler.run_sweep().await.expect("list namespaces");
         // The seed's publications, the publications that enabled each index,
         // and the first sweep's index builds each raised their namespace's
         // hint, so the sweeps below start from hints at the current manifests.
@@ -1192,12 +1147,9 @@ async fn an_idle_sweep_costs_one_listing_per_page_and_a_fixed_number_of_requests
             assert_hint_at_current_manifest(base.as_ref(), namespace_id).await;
         }
         // An index's publication drops the runtime's cached head, so this
-        // sweep loads each head again, and the sweeps below find it cached,
+        // sweep loads each head again, and the sweep below finds it cached,
         // as an idle namespace's sweeps do.
-        scheduler
-            .run_sweep(GarbageCollection::Skip)
-            .await
-            .expect("list namespaces");
+        scheduler.run_sweep().await.expect("list namespaces");
 
         let mut pool_prefixes = Vec::new();
         for namespace_id in &names {
@@ -1205,64 +1157,46 @@ async fn an_idle_sweep_costs_one_listing_per_page_and_a_fixed_number_of_requests
                 loonfs_core::test_support::load_pool_id(base.as_ref(), namespace_id).await;
             pool_prefixes.push(loonfs_objectstore::keys::pool_prefix(&pool_id));
         }
-        for (garbage, per_namespace, lists_per_namespace) in [
-            (GarbageCollection::Skip, requests, 0),
-            (
-                GarbageCollection::Collect,
-                collecting_requests,
-                collecting_lists,
-            ),
-        ] {
-            store.reset();
-            scheduler.run_sweep(garbage).await.expect("list namespaces");
-            let operations = store.take();
-            let listings = operations
+        store.reset();
+        scheduler.run_sweep().await.expect("list namespaces");
+        let operations = store.take();
+        let listings = operations
+            .iter()
+            .filter(|operation| {
+                matches!(operation, RecordedOperation::List { .. })
+                    && operation.key() == "namespaces/"
+            })
+            .count();
+        assert_eq!(listings, 2, "three namespaces at two per page");
+        let pool_listings = operations
+            .iter()
+            .filter(|operation| {
+                matches!(operation, RecordedOperation::List { .. }) && operation.key() == "pools/"
+            })
+            .count();
+        assert_eq!(pool_listings, 2, "three pools at two per page");
+        for (namespace_id, pool) in names.iter().zip(&pool_prefixes) {
+            let prefix = loonfs_objectstore::keys::namespace_prefix(namespace_id);
+            let namespace_requests: Vec<_> = operations
                 .iter()
                 .filter(|operation| {
-                    matches!(operation, RecordedOperation::List { .. })
-                        && operation.key() == "namespaces/"
+                    operation.key().starts_with(&prefix) || operation.key().starts_with(pool)
                 })
-                .count();
-            assert_eq!(listings, 2, "three namespaces at two per page");
-            let pool_listings = operations
+                .collect();
+            let lists = namespace_requests
                 .iter()
-                .filter(|operation| {
-                    matches!(operation, RecordedOperation::List { .. })
-                        && operation.key() == "pools/"
-                })
+                .filter(|operation| matches!(operation, RecordedOperation::List { .. }))
                 .count();
-            let expected_pool_listings = match garbage {
-                GarbageCollection::Collect => 2,
-                GarbageCollection::Skip => 0,
-            };
             assert_eq!(
-                pool_listings, expected_pool_listings,
-                "three pools at two per page"
-            );
-            for (namespace_id, pool) in names.iter().zip(&pool_prefixes) {
-                let prefix = loonfs_objectstore::keys::namespace_prefix(namespace_id);
-                let namespace_requests: Vec<_> = operations
-                    .iter()
-                    .filter(|operation| {
-                        operation.key().starts_with(&prefix) || operation.key().starts_with(pool)
-                    })
-                    .collect();
-                let lists = namespace_requests
-                    .iter()
-                    .filter(|operation| matches!(operation, RecordedOperation::List { .. }))
-                    .count();
-                assert_eq!(
-                    (namespace_requests.len(), lists),
-                    (per_namespace, lists_per_namespace),
-                    "requests and lists for `{namespace_id}`, grep {grep:?}, garbage \
-                     {garbage:?}"
-                );
-            }
-            assert_eq!(
-                operations.len(),
-                listings + pool_listings + names.len() * per_namespace
+                (namespace_requests.len(), lists),
+                (per_namespace, lists_per_namespace),
+                "requests and lists for `{namespace_id}`, grep {grep:?}"
             );
         }
+        assert_eq!(
+            operations.len(),
+            listings + pool_listings + names.len() * per_namespace
+        );
     }
 }
 
@@ -1288,11 +1222,7 @@ async fn a_stray_child_of_the_namespace_prefix_is_not_a_failed_call() {
     store.reset();
 
     assert_eq!(
-        server
-            .scheduler
-            .run_sweep(GarbageCollection::Collect)
-            .await
-            .expect("list namespaces"),
+        server.scheduler.run_sweep().await.expect("list namespaces"),
         1,
         "a child whose name is not a namespace id is skipped"
     );

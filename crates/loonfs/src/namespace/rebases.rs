@@ -219,9 +219,7 @@ impl Namespace<Writable> {
                     )
                     .await?;
                 let prepared_at_ms = self.core.now_ms();
-                let (fork, fork_pin) = self
-                    .pin_fork(source_namespace_id, request, prepared_at_ms)
-                    .await?;
+                let (fork, fork_pin) = self.pin_fork(source_namespace_id, prepared_at_ms).await?;
                 let planned = async {
                     let source = self
                         .core

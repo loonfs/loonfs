@@ -8,8 +8,9 @@
 //! crate adds caching, batching, budgets, and maintenance around it.
 //!
 //! The crate root re-exports each type that a public runtime signature, or a
-//! field of a type that one returns, uses, and the sub-modules re-export the
-//! items their docs list. Nothing else is re-exported.
+//! field of a type that one returns, uses, except an extension's types, which
+//! [`engine`] re-exports. The sub-modules re-export the items their docs
+//! list. Nothing else is re-exported.
 //!
 //! The crate has two nouns. A [`LoonFs`] is the runtime: it owns the store
 //! client and the read budgets, and reads through a [`MetadataCache`] that
@@ -99,27 +100,30 @@ pub use loonfs_core::{
     CONTENT_READ_CHUNK_BYTES, MAX_CURRENT_FILES_PER_STAT,
 };
 pub use loonfs_types::{
-    AbsolutePath, ActorId, AdvanceRetentionResponse, AttributeKey, AttributeValue, Attributes,
-    AttributesProjection, AttributesRevisionNo, BindingVersion, CapabilityDocument, Checkpoint,
-    CheckpointOwner, ChecksumAlgorithm, CommitId, CommitPrecondition, CommitSeq, ContentId,
-    ContentRef, ContentRefKind, DeleteDirectoryBehavior, DeleteNamespaceResponse,
-    DeleteSnapshotResponse, DeletedCheckpointsByOwner, DeletedObjectCounts, DestinationBehavior,
-    DirectoryPageCursor, DisplayName, EffectiveLimit, EntryInodeKind, FileRevision,
-    FileRevisionsPageCursor, GcResponse, GcSkippedWork, InodeId, InodeKind,
-    ListCheckpointsResponse, ListFileRevisionsResponse, ListInodeChildrenResponse,
+    AbsolutePath, AccessRevisionNo, ActorId, AdvanceRetentionResponse, AttributeKey,
+    AttributeValue, Attributes, AttributesProjection, AttributesRevisionNo, BindingVersion,
+    CapabilityDocument, Checkpoint, CheckpointOwner, ChecksumAlgorithm, CommitId,
+    CommitPrecondition, CommitSeq, ContentId, ContentRef, ContentRefKind, DeleteDirectoryBehavior,
+    DeleteNamespaceResponse, DeleteSnapshotResponse, DeletedCheckpointsByOwner,
+    DeletedObjectCounts, DestinationBehavior, DirectoryPageCursor, DisplayName, EffectiveLimit,
+    EntryInodeKind, FileRevision, FileRevisionsPageCursor, GcResponse, GcSkippedWork, InodeId,
+    InodeKind, ListCheckpointsResponse, ListFileRevisionsResponse, ListInodeChildrenResponse,
     ListPathEntriesResponse, ListSnapshotsResponse, ManifestNo, MetadataMaintenanceOutcome,
-    MetadataMaintenanceResponse, MetadataSkippedWork, NameKey, NamespaceDiagnostics, NamespaceId,
-    NamespaceMetadata, Page, PageRequest, PathEntry, PathEntryKind, PinId, PoolDeletedObjectCounts,
-    PoolGcResponse, PoolId, PoolRetainedCandidates, PoolRetainedReason, RetainedCandidates,
-    RetainedReason, RevisionNo, SetRetentionWindowResponse, Snapshot, TrashEntry, UploadId,
-    WriterId, API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0, FEATURE_DOWNLOADS_DIRECT_GET,
-    FEATURE_MERGES, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, PROTOCOL_VERSION,
+    MetadataMaintenanceResponse, MetadataSkippedWork, MonotonicTimer, NameKey,
+    NamespaceDiagnostics, NamespaceId, NamespaceMetadata, Page, PageRequest, PathEntry,
+    PathEntryKind, PinId, PoolDeletedObjectCounts, PoolGcResponse, PoolId, PoolRetainedCandidates,
+    PoolRetainedReason, PrincipalId, PrincipalScope, PrincipalSet, RecoverAdministratorResponse,
+    RetainedCandidates, RetainedReason, RevisionNo, SetRetentionWindowResponse, Snapshot, Subject,
+    SubjectId, TrashEntry, UploadId, WriterId, API_GROUP_FILESYSTEM_V0, API_GROUP_MAINTENANCE_V0,
+    FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_MERGES, FEATURE_UPLOADS_DIRECT_MULTIPART,
+    FEATURE_UPLOADS_DIRECT_PUT, PROTOCOL_VERSION,
 };
 pub use loonfs_types::{
     Commit, CompleteUploadBody, CreateUploadBody, DiffEntry, DiffEntryKind, DiffResponse,
     FilesystemEvent, ListChangesResponse, MergeConflict, MergeConflictKind, MergeConflictRevision,
     MergeConflictVersion, NextMergeRangeOutcome, NextMergeRangeResponse, ObjectTransfer,
-    RebaseForkResponse, UploadContentClaim, UploadMode, UploadSession, UploadSessionStatus,
+    RebaseForkResponse, UploadContentClaim, UploadMode, UploadPartChecksumClaim, UploadSession,
+    UploadSessionStatus,
 };
 
 /// The parts an extension uses to keep its own index over a namespace.
@@ -138,6 +142,8 @@ pub mod engine {
         ExtensionPublication, LoadedBlocks, PermitPool, PoolCounts, SegmentBlockLoader,
         SegmentRowIterator,
     };
+    pub use loonfs_types::format::manifest::{ExtensionEntry, ExtensionRunRef};
+    pub use loonfs_types::{ExtensionName, RunNo};
 }
 
 /// Commit types used by integrations that submit classified mutations to
