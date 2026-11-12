@@ -107,7 +107,6 @@ impl PathEntry {
 #[serde(tag = "inode_kind", rename_all = "snake_case")]
 pub enum PathEntryKind {
     /// A directory, which has no revision fields.
-    #[serde(rename = "dir")]
     #[cfg_attr(feature = "openapi", schema(title = "PathEntryDirectory"))]
     Directory {},
     /// A file, with a summary of its current revision.
@@ -168,9 +167,6 @@ pub enum EntryInodeKind {
     /// A file, which has a revision history.
     File,
     /// A directory, which has child bindings.
-    ///
-    /// The wire value is always `"dir"`, and only the Rust variant name spells out the whole word.
-    #[serde(rename = "dir")]
     Directory,
     /// An inode kind from a newer server. It serializes as `unknown`.
     #[serde(other)]
@@ -190,7 +186,7 @@ impl fmt::Display for EntryInodeKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::File => "file",
-            Self::Directory => "dir",
+            Self::Directory => "directory",
             Self::Unknown => "unknown",
         })
     }
@@ -378,7 +374,7 @@ mod tests {
                 "inode_id": "ino_00000000000000000000000002",
                 "created_by": "loonfs",
                 "created_at_ms": 1_752_624_000_000_u64,
-                "inode_kind": "dir",
+                "inode_kind": "directory",
                 "head_seq": 3,
                 "parent_inode_id": "ino_00000000000000000000000000",
                 "display_name": "docs",
@@ -405,7 +401,7 @@ mod tests {
                     "inode_id": "ino_00000000000000000000000002",
                     "created_by": "loonfs",
                     "created_at_ms": 1_752_624_000_000_u64,
-                    "inode_kind": "dir",
+                    "inode_kind": "directory",
                     "head_seq": 3,
                     "parent_inode_id": "ino_00000000000000000000000000",
                     "display_name": "docs",

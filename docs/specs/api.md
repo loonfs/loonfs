@@ -1557,7 +1557,7 @@ The CLI reports the last page's head as `head_seq`. For multi-page reads and rec
       "inode_id": "ino_000000w000000kewn0stth7erh",
       "created_by": "usr_8f3c",
       "created_at_ms": 1752623000000,
-      "inode_kind": "dir",
+      "inode_kind": "directory",
       "head_seq": 418,
       "parent_inode_id": "ino_000000r000000tn10r0b9wf3yy",
       "display_name": "slides",

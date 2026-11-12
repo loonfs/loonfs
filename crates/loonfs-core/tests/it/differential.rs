@@ -2296,7 +2296,7 @@ fn normalize_inode(
     (
         inode_id,
         match inode_kind {
-            InodeKind::Directory => "dir",
+            InodeKind::Directory => "directory",
             InodeKind::File => "file",
         },
         committed_seq,

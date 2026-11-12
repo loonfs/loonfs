@@ -277,7 +277,7 @@ fn embedded_profile_filesystem_flow_works_end_to_end() {
 
     let docs = harness.run(&["--json", "stat", "/docs"]);
     assert_success(&docs);
-    assert_eq!(json_data(&docs)["inode_kind"], "dir");
+    assert_eq!(json_data(&docs)["inode_kind"], "directory");
 
     let put = harness.run(&[
         "--json",
@@ -1827,7 +1827,7 @@ fn mkdir_parents_get_noclobber_and_version() {
     assert_eq!(json_data(&with_parents)["target"], "demo:/a/b/c");
     let created_ancestor = harness.run(&["--json", "stat", "/a/b"]);
     assert_success(&created_ancestor);
-    assert_eq!(json_data(&created_ancestor)["inode_kind"], "dir");
+    assert_eq!(json_data(&created_ancestor)["inode_kind"], "directory");
 
     // get refuses to clobber a local file unless forced.
     let payload = harness.temp_dir.path().join("f.txt");

@@ -13,7 +13,7 @@ type PathEntryUnknown PathEntryDirectory
 // requires a client to keep such an entry, read those fields, and ignore the fields that belong to
 // the unknown kind. The entry's InodeKind reports the kind itself.
 func (p *PathEntry) GetUnknown() (*PathEntryUnknown, error) {
-	if p == nil || p.Dir != nil || p.File != nil || len(p.rawJSON) == 0 {
+	if p == nil || p.Directory != nil || p.File != nil || len(p.rawJSON) == 0 {
 		return nil, nil
 	}
 	unknown := new(PathEntryUnknown)
