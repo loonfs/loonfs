@@ -81,7 +81,7 @@ async fn an_extension_segment_goes_once_no_root_lists_it() {
     let first = extension_segment(&namespace_id, 1);
     let first_key = write_segment(&store, &first).await;
     publish_run(&store, &namespace_id, first).await;
-    let snapshot = create_checkpoint(&store, &namespace_id, &setup)
+    let snapshot = create_snapshot(&store, &namespace_id, &setup)
         .await
         .expect("take a snapshot of the first entry");
     let second = extension_segment(&namespace_id, 2);
@@ -102,7 +102,7 @@ async fn an_extension_segment_goes_once_no_root_lists_it() {
     }
 
     crate::test_support::namespace_store(&store, &namespace_id)
-        .delete_snapshot_record(&snapshot.checkpoint_id)
+        .delete_snapshot_record(&snapshot.snapshot_id)
         .await
         .expect("delete the snapshot");
     let report = collect(&store, &namespace_id).await;
@@ -193,7 +193,7 @@ async fn an_inherited_extension_segment_stays_until_no_fork_snapshot_keeps_it() 
         .gc(&options(), &context(setup.now_ms + retirement_ms()).clock())
         .await
         .expect("retire the fork");
-    assert_eq!(retired.deleted_checkpoints_by_owner.fork, 1);
+    assert_eq!(retired.deleted_snapshots_by_owner.fork, 1);
     let report = collect(&store, &source).await;
     assert_eq!(report.deleted.extension_segments, 1, "{report:?}");
     assert!(store

@@ -82,7 +82,7 @@ async fn live_grandchild_keeps_deleted_ancestors_until_retirement_runs_leaf_firs
             .gc(&options(), &aged.clock())
             .await
             .expect("collect ancestor while grandchild lives");
-        assert_eq!(report.deleted_checkpoints_by_owner.fork, 0);
+        assert_eq!(report.deleted_snapshots_by_owner.fork, 0);
         assert_eq!(
             collect_pool(&store, &pool_id, &aged)
                 .await
@@ -106,7 +106,7 @@ async fn live_grandchild_keeps_deleted_ancestors_until_retirement_runs_leaf_firs
             .gc(&options(), &aged.clock())
             .await
             .expect("ancestors still kept by unretired descendants");
-        assert_eq!(report.deleted_checkpoints_by_owner.fork, 0);
+        assert_eq!(report.deleted_snapshots_by_owner.fork, 0);
     }
     for index in [2, 1, 0] {
         let report = crate::test_support::namespace_store(&store, &namespaces[index])
@@ -116,7 +116,7 @@ async fn live_grandchild_keeps_deleted_ancestors_until_retirement_runs_leaf_firs
         if index > 0 {
             // A fork's retirement releases its fork snapshot and deletes no
             // content.
-            assert_eq!(report.deleted_checkpoints_by_owner.fork, 1);
+            assert_eq!(report.deleted_snapshots_by_owner.fork, 1);
             for key in &keys {
                 assert!(store.head(key).await.expect("pool object").is_some());
             }
@@ -132,7 +132,7 @@ async fn live_grandchild_keeps_deleted_ancestors_until_retirement_runs_leaf_firs
         } else {
             // The first member retires last, and then the pool has no members,
             // so the pool's collection deletes the aged content.
-            assert_eq!(report.deleted_checkpoints_by_owner.fork, 0);
+            assert_eq!(report.deleted_snapshots_by_owner.fork, 0);
             let pool_report = collect_pool(&store, &pool_id, &aged).await;
             assert!(pool_report.deleted.content_objects >= keys.len() as u64);
             for key in &keys {

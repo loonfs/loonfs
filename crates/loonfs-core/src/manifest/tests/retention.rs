@@ -1,4 +1,4 @@
-//! Checkpoint retention, compaction, and publication budgets.
+//! Snapshot retention, compaction, and publication budgets.
 
 use super::*;
 use crate::publish::SharedWriterSessionStatus;
@@ -291,7 +291,7 @@ async fn a_targeted_advance_stops_at_the_cutoff_or_the_sequence_and_never_lowers
             .await
             .expect("commit");
     }
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
         .expect("fold the commits");
 
@@ -376,7 +376,7 @@ async fn an_advance_stops_below_the_first_commit_younger_than_the_grace_window()
             .await
             .expect("commit");
     }
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
         .expect("fold the commits");
 
@@ -795,7 +795,7 @@ async fn a_window_advance_uses_the_namespace_window_and_keeps_the_floor_without_
             .await
             .expect("commit");
     }
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
         .expect("fold the commits");
     let window = |window_ms: u64| std::num::NonZeroU64::new(window_ms);
@@ -877,7 +877,7 @@ async fn a_cutoff_advance_reads_commits_through_the_given_cache() {
             .await
             .expect("commit");
     }
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
         .expect("fold the commits");
 
@@ -931,9 +931,9 @@ async fn retention_floor_does_not_advance_past_a_missing_basis_segment() {
         .write_file_bytes("/docs/hello.txt", b"hello\n", None)
         .await
         .expect("write hello");
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("create checkpoint");
+        .expect("create snapshot");
 
     let manifest = crate::test_support::namespace_store(&store, &namespace_id)
         .load_current_manifest()
@@ -999,9 +999,9 @@ async fn retention_floor_does_not_advance_when_a_basis_segment_cannot_be_checked
         .write_file_bytes("/docs/hello.txt", b"hello\n", None)
         .await
         .expect("write hello");
-    create_checkpoint(&setup_store, &namespace_id, &context)
+    create_snapshot(&setup_store, &namespace_id, &context)
         .await
-        .expect("create checkpoint");
+        .expect("create snapshot");
 
     let manifest = crate::test_support::namespace_store(&setup_store, &namespace_id)
         .load_current_manifest()
@@ -1341,16 +1341,16 @@ async fn two_advances_to_different_floors_leave_the_higher_floor() {
     }
 }
 
-/// Reads the files one checkpoint keeps at the test clock, or the error that
+/// Reads the files one snapshot keeps at the test clock, or the error that
 /// says it no longer keeps anything.
-async fn read_checkpoint_files<S: ObjectStore + ?Sized>(
+async fn read_snapshot_files<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    checkpoint_id: &SnapshotId,
+    snapshot_id: &SnapshotId,
 ) -> crate::error::Result<Vec<InodeId>> {
     let page = crate::test_support::namespace_store(store, namespace_id)
         .list_snapshot_files_page(
-            checkpoint_id,
+            snapshot_id,
             loonfs_types::PageRequest {
                 cursor: None,
                 limit: EffectiveLimit::new(NonZeroU32::new(64).expect("nonzero")),
@@ -1378,11 +1378,11 @@ async fn deleting_a_snapshot_never_reuses_its_id() {
         .write_file_bytes("/docs/file.txt", b"body\n", None)
         .await
         .expect("write");
-    let first = create_checkpoint(&store, &namespace_id, &context)
+    let first = create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("create checkpoint");
+        .expect("create snapshot");
     assert!(
-        !read_checkpoint_files(&store, &namespace_id, &first.checkpoint_id)
+        !read_snapshot_files(&store, &namespace_id, &first.snapshot_id)
             .await
             .expect("the first snapshot serves")
             .is_empty()
@@ -1394,27 +1394,27 @@ async fn deleting_a_snapshot_never_reuses_its_id() {
         &crate::test_support::writer_at("test-writer", 0),
     )
     .engine();
-    let delete = engine.delete_snapshot(&first.checkpoint_id);
-    let recreate = create_checkpoint(&store, &namespace_id, &context);
+    let delete = engine.delete_snapshot(&first.snapshot_id);
+    let recreate = create_snapshot(&store, &namespace_id, &context);
     let (delete, second) = tokio::join!(delete, recreate);
-    assert_eq!(delete.expect("delete").snapshot_id, first.checkpoint_id);
+    assert_eq!(delete.expect("delete").snapshot_id, first.snapshot_id);
     let second = second.expect("a concurrent create takes a fresh snapshot");
     assert_ne!(
-        second.checkpoint_id, first.checkpoint_id,
+        second.snapshot_id, first.snapshot_id,
         "a new snapshot is never written at a deleted record's key"
     );
 
     assert!(crate::test_support::namespace_store(&store, &namespace_id)
-        .load_snapshot_record(&first.checkpoint_id)
+        .load_snapshot_record(&first.snapshot_id)
         .await
         .expect("load snapshot")
         .is_none());
-    let error = read_checkpoint_files(&store, &namespace_id, &first.checkpoint_id)
+    let error = read_snapshot_files(&store, &namespace_id, &first.snapshot_id)
         .await
         .expect_err("a deleted record serves no read");
     assert_eq!(error.code(), ErrorCode::SnapshotNotFound);
     assert!(
-        !read_checkpoint_files(&store, &namespace_id, &second.checkpoint_id)
+        !read_snapshot_files(&store, &namespace_id, &second.snapshot_id)
             .await
             .expect("the new snapshot serves")
             .is_empty()
@@ -1426,14 +1426,14 @@ async fn deleting_a_snapshot_never_reuses_its_id() {
         &crate::test_support::writer_at("test-writer", 0),
     )
     .engine()
-    .delete_snapshot(&first.checkpoint_id)
+    .delete_snapshot(&first.snapshot_id)
     .await
     .expect("a second delete succeeds");
 }
 
 #[tokio::test]
 async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
-    // Re-creating a checkpoint is not a renewal of an earlier one. Every
+    // Re-creating a snapshot is not a renewal of an earlier one. Every
     // call is its own snapshot with its own id, its own creation instant, and
     // exactly the expiry it asked for; earlier records are left alone.
     let temp_dir = tempdir().expect("tempdir");
@@ -1462,13 +1462,13 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
             &context.clock(),
         )
         .await
-        .map(crate::snapshot::checkpoint_summary)
-        .expect("create checkpoint");
+        .map(crate::snapshot::snapshot_record_summary)
+        .expect("create snapshot");
     assert_eq!(first.expires_at_ms, Some(10_000));
 
     let mut later_context = test_context();
     later_context.now_ms = 2_000;
-    let mut minted = BTreeSet::from([first.checkpoint_id.clone()]);
+    let mut minted = BTreeSet::from([first.snapshot_id.clone()]);
     for expiry in [Some(99_000), Some(5_000), None] {
         let namespace = crate::test_support::namespace_store(&store, &namespace_id);
         let next = namespace
@@ -1480,15 +1480,15 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
                 &later_context.clock(),
             )
             .await
-            .map(crate::snapshot::checkpoint_summary)
-            .expect("create checkpoint");
+            .map(crate::snapshot::snapshot_record_summary)
+            .expect("create snapshot");
         assert!(
-            minted.insert(next.checkpoint_id.clone()),
+            minted.insert(next.snapshot_id.clone()),
             "each snapshot gets an id of its own"
         );
         assert_eq!(next.expires_at_ms, expiry);
         let record = crate::test_support::namespace_store(&store, &namespace_id)
-            .load_snapshot_record(&next.checkpoint_id)
+            .load_snapshot_record(&next.snapshot_id)
             .await
             .expect("read snapshot")
             .expect("record exists")
@@ -1500,7 +1500,7 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
     // The very first record is untouched by any of it: a snapshot taken without
     // an expiry, or with one, is held until something deletes it.
     let original = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_snapshot_record(&first.checkpoint_id)
+        .load_snapshot_record(&first.snapshot_id)
         .await
         .expect("read snapshot")
         .expect("record exists")
@@ -1538,14 +1538,14 @@ async fn an_expired_snapshot_serves_no_reads_but_stays_until_a_collection_delete
             &context.clock(),
         )
         .await
-        .map(crate::snapshot::checkpoint_summary)
-        .expect("create checkpoint whose expiry has already passed");
+        .map(crate::snapshot::snapshot_record_summary)
+        .expect("create snapshot whose expiry has already passed");
     assert!(crate::test_support::namespace_store(&store, &namespace_id)
-        .load_snapshot_record(&already_expired.checkpoint_id)
+        .load_snapshot_record(&already_expired.snapshot_id)
         .await
         .expect("load snapshot")
         .is_some());
-    let error = read_checkpoint_files(&store, &namespace_id, &already_expired.checkpoint_id)
+    let error = read_snapshot_files(&store, &namespace_id, &already_expired.snapshot_id)
         .await
         .expect_err("an expired snapshot serves no read");
     assert_eq!(error.code(), ErrorCode::SnapshotNotFound);
@@ -1562,12 +1562,12 @@ async fn an_expired_snapshot_serves_no_reads_but_stays_until_a_collection_delete
         )
         .await
         .expect("collection");
-    let error = read_checkpoint_files(&store, &namespace_id, &already_expired.checkpoint_id)
+    let error = read_snapshot_files(&store, &namespace_id, &already_expired.snapshot_id)
         .await
         .expect_err("a deleted snapshot serves nothing");
     assert_eq!(error.code(), ErrorCode::SnapshotNotFound);
     assert!(crate::test_support::namespace_store(&store, &namespace_id)
-        .load_snapshot_record(&already_expired.checkpoint_id)
+        .load_snapshot_record(&already_expired.snapshot_id)
         .await
         .expect("load snapshot")
         .is_none());
@@ -1588,9 +1588,9 @@ async fn a_snapshot_without_a_ttl_is_kept_until_it_is_deleted() {
         .write_file_bytes("/docs/file.txt", b"body\n", None)
         .await
         .expect("write");
-    let snapshot = create_checkpoint(&store, &namespace_id, &context)
+    let snapshot = create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("create checkpoint");
+        .expect("create snapshot");
     assert_eq!(snapshot.expires_at_ms, None);
 
     let mut distant = test_context();
@@ -1602,12 +1602,12 @@ async fn a_snapshot_without_a_ttl_is_kept_until_it_is_deleted() {
             .expect("collection");
     }
     crate::test_support::namespace_store(&store, &namespace_id)
-        .load_snapshot_record(&snapshot.checkpoint_id)
+        .load_snapshot_record(&snapshot.snapshot_id)
         .await
         .expect("read snapshot")
         .expect("an unexpiring snapshot survives every collection");
     assert!(
-        !read_checkpoint_files(&store, &namespace_id, &snapshot.checkpoint_id)
+        !read_snapshot_files(&store, &namespace_id, &snapshot.snapshot_id)
             .await
             .expect("the snapshot still serves")
             .is_empty()
@@ -1619,17 +1619,17 @@ async fn a_snapshot_without_a_ttl_is_kept_until_it_is_deleted() {
         &crate::test_support::writer_at("test-writer", 0),
     )
     .engine()
-    .delete_snapshot(&snapshot.checkpoint_id)
+    .delete_snapshot(&snapshot.snapshot_id)
     .await
     .expect("delete");
-    let error = read_checkpoint_files(&store, &namespace_id, &snapshot.checkpoint_id)
+    let error = read_snapshot_files(&store, &namespace_id, &snapshot.snapshot_id)
         .await
         .expect_err("delete ends it");
     assert_eq!(error.code(), ErrorCode::SnapshotNotFound);
 }
 
 #[tokio::test]
-async fn checkpoint_creation_deletes_its_snapshot_when_the_floor_passed_its_manifest() {
+async fn snapshot_creation_deletes_its_record_when_the_floor_passed_its_manifest() {
     let directory = tempdir().expect("tempdir");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -1675,7 +1675,7 @@ async fn checkpoint_creation_deletes_its_snapshot_when_the_floor_passed_its_mani
             &context.clock(),
         )
         .await
-        .map(crate::snapshot::checkpoint_summary)
+        .map(crate::snapshot::snapshot_record_summary)
         .expect_err("floor passed snapshot");
     assert_eq!(error.code(), ErrorCode::CheckpointUnavailable);
     assert!(store
@@ -1700,14 +1700,14 @@ async fn snapshot_verification_rejects_a_deleted_namespace() {
         .write_file_bytes("/docs/file.txt", b"body\n", None)
         .await
         .expect("write");
-    let checkpoint = create_checkpoint(&store, &namespace_id, &context)
+    let snapshot = create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("create checkpoint");
+        .expect("create snapshot");
     let record = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_snapshot_record(&checkpoint.checkpoint_id)
+        .load_snapshot_record(&snapshot.snapshot_id)
         .await
-        .expect("load checkpoint")
-        .expect("checkpoint exists")
+        .expect("load snapshot")
+        .expect("snapshot exists")
         .state;
 
     let acquired = crate::test_support::namespace_store(&store, &namespace_id)
@@ -1726,7 +1726,7 @@ async fn snapshot_verification_rejects_a_deleted_namespace() {
     assert_eq!(
         verified,
         crate::snapshot::record::SnapshotBasisVerification::Invalid,
-        "a tombstoned namespace cannot acquire a new checkpoint dependency"
+        "a tombstoned namespace cannot acquire a new snapshot dependency"
     );
 }
 
@@ -1762,7 +1762,7 @@ async fn snapshot_basis_verification_store_failure_deletes_the_record() {
             &context.clock(),
         )
         .await
-        .map(crate::snapshot::checkpoint_summary)
+        .map(crate::snapshot::snapshot_record_summary)
         .expect_err("verification failed");
     assert_eq!(error.code(), ErrorCode::ServerError);
     assert!(store
@@ -1941,7 +1941,7 @@ async fn publish_backpressure_rejects_at_the_longest_tail_the_head_describes() {
 }
 
 #[tokio::test]
-async fn checkpoints_append_past_the_threshold_and_compaction_drains() {
+async fn snapshots_append_past_the_threshold_and_compaction_drains() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1956,7 +1956,7 @@ async fn checkpoints_append_past_the_threshold_and_compaction_drains() {
 
     let rounds = DEFAULT_MAX_DELTA_RUNS.get() + 2;
     for index in 1..=u64::try_from(rounds).expect("round count fits") {
-        write_file_and_checkpoint(&store, &namespace_id, &context, index).await;
+        write_file_and_create_snapshot(&store, &namespace_id, &context, index).await;
     }
 
     let appended = load_manifest_state_for_inspection(
@@ -2048,9 +2048,9 @@ async fn a_unit_honors_its_run_budget_and_reads_only_the_selected_runs() {
             .write_file_bytes(&format!("/docs/file-{index}.txt"), b"body\n", None)
             .await
             .expect("write file");
-        create_checkpoint(&store, &namespace_id, &context)
+        create_snapshot(&store, &namespace_id, &context)
             .await
-            .expect("create checkpoint");
+            .expect("create snapshot");
     }
 
     let policy = MetadataRunPolicy {
@@ -2116,9 +2116,9 @@ async fn bounded_compaction_reaches_the_unbounded_state_and_preserves_intermedia
             )
             .await
             .expect("write file");
-        create_checkpoint(&bounded_store, &namespace_id, &context)
+        create_snapshot(&bounded_store, &namespace_id, &context)
             .await
-            .expect("create checkpoint");
+            .expect("create snapshot");
     }
     // The two compactions start from the same objects, so their results have
     // the same inode IDs.
@@ -2210,9 +2210,9 @@ async fn bounded_compaction_reaches_the_unbounded_state_and_preserves_intermedia
         .write_file_bytes("/docs/later.txt", b"later\n", Some(&later_commit))
         .await
         .expect("write later file");
-    create_checkpoint(&unbounded_store, &namespace_id, &context)
+    create_snapshot(&unbounded_store, &namespace_id, &context)
         .await
-        .expect("checkpoint later file");
+        .expect("snapshot later file");
     let below_trigger = {
         let mut fixture = crate::test_support::NamespaceFixture::new(
             &unbounded_store,
@@ -2257,7 +2257,7 @@ async fn whole_run_compaction_rewrites_base_segments() {
         .await
         .expect("write cold");
 
-    let first_manifest_no = checkpoint_then_compact(&store, &namespace_id, &context, policy).await;
+    let first_manifest_no = snapshot_then_compact(&store, &namespace_id, &context, policy).await;
     let first_materialized =
         load_manifest_state_for_inspection(&store, &namespace_id, first_manifest_no)
             .await
@@ -2268,14 +2268,14 @@ async fn whole_run_compaction_rewrites_base_segments() {
         .write_file_bytes("/hot/after-delta.txt", b"hot 2\n", None)
         .await
         .expect("write hot delta");
-    checkpoint_then_compact(&store, &namespace_id, &context, policy).await;
+    snapshot_then_compact(&store, &namespace_id, &context, policy).await;
     crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
         .write_file_bytes("/hot/after-compact.txt", b"hot 3\n", None)
         .await
         .expect("write hot compact");
-    let compacted = create_checkpoint(&store, &namespace_id, &context)
+    let compacted = create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("compacted checkpoint");
+        .expect("compacted snapshot");
     let compacted_manifest_no = drain_compaction(
         &store,
         &namespace_id,
@@ -2347,7 +2347,7 @@ async fn whole_run_compaction_resegments_row_key_range_families_with_delta_runs(
             .expect("write initial file");
     }
 
-    let first_manifest_no = checkpoint_then_compact(&store, &namespace_id, &context, policy).await;
+    let first_manifest_no = snapshot_then_compact(&store, &namespace_id, &context, policy).await;
     let first_materialized =
         load_manifest_state_for_inspection(&store, &namespace_id, first_manifest_no)
             .await
@@ -2362,14 +2362,14 @@ async fn whole_run_compaction_resegments_row_key_range_families_with_delta_runs(
         .write_file_bytes("/docs/file-0.txt", b"delta\n", None)
         .await
         .expect("write delta revision");
-    checkpoint_then_compact(&store, &namespace_id, &context, policy).await;
+    snapshot_then_compact(&store, &namespace_id, &context, policy).await;
     crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
         .write_file_bytes("/docs/file-0.txt", b"compact\n", None)
         .await
         .expect("write compaction revision");
-    let _compacted = create_checkpoint(&store, &namespace_id, &context)
+    let _compacted = create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("compacted checkpoint");
+        .expect("compacted snapshot");
     let compacted_manifest_no = drain_compaction(
         &store,
         &namespace_id,
@@ -2422,7 +2422,7 @@ async fn compaction_resumes_from_the_manifest_after_interruption() {
         .await
         .expect("bootstrap");
     for index in 1..=3 {
-        write_file_and_checkpoint(&store, &namespace_id, &context, index).await;
+        write_file_and_create_snapshot(&store, &namespace_id, &context, index).await;
     }
 
     // One unit runs, then the process "crashes": nothing is carried over
@@ -2451,11 +2451,11 @@ async fn compaction_resumes_from_the_manifest_after_interruption() {
         panic!("expected a published unit, got {:?}", first_report);
     };
 
-    // A checkpoint is published in between, adding a fresh delta run.
-    write_file_and_checkpoint(&store, &namespace_id, &context, 9).await;
+    // A snapshot is published in between, adding a fresh delta run.
+    write_file_and_create_snapshot(&store, &namespace_id, &context, 9).await;
 
     // A fresh sequence of steps reads the live manifest and finishes the
-    // job, including the delta the interleaved checkpoint added.
+    // job, including the delta the interleaved snapshot added.
     let mut compacted_groups = vec![first_group];
     loop {
         let report = {
@@ -2769,7 +2769,7 @@ async fn a_base_comparable_to_its_deltas_is_rebuilt_whole_with_them() {
 
     // A compacted base first, then delta runs stacked above it.
     for index in 1..=4 {
-        write_file_and_checkpoint(&store, &namespace_id, &context, index).await;
+        write_file_and_create_snapshot(&store, &namespace_id, &context, index).await;
     }
     drain_compaction(
         &store,
@@ -2781,7 +2781,7 @@ async fn a_base_comparable_to_its_deltas_is_rebuilt_whole_with_them() {
     )
     .await;
     for index in 5..=8 {
-        write_file_and_checkpoint(&store, &namespace_id, &context, index).await;
+        write_file_and_create_snapshot(&store, &namespace_id, &context, index).await;
     }
 
     let before = load_manifest_state_for_inspection(
@@ -2872,9 +2872,9 @@ async fn a_compaction_above_the_base_keeps_the_rows_that_shadow_it() {
             .await
             .expect("grow the base");
     }
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("checkpoint the seed");
+        .expect("snapshot the seed");
     drain_compaction(
         &store,
         &namespace_id,
@@ -2892,17 +2892,17 @@ async fn a_compaction_above_the_base_keeps_the_rows_that_shadow_it() {
         .delete_path("/docs/gone.txt", None)
         .await
         .expect("delete");
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
-        .expect("checkpoint the delete");
+        .expect("snapshot the delete");
     for extra in 1..MetadataRunPolicy::default().min_compaction_runs.get() {
         crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
             .write_file_bytes(&format!("/docs/extra-{extra}.txt"), b"body\n", None)
             .await
             .expect("write extra");
-        create_checkpoint(&store, &namespace_id, &context)
+        create_snapshot(&store, &namespace_id, &context)
             .await
-            .expect("checkpoint the extra file");
+            .expect("snapshot the extra file");
     }
     crate::test_support::NamespaceFixture::new(
         &store,
@@ -3040,18 +3040,18 @@ async fn repeated_churn_under_small_budgets_leaves_one_base_run_per_group() {
                 .await
                 .expect("write file");
         }
-        create_checkpoint(&store, &namespace_id, &context)
+        create_snapshot(&store, &namespace_id, &context)
             .await
-            .expect("checkpoint the writes");
+            .expect("snapshot the writes");
         for file in 0..3u64 {
             crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
                 .delete_path(&format!("/d{cycle}/f{file}.txt"), None)
                 .await
                 .expect("delete a file");
         }
-        create_checkpoint(&store, &namespace_id, &context)
+        create_snapshot(&store, &namespace_id, &context)
             .await
-            .expect("checkpoint the deletions");
+            .expect("snapshot the deletions");
         crate::test_support::NamespaceFixture::new(
             &store,
             &namespace_id,
@@ -3129,10 +3129,10 @@ async fn a_floor_past_a_snapshot_keeps_its_manifest_and_runs_readable_until_dele
         .write_file_bytes("/first", b"first", None)
         .await
         .expect("first write");
-    let snapshot = create_checkpoint(&store, &namespace_id, &context)
+    let snapshot = create_snapshot(&store, &namespace_id, &context)
         .await
         .expect("snapshot");
-    let snapshot_files = read_checkpoint_files(&store, &namespace_id, &snapshot.checkpoint_id)
+    let snapshot_files = read_snapshot_files(&store, &namespace_id, &snapshot.snapshot_id)
         .await
         .expect("snapshot files");
     let snapshot_segments =
@@ -3175,7 +3175,7 @@ async fn a_floor_past_a_snapshot_keeps_its_manifest_and_runs_readable_until_dele
         .await
         .expect("collect past the floor");
     assert_eq!(
-        read_checkpoint_files(&store, &namespace_id, &snapshot.checkpoint_id)
+        read_snapshot_files(&store, &namespace_id, &snapshot.snapshot_id)
             .await
             .expect("snapshot readable"),
         snapshot_files
@@ -3195,7 +3195,7 @@ async fn a_floor_past_a_snapshot_keeps_its_manifest_and_runs_readable_until_dele
         &crate::test_support::writer_at("test-writer", 0),
     )
     .engine()
-    .delete_snapshot(&snapshot.checkpoint_id)
+    .delete_snapshot(&snapshot.snapshot_id)
     .await
     .expect("delete snapshot");
     crate::test_support::namespace_store(&store, &namespace_id)

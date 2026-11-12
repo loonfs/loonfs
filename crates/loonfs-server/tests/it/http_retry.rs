@@ -768,7 +768,7 @@ async fn http_put_conflict_stands_when_retention_trimmed_the_committed_seq() {
         .client
         .create_snapshot(&namespace, "trimmed")
         .await
-        .expect("create checkpoint");
+        .expect("create snapshot");
     let advanced = maintenance_past_the_grace_window(harness.store.clone())
         .await
         .advance_retention_floor(&namespace)

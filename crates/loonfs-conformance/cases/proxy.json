@@ -13,7 +13,7 @@
       "direct": "conf-proxy-upload-direct"
     },
     "content_utf8": "proxy conformance payload",
-    "disallowed_path_suffix": "/checkpoints",
+    "disallowed_path_suffix": "/diff",
     "authorize": {
       "actor_id": "proxy-stamped-actor",
       "browser_actor_id": "browser-claimed-actor",

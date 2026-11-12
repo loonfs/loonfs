@@ -9,9 +9,7 @@ use crate::limits::{
     NAMESPACE_RETIREMENT_GRACE_WINDOW_MS, UNREFERENCED_SEGMENT_GRACE_WINDOW_MS,
     UPLOAD_SESSION_LEASE_MS,
 };
-use crate::manifest::tests::{
-    compact_a_family_group, create_checkpoint, write_test_file, writer_at,
-};
+use crate::manifest::tests::{compact_a_family_group, create_snapshot, write_test_file, writer_at};
 use crate::manifest::RetentionTarget;
 use crate::path::write::{CommitIntent, FilesystemOperation};
 use crate::test_support::WriterAt;
@@ -81,10 +79,10 @@ fn retirement_ms() -> u64 {
 async fn snapshot_record_exists<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    checkpoint_id: &SnapshotId,
+    snapshot_id: &SnapshotId,
 ) -> bool {
     crate::test_support::namespace_store(store, namespace_id)
-        .load_snapshot_record(checkpoint_id)
+        .load_snapshot_record(snapshot_id)
         .await
         .expect("read snapshot")
         .is_some()
@@ -211,9 +209,9 @@ async fn gc_reaps_below_floor_wal_objects_after_the_grace_window() {
         .expect("bootstrap");
     write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
     write_test_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
-    create_checkpoint(&store, &namespace_id, &setup)
+    create_snapshot(&store, &namespace_id, &setup)
         .await
-        .expect("checkpoint");
+        .expect("snapshot");
     crate::test_support::NamespaceFixture::new(
         &store,
         &namespace_id,
@@ -304,7 +302,7 @@ async fn deleted_namespace_keeps_its_tombstone_and_segments() {
         .put_if_absent(&unreferenced_key, Bytes::from_static(b"unreferenced"))
         .await
         .expect("unreferenced object");
-    create_checkpoint(&store, &namespace_id, &setup)
+    create_snapshot(&store, &namespace_id, &setup)
         .await
         .expect("user snapshot");
     crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
@@ -339,7 +337,7 @@ async fn deleted_namespace_keeps_its_tombstone_and_segments() {
     assert!(report.deleted.wal_objects >= 1);
     assert_eq!(report.deleted.metadata_segments, 0);
     assert!(report.deleted.manifests > 0);
-    assert_eq!(report.deleted_checkpoints_by_owner.user, 1);
+    assert_eq!(report.deleted_snapshots_by_owner.user, 1);
     assert!(store
         .head(&unreferenced_key)
         .await
@@ -352,8 +350,8 @@ async fn deleted_namespace_keeps_its_tombstone_and_segments() {
         .await
         .expect("collection after segment grace");
     assert_eq!(
-        report.deleted_checkpoints_by_owner,
-        loonfs_types::DeletedCheckpointsByOwner::default()
+        report.deleted_snapshots_by_owner,
+        loonfs_types::DeletedSnapshotsByOwner::default()
     );
     assert_eq!(report.deleted.metadata_segments, 0);
     assert!(report.deleted.manifests >= 1);
@@ -433,7 +431,7 @@ async fn deleted_namespace_keeps_its_tombstone_and_segments() {
     assert_eq!(report.deleted.wal_objects, 0);
     assert_eq!(report.deleted.manifests, 0);
     assert_eq!(report.deleted.metadata_segments, 0);
-    assert_eq!(report.deleted_checkpoints_by_owner, Default::default());
+    assert_eq!(report.deleted_snapshots_by_owner, Default::default());
     assert_eq!(
         collect_pool(&store, &pool_id, &again).await.deleted,
         Default::default()
@@ -489,7 +487,7 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
         .gc(&options(), &aged.clock())
         .await
         .expect("collection with live clone");
-    assert_eq!(report.deleted_checkpoints_by_owner.fork, 0);
+    assert_eq!(report.deleted_snapshots_by_owner.fork, 0);
     assert!(
         store.head(&basis_key).await.expect("head basis").is_some(),
         "fork basis must survive while the clone lives"
@@ -533,7 +531,7 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
         .gc(&options(), &again.clock())
         .await
         .expect("idempotent collection");
-    assert_eq!(report.deleted_checkpoints_by_owner.fork, 0);
+    assert_eq!(report.deleted_snapshots_by_owner.fork, 0);
     assert_eq!(report.deleted.manifests, 1);
     assert!(store
         .head(&basis_key)
@@ -724,9 +722,9 @@ async fn gc_retains_everything_inside_the_grace_window() {
         .await
         .expect("bootstrap");
     write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
-    create_checkpoint(&store, &namespace_id, &setup)
+    create_snapshot(&store, &namespace_id, &setup)
         .await
-        .expect("checkpoint");
+        .expect("snapshot");
     crate::test_support::NamespaceFixture::new(
         &store,
         &namespace_id,
@@ -783,7 +781,7 @@ async fn published_compaction_segments_are_referenced_and_kept() {
             &setup,
         )
         .await;
-        // Folds rather than checkpoints: a checkpoint keeps the manifest it
+        // Folds rather than creating snapshots: a snapshot keeps the manifest it
         // published, and a snapshot's manifest protects its segments forever, which
         // would leave this collection nothing to reap and nothing to prove.
         crate::test_support::namespace_store(&store, &namespace_id)
@@ -910,9 +908,9 @@ async fn a_collection_names_a_snapshot_it_could_not_advance() {
         .await
         .expect("bootstrap");
     write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
-    create_checkpoint(&store, &namespace_id, &setup)
+    create_snapshot(&store, &namespace_id, &setup)
         .await
-        .expect("checkpoint");
+        .expect("snapshot");
 
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS * 2).await);
     let report = crate::test_support::namespace_store(&store, &namespace_id)
@@ -921,10 +919,10 @@ async fn a_collection_names_a_snapshot_it_could_not_advance() {
         .expect("collection");
 
     assert_eq!(
-        report.deleted_checkpoints_by_owner,
-        loonfs_types::DeletedCheckpointsByOwner::default()
+        report.deleted_snapshots_by_owner,
+        loonfs_types::DeletedSnapshotsByOwner::default()
     );
-    assert_eq!(report.retained.checkpoint_not_deletable, 1);
+    assert_eq!(report.retained.snapshot_not_deletable, 1);
 }
 
 #[tokio::test]
@@ -946,9 +944,9 @@ async fn gc_never_deletes_the_live_replay_tail() {
         &setup,
     )
     .await;
-    create_checkpoint(&store, &namespace_id, &setup)
+    create_snapshot(&store, &namespace_id, &setup)
         .await
-        .expect("checkpoint");
+        .expect("snapshot");
     crate::test_support::NamespaceFixture::new(
         &store,
         &namespace_id,
@@ -1185,7 +1183,7 @@ async fn gc_keeps_a_basis_kept_by_another_owner_after_one_release() {
             &setup.clock(),
         )
         .await
-        .map(crate::snapshot::checkpoint_summary)
+        .map(crate::snapshot::snapshot_record_summary)
         .expect("first owner");
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let second = namespace
@@ -1200,12 +1198,12 @@ async fn gc_keeps_a_basis_kept_by_another_owner_after_one_release() {
             &setup.clock(),
         )
         .await
-        .map(crate::snapshot::checkpoint_summary)
+        .map(crate::snapshot::snapshot_record_summary)
         .expect("second owner");
-    assert_ne!(first.checkpoint_id, second.checkpoint_id);
+    assert_ne!(first.snapshot_id, second.snapshot_id);
     assert_eq!(first.manifest_no, second.manifest_no);
     write_test_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
-    create_checkpoint(&store, &namespace_id, &setup)
+    create_snapshot(&store, &namespace_id, &setup)
         .await
         .expect("advance past the shared basis");
 
@@ -1215,7 +1213,7 @@ async fn gc_keeps_a_basis_kept_by_another_owner_after_one_release() {
         &crate::test_support::writer_at("test-writer", 0),
     )
     .engine()
-    .delete_snapshot(&second.checkpoint_id)
+    .delete_snapshot(&second.snapshot_id)
     .await
     .expect("release one owner");
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
@@ -1224,8 +1222,8 @@ async fn gc_keeps_a_basis_kept_by_another_owner_after_one_release() {
         .await
         .expect("first collection");
     assert_eq!(
-        first_collection.deleted_checkpoints_by_owner,
-        loonfs_types::DeletedCheckpointsByOwner::default()
+        first_collection.deleted_snapshots_by_owner,
+        loonfs_types::DeletedSnapshotsByOwner::default()
     );
 
     let second_collection = crate::test_support::namespace_store(&store, &namespace_id)
@@ -1234,12 +1232,12 @@ async fn gc_keeps_a_basis_kept_by_another_owner_after_one_release() {
         .expect("second collection");
     assert_eq!(second_collection.deleted.manifests, 0);
     assert_eq!(
-        second_collection.deleted_checkpoints_by_owner,
-        loonfs_types::DeletedCheckpointsByOwner::default()
+        second_collection.deleted_snapshots_by_owner,
+        loonfs_types::DeletedSnapshotsByOwner::default()
     );
 
     let keeper = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_snapshot_record(&first.checkpoint_id)
+        .load_snapshot_record(&first.snapshot_id)
         .await
         .expect("read keeper record")
         .expect("the surviving owner's record stays")
@@ -1257,7 +1255,7 @@ async fn gc_keeps_a_basis_kept_by_another_owner_after_one_release() {
 }
 
 #[tokio::test]
-async fn gc_retains_active_checkpoint_bases() {
+async fn gc_retains_active_snapshot_bases() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -1267,14 +1265,14 @@ async fn gc_retains_active_checkpoint_bases() {
         .await
         .expect("bootstrap");
     write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
-    let first = create_checkpoint(&store, &namespace_id, &setup)
+    let first = create_snapshot(&store, &namespace_id, &setup)
         .await
-        .expect("first checkpoint");
+        .expect("first snapshot");
     write_test_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
-    create_checkpoint(&store, &namespace_id, &setup)
+    create_snapshot(&store, &namespace_id, &setup)
         .await
-        .expect("second checkpoint");
-    // The runtime that published the checkpoints' folds raises the hint.
+        .expect("second snapshot");
+    // The runtime that published the snapshots' folds raises the hint.
     crate::test_support::namespace_store(&store, &namespace_id)
         .raise_hint_to_current_manifest()
         .await;
@@ -1286,17 +1284,17 @@ async fn gc_retains_active_checkpoint_bases() {
         .expect("collection");
 
     // Only the bootstrap manifest, which no snapshot keeps, is collectable; both active
-    // checkpoint bases stay.
+    // snapshot bases stay.
     assert_eq!(report.deleted.manifests, 3);
     assert_eq!(
-        report.deleted_checkpoints_by_owner,
-        loonfs_types::DeletedCheckpointsByOwner::default()
+        report.deleted_snapshots_by_owner,
+        loonfs_types::DeletedSnapshotsByOwner::default()
     );
     let first_record = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_snapshot_record(&first.checkpoint_id)
+        .load_snapshot_record(&first.snapshot_id)
         .await
-        .expect("read first checkpoint")
-        .expect("first checkpoint exists")
+        .expect("read first snapshot")
+        .expect("first snapshot exists")
         .state;
     assert!(crate::manifest::load_namespace_manifest_envelope(
         &store,
@@ -1312,7 +1310,7 @@ async fn read_fork_record(store: &LocalFsStore, source: &NamespaceId) -> Snapsho
     for key in store
         .list_prefix(&snapshot_prefix(source))
         .await
-        .expect("list checkpoints")
+        .expect("list snapshots")
     {
         let bytes = store
             .get(&key, None)
@@ -1353,21 +1351,21 @@ async fn retired_targets_release_their_source_snapshots_and_retry_failed_deletes
         )
         .await
         .expect("fork");
-    let target_snapshot = create_checkpoint(&store, &clone, &setup)
+    let target_snapshot = create_snapshot(&store, &clone, &setup)
         .await
         .expect("materialize target manifest");
     crate::test_support::namespace_store(&store, &clone)
-        .delete_snapshot_record(&target_snapshot.checkpoint_id)
+        .delete_snapshot_record(&target_snapshot.snapshot_id)
         .await
         .expect("release target snapshot");
     let fork_record = read_fork_record(&store, &source).await;
     // Advance the source manifest past the fork basis so the basis is
     // reachable only through the fork-owned record.
     write_test_file(&store, &source, "/docs/two.txt", "gc-two", &setup).await;
-    create_checkpoint(&store, &source, &setup)
+    create_snapshot(&store, &source, &setup)
         .await
         .expect("advance manifest past the fork basis");
-    // The runtime that published the checkpoint's fold raises the hint.
+    // The runtime that published the snapshot's fold raises the hint.
     crate::test_support::namespace_store(&store, &source)
         .raise_hint_to_current_manifest()
         .await;
@@ -1377,7 +1375,7 @@ async fn retired_targets_release_their_source_snapshots_and_retry_failed_deletes
         .gc(&options(), &before.clock())
         .await
         .expect("gc with live target");
-    assert_eq!(report.deleted_checkpoints_by_owner.fork, 0);
+    assert_eq!(report.deleted_snapshots_by_owner.fork, 0);
 
     crate::test_support::NamespaceFixture::new(&store, &clone, &setup)
         .engine()
@@ -1390,7 +1388,7 @@ async fn retired_targets_release_their_source_snapshots_and_retry_failed_deletes
         .gc(&options(), &aged.clock())
         .await
         .expect("wait for retirement");
-    assert_eq!(waiting.deleted_checkpoints_by_owner.fork, 0);
+    assert_eq!(waiting.deleted_snapshots_by_owner.fork, 0);
     let retired = crate::test_support::namespace_store(&store, &clone)
         .gc(&options(), &aged.clock())
         .await
@@ -1400,7 +1398,7 @@ async fn retired_targets_release_their_source_snapshots_and_retry_failed_deletes
         .gc(&options(), &context(deadline - 1).clock())
         .await
         .expect("wait for grace");
-    assert_eq!(waiting.deleted_checkpoints_by_owner.fork, 0);
+    assert_eq!(waiting.deleted_snapshots_by_owner.fork, 0);
     assert!(snapshot_record_exists(&store, &source, &fork_record.snapshot_id).await);
     let aged = context(deadline);
 
@@ -1424,13 +1422,13 @@ async fn retired_targets_release_their_source_snapshots_and_retry_failed_deletes
         .gc(&options(), &aged.clock())
         .await
         .expect("retry fork snapshot delete");
-    assert_eq!(released.deleted_checkpoints_by_owner.fork, 1);
+    assert_eq!(released.deleted_snapshots_by_owner.fork, 1);
     assert!(!snapshot_record_exists(&store, &source, &fork_record.snapshot_id).await);
     let repeated = crate::test_support::namespace_store(&store, &clone)
         .gc(&options(), &aged.clock())
         .await
         .expect("repeat fork snapshot delete");
-    assert_eq!(repeated.deleted_checkpoints_by_owner.fork, 0);
+    assert_eq!(repeated.deleted_snapshots_by_owner.fork, 0);
     assert_eq!(store.counts().deletes, 3);
     assert!(store
         .head(&metadata_manifest_object(
@@ -1493,7 +1491,7 @@ async fn an_unreadable_or_corrupt_fork_target_keeps_its_snapshot_and_the_collect
         .gc(&options(), &aged.clock())
         .await
         .expect("an unreadable target is retained conservatively");
-    assert_eq!(report.deleted_checkpoints_by_owner.fork, 0);
+    assert_eq!(report.deleted_snapshots_by_owner.fork, 0);
     assert!(snapshot_record_exists(store.inner(), &source, &fork_record.snapshot_id).await);
 
     store.clear();
@@ -1504,7 +1502,7 @@ async fn an_unreadable_or_corrupt_fork_target_keeps_its_snapshot_and_the_collect
         .gc(&options(), &aged.clock())
         .await
         .expect("a corrupt target is retained conservatively");
-    assert_eq!(report.deleted_checkpoints_by_owner.fork, 0);
+    assert_eq!(report.deleted_snapshots_by_owner.fork, 0);
     assert!(snapshot_record_exists(store.inner(), &source, &fork_record.snapshot_id).await);
 }
 
@@ -1539,7 +1537,7 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
     );
     // Only the fork-owned record can protect the basis after this.
     write_test_file(&store, &source, "/docs/two.txt", "gc-two", &setup).await;
-    create_checkpoint(&store, &source, &setup)
+    create_snapshot(&store, &source, &setup)
         .await
         .expect("advance manifest past the fork basis");
 
@@ -1554,8 +1552,8 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
             .gc(&options(), &context(now_ms).clock())
             .await
             .expect("collection with a live target");
-        assert_eq!(report.deleted_checkpoints_by_owner.fork, 0, "at {now_ms}");
-        assert_eq!(report.deleted_checkpoints_by_owner.user, 0, "at {now_ms}");
+        assert_eq!(report.deleted_snapshots_by_owner.fork, 0, "at {now_ms}");
+        assert_eq!(report.deleted_snapshots_by_owner.user, 0, "at {now_ms}");
         assert!(
             snapshot_record_exists(&store, &source, &fork_record.snapshot_id).await,
             "a live target keeps its snapshot at {now_ms}"
@@ -1605,7 +1603,7 @@ async fn a_fork_retry_keeps_young_snapshots_and_reclaims_the_abandoned_one_after
             &setup.clock(),
         )
         .await
-        .map(crate::snapshot::checkpoint_summary)
+        .map(crate::snapshot::snapshot_record_summary)
         .expect("fork snapshot from the abandoned attempt");
 
     let fixture = crate::test_support::NamespaceFixture::new(&store, &source, &setup);
@@ -1623,14 +1621,14 @@ async fn a_fork_retry_keeps_young_snapshots_and_reclaims_the_abandoned_one_after
     let retry = store
         .list_prefix(&snapshot_prefix(&source))
         .await
-        .expect("list checkpoints")
+        .expect("list snapshots")
         .len();
     assert_eq!(
         retry, 2,
         "the retry takes its own snapshot instead of reusing one"
     );
     assert!(
-        snapshot_record_exists(&store, &source, &abandoned.checkpoint_id).await,
+        snapshot_record_exists(&store, &source, &abandoned.snapshot_id).await,
         "the retry leaves the abandoned record alone"
     );
 
@@ -1639,19 +1637,19 @@ async fn a_fork_retry_keeps_young_snapshots_and_reclaims_the_abandoned_one_after
         .gc(&options(), &before_creation_grace.clock())
         .await
         .expect("collection with a target that reads through another record");
-    assert_eq!(report.deleted_checkpoints_by_owner.fork, 0);
-    assert!(snapshot_record_exists(&store, &source, &abandoned.checkpoint_id).await);
+    assert_eq!(report.deleted_snapshots_by_owner.fork, 0);
+    assert!(snapshot_record_exists(&store, &source, &abandoned.snapshot_id).await);
     let report = crate::test_support::namespace_store(&store, &source)
         .gc(&options(), &context(setup.now_ms + GRACE_MS).clock())
         .await
         .expect("an aged snapshot the target does not name is the abandoned attempt's");
-    assert_eq!(report.deleted_checkpoints_by_owner.fork, 1);
-    assert!(!snapshot_record_exists(&store, &source, &abandoned.checkpoint_id).await);
+    assert_eq!(report.deleted_snapshots_by_owner.fork, 1);
+    assert!(!snapshot_record_exists(&store, &source, &abandoned.snapshot_id).await);
     assert_eq!(
         store
             .list_prefix(&snapshot_prefix(&source))
             .await
-            .expect("list checkpoints")
+            .expect("list snapshots")
             .len(),
         1,
         "the retry's own snapshot stays"
@@ -1685,17 +1683,17 @@ async fn a_corrupt_snapshot_and_an_unreadable_one_both_fail_the_collection() {
         .await
         .expect("bootstrap");
     write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
-    create_checkpoint(&store, &namespace_id, &setup)
+    create_snapshot(&store, &namespace_id, &setup)
         .await
-        .expect("checkpoint");
+        .expect("snapshot");
 
     let record_key = store
         .inner()
         .list_prefix(&snapshot_prefix(&namespace_id))
         .await
-        .expect("list checkpoints")
+        .expect("list snapshots")
         .first()
-        .expect("the checkpoint wrote a record")
+        .expect("the snapshot wrote a record")
         .clone();
     let before = namespace_keys(store.inner(), &namespace_id).await;
     let aged = context(setup.now_ms);
@@ -1753,9 +1751,9 @@ async fn a_corrupt_or_unreadable_current_manifest_fails_the_collection() {
         .await
         .expect("bootstrap");
     write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
-    create_checkpoint(&store, &namespace_id, &setup)
+    create_snapshot(&store, &namespace_id, &setup)
         .await
-        .expect("checkpoint");
+        .expect("snapshot");
 
     let manifest_keys = store
         .inner()
@@ -1764,7 +1762,7 @@ async fn a_corrupt_or_unreadable_current_manifest_fails_the_collection() {
         .expect("list manifests");
     assert!(
         !manifest_keys.is_empty(),
-        "the checkpoint published a manifest"
+        "the snapshot published a manifest"
     );
     let before = namespace_keys(store.inner(), &namespace_id).await;
     let aged = context(now_after_newest_object(store.inner(), &namespace_id, GRACE_MS + 1).await);
@@ -1821,9 +1819,9 @@ async fn gc_retains_everything_without_provider_timestamps() {
         .await
         .expect("bootstrap");
     write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
-    create_checkpoint(&store, &namespace_id, &setup)
+    create_snapshot(&store, &namespace_id, &setup)
         .await
-        .expect("checkpoint");
+        .expect("snapshot");
     crate::test_support::NamespaceFixture::new(
         &store,
         &namespace_id,
@@ -1849,10 +1847,10 @@ async fn gc_retains_everything_without_provider_timestamps() {
     assert_eq!(report.deleted.metadata_segments, 0);
     assert_eq!(report.deleted.manifests, 0);
     assert_eq!(
-        report.deleted_checkpoints_by_owner,
-        loonfs_types::DeletedCheckpointsByOwner::default()
+        report.deleted_snapshots_by_owner,
+        loonfs_types::DeletedSnapshotsByOwner::default()
     );
-    assert_eq!(report.deleted_checkpoints_by_owner.fork, 0);
+    assert_eq!(report.deleted_snapshots_by_owner.fork, 0);
     assert!(report.retained.total() > 0);
     stat_root(&store, &namespace_id).await;
 }
@@ -2020,7 +2018,7 @@ async fn gc_keeps_snapshot_and_current_numbers_and_preserves_discovery_from_a_la
         .await
         .expect("bootstrap");
     write_test_file(&store, &namespace_id, "/one", "one", &setup).await;
-    let snapshot = create_checkpoint(&store, &namespace_id, &setup)
+    let snapshot = create_snapshot(&store, &namespace_id, &setup)
         .await
         .expect("snapshot");
     for index in 2..=3 {
@@ -2118,7 +2116,7 @@ async fn concurrent_collectors_keep_snapshot_and_current_roots_and_young_objects
         .await
         .expect("bootstrap");
     write_test_file(&inner, &namespace_id, "/one", "one", &setup).await;
-    let snapshot = create_checkpoint(&inner, &namespace_id, &setup)
+    let snapshot = create_snapshot(&inner, &namespace_id, &setup)
         .await
         .expect("snapshot");
     write_test_file(&inner, &namespace_id, "/two", "two", &setup).await;
@@ -2363,7 +2361,7 @@ async fn expiry_and_creation_grace_delete_snapshots_without_a_released_state() {
                     &setup.clock(),
                 )
                 .await
-                .map(crate::snapshot::checkpoint_summary)
+                .map(crate::snapshot::snapshot_record_summary)
                 .expect("snapshot"),
         );
     }
@@ -2372,33 +2370,33 @@ async fn expiry_and_creation_grace_delete_snapshots_without_a_released_state() {
         .await
         .expect("before creation grace");
     assert_eq!(
-        before.deleted_checkpoints_by_owner,
-        loonfs_types::DeletedCheckpointsByOwner::default()
+        before.deleted_snapshots_by_owner,
+        loonfs_types::DeletedSnapshotsByOwner::default()
     );
     let abandoned = crate::test_support::namespace_store(&store, &namespace_id)
         .gc(&options(), &context(1_000 + GRACE_MS).clock())
         .await
         .expect("creation grace");
-    assert_eq!(abandoned.deleted_checkpoints_by_owner.fork, 1);
-    assert!(!snapshot_record_exists(&store, &namespace_id, &snapshots[3].checkpoint_id).await);
+    assert_eq!(abandoned.deleted_snapshots_by_owner.fork, 1);
+    assert!(!snapshot_record_exists(&store, &namespace_id, &snapshots[3].snapshot_id).await);
     assert!(namespace_keys(&store, &target).await.is_empty());
     let before_expiry = crate::test_support::namespace_store(&store, &namespace_id)
         .gc(&options(), &context(2_000 + GRACE_MS - 1).clock())
         .await
         .expect("before expiry grace");
     assert_eq!(
-        before_expiry.deleted_checkpoints_by_owner,
-        loonfs_types::DeletedCheckpointsByOwner::default()
+        before_expiry.deleted_snapshots_by_owner,
+        loonfs_types::DeletedSnapshotsByOwner::default()
     );
     let expired = crate::test_support::namespace_store(&store, &namespace_id)
         .gc(&options(), &context(2_000 + GRACE_MS).clock())
         .await
         .expect("expiry grace");
-    assert_eq!(expired.deleted_checkpoints_by_owner.user, 2);
-    assert!(snapshot_record_exists(&store, &namespace_id, &snapshots[0].checkpoint_id).await);
-    assert!(!snapshot_record_exists(&store, &namespace_id, &snapshots[1].checkpoint_id).await);
-    assert!(!snapshot_record_exists(&store, &namespace_id, &snapshots[2].checkpoint_id).await);
-    create_checkpoint(&store, &namespace_id, &setup)
+    assert_eq!(expired.deleted_snapshots_by_owner.user, 2);
+    assert!(snapshot_record_exists(&store, &namespace_id, &snapshots[0].snapshot_id).await);
+    assert!(!snapshot_record_exists(&store, &namespace_id, &snapshots[1].snapshot_id).await);
+    assert!(!snapshot_record_exists(&store, &namespace_id, &snapshots[2].snapshot_id).await);
+    create_snapshot(&store, &namespace_id, &setup)
         .await
         .expect("second permanent snapshot");
     let deleted_at = 3_000 + GRACE_MS;
@@ -2412,8 +2410,8 @@ async fn expiry_and_creation_grace_delete_snapshots_without_a_released_state() {
         .await
         .expect("retire");
     assert_eq!(
-        retired.deleted_checkpoints_by_owner,
-        loonfs_types::DeletedCheckpointsByOwner {
+        retired.deleted_snapshots_by_owner,
+        loonfs_types::DeletedSnapshotsByOwner {
             user: 2,
             ..Default::default()
         }
@@ -2450,7 +2448,7 @@ async fn a_snapshot_naming_an_absent_manifest_is_corruption_before_sweeping() {
             &setup.clock(),
         )
         .await
-        .map(crate::snapshot::checkpoint_summary)
+        .map(crate::snapshot::snapshot_record_summary)
         .expect("snapshot");
     write_test_file(&store, &namespace_id, "/file", "new", &setup).await;
     crate::test_support::namespace_store(&store, &namespace_id)
@@ -2479,7 +2477,7 @@ async fn a_snapshot_naming_an_absent_manifest_is_corruption_before_sweeping() {
         .to_string()
         .contains(&loonfs_objectstore::keys::snapshot_record(
             &namespace_id,
-            &initial.checkpoint_id
+            &initial.snapshot_id
         )));
     assert_eq!(store.counts().puts, 0);
     assert_eq!(store.counts().deletes, 0);
@@ -2541,13 +2539,13 @@ async fn fork_snapshot_grace_skips_targets_and_aged_snapshots_read_only_manifest
         .gc(&options(), &context(setup.now_ms + GRACE_MS - 1).clock())
         .await
         .expect("young snapshots");
-    assert_eq!(young.deleted_checkpoints_by_owner.fork, 0);
+    assert_eq!(young.deleted_snapshots_by_owner.fork, 0);
     assert!(store.snapshot().is_empty());
     let aged = crate::test_support::namespace_store(&store, &source)
         .gc(&options(), &context(setup.now_ms + GRACE_MS).clock())
         .await
         .expect("aged snapshots");
-    assert_eq!(aged.deleted_checkpoints_by_owner.fork, 1);
+    assert_eq!(aged.deleted_snapshots_by_owner.fork, 1);
     let counts = store.counts();
     assert_eq!(counts.lists, 0);
     assert_eq!(counts.puts, 0);
@@ -2639,9 +2637,9 @@ async fn folded_namespace_with_two_files(store: &LocalFsStore, namespace_id: &Na
         )
         .await;
     }
-    create_checkpoint(store, namespace_id, &setup)
+    create_snapshot(store, namespace_id, &setup)
         .await
-        .expect("checkpoint");
+        .expect("snapshot");
 }
 
 #[tokio::test]
@@ -2752,9 +2750,9 @@ async fn a_collection_fails_when_its_snapshot_manifests_do_not_fit_the_read_memo
             format!("gc-snapshot-{index}"),
         );
         write_test_file(&store, &namespace_id, &path, &commit_id, &setup).await;
-        create_checkpoint(&store, &namespace_id, &setup)
+        create_snapshot(&store, &namespace_id, &setup)
             .await
-            .expect("checkpoint");
+            .expect("snapshot");
     }
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
     let error = crate::NamespaceStore {

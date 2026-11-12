@@ -186,7 +186,7 @@ async fn many_run_fixture() -> ManyRunFixture {
         .expect("write the base files");
     let mut inodes = inodes_at(&store, &namespace_id, &base_paths).await;
     append_whole_state_revisions(&store, &namespace_id, &inodes[..3], 1).await;
-    checkpoint_then_compact(
+    snapshot_then_compact(
         &store,
         &namespace_id,
         &context,
@@ -207,7 +207,7 @@ async fn many_run_fixture() -> ManyRunFixture {
             .expect("delete a base file");
     }
     append_whole_state_revisions(&store, &namespace_id, &inodes[1..3], 2).await;
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
         .expect("fold the middle delta run");
     run_heads.push(head_seq(&store, &namespace_id).await);
@@ -222,7 +222,7 @@ async fn many_run_fixture() -> ManyRunFixture {
         .await
         .expect("delete the trash directory");
     append_whole_state_revisions(&store, &namespace_id, &inodes[2..3], 3).await;
-    create_checkpoint(&store, &namespace_id, &context)
+    create_snapshot(&store, &namespace_id, &context)
         .await
         .expect("fold the newest delta run");
     run_heads.push(head_seq(&store, &namespace_id).await);
@@ -646,7 +646,7 @@ async fn hot_key_fixture<S: ObjectStore + ?Sized>(
     let inodes = inodes_at(store, namespace_id, &["/docs".to_owned(), paths[0].clone()]).await;
     let (docs, hot) = (inodes[0], inodes[1]);
     append_whole_state_revisions(store, namespace_id, &[hot], 1).await;
-    checkpoint_then_compact(store, namespace_id, &context, MetadataRunPolicy::default()).await;
+    snapshot_then_compact(store, namespace_id, &context, MetadataRunPolicy::default()).await;
     for run in 2..=HOT_KEY_RUNS {
         // Names at both ends of the directory keep each run's binding range
         // across the slot, so only the filters can rule a run out.
@@ -664,7 +664,7 @@ async fn hot_key_fixture<S: ObjectStore + ?Sized>(
             .await
             .expect("bind the slot to a new inode");
         append_whole_state_revisions(store, namespace_id, &[hot], run).await;
-        create_checkpoint(store, namespace_id, &context)
+        create_snapshot(store, namespace_id, &context)
             .await
             .expect("fold a delta run");
     }

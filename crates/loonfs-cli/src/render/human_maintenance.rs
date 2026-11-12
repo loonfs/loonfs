@@ -8,7 +8,7 @@ use loonfs_merge::{
 };
 use loonfs_types::{
     CommitSeq, DeleteNamespaceResponse, DeleteSnapshotResponse, GrepIndex, ListChangesResponse,
-    ListCheckpointsResponse, ListSnapshotsResponse, MetadataMaintenanceOutcome,
+    ListSnapshotRecordsResponse, ListSnapshotsResponse, MetadataMaintenanceOutcome,
     MetadataSkippedWork, NamespaceMetadata, RunMaintenanceJobResponse,
     RunPoolMaintenanceJobResponse, Snapshot, StoreProbeResponse,
 };
@@ -116,24 +116,24 @@ pub(super) fn human_snapshot_deleted(response: &DeleteSnapshotResponse) -> Strin
     )
 }
 
-pub(super) fn human_checkpoints_listed(response: &ListCheckpointsResponse) -> String {
+pub(super) fn human_snapshot_records_listed(response: &ListSnapshotRecordsResponse) -> String {
     let mut lines = vec![
-        format!("checkpoints for {}", response.namespace_id),
-        "CREATED\tEXPIRES\tSEQ\tOWNER\tCHECKPOINT".to_owned(),
+        format!("snapshots for {}", response.namespace_id),
+        "CREATED\tEXPIRES\tSEQ\tOWNER\tSNAPSHOT".to_owned(),
     ];
-    for checkpoint in &response.checkpoints {
-        let owner = checkpoint_owner_label(&checkpoint.owner);
-        let expiry = checkpoint
+    for snapshot in &response.snapshots {
+        let owner = snapshot_record_owner_label(&snapshot.owner);
+        let expiry = snapshot
             .expires_at_ms
             .map_or_else(|| "-".to_owned(), format_utc_ms);
         lines.push(format!(
             "{}\t{expiry}\t{}\t{owner}\t{}",
-            format_utc_ms(checkpoint.created_at_ms),
-            checkpoint.captured_seq.0,
-            checkpoint.checkpoint_id,
+            format_utc_ms(snapshot.created_at_ms),
+            snapshot.captured_seq.0,
+            snapshot.snapshot_id,
         ));
     }
-    if response.checkpoints.is_empty() {
+    if response.snapshots.is_empty() {
         lines.push("(none)".to_owned());
     }
     if let Some(cursor) = &response.next_cursor {

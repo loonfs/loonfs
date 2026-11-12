@@ -168,110 +168,6 @@
         ],
         "type": "object"
       },
-      "Checkpoint": {
-        "description": "One checkpoint, as its durable record stores it.",
-        "properties": {
-          "captured_seq": {
-            "$ref": "#/components/schemas/CommitSeq",
-            "description": "The namespace sequence that the checkpoint captured."
-          },
-          "checkpoint_id": {
-            "$ref": "#/components/schemas/SnapshotId",
-            "description": "The checkpoint's durable ID. For a user snapshot, it's also the snapshot's `snapshot_id`."
-          },
-          "created_at_ms": {
-            "description": "The time the checkpoint record was created, in Unix milliseconds.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "expires_at_ms": {
-            "description": "The time the checkpoint expires, in Unix milliseconds. Garbage collection waits one more\ngrace window before it deletes the record.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "manifest_no": {
-            "$ref": "#/components/schemas/ManifestNo",
-            "description": "The manifest that the checkpoint keeps."
-          },
-          "namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "The namespace that the checkpoint belongs to."
-          },
-          "owner": {
-            "$ref": "#/components/schemas/CheckpointOwner",
-            "description": "The checkpoint's owner. For a user snapshot, the owner includes the label."
-          }
-        },
-        "required": [
-          "namespace_id",
-          "checkpoint_id",
-          "owner",
-          "created_at_ms",
-          "captured_seq",
-          "manifest_no"
-        ],
-        "type": "object"
-      },
-      "CheckpointOwner": {
-        "description": "The owner of a checkpoint record.",
-        "discriminator": {
-          "mapping": {
-            "fork": "#/components/schemas/CheckpointOwnerFork",
-            "user": "#/components/schemas/CheckpointOwnerUser"
-          },
-          "propertyName": "kind"
-        },
-        "oneOf": [
-          {
-            "$ref": "#/components/schemas/CheckpointOwnerUser"
-          },
-          {
-            "$ref": "#/components/schemas/CheckpointOwnerFork"
-          }
-        ]
-      },
-      "CheckpointOwnerFork": {
-        "description": "A snapshot that keeps the source state that one fork attempt starts from.",
-        "properties": {
-          "kind": {
-            "enum": [
-              "fork"
-            ],
-            "type": "string"
-          },
-          "target_namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "The fork's target namespace. Garbage collection keeps this checkpoint while that\nnamespace exists."
-          }
-        },
-        "required": [
-          "target_namespace_id",
-          "kind"
-        ],
-        "type": "object"
-      },
-      "CheckpointOwnerUser": {
-        "description": "A snapshot, which a caller created. It's deleted by its ID or after it expires.",
-        "properties": {
-          "kind": {
-            "enum": [
-              "user"
-            ],
-            "type": "string"
-          },
-          "name": {
-            "description": "The label that the creator recorded. Labels don't need to be unique.",
-            "type": "string"
-          }
-        },
-        "required": [
-          "name",
-          "kind"
-        ],
-        "type": "object"
-      },
       "Checksum": {
         "additionalProperties": false,
         "description": "A checksum algorithm and the checksum's canonical lowercase hexadecimal value.",
@@ -1143,28 +1039,6 @@
         ],
         "type": "object"
       },
-      "DeletedCheckpointsByOwner": {
-        "description": "The number of checkpoint records that one garbage collection deleted, grouped by owner.",
-        "properties": {
-          "fork": {
-            "description": "The fork snapshots that the collection deleted because their target namespaces no longer exist.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "user": {
-            "description": "The user snapshots that the collection deleted after they expired or their namespace was deleted.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          }
-        },
-        "required": [
-          "user",
-          "fork"
-        ],
-        "type": "object"
-      },
       "DeletedObjectCounts": {
         "description": "The number of objects that one garbage collection of a namespace deleted, grouped by\nobject family.",
         "properties": {
@@ -1198,6 +1072,28 @@
           "metadata_segments",
           "extension_segments",
           "manifests"
+        ],
+        "type": "object"
+      },
+      "DeletedSnapshotsByOwner": {
+        "description": "The number of snapshot records that one garbage collection deleted, grouped by owner.",
+        "properties": {
+          "fork": {
+            "description": "The fork snapshots that the collection deleted because their target namespaces no longer exist.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "user": {
+            "description": "The user snapshots that the collection deleted after they expired or their namespace was deleted.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "user",
+          "fork"
         ],
         "type": "object"
       },
@@ -2831,15 +2727,11 @@
         "type": "object"
       },
       "GrepIndexStatusBackfilling": {
-        "description": "An index that is running its initial scan of a checkpoint and can't be searched yet.",
+        "description": "An index that is running its initial scan of a snapshot and can't be searched yet.",
         "properties": {
           "captured_seq": {
             "$ref": "#/components/schemas/CommitSeq",
             "description": "The namespace sequence that completes the backfill when the index reaches it."
-          },
-          "checkpoint_id": {
-            "$ref": "#/components/schemas/SnapshotId",
-            "description": "The checkpoint that keeps the state being scanned."
           },
           "cursor_inode_id": {
             "$ref": "#/components/schemas/InodeId",
@@ -2853,6 +2745,10 @@
             "description": "Whether a partitioned segment reorganization is in progress.",
             "type": "boolean"
           },
+          "snapshot_id": {
+            "$ref": "#/components/schemas/SnapshotId",
+            "description": "The snapshot that keeps the state being scanned."
+          },
           "status": {
             "enum": [
               "backfilling"
@@ -2862,7 +2758,7 @@
         },
         "required": [
           "captured_seq",
-          "checkpoint_id",
+          "snapshot_id",
           "status",
           "namespace_id",
           "reorganize_pending"
@@ -3036,31 +2932,6 @@
         ],
         "type": "object"
       },
-      "ListCheckpointsResponse": {
-        "description": "One page of checkpoint records, including expired records that garbage collection hasn't deleted\nyet.",
-        "properties": {
-          "checkpoints": {
-            "description": "The records, in ascending checkpoint ID order.",
-            "items": {
-              "$ref": "#/components/schemas/Checkpoint"
-            },
-            "type": "array"
-          },
-          "namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "The namespace that the records belong to."
-          },
-          "next_cursor": {
-            "description": "An opaque cursor for the next page.",
-            "type": "string"
-          }
-        },
-        "required": [
-          "namespace_id",
-          "checkpoints"
-        ],
-        "type": "object"
-      },
       "ListFileRevisionsResponse": {
         "description": "One page of a file's revisions.",
         "properties": {
@@ -3163,6 +3034,31 @@
           "path",
           "head_seq",
           "entries"
+        ],
+        "type": "object"
+      },
+      "ListSnapshotRecordsResponse": {
+        "description": "One page of snapshot records, including expired records that garbage collection hasn't deleted\nyet.",
+        "properties": {
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "The namespace that the records belong to."
+          },
+          "next_cursor": {
+            "description": "An opaque cursor for the next page.",
+            "type": "string"
+          },
+          "snapshots": {
+            "description": "The records, in ascending snapshot ID order.",
+            "items": {
+              "$ref": "#/components/schemas/SnapshotRecord"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "namespace_id",
+          "snapshots"
         ],
         "type": "object"
       },
@@ -4199,12 +4095,6 @@
       "RetainedCandidates": {
         "description": "The candidates that one garbage collection of a namespace inspected but didn't delete,\ncounted by reason.",
         "properties": {
-          "checkpoint_not_deletable": {
-            "description": "The checkpoint records that the collection couldn't delete because of their owner or their\ngrace window.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
           "no_provider_timestamp": {
             "description": "The unreferenced candidates that had no provider timestamp, so their age was unknown.",
             "format": "int64",
@@ -4213,6 +4103,12 @@
           },
           "referenced": {
             "description": "The candidates that a current root protected, or that manifest discovery needed.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "snapshot_not_deletable": {
+            "description": "The snapshot records that the collection couldn't delete because of their owner or their\ngrace window.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -4235,7 +4131,7 @@
           "within_grace_window",
           "no_provider_timestamp",
           "unrecognized_key",
-          "checkpoint_not_deletable"
+          "snapshot_not_deletable"
         ],
         "type": "object"
       },
@@ -4421,9 +4317,9 @@
             "$ref": "#/components/schemas/DeletedObjectCounts",
             "description": "The objects that the collection deleted, counted by object family."
           },
-          "deleted_checkpoints_by_owner": {
-            "$ref": "#/components/schemas/DeletedCheckpointsByOwner",
-            "description": "The checkpoint records that the collection deleted, counted by owner."
+          "deleted_snapshots_by_owner": {
+            "$ref": "#/components/schemas/DeletedSnapshotsByOwner",
+            "description": "The snapshot records that the collection deleted, counted by owner."
           },
           "kind": {
             "enum": [
@@ -4461,7 +4357,7 @@
         "required": [
           "namespace_id",
           "deleted",
-          "deleted_checkpoints_by_owner",
+          "deleted_snapshots_by_owner",
           "retained",
           "listed_bytes",
           "kind"
@@ -4801,6 +4697,110 @@
         "example": "snp_00000000000000000001-00000000000000000000000002",
         "pattern": "^snp_[0-9]{20}-[0-7][0-9a-hjkmnp-tv-z]{25}$",
         "type": "string"
+      },
+      "SnapshotRecord": {
+        "description": "One snapshot, as its durable record stores it.",
+        "properties": {
+          "captured_seq": {
+            "$ref": "#/components/schemas/CommitSeq",
+            "description": "The namespace sequence that the snapshot captured."
+          },
+          "created_at_ms": {
+            "description": "The time the snapshot record was created, in Unix milliseconds.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "expires_at_ms": {
+            "description": "The time the snapshot expires, in Unix milliseconds. Garbage collection waits one more\ngrace window before it deletes the record.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "manifest_no": {
+            "$ref": "#/components/schemas/ManifestNo",
+            "description": "The manifest that the snapshot keeps."
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "The namespace that the snapshot belongs to."
+          },
+          "owner": {
+            "$ref": "#/components/schemas/SnapshotRecordOwner",
+            "description": "The snapshot's owner. For a user snapshot, the owner includes the label."
+          },
+          "snapshot_id": {
+            "$ref": "#/components/schemas/SnapshotId",
+            "description": "The snapshot's durable ID."
+          }
+        },
+        "required": [
+          "namespace_id",
+          "snapshot_id",
+          "owner",
+          "created_at_ms",
+          "captured_seq",
+          "manifest_no"
+        ],
+        "type": "object"
+      },
+      "SnapshotRecordOwner": {
+        "description": "The owner of a snapshot record.",
+        "discriminator": {
+          "mapping": {
+            "fork": "#/components/schemas/SnapshotRecordOwnerFork",
+            "user": "#/components/schemas/SnapshotRecordOwnerUser"
+          },
+          "propertyName": "kind"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/SnapshotRecordOwnerUser"
+          },
+          {
+            "$ref": "#/components/schemas/SnapshotRecordOwnerFork"
+          }
+        ]
+      },
+      "SnapshotRecordOwnerFork": {
+        "description": "A snapshot that keeps the source state that one fork attempt starts from.",
+        "properties": {
+          "kind": {
+            "enum": [
+              "fork"
+            ],
+            "type": "string"
+          },
+          "target_namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "The fork's target namespace. Garbage collection keeps this snapshot while that\nnamespace exists."
+          }
+        },
+        "required": [
+          "target_namespace_id",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "SnapshotRecordOwnerUser": {
+        "description": "A snapshot, which a caller created. It's deleted by its ID or after it expires.",
+        "properties": {
+          "kind": {
+            "enum": [
+              "user"
+            ],
+            "type": "string"
+          },
+          "name": {
+            "description": "The label that the creator recorded. Labels don't need to be unique.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "kind"
+        ],
+        "type": "object"
       },
       "StoreProbeCheck": {
         "description": "The result of one contract check.",
@@ -5357,188 +5357,6 @@
         "x-loonfs-retry": "idempotent"
       }
     },
-    "/v0/maintenance/namespaces/{namespace_id}/checkpoints": {
-      "get": {
-        "description": "Lists every snapshot, user snapshots and fork snapshots, in checkpoint ID order. This is the inventory of what keeps manifests from garbage collection. An expired snapshot stays in the list until garbage collection deletes it, after its expiry plus the grace window. A cursor continues the listing against the current set of snapshots.",
-        "operationId": "list_checkpoints",
-        "parameters": [
-          {
-            "description": "The namespace ID.",
-            "in": "path",
-            "name": "namespace_id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "The maximum page size.",
-            "in": "query",
-            "name": "limit",
-            "required": false,
-            "schema": {
-              "default": 1000,
-              "format": "int32",
-              "maximum": 1000,
-              "minimum": 1,
-              "type": "integer"
-            }
-          },
-          {
-            "description": "The opaque cursor that the previous page returned.",
-            "in": "query",
-            "name": "cursor",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ListCheckpointsResponse"
-                }
-              }
-            },
-            "description": "Existing checkpoint objects"
-          },
-          "400": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Invalid namespace ID, limit, or cursor"
-          },
-          "401": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Unauthorized"
-          },
-          "404": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Namespace not found"
-          },
-          "503": {
-            "$ref": "#/components/responses/UnavailableResponse"
-          }
-        },
-        "summary": "List checkpoints",
-        "tags": [
-          "maintenance"
-        ],
-        "x-fern-pagination": {
-          "cursor": "$request.cursor",
-          "next_cursor": "$response.next_cursor",
-          "results": "$response.checkpoints"
-        },
-        "x-fern-request-name": "ListCheckpointsRequest",
-        "x-fern-sdk-group-name": [
-          "maintenance",
-          "checkpoints"
-        ],
-        "x-fern-sdk-method-name": "list",
-        "x-loonfs-retry": "idempotent"
-      }
-    },
-    "/v0/maintenance/namespaces/{namespace_id}/checkpoints/{checkpoint_id}": {
-      "get": {
-        "description": "Returns one existing snapshot of any owner, as the checkpoint listing returns it, including an expired snapshot that garbage collection hasn't deleted. A missing ID returns `snapshot_not_found`.",
-        "operationId": "get_checkpoint",
-        "parameters": [
-          {
-            "description": "The namespace ID.",
-            "in": "path",
-            "name": "namespace_id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "The checkpoint ID.",
-            "in": "path",
-            "name": "checkpoint_id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Checkpoint"
-                }
-              }
-            },
-            "description": "Existing checkpoint"
-          },
-          "400": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Invalid namespace or checkpoint ID"
-          },
-          "401": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Unauthorized"
-          },
-          "404": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Namespace or checkpoint not found"
-          },
-          "503": {
-            "$ref": "#/components/responses/UnavailableResponse"
-          }
-        },
-        "summary": "Retrieve checkpoint",
-        "tags": [
-          "maintenance"
-        ],
-        "x-fern-request-name": "GetCheckpointRequest",
-        "x-fern-sdk-group-name": [
-          "maintenance",
-          "checkpoints"
-        ],
-        "x-fern-sdk-method-name": "retrieve",
-        "x-loonfs-retry": "idempotent"
-      }
-    },
     "/v0/maintenance/namespaces/{namespace_id}/diagnostics": {
       "get": {
         "description": "Returns namespace state together with the current manifest and visible WAL tail.",
@@ -5810,7 +5628,7 @@
     },
     "/v0/maintenance/namespaces/{namespace_id}/grep/index/enable": {
       "post": {
-        "description": "Enables the namespace's grep index. A deployment that runs maintenance starts the backfill at the next maintenance interval and continues until the index is active. The response reports the index state read after the change. A new enable reports `backfilling`, with the sequence that its checkpoint captured, and an index that was already enabled reports its current status. Repeating the request has the same result. A deployment that doesn't maintain the grep index returns `not_supported`.",
+        "description": "Enables the namespace's grep index. A deployment that runs maintenance starts the backfill at the next maintenance interval and continues until the index is active. The response reports the index state read after the change. A new enable reports `backfilling`, with the sequence that its snapshot captured, and an index that was already enabled reports its current status. Repeating the request has the same result. A deployment that doesn't maintain the grep index returns `not_supported`.",
         "operationId": "enable_grep_index",
         "parameters": [
           {
@@ -6015,6 +5833,188 @@
         ],
         "x-fern-sdk-method-name": "create",
         "x-loonfs-retry": "not_idempotent"
+      }
+    },
+    "/v0/maintenance/namespaces/{namespace_id}/snapshots": {
+      "get": {
+        "description": "Lists every snapshot, user snapshots and fork snapshots, in snapshot ID order. This is the inventory of what keeps manifests from garbage collection. An expired snapshot stays in the list until garbage collection deletes it, after its expiry plus the grace window. A cursor continues the listing against the current set of snapshots.",
+        "operationId": "list_snapshot_records",
+        "parameters": [
+          {
+            "description": "The namespace ID.",
+            "in": "path",
+            "name": "namespace_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The maximum page size.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 1000,
+              "format": "int32",
+              "maximum": 1000,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "The opaque cursor that the previous page returned.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListSnapshotRecordsResponse"
+                }
+              }
+            },
+            "description": "Existing snapshot objects"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid namespace ID, limit, or cursor"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Namespace not found"
+          },
+          "503": {
+            "$ref": "#/components/responses/UnavailableResponse"
+          }
+        },
+        "summary": "List snapshot records",
+        "tags": [
+          "maintenance"
+        ],
+        "x-fern-pagination": {
+          "cursor": "$request.cursor",
+          "next_cursor": "$response.next_cursor",
+          "results": "$response.snapshots"
+        },
+        "x-fern-request-name": "ListSnapshotRecordsRequest",
+        "x-fern-sdk-group-name": [
+          "maintenance",
+          "snapshots"
+        ],
+        "x-fern-sdk-method-name": "list",
+        "x-loonfs-retry": "idempotent"
+      }
+    },
+    "/v0/maintenance/namespaces/{namespace_id}/snapshots/{snapshot_id}": {
+      "get": {
+        "description": "Returns one existing snapshot of any owner, as the snapshot inventory lists it, including an expired snapshot that garbage collection hasn't deleted. A missing ID returns `snapshot_not_found`.",
+        "operationId": "get_snapshot_record",
+        "parameters": [
+          {
+            "description": "The namespace ID.",
+            "in": "path",
+            "name": "namespace_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The snapshot ID.",
+            "in": "path",
+            "name": "snapshot_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SnapshotRecord"
+                }
+              }
+            },
+            "description": "Existing snapshot"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid namespace or snapshot ID"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Namespace or snapshot not found"
+          },
+          "503": {
+            "$ref": "#/components/responses/UnavailableResponse"
+          }
+        },
+        "summary": "Retrieve snapshot record",
+        "tags": [
+          "maintenance"
+        ],
+        "x-fern-request-name": "GetSnapshotRecordRequest",
+        "x-fern-sdk-group-name": [
+          "maintenance",
+          "snapshots"
+        ],
+        "x-fern-sdk-method-name": "retrieve",
+        "x-loonfs-retry": "idempotent"
       }
     },
     "/v0/maintenance/pools/{pool_id}/jobs": {
@@ -9661,7 +9661,7 @@
     },
     "/v0/namespaces/{namespace_id}/snapshots": {
       "get": {
-        "description": "Lists snapshots in snapshot ID order. An expired snapshot stays in the list until garbage collection deletes it, after its expiry plus the grace window. The list leaves out fork snapshots, which the maintenance checkpoint inventory lists.",
+        "description": "Lists snapshots in snapshot ID order. An expired snapshot stays in the list until garbage collection deletes it, after its expiry plus the grace window. The list leaves out fork snapshots, which the maintenance snapshot inventory lists.",
         "operationId": "list_snapshots",
         "parameters": [
           {

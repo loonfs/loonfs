@@ -202,7 +202,7 @@ fn maintenance_step_at_wal_object_threshold_folds_the_wal() {
     assert_eq!(status.wal_tail_objects, 0);
 
     // Maintenance is record-less: folding the WAL must leave nothing
-    // under `checkpoints/`.
+    // under `snapshots/`.
     let raw_store = LocalFsStore::new(temp_dir.path()).expect("store");
     let records =
         block_on(raw_store.list_prefix(&loonfs_objectstore::keys::snapshot_prefix(&namespace_id)))
@@ -333,13 +333,13 @@ fn the_typed_wrappers_are_single_action_steps() {
         "the metadata request runs only metadata maintenance"
     );
 
-    let checkpoint = fs
+    let snapshot = fs
         .create_snapshot_blocking(&namespace_id)
-        .expect("create checkpoint");
+        .expect("create snapshot");
     let advanced = fs
         .advance_retention_floor_blocking(&namespace_id)
         .expect("advance retention");
-    assert_eq!(advanced.retention_floor_seq, checkpoint.captured_seq);
+    assert_eq!(advanced.retention_floor_seq, snapshot.captured_seq);
     let retention = fs
         .advance_retention_floor_blocking(&namespace_id)
         .expect("retention-only step");

@@ -449,10 +449,10 @@ async fn a_reorganization_that_starts_in_a_rebuilt_change_gets_its_run_number_at
 }
 
 /// Checks that an enable whose publication loses its put to another
-/// process's enable deletes the backfill checkpoint it created, because no
+/// process's enable deletes the backfill snapshot it created, because no
 /// manifest lists it.
 #[tokio::test]
-async fn an_enable_that_loses_to_another_enable_deletes_its_checkpoint() {
+async fn an_enable_that_loses_to_another_enable_deletes_its_snapshot() {
     let directory = tempfile::tempdir().expect("directory");
     let base: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
     let namespace_id = namespace_id("lost-enable");
@@ -488,28 +488,28 @@ async fn an_enable_that_loses_to_another_enable_deletes_its_checkpoint() {
     else {
         panic!("the rival's enable is published");
     };
-    let checkpoints = host
+    let snapshots = host
         .maintenance
-        .list_checkpoints(&namespace_id)
+        .list_snapshot_records(&namespace_id)
         .page()
         .await
-        .expect("list checkpoints")
-        .checkpoints;
+        .expect("list snapshots")
+        .snapshots;
     assert_eq!(
-        checkpoints
+        snapshots
             .iter()
-            .map(|checkpoint| &checkpoint.checkpoint_id)
+            .map(|snapshot| &snapshot.snapshot_id)
             .collect::<Vec<_>>(),
         [&rival_snapshot_id],
-        "the lost enable deleted its own checkpoint"
+        "the lost enable deleted its own snapshot"
     );
 }
 
 /// Checks that an enable whose put has an unknown outcome returns
-/// `outcome_unknown` and keeps the backfill checkpoint, which the put may
+/// `outcome_unknown` and keeps the backfill snapshot, which the put may
 /// have listed.
 #[tokio::test]
-async fn an_enable_whose_put_has_an_unknown_outcome_fails_and_keeps_its_checkpoint() {
+async fn an_enable_whose_put_has_an_unknown_outcome_fails_and_keeps_its_snapshot() {
     let directory = tempfile::tempdir().expect("directory");
     let base: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
     let namespace_id = namespace_id("unknown-enable");
@@ -529,16 +529,16 @@ async fn an_enable_whose_put_has_an_unknown_outcome_fails_and_keeps_its_checkpoi
 
     assert_matches!(outcome, Err(error) if error.code() == ErrorCode::OutcomeUnknown);
     assert_matches!(host.worker.entry(&namespace_id).await, Ok(None));
-    let checkpoints = host
+    let snapshots = host
         .maintenance
-        .list_checkpoints(&namespace_id)
+        .list_snapshot_records(&namespace_id)
         .page()
         .await
-        .expect("list checkpoints")
-        .checkpoints;
+        .expect("list snapshots")
+        .snapshots;
     assert_eq!(
-        checkpoints.len(),
+        snapshots.len(),
         1,
-        "an unknown outcome must keep the backfill checkpoint the put may list"
+        "an unknown outcome must keep the backfill snapshot the put may list"
     );
 }

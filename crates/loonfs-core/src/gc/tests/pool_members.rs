@@ -285,7 +285,7 @@ async fn content_that_only_a_deleted_fork_refers_to_stays_until_the_fork_is_reti
         .gc(&options(), &aged.clock())
         .await
         .expect("the fork's retirement");
-    assert_eq!(retired.deleted_checkpoints_by_owner.fork, 1);
+    assert_eq!(retired.deleted_snapshots_by_owner.fork, 1);
     let report = collect_pool(&store, &pool_id, &aged).await;
     assert_eq!(report.deleted.content_objects, 1);
     assert!(!exists(&store, &referenced).await);
@@ -612,7 +612,7 @@ async fn a_deleted_forks_sessions_stay_until_the_fork_is_retired() {
         .await,
     );
     let retired = collect(&store, fork, aged.now_ms).await;
-    assert_eq!(retired.deleted_checkpoints_by_owner.fork, 1);
+    assert_eq!(retired.deleted_snapshots_by_owner.fork, 1);
     let report = collect_pool_at(&store, &pool_id, aged.now_ms).await;
     assert_eq!(report.deleted.upload_sessions, 3);
     for session in &sessions {

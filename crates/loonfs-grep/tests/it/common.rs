@@ -253,10 +253,9 @@ pub(crate) mod control {
     pub(crate) async fn snapshot_record(
         store: &SharedObjectStore,
         namespace_id: &NamespaceId,
-        checkpoint_id: &SnapshotId,
+        snapshot_id: &SnapshotId,
     ) -> Option<SnapshotPayload> {
-        let bytes =
-            control_bytes(store, &keys::snapshot_record(namespace_id, checkpoint_id)).await?;
+        let bytes = control_bytes(store, &keys::snapshot_record(namespace_id, snapshot_id)).await?;
         Some(
             decode_control_object::<SnapshotPayload>(&bytes, ControlObjectKind::Snapshot)
                 .expect("decode snapshot")

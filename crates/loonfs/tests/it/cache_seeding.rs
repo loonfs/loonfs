@@ -608,7 +608,7 @@ fn read_heads(recorder: &DefaultMetricsRecorder) -> u64 {
 }
 
 #[test]
-fn stat_and_list_use_materialized_segments_after_checkpoint_without_content_reads() {
+fn stat_and_list_use_materialized_segments_after_a_snapshot_without_content_reads() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     let raw_store = Arc::new(RecordingStore::new(
@@ -631,7 +631,7 @@ fn stat_and_list_use_materialized_segments_after_checkpoint_without_content_read
     )
     .expect("put file");
     fs.create_snapshot_blocking(&namespace_id)
-        .expect("checkpoint");
+        .expect("snapshot");
 
     raw_store.reset();
     let heads = read_heads(&recorder);
@@ -667,7 +667,7 @@ async fn concurrent_materialized_stat_and_list_share_async_store() {
     )
     .await
     .expect("put file");
-    fs.create_snapshot(&namespace_id).await.expect("checkpoint");
+    fs.create_snapshot(&namespace_id).await.expect("snapshot");
 
     let heads = read_heads(&recorder);
     let (stat, list) = tokio::join!(
@@ -701,7 +701,7 @@ fn repeated_materialized_stat_uses_metadata_segment_cache() {
     )
     .expect("put file");
     fs.create_snapshot_blocking(&namespace_id)
-        .expect("checkpoint");
+        .expect("snapshot");
     block_on(fs.writer.drain()).expect("finish hints");
     let recorder = Arc::new(DefaultMetricsRecorder::new());
     let fs = open_runtime_with(store(temp_dir.path()), "materialized-reader", |builder| {

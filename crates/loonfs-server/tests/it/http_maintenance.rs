@@ -1,8 +1,8 @@
-//! HTTP checkpoint inventory, retention, garbage collection, and maintenance
+//! HTTP snapshot inventory, retention, garbage collection, and maintenance
 //! operations.
 
 use crate::common::http_split_support::*;
-use crate::common::{assert_api_code, collect_checkpoints, start_server};
+use crate::common::{assert_api_code, collect_snapshot_records, start_server};
 use bytes::Bytes;
 use loonfs_client::{ClientError, NamespacePath};
 use loonfs_objectstore::keys::metadata_manifest_object;
@@ -12,16 +12,16 @@ use loonfs_test_support::http::{raw_agent, retry_result_on_macos_teardown_einval
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::replace_object;
 use loonfs_types::{
-    Checkpoint, CheckpointOwner, CommitSeq, DeleteSnapshotResponse, ErrorCode, ErrorResponse,
-    ManifestNo, PoolId, Snapshot, SnapshotId,
+    CommitSeq, DeleteSnapshotResponse, ErrorCode, ErrorResponse, ManifestNo, PoolId, Snapshot,
+    SnapshotId, SnapshotRecord, SnapshotRecordOwner,
 };
 use tempfile::tempdir;
 
 type ApiResult<T> = Result<T, Box<ErrorResponse>>;
 
 /// Creates a snapshot without an expiry, and returns its row in the
-/// checkpoint inventory.
-fn post_checkpoint(server_url: &str, namespace: &str) -> ApiResult<Checkpoint> {
+/// snapshot inventory.
+fn post_snapshot(server_url: &str, namespace: &str) -> ApiResult<SnapshotRecord> {
     let snapshot: Snapshot = post_maintenance_json_body(
         &format!("{server_url}/v0/namespaces/{namespace}/snapshots"),
         "test-token",
@@ -31,7 +31,7 @@ fn post_checkpoint(server_url: &str, namespace: &str) -> ApiResult<Checkpoint> {
         decode_maintenance_response(
             raw_agent()
                 .get(&format!(
-                    "{server_url}/v0/maintenance/namespaces/{namespace}/checkpoints/{}",
+                    "{server_url}/v0/maintenance/namespaces/{namespace}/snapshots/{}",
                     snapshot.snapshot_id
                 ))
                 .set("authorization", "Bearer test-token")
@@ -256,7 +256,7 @@ async fn seed_with_a_departed_writer(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_maintenance_checkpoint_and_retention_are_idempotent_and_soft() {
+async fn http_maintenance_snapshot_and_retention_are_idempotent_and_soft() {
     let temp_dir = tempdir().expect("tempdir");
     let store_root = temp_dir.path().join("store");
     let key_prefix = "http-maintenance";
@@ -282,24 +282,24 @@ async fn http_maintenance_checkpoint_and_retention_are_idempotent_and_soft() {
     let server_url = harness.server_url.clone();
     let target = NamespacePath::parse("demo", "/docs/hello.txt").expect("target");
 
-    let first = post_checkpoint(&server_url, namespace.as_str()).expect("first checkpoint");
-    assert!(SnapshotId::parse(first.checkpoint_id.as_str()).is_ok());
+    let first = post_snapshot(&server_url, namespace.as_str()).expect("first snapshot");
+    assert!(SnapshotId::parse(first.snapshot_id.as_str()).is_ok());
     assert_eq!(
         first.owner,
-        CheckpointOwner::User {
+        SnapshotRecordOwner::User {
             name: "nightly".to_owned()
         }
     );
     assert_eq!(first.captured_seq, CommitSeq(1));
     assert_eq!(first.manifest_no, ManifestNo(3));
-    let listed = collect_checkpoints(&client, &namespace)
+    let listed = collect_snapshot_records(&client, &namespace)
         .await
-        .expect("list first checkpoint");
-    assert_eq!(listed.checkpoints, vec![first.clone()]);
+        .expect("list first snapshot");
+    assert_eq!(listed.snapshots, vec![first.clone()]);
 
-    // A second checkpoint at the same head creates a new record.
-    let repeated = post_checkpoint(&server_url, namespace.as_str()).expect("repeat checkpoint");
-    assert_ne!(repeated.checkpoint_id, first.checkpoint_id);
+    // A second snapshot at the same head creates a new record.
+    let repeated = post_snapshot(&server_url, namespace.as_str()).expect("repeat snapshot");
+    assert_ne!(repeated.snapshot_id, first.snapshot_id);
     assert_eq!(repeated.namespace_id, first.namespace_id);
     assert_eq!(repeated.owner, first.owner);
     assert_eq!(repeated.captured_seq, first.captured_seq);
@@ -317,21 +317,17 @@ async fn http_maintenance_checkpoint_and_retention_are_idempotent_and_soft() {
     let diagnostics = client
         .get_namespace_diagnostics(&namespace)
         .await
-        .expect("read checkpoint diagnostics");
+        .expect("read snapshot diagnostics");
     assert_eq!(diagnostics.live_snapshots, 2);
 
     for attempt in 0..2 {
-        let deleted = delete_snapshot(
-            &server_url,
-            namespace.as_str(),
-            first.checkpoint_id.as_str(),
-        )
-        .unwrap_or_else(|error| panic!("delete attempt {attempt}: {error:?}"));
+        let deleted = delete_snapshot(&server_url, namespace.as_str(), first.snapshot_id.as_str())
+            .unwrap_or_else(|error| panic!("delete attempt {attempt}: {error:?}"));
         assert_eq!(
             deleted,
             DeleteSnapshotResponse {
                 namespace_id: namespace.clone(),
-                snapshot_id: first.checkpoint_id.clone(),
+                snapshot_id: first.snapshot_id.clone(),
             }
         );
     }
@@ -340,8 +336,8 @@ async fn http_maintenance_checkpoint_and_retention_are_idempotent_and_soft() {
         .await
         .expect("read diagnostics after delete");
     assert_eq!(diagnostics.live_snapshots, 1);
-    let bogus_delete = delete_snapshot(&server_url, namespace.as_str(), "not-a-checkpoint-id")
-        .expect_err("malformed checkpoint id");
+    let bogus_delete = delete_snapshot(&server_url, namespace.as_str(), "not-a-snapshot-id")
+        .expect_err("malformed snapshot id");
     assert_eq!(bogus_delete.code, "invalid_request");
 
     // Reject grace periods below the safety minimum.
@@ -433,7 +429,7 @@ async fn http_maintenance_gc_is_explicit_and_retains_young_namespaces() {
         )
         .await
         .expect("write file");
-    post_checkpoint(&server_url, namespace.as_str()).expect("checkpoint");
+    post_snapshot(&server_url, namespace.as_str()).expect("snapshot");
 
     let refused = post_gc_with(
         &server_url,
@@ -449,8 +445,8 @@ async fn http_maintenance_gc_is_explicit_and_retains_young_namespaces() {
     assert_eq!(report.deleted.metadata_segments, 0);
     assert_eq!(report.deleted.manifests, 0);
     assert_eq!(
-        report.deleted_checkpoints_by_owner,
-        loonfs_types::DeletedCheckpointsByOwner::default()
+        report.deleted_snapshots_by_owner,
+        loonfs_types::DeletedSnapshotsByOwner::default()
     );
 
     let bytes = client.read_file(&target).await.expect("read file");
@@ -628,8 +624,8 @@ async fn http_maintenance_retention_advance_uses_initial_manifest_after_create()
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
-        "loonfs-server-maintenance-missing-checkpoint",
-        "http-maintenance-missing-checkpoint",
+        "loonfs-server-maintenance-missing-snapshot",
+        "http-maintenance-missing-snapshot",
     ))
     .await;
     let client = harness.client.clone();
@@ -650,7 +646,7 @@ async fn http_maintenance_retention_advance_uses_initial_manifest_after_create()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupted() {
+async fn http_snapshot_manifest_consumption_is_strict_when_manifest_is_corrupted() {
     let temp_dir = tempdir().expect("tempdir");
     let store_root = temp_dir.path().join("store");
     let mut warm_config = test_config(
@@ -692,11 +688,11 @@ async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupt
         )
         .await
         .expect("write file");
-    post_checkpoint(&server_url, namespace.as_str()).expect("checkpoint");
+    post_snapshot(&server_url, namespace.as_str()).expect("snapshot");
     client
         .stat(&target)
         .await
-        .expect("warm the first server after checkpoint maintenance");
+        .expect("warm the first server after snapshot maintenance");
 
     let store = ConfiguredObjectStore::local_fs(LocalFsStoreConfig {
         root: store_root.display().to_string(),

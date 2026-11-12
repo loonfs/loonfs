@@ -2,9 +2,9 @@
 
 use crate::common::*;
 use loonfs::{
-    CheckpointOwner, CommitSeq, CreateSnapshotOptions, DownloadOptions, ErrorCode,
-    ForkNamespaceOptions, ListChangesOptions, ListSnapshotsResponse, LoonFs, NamespaceId, ReadAt,
-    ReadFileOptions, ReadOnly, RevisionNo, SharedObjectStore,
+    CommitSeq, CreateSnapshotOptions, DownloadOptions, ErrorCode, ForkNamespaceOptions,
+    ListChangesOptions, ListSnapshotsResponse, LoonFs, NamespaceId, ReadAt, ReadFileOptions,
+    ReadOnly, RevisionNo, SharedObjectStore, SnapshotRecordOwner,
 };
 use loonfs_objectstore::keys::snapshot_prefix;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -90,7 +90,7 @@ async fn snapshot_create_recovers_a_record_write_with_an_ambiguous_outcome() {
             LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
             KeyPredicate::prefix(snapshot_prefix(&namespace_id)),
             OperationSelector::PutCreateIfAbsent,
-            InjectedError::Transport("lost checkpoint write acknowledgement".to_owned()),
+            InjectedError::Transport("lost snapshot write acknowledgement".to_owned()),
         )
         .apply_then_fail(),
     );
@@ -214,14 +214,14 @@ async fn a_retried_snapshot_delete_succeeds_after_an_uncertain_delete() {
     assert!(listed.snapshots.is_empty());
 }
 
-/// Checks that after a namespace is deleted, the checkpoint inventory still
+/// Checks that after a namespace is deleted, the snapshot inventory still
 /// lists its snapshot and fork snapshot, the snapshot can still be deleted, and a
 /// fork snapshot's ID returns `snapshot_not_found`.
 #[tokio::test]
-async fn a_deleted_namespace_keeps_its_checkpoint_inventory_and_snapshot_delete() {
+async fn a_deleted_namespace_keeps_its_snapshot_inventory_and_snapshot_delete() {
     let temp_dir = tempdir().expect("tempdir");
     let store = store(temp_dir.path());
-    let fs = open_runtime_async(store.clone(), "checkpoint-tombstone-setup").await;
+    let fs = open_runtime_async(store.clone(), "snapshot-tombstone-setup").await;
     let source = namespace_id("source");
     let target = namespace_id("target");
 
@@ -245,27 +245,27 @@ async fn a_deleted_namespace_keeps_its_checkpoint_inventory_and_snapshot_delete(
         .await
         .expect("create a snapshot without an expiry");
 
-    let before_delete = collect_checkpoints(&fs.maintenance, &source)
+    let before_delete = collect_snapshot_records(&fs.maintenance, &source)
         .await
-        .expect("list checkpoints before deletion");
-    let fork_checkpoint = before_delete
-        .checkpoints
+        .expect("list snapshots before deletion");
+    let fork_snapshot_id = before_delete
+        .snapshots
         .iter()
-        .find(|checkpoint| {
+        .find(|record| {
             matches!(
-                &checkpoint.owner,
-                CheckpointOwner::Fork {
+                &record.owner,
+                SnapshotRecordOwner::Fork {
                     target_namespace_id
                 } if target_namespace_id == &target
             )
         })
-        .expect("fork-owned checkpoint")
-        .checkpoint_id
+        .expect("fork-owned snapshot")
+        .snapshot_id
         .clone();
 
     let deleter = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id(
-            "checkpoint-tombstone-deleter",
+            "snapshot-tombstone-deleter",
         ))
         .build()
         .await
@@ -275,26 +275,26 @@ async fn a_deleted_namespace_keeps_its_checkpoint_inventory_and_snapshot_delete(
 
     let observer = LoonFs::builder_with_store(store)
         .writer_id(loonfs_test_support::ids::writer_id(
-            "checkpoint-tombstone-observer",
+            "snapshot-tombstone-observer",
         ))
         .build()
         .await
         .expect("build post-delete runtime");
     let maintenance = observer.maintenance(loonfs_test_support::ids::writer_id(
-        "checkpoint-tombstone-observer",
+        "snapshot-tombstone-observer",
     ));
-    let listed = collect_checkpoints(&maintenance, &source)
+    let listed = collect_snapshot_records(&maintenance, &source)
         .await
-        .expect("list checkpoints on deleted namespace");
-    assert_eq!(listed.checkpoints.len(), 2);
+        .expect("list snapshots on deleted namespace");
+    assert_eq!(listed.snapshots.len(), 2);
     assert!(listed
-        .checkpoints
+        .snapshots
         .iter()
-        .any(|checkpoint| checkpoint.checkpoint_id == snapshot.snapshot_id));
+        .any(|record| record.snapshot_id == snapshot.snapshot_id));
     assert!(listed
-        .checkpoints
+        .snapshots
         .iter()
-        .any(|checkpoint| checkpoint.checkpoint_id == fork_checkpoint));
+        .any(|record| record.snapshot_id == fork_snapshot_id));
 
     let namespace = observer.open_namespace(&source).expect("open namespace");
     let deleted = namespace
@@ -303,7 +303,7 @@ async fn a_deleted_namespace_keeps_its_checkpoint_inventory_and_snapshot_delete(
         .expect("delete a snapshot on a deleted namespace");
     assert_eq!(deleted.snapshot_id, snapshot.snapshot_id);
     assert_core_error_kind(
-        namespace.delete_snapshot(&fork_checkpoint).await,
+        namespace.delete_snapshot(&fork_snapshot_id).await,
         ErrorCode::SnapshotNotFound,
     );
     assert_core_error_kind(
@@ -317,7 +317,7 @@ async fn a_deleted_namespace_keeps_its_checkpoint_inventory_and_snapshot_delete(
 }
 
 /// Checks that an expired snapshot can't be read or forked, and that it
-/// stays in the snapshot listing and the checkpoint inventory with its past
+/// stays in the snapshot listing and the snapshot inventory with its past
 /// expiry.
 #[tokio::test]
 async fn an_expired_snapshot_is_not_found_for_reads_and_forks_but_stays_listed() {
@@ -405,14 +405,11 @@ async fn an_expired_snapshot_is_not_found_for_reads_and_forks_but_stays_listed()
         snapshot
     );
     let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id("snapshot-expiry"));
-    let checkpoints = collect_checkpoints(&maintenance, &source)
+    let snapshots = collect_snapshot_records(&maintenance, &source)
         .await
-        .expect("list checkpoints");
-    assert_eq!(checkpoints.checkpoints.len(), 1);
-    assert_eq!(
-        checkpoints.checkpoints[0].expires_at_ms,
-        Some(expires_at_ms)
-    );
+        .expect("list snapshots");
+    assert_eq!(snapshots.snapshots.len(), 1);
+    assert_eq!(snapshots.snapshots[0].expires_at_ms, Some(expires_at_ms));
     writer.shutdown().await.expect("shutdown");
 }
 

@@ -33,9 +33,9 @@ pub struct RetainedCandidates {
     /// The keys that garbage collection didn't recognize in the object families it scanned. The
     /// collection keeps these objects.
     pub unrecognized_key: u64,
-    /// The checkpoint records that the collection couldn't delete because of their owner or their
+    /// The snapshot records that the collection couldn't delete because of their owner or their
     /// grace window.
-    pub checkpoint_not_deletable: u64,
+    pub snapshot_not_deletable: u64,
 }
 
 /// The candidates that one garbage collection of a pool inspected but didn't delete, counted
@@ -122,17 +122,17 @@ impl PoolDeletedObjectCounts {
     }
 }
 
-/// The number of checkpoint records that one garbage collection deleted, grouped by owner.
+/// The number of snapshot records that one garbage collection deleted, grouped by owner.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct DeletedCheckpointsByOwner {
+pub struct DeletedSnapshotsByOwner {
     /// The user snapshots that the collection deleted after they expired or their namespace was deleted.
     pub user: u64,
     /// The fork snapshots that the collection deleted because their target namespaces no longer exist.
     pub fork: u64,
 }
 
-impl DeletedCheckpointsByOwner {
+impl DeletedSnapshotsByOwner {
     /// Adds counts from another collection.
     pub fn add(&mut self, other: &Self) {
         let Self { user, fork } = other;
@@ -149,8 +149,8 @@ pub struct GcResponse {
     pub namespace_id: NamespaceId,
     /// The objects that the collection deleted, counted by object family.
     pub deleted: DeletedObjectCounts,
-    /// The checkpoint records that the collection deleted, counted by owner.
-    pub deleted_checkpoints_by_owner: DeletedCheckpointsByOwner,
+    /// The snapshot records that the collection deleted, counted by owner.
+    pub deleted_snapshots_by_owner: DeletedSnapshotsByOwner,
     /// The candidates that the collection kept at deletion time, counted by reason.
     pub retained: RetainedCandidates,
     /// The bytes of every object that the collection listed under the namespace, each object once,
@@ -211,7 +211,7 @@ impl GcResponse {
         Self {
             namespace_id,
             deleted: DeletedObjectCounts::default(),
-            deleted_checkpoints_by_owner: DeletedCheckpointsByOwner::default(),
+            deleted_snapshots_by_owner: DeletedSnapshotsByOwner::default(),
             retained: RetainedCandidates::default(),
             listed_bytes: 0,
             next_reclamation_at_ms: None,
@@ -257,8 +257,8 @@ pub enum RetainedReason {
     NoProviderTimestamp,
     /// Counts into [`RetainedCandidates::unrecognized_key`].
     UnrecognizedKey,
-    /// Counts into [`RetainedCandidates::checkpoint_not_deletable`].
-    CheckpointNotDeletable,
+    /// Counts into [`RetainedCandidates::snapshot_not_deletable`].
+    SnapshotNotDeletable,
 }
 
 impl RetainedReason {
@@ -268,7 +268,7 @@ impl RetainedReason {
             Self::WithinGraceWindow => &mut retained.within_grace_window,
             Self::NoProviderTimestamp => &mut retained.no_provider_timestamp,
             Self::UnrecognizedKey => &mut retained.unrecognized_key,
-            Self::CheckpointNotDeletable => &mut retained.checkpoint_not_deletable,
+            Self::SnapshotNotDeletable => &mut retained.snapshot_not_deletable,
         }
     }
 }
@@ -317,14 +317,14 @@ impl RetainedCandidates {
             within_grace_window,
             no_provider_timestamp,
             unrecognized_key,
-            checkpoint_not_deletable,
+            snapshot_not_deletable,
         } = *self;
         [
             ("referenced", referenced),
             ("within_grace_window", within_grace_window),
             ("no_provider_timestamp", no_provider_timestamp),
             ("unrecognized_key", unrecognized_key),
-            ("checkpoint_not_deletable", checkpoint_not_deletable),
+            ("snapshot_not_deletable", snapshot_not_deletable),
         ]
     }
 
@@ -335,13 +335,13 @@ impl RetainedCandidates {
             within_grace_window,
             no_provider_timestamp,
             unrecognized_key,
-            checkpoint_not_deletable,
+            snapshot_not_deletable,
         } = other;
         self.referenced += referenced;
         self.within_grace_window += within_grace_window;
         self.no_provider_timestamp += no_provider_timestamp;
         self.unrecognized_key += unrecognized_key;
-        self.checkpoint_not_deletable += checkpoint_not_deletable;
+        self.snapshot_not_deletable += snapshot_not_deletable;
     }
 
     /// Returns the reason with the highest count, and that count.
@@ -429,7 +429,7 @@ mod tests {
         assert!(gc_json.get("reclaimable_at_ms").is_none());
         assert!(gc_json.get("skipped").is_none());
         assert_eq!(
-            gc_json["deleted_checkpoints_by_owner"],
+            gc_json["deleted_snapshots_by_owner"],
             serde_json::json!({"user": 0, "fork": 0})
         );
         assert_eq!(gc_json["listed_bytes"], 0);

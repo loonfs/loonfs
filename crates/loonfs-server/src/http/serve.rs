@@ -74,7 +74,7 @@ pub async fn app(config: ValidatedServerConfig, options: AppConfig) -> Result<(R
         }
     };
     let metrics = HttpMetrics::new();
-    // Grep reads and checkpoints through the same runtime the HTTP API
+    // Grep reads and creates snapshots through the same runtime the HTTP API
     // groups use, so it is composed after it.
     let RuntimeHandles {
         runtime,

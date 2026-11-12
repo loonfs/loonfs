@@ -4,8 +4,8 @@
 use super::cli::{Cli, Command, ConfigCommand, TopLevelCommand};
 use super::filesystem::AccessCommand;
 use super::maintenance::{
-    MaintenanceCheckpointCommand, MaintenanceCommand, MaintenanceIndexCommand,
-    MaintenancePoolCommand, MaintenanceRetentionCommand, MaintenanceStoreCommand,
+    MaintenanceCommand, MaintenanceIndexCommand, MaintenancePoolCommand,
+    MaintenanceRetentionCommand, MaintenanceSnapshotCommand, MaintenanceStoreCommand,
 };
 use super::namespace::{NamespaceCommand, SnapshotCommand};
 use super::profile::ProfileCommand;
@@ -73,7 +73,7 @@ command_kinds! {
     Changes => "changes",
     Capabilities => "capabilities",
     Doctor => "doctor",
-    MaintenanceCheckpointList => "maintenance_checkpoint_list",
+    MaintenanceSnapshotList => "maintenance_snapshot_list",
     MaintenanceFold => "maintenance_fold",
     MaintenanceRetentionAdvance => "maintenance_retention_advance",
     MaintenanceRetentionWindow => "maintenance_retention_window",
@@ -158,8 +158,8 @@ impl Command {
                 }
                 MaintenanceCommand::Metadata(_) => CommandKind::MaintenanceMetadata,
                 MaintenanceCommand::Fold => CommandKind::MaintenanceFold,
-                MaintenanceCommand::Checkpoint { command } => match command {
-                    MaintenanceCheckpointCommand::List(_) => CommandKind::MaintenanceCheckpointList,
+                MaintenanceCommand::Snapshot { command } => match command {
+                    MaintenanceSnapshotCommand::List(_) => CommandKind::MaintenanceSnapshotList,
                 },
                 MaintenanceCommand::Index { command } => match command {
                     MaintenanceIndexCommand::Enable(_) => CommandKind::MaintenanceIndexEnable,

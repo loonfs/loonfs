@@ -330,7 +330,7 @@ pub struct NamespaceManifestPayload {
     /// floor](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#101-advancing-the-retention-floor)).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retention_window_ms: Option<NonZeroU64>,
-    /// Fork provenance and source checkpoint identity for this namespace.
+    /// Fork provenance and source snapshot identity for this namespace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork_basis: Option<ForkBasis>,
     /// The pool whose prefix stores the namespace's content objects and
@@ -792,7 +792,7 @@ mod tests {
                         source_snapshot_id: crate::SnapshotId::parse(
                             "snp_00000000000000000001-00000000000000000000000001",
                         )
-                        .expect("checkpoint"),
+                        .expect("snapshot"),
                         rebased_from: None,
                     })
                 }

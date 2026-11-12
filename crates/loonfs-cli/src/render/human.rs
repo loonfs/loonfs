@@ -64,7 +64,7 @@ fn human_success_text(output: &CommandOutput) -> String {
         CommandData::SnapshotsListed(response) => human_snapshots_listed(response),
         CommandData::SnapshotExtended(snapshot) => human_snapshot_extended(snapshot),
         CommandData::SnapshotDeleted(response) => human_snapshot_deleted(response),
-        CommandData::CheckpointsListed(response) => human_checkpoints_listed(response),
+        CommandData::SnapshotRecordsListed(response) => human_snapshot_records_listed(response),
         CommandData::MergeSession {
             record_path,
             session,

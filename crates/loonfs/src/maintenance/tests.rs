@@ -107,13 +107,10 @@ async fn a_maintenance_gc_step_records_the_collection_counters_once() {
         ("deleted_metadata_segments", gc.deleted.metadata_segments),
         ("deleted_extension_segments", gc.deleted.extension_segments),
         ("deleted_manifests", gc.deleted.manifests),
+        ("deleted_fork_snapshots", gc.deleted_snapshots_by_owner.fork),
         (
-            "deleted_fork_checkpoints",
-            gc.deleted_checkpoints_by_owner.fork,
-        ),
-        (
-            "deleted_expired_checkpoints",
-            gc.deleted_checkpoints_by_owner.user,
+            "deleted_expired_snapshots",
+            gc.deleted_snapshots_by_owner.user,
         ),
     ] {
         assert_eq!(

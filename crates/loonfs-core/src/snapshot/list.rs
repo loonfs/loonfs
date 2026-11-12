@@ -1,4 +1,4 @@
-//! Lists existing snapshots: every snapshot as a checkpoint, or only the user
+//! Lists existing snapshots: every snapshot record, or only the user
 //! snapshots.
 
 use super::record::load_snapshot_record_at_key;
@@ -10,24 +10,26 @@ use loonfs_objectstore::keys::snapshot_prefix;
 use loonfs_objectstore::ObjectStore;
 use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_types::format::control::SnapshotPayload;
-use loonfs_types::{Checkpoint, NamespaceId, Page, PageCursor, PageRequest, Snapshot, SnapshotId};
+use loonfs_types::{
+    NamespaceId, Page, PageCursor, PageRequest, Snapshot, SnapshotId, SnapshotRecord,
+};
 use serde::{Deserialize, Serialize};
 
-/// Resume position for a checkpoint listing.
+/// Resume position for a listing of the snapshot inventory.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CheckpointPageCursor {
+pub struct SnapshotRecordPageCursor {
     namespace_id: NamespaceId,
     pub(super) last_key: String,
 }
 
-impl PageCursor for CheckpointPageCursor {
-    const KIND: &'static str = "checkpoint_inventory";
+impl PageCursor for SnapshotRecordPageCursor {
+    const KIND: &'static str = "snapshot_record_inventory";
 }
 
 /// Resume position for a snapshot listing.
 ///
-/// It records the same position as a [`CheckpointPageCursor`] under its own
+/// It records the same position as a [`SnapshotRecordPageCursor`] under its own
 /// kind, so a cursor from one listing can't resume the other.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -40,8 +42,8 @@ impl PageCursor for SnapshotPageCursor {
     const KIND: &'static str = "snapshot_inventory";
 }
 
-impl From<CheckpointPageCursor> for SnapshotPageCursor {
-    fn from(cursor: CheckpointPageCursor) -> Self {
+impl From<SnapshotRecordPageCursor> for SnapshotPageCursor {
+    fn from(cursor: SnapshotRecordPageCursor) -> Self {
         Self {
             namespace_id: cursor.namespace_id,
             last_key: cursor.last_key,
@@ -49,7 +51,7 @@ impl From<CheckpointPageCursor> for SnapshotPageCursor {
     }
 }
 
-impl From<SnapshotPageCursor> for CheckpointPageCursor {
+impl From<SnapshotPageCursor> for SnapshotRecordPageCursor {
     fn from(cursor: SnapshotPageCursor) -> Self {
         Self {
             namespace_id: cursor.namespace_id,
@@ -58,7 +60,7 @@ impl From<SnapshotPageCursor> for CheckpointPageCursor {
     }
 }
 
-impl CheckpointPageCursor {
+impl SnapshotRecordPageCursor {
     fn validate_for(&self, namespace_id: &NamespaceId) -> Result<()> {
         if &self.namespace_id != namespace_id {
             return Err(CoreError::InvalidCursor(
@@ -75,30 +77,32 @@ impl CheckpointPageCursor {
 }
 
 impl<S: ObjectStore, M> NamespaceEngine<S, M> {
-    /// Loads one existing snapshot of any owner by id, as the checkpoint listing
+    /// Loads one existing snapshot of any owner by id, as the snapshot inventory
     /// returns it. An expired record stays readable until garbage collection
     /// deletes it. A missing snapshot returns `snapshot_not_found`.
-    pub async fn get_checkpoint(&self, checkpoint_id: &SnapshotId) -> Result<Checkpoint> {
+    pub async fn get_snapshot_record(&self, snapshot_id: &SnapshotId) -> Result<SnapshotRecord> {
         self.namespace.load_current_manifest().await?;
         let loaded = self
             .namespace
-            .load_snapshot_record(checkpoint_id)
+            .load_snapshot_record(snapshot_id)
             .await?
             .ok_or_else(|| CoreError::SnapshotNotFound {
-                snapshot_id: checkpoint_id.clone(),
+                snapshot_id: snapshot_id.clone(),
             })?;
-        Ok(super::checkpoint_summary(loaded.state))
+        Ok(super::snapshot_record_summary(loaded.state))
     }
 
-    /// Lists one page of existing checkpoints, fork snapshots included, in
+    /// Lists one page of existing snapshots, fork snapshots included, in
     /// ascending id order. Expired records remain visible until garbage
     /// collection deletes them.
-    pub async fn list_checkpoints_page(
+    pub async fn list_snapshot_records_page(
         &self,
-        request: PageRequest<CheckpointPageCursor>,
-    ) -> Result<Page<Checkpoint, CheckpointPageCursor>> {
-        self.list_snapshot_records_page(request, |record| Some(super::checkpoint_summary(record)))
-            .await
+        request: PageRequest<SnapshotRecordPageCursor>,
+    ) -> Result<Page<SnapshotRecord, SnapshotRecordPageCursor>> {
+        self.list_mapped_snapshot_records_page(request, |record| {
+            Some(super::snapshot_record_summary(record))
+        })
+        .await
     }
 
     /// Lists one page of snapshots (the user snapshots) in ascending ID order,
@@ -109,10 +113,10 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     ) -> Result<Page<Snapshot, SnapshotPageCursor>> {
         let request = PageRequest {
             limit: request.limit,
-            cursor: request.cursor.map(CheckpointPageCursor::from),
+            cursor: request.cursor.map(SnapshotRecordPageCursor::from),
         };
         let page = self
-            .list_snapshot_records_page(request, super::user_snapshot)
+            .list_mapped_snapshot_records_page(request, super::user_snapshot)
             .await?;
         Ok(Page {
             items: page.items,
@@ -123,11 +127,11 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// Lists the snapshots after the request's cursor and returns up to its limit of
     /// the rows that `row` returns for them. A snapshot for which `row` returns
     /// `None` doesn't count toward the limit.
-    async fn list_snapshot_records_page<T>(
+    async fn list_mapped_snapshot_records_page<T>(
         &self,
-        request: PageRequest<CheckpointPageCursor>,
+        request: PageRequest<SnapshotRecordPageCursor>,
         row: impl Fn(SnapshotPayload) -> Option<T>,
-    ) -> Result<Page<T, CheckpointPageCursor>> {
+    ) -> Result<Page<T, SnapshotRecordPageCursor>> {
         self.namespace.load_current_manifest().await?;
 
         if let Some(cursor) = &request.cursor {
@@ -178,7 +182,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         } else {
             false
         };
-        let next_cursor = has_more.then(|| CheckpointPageCursor {
+        let next_cursor = has_more.then(|| SnapshotRecordPageCursor {
             namespace_id: self.namespace.namespace_id.clone(),
             last_key: last_inspected_key.expect("a full page should inspect at least one key"),
         });
@@ -207,19 +211,20 @@ mod cursor_tests {
             loonfs_types::encode_token_bytes(
                 &serde_json::to_vec(&serde_json::json!({
                     "format_version": 1,
-                    "kind": "checkpoint_inventory",
+                    "kind": "snapshot_record_inventory",
                     "token": cursor,
                 }))
                 .expect("encode cursor"),
             )
         };
 
-        let cursor = decode_cursor::<CheckpointPageCursor>(&token(None)).expect("decode cursor");
+        let cursor =
+            decode_cursor::<SnapshotRecordPageCursor>(&token(None)).expect("decode cursor");
         assert_eq!(
             cursor.last_key,
             "namespaces/demo/snapshots/snp_00000000000000000001-00000000000000000000000001.json"
         );
-        decode_cursor::<CheckpointPageCursor>(&token(Some((
+        decode_cursor::<SnapshotRecordPageCursor>(&token(Some((
             "future_field",
             serde_json::json!({"ignored": true}),
         ))))
@@ -234,7 +239,7 @@ mod cursor_tests {
             InodeId, RevisionNo, TrashPageCursor,
         };
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-        let checkpoint = CheckpointPageCursor {
+        let snapshot = SnapshotRecordPageCursor {
             namespace_id: namespace_id.clone(),
             last_key:
                 "namespaces/demo/snapshots/snp_00000000000000000001-00000000000000000000000001.json"
@@ -282,10 +287,10 @@ mod cursor_tests {
                     fingerprint: 7,
                 }),
             ),
-            ("checkpoint_inventory.txt", encode_cursor(&checkpoint)),
+            ("snapshot_record_inventory.txt", encode_cursor(&snapshot)),
             (
                 "snapshot_inventory.txt",
-                encode_cursor(&SnapshotPageCursor::from(checkpoint.clone())),
+                encode_cursor(&SnapshotPageCursor::from(snapshot.clone())),
             ),
         ];
         for (name, token) in cursors {
@@ -303,7 +308,7 @@ mod cursor_tests {
         };
         let token = encode_cursor(&directory).expect("encode directory cursor");
 
-        decode_cursor::<CheckpointPageCursor>(&token)
-            .expect_err("a directory cursor should not resume a checkpoint listing");
+        decode_cursor::<SnapshotRecordPageCursor>(&token)
+            .expect_err("a directory cursor should not resume a snapshot inventory listing");
     }
 }

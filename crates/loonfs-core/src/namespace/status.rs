@@ -65,7 +65,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     }
 }
 
-/// Namespace storage diagnostics that do not require checkpoint enumeration.
+/// Namespace storage diagnostics that do not require snapshot enumeration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NamespaceStorageDiagnostics {
     pub namespace_id: NamespaceId,

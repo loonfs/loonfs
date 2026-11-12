@@ -116,7 +116,7 @@ async fn overlapping_retirement_retries_a_lost_snapshot_delete_and_preserves_a_l
             .gc(&gc_options, &deadline.clock())
             .await
             .expect("second collector retries from the beginning");
-        assert_eq!(retried.deleted_checkpoints_by_owner.fork, 0);
+        assert_eq!(retried.deleted_snapshots_by_owner.fork, 0);
         assert!(snapshot_record_exists(store.inner(), &source, &sibling_snapshot).await);
         store.release();
     });

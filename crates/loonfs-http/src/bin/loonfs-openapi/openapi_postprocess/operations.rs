@@ -135,14 +135,6 @@ pub(crate) const OPERATION_SDK_NAMES: &[(&str, SdkName)] = &[
         },
     ),
     (
-        "get_checkpoint",
-        SdkName {
-            group: &["maintenance", "checkpoints"],
-            method: "retrieve",
-            request: Some("GetCheckpointRequest"),
-        },
-    ),
-    (
         "get_file_content",
         SdkName {
             group: &["files"],
@@ -223,6 +215,14 @@ pub(crate) const OPERATION_SDK_NAMES: &[(&str, SdkName)] = &[
         },
     ),
     (
+        "get_snapshot_record",
+        SdkName {
+            group: &["maintenance", "snapshots"],
+            method: "retrieve",
+            request: Some("GetSnapshotRecordRequest"),
+        },
+    ),
+    (
         "get_upload",
         SdkName {
             group: &["uploads"],
@@ -244,14 +244,6 @@ pub(crate) const OPERATION_SDK_NAMES: &[(&str, SdkName)] = &[
             group: &["changes"],
             method: "list",
             request: Some("ListChangesRequest"),
-        },
-    ),
-    (
-        "list_checkpoints",
-        SdkName {
-            group: &["maintenance", "checkpoints"],
-            method: "list",
-            request: Some("ListCheckpointsRequest"),
         },
     ),
     (
@@ -292,6 +284,14 @@ pub(crate) const OPERATION_SDK_NAMES: &[(&str, SdkName)] = &[
             group: &["files"],
             method: "list",
             request: Some("ListPathEntriesRequest"),
+        },
+    ),
+    (
+        "list_snapshot_records",
+        SdkName {
+            group: &["maintenance", "snapshots"],
+            method: "list",
+            request: Some("ListSnapshotRecordsRequest"),
         },
     ),
     (

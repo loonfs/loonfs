@@ -77,7 +77,7 @@ core|manifest::tests::fold_races::a_fold_that_loses_to_a_compaction_reads_no_wal
 core|manifest::tests::fold_races::a_fold_that_loses_to_a_fold_still_takes_the_cold_path
 core|manifest::tests::fold_races::a_fold_survives_repeated_compaction_publications
 core|manifest::tests::fold_races::a_retried_fold_leaves_the_session_where_an_unraced_fold_does
-core|manifest::tests::fold_races::a_checkpoint_that_loses_its_fold_to_a_compaction_reads_no_wal_object
+core|manifest::tests::fold_races::a_snapshot_that_loses_its_fold_to_a_compaction_reads_no_wal_object
 runtime|execution_budget::tests::runtimes_sharing_a_budget_never_exceed_its_limits
 runtime|execution_budget::tests::an_idle_runtime_strands_no_capacity
 runtime|execution_budget::tests::shutting_down_one_runtime_leaves_the_budget_usable

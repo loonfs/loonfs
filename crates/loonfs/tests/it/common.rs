@@ -151,15 +151,15 @@ pub(crate) async fn collect_path_entries(
     Ok(response)
 }
 
-pub(crate) async fn collect_checkpoints(
+pub(crate) async fn collect_snapshot_records(
     maintenance: &Maintenance,
     namespace_id: &NamespaceId,
-) -> loonfs::Result<loonfs::ListCheckpointsResponse> {
-    let mut pager = maintenance.list_checkpoints(namespace_id);
+) -> loonfs::Result<loonfs::ListSnapshotRecordsResponse> {
+    let mut pager = maintenance.list_snapshot_records(namespace_id);
     let mut response = pager.next().await.expect("first page")?;
     while let Some(page) = pager.next().await {
         let page = page?;
-        response.checkpoints.extend(page.checkpoints);
+        response.snapshots.extend(page.snapshots);
         response.next_cursor = page.next_cursor;
     }
     Ok(response)

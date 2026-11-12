@@ -1694,8 +1694,8 @@ async fn publish_views_reuse_cached_segment_blocks_across_publishes() {
             &writer.clock(),
         )
         .await
-        .map(crate::snapshot::checkpoint_summary)
-        .expect("checkpoint");
+        .map(crate::snapshot::snapshot_record_summary)
+        .expect("snapshot");
 
     // Without a cache, every publish view re-fetches the segment blocks
     // its validation walks need.

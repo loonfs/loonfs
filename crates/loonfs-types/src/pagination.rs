@@ -227,9 +227,9 @@ string_cursor_response!(
     head_seq
 );
 string_cursor_response!(
-    crate::ListCheckpointsResponse,
-    crate::Checkpoint,
-    checkpoints
+    crate::ListSnapshotRecordsResponse,
+    crate::SnapshotRecord,
+    snapshots
 );
 string_cursor_response!(crate::ListSnapshotsResponse, crate::Snapshot, snapshots);
 

@@ -394,7 +394,7 @@ fn a_collection_counts_what_it_reclaimed_and_retained() {
             wal_objects: 3,
             ..loonfs_types::DeletedObjectCounts::default()
         },
-        deleted_checkpoints_by_owner: loonfs_types::DeletedCheckpointsByOwner { fork: 2, user: 3 },
+        deleted_snapshots_by_owner: loonfs_types::DeletedSnapshotsByOwner { fork: 2, user: 3 },
         retained: loonfs_types::RetainedCandidates {
             referenced: 2,
             ..loonfs_types::RetainedCandidates::default()
@@ -440,8 +440,8 @@ fn a_collection_counts_what_it_reclaimed_and_retained() {
     // whole reclaimable vocabulary rather than only what has happened.
     assert_eq!(snapshot.by_name("loonfs.gc.reclaimed").count(), 9);
     for (category, expected) in [
-        ("deleted_fork_checkpoints", 4),
-        ("deleted_expired_checkpoints", 6),
+        ("deleted_fork_snapshots", 4),
+        ("deleted_expired_snapshots", 6),
         ("deleted_temporary_objects", 22),
         ("deleted_upload_sessions", 26),
     ] {

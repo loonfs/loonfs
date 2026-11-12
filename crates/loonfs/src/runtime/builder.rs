@@ -166,7 +166,7 @@ impl<M> LoonFsBuilder<M> {
     /// budget's admitted totals until its work settles. Public reads wait for
     /// a read permit before loading anything. Publication batches,
     /// session folds and compactions, [`LoonFs::maintenance`] work, namespace
-    /// deletions, and the creation of checkpoints, snapshots, and forks of
+    /// deletions, and the creation of snapshots and forks of
     /// the current head take their permits from it, and every compaction keeps
     /// at most its compaction input size. The per-namespace admission limits stay
     /// with this runtime. The budget
