@@ -310,3 +310,53 @@ async fn a_fork_basis_naming_its_snapshot_with_a_different_checksum_is_corrupt()
     assert_eq!(store.counts().deletes, 0);
     assert!(snapshot_record_exists(&store, &source, &snapshot_id).await);
 }
+
+/// A key under a deleted fork's snapshots prefix that isn't a snapshot record is
+/// kept, is reported as unrecognized, and keeps the fork from retirement.
+#[tokio::test]
+async fn an_unrecognized_snapshot_key_is_kept_and_blocks_retirement() {
+    let directory = tempdir().expect("directory");
+    let store = LocalFsStore::new(directory.path()).expect("store");
+    let source = NamespaceId::parse("source").expect("namespace");
+    let target = NamespaceId::parse("target").expect("namespace");
+    let setup = context(1_000);
+    let fixture = crate::test_support::NamespaceFixture::new(&store, &source, &setup);
+    fixture.create().await.expect("bootstrap source");
+    fixture
+        .engine()
+        .fork_namespace(
+            &target,
+            &loonfs_test_support::test_actor(),
+            crate::test_support::folded_manifest(&fixture.namespace)
+                .await
+                .expect("fold the WAL tail"),
+        )
+        .await
+        .expect("fork target");
+    crate::test_support::NamespaceFixture::new(&store, &target, &setup)
+        .engine()
+        .delete_namespace(Default::default())
+        .await
+        .expect("delete target");
+    let unrecognized = format!("{}notes.txt", snapshot_prefix(&target));
+    store
+        .put_if_absent(&unrecognized, Bytes::from_static(b"foreign key"))
+        .await
+        .expect("unrecognized key");
+    let retirement = context(setup.now_ms + retirement_ms());
+    let listed_bytes = core_listed_bytes(&store, &target).await;
+    let kept = crate::test_support::namespace_store(&store, &target)
+        .gc(&options(), &retirement.clock())
+        .await
+        .expect("kept collection");
+    assert_eq!(kept.retained.unrecognized_key, 1);
+    assert_eq!(kept.listed_bytes, listed_bytes);
+    assert_eq!(kept.deleted_snapshots_by_owner.fork, 0);
+    assert!(store.head(&unrecognized).await.expect("head").is_some());
+    store.delete(&unrecognized).await.expect("remove the key");
+    let retired = crate::test_support::namespace_store(&store, &target)
+        .gc(&options(), &retirement.clock())
+        .await
+        .expect("retirement");
+    assert_eq!(retired.deleted_snapshots_by_owner.fork, 1);
+}

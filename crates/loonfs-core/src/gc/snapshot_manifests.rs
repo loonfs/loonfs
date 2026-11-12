@@ -10,7 +10,8 @@ use crate::snapshot::record::snapshot_record_key_ids;
 use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
 use loonfs_objectstore::keys::{metadata_manifest_object, snapshot_prefix};
-use loonfs_objectstore::{ObjectStore, ObjectStoreExtension};
+use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
+use loonfs_objectstore::{ListedObject, ObjectStore};
 use loonfs_types::format::control::SnapshotPayload;
 use loonfs_types::{ManifestNo, NamespaceId};
 use std::collections::BTreeSet;
@@ -18,14 +19,19 @@ use std::sync::Arc;
 
 /// One key that a listing of a namespace's snapshots returned.
 pub(super) enum ListedSnapshotKey {
-    /// A key under the snapshots prefix that isn't a snapshot record.
-    Unrecognized,
+    /// A key under the snapshots prefix that isn't a snapshot record, with the
+    /// object's size as the listing reported it.
+    Unrecognized {
+        size_bytes: u64,
+    },
     Snapshot(ListedSnapshot),
 }
 
 /// One listed snapshot, with its record and the manifest that it keeps.
 pub(super) struct ListedSnapshot {
     pub(super) key: String,
+    /// The record's size, as the listing reported it.
+    pub(super) size_bytes: u64,
     /// The snapshot's record, or `None` when the record is gone.
     pub(super) record: Option<SnapshotPayload>,
     pub(super) manifest: SnapshotManifest,
@@ -57,14 +63,17 @@ impl<S: ObjectStore> NamespaceStore<S> {
         let mut requested = BTreeSet::from([current_manifest_no]);
         let mut rooted = BTreeSet::from([current_manifest_no]);
         self.store
-            .list_prefix_stream(&prefix)
+            .list_entries_from_stream(&prefix, None)
             .map_err(move |error| CoreError::store(&prefix, &error))
-            .map_ok(move |key| {
+            .map_ok(move |entry| {
+                let ListedObject {
+                    key, size_bytes, ..
+                } = entry;
                 let manifest_no = snapshot_manifest_no(&key);
                 let first = matches!(manifest_no, Ok(Some(number)) if requested.insert(number));
                 async move {
                     let Some(manifest_no) = manifest_no? else {
-                        return Ok(None);
+                        return Ok((size_bytes, None));
                     };
                     let manifest = async {
                         if first {
@@ -75,15 +84,15 @@ impl<S: ObjectStore> NamespaceStore<S> {
                     };
                     let (loaded, record) =
                         futures::try_join!(manifest, self.load_listed_snapshot_record(&key))?;
-                    Ok(Some((key, manifest_no, loaded, record)))
+                    Ok((size_bytes, Some((key, manifest_no, loaded, record))))
                 }
             })
             // `try_buffered` keeps listing order, so a snapshot that reuses an
             // earlier snapshot's load arrives after that load's result.
             .try_buffered(STORE_READS_IN_FLIGHT)
-            .map_ok(move |listed| {
+            .map_ok(move |(size_bytes, listed)| {
                 let Some((key, manifest_no, loaded, record)) = listed else {
-                    return ListedSnapshotKey::Unrecognized;
+                    return ListedSnapshotKey::Unrecognized { size_bytes };
                 };
                 let manifest = match loaded {
                     Some(Some(manifest)) => {
@@ -95,6 +104,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 };
                 ListedSnapshotKey::Snapshot(ListedSnapshot {
                     key,
+                    size_bytes,
                     record,
                     manifest,
                 })
@@ -122,7 +132,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
 /// Returns the manifest number in a snapshot key, or `None` for a key that isn't
 /// a snapshot record.
 fn snapshot_manifest_no(key: &str) -> Result<Option<ManifestNo>> {
-    if !super::families::CandidateFamily::Snapshots.recognizes(key) {
+    if parse_object_key(key).map(|parsed| parsed.family()) != Some(DurableObjectFamily::Snapshot) {
         return Ok(None);
     }
     let (_, snapshot_id) = snapshot_record_key_ids(key).map_err(CoreError::ControlObjectLoad)?;

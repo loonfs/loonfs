@@ -97,7 +97,6 @@ async fn one_collection_deletes_an_aged_upload_and_every_expired_snapshot_among_
             wal_prefix(&namespace_id),
             metadata_segment_prefix(&namespace_id),
             extensions_prefix(&namespace_id),
-            snapshot_prefix(&namespace_id),
         ]
     );
     store.reset();
