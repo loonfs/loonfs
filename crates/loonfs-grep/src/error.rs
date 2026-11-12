@@ -191,7 +191,9 @@ mod tests {
             (ObjectStoreErrorKind::Other, ErrorCode::ServerError),
         ] {
             let error = GrepError::StoreUnavailable {
-                object_key: "namespaces/demo/extensions/grep/segments/idx_00000000000000000000000001.sst.zst".to_owned(),
+                object_key:
+                    "namespaces/demo/extensions/grep/segments/idx_00000000000000000000000001.sst"
+                        .to_owned(),
                 message: "provider failure".to_owned(),
                 kind,
             };

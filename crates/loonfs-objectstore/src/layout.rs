@@ -636,7 +636,7 @@ mod tests {
             "namespaces/ns-1/extensions/grep/hint.json",
             "namespaces/ns-1/extensions/grep/manifests/00000000000000000001.json",
             "namespaces/ns-1/extensions/grep/segments/idx_1.tmp",
-            "namespaces/ns-1/extensions/grep/segments/nested/idx_1.sst.zst",
+            "namespaces/ns-1/extensions/grep/segments/nested/idx_1.sst",
         ] {
             assert!(
                 parse_object_key(key).is_none(),
