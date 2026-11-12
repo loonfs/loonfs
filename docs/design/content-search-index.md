@@ -235,7 +235,7 @@ If the tail is larger than the query's budget:
 - By default, the query fails with an `index_lagging` error.
 - With `allow_stale`, the server can return indexed-only results and report `tail_scanned: false`, along with the index and head positions. Stale results still go through visibility checks and content verification, but they might leave out eligible revisions that aren't indexed yet.
 
-If the tail's change history is below the retention floor, the query returns `rebootstrap_required`, with or without `allow_stale`. The worker's next step rebuilds the index from a new snapshot, and the rebuild keeps the index's segments, so it reads only the values that they don't record.
+If the tail's change history is below the retention floor, the query returns `below_retention_floor`, with or without `allow_stale`. The worker's next step rebuilds the index from a new snapshot, and the rebuild keeps the index's segments, so it reads only the values that they don't record.
 
 Index maintenance reduces this gap when it runs. Core backpressure on the WAL tail doesn't limit grep lag by itself, because metadata can be folded while grep maintenance is still behind. When the gap is too large, the query's tail budget and the explicit stale-result option determine what happens.
 

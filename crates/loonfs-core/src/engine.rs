@@ -213,7 +213,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     }
 
     /// Checks that the sequence `context` reads at is at or above the
-    /// retention floor of its metadata, and returns `rebootstrap_required`
+    /// retention floor of its metadata, and returns `below_retention_floor`
     /// otherwise.
     pub async fn ensure_retained(&self, context: &RuntimeReadContext) -> Result<()> {
         self.load_read_view(context).await.map(drop)

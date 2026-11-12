@@ -81,7 +81,7 @@ async fn a_retry_of_a_committed_replay_folds_nothing() {
 }
 
 /// Checks that a rebase of a fork whose own retention floor is above the
-/// start of the fork's next merge returns `rebootstrap_required` before it
+/// start of the fork's next merge returns `below_retention_floor` before it
 /// creates the new fork, and folds nothing: main keeps its manifest and the
 /// commit in its WAL tail.
 #[tokio::test]
@@ -126,7 +126,7 @@ async fn a_rebase_of_a_fork_below_its_own_floor_creates_nothing() {
         .fork_namespace_for_rebase(&main_id, &fork_id, &rebase_id, &actor())
         .await
         .expect_err("the fork's floor");
-    assert_eq!(error.code(), ErrorCode::RebootstrapRequired);
+    assert_eq!(error.code(), ErrorCode::BelowRetentionFloor);
     assert_eq!(
         manifest_nos(&maintenance, [&main_id, &fork_id]).await,
         before

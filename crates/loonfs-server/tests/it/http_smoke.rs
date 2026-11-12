@@ -454,8 +454,10 @@ async fn http_namespace_fork_shares_content_and_diverges() {
         .page()
         .await
     {
-        Err(ClientError::Api { response, .. }) => assert_eq!(response.code, "rebootstrap_required"),
-        other => panic!("expected rebootstrap_required, got {other:?}"),
+        Err(ClientError::Api { response, .. }) => {
+            assert_eq!(response.code, "below_retention_floor")
+        }
+        other => panic!("expected below_retention_floor, got {other:?}"),
     }
     let clone_changes = harness
         .client

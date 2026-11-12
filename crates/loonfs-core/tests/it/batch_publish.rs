@@ -431,7 +431,7 @@ async fn a_failed_retry_keeps_the_result_a_batch_already_settled() {
         unresolved
             .expect_err("the lost answer stays unknown")
             .code(),
-        ErrorCode::CommitOutcomeUnknown
+        ErrorCode::OutcomeUnknown
     );
     let replayed = results
         .pop()

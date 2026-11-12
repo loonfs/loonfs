@@ -9,7 +9,7 @@ use std::assert_matches;
 
 /// Checks that a snapshot of a manifest that compaction, or a fold of a newer
 /// head, replaces before the snapshot's verification returns
-/// `checkpoint_unavailable` and deletes the snapshot, so the caller folds and takes a
+/// `snapshot_unavailable` and deletes the snapshot, so the caller folds and takes a
 /// snapshot again.
 #[tokio::test]
 async fn a_snapshot_of_a_manifest_replaced_before_verification_is_refused_and_deleted() {
@@ -64,7 +64,7 @@ async fn a_snapshot_of_a_manifest_replaced_before_verification_is_refused_and_de
             store.release();
         });
         let error = created.expect_err("the selected manifest is no longer current");
-        assert_eq!(error.code(), ErrorCode::CheckpointUnavailable);
+        assert_eq!(error.code(), ErrorCode::SnapshotUnavailable);
         assert!(store
             .list_prefix(&snapshot_prefix(&namespace_id))
             .await
@@ -205,7 +205,7 @@ async fn namespace_deletion_during_snapshot_verification_deletes_the_snapshot() 
             store.release();
         }
     );
-    assert_matches!(result, Err(CoreError::CheckpointUnavailable(_)));
+    assert_matches!(result, Err(CoreError::SnapshotUnavailable(_)));
     assert!(store
         .list_prefix(&snapshot_prefix(&namespace_id))
         .await

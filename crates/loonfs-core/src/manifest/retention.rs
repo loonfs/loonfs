@@ -186,7 +186,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// attempt's error is returned when every attempt failed. The call
     /// claims no epoch and writes nothing when the view's floor is already
     /// at or above `target`. An unknown put outcome returns
-    /// `commit_outcome_unknown`, and a deleted namespace returns
+    /// `outcome_unknown`, and a deleted namespace returns
     /// `namespace_deleted`.
     pub async fn publish_floor_object(
         &self,

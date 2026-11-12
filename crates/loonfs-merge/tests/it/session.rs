@@ -468,8 +468,8 @@ async fn errors_that_the_loop_cant_act_on_fail_the_session() {
         ),
         (
             "a fork point below the retention floor",
-            vec![Answer::refused(ErrorCode::RebootstrapRequired)],
-            ErrorCode::RebootstrapRequired,
+            vec![Answer::refused(ErrorCode::BelowRetentionFloor)],
+            ErrorCode::BelowRetentionFloor,
         ),
     ];
     for (case, answers, code) in cases {

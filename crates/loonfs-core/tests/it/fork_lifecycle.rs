@@ -686,7 +686,7 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
     let stale_clone_changes = list_changes_after(&store, &clone_namespace_id, CommitSeq(0))
         .await
         .expect_err("old cursor");
-    assert_eq!(stale_clone_changes.code(), ErrorCode::RebootstrapRequired);
+    assert_eq!(stale_clone_changes.code(), ErrorCode::BelowRetentionFloor);
     let empty_clone_changes = list_changes_after(&store, &clone_namespace_id, CommitSeq(1))
         .await
         .expect("empty changes");
@@ -1012,7 +1012,7 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
         .gc(&options, &aged.clock())
         .await
         .expect("parent waits");
-    assert_eq!(parent_waiting.reclaimable_at_ms, Some(parent_deadline));
+    assert_eq!(parent_waiting.retires_at_ms, Some(parent_deadline));
     let ancestor_waiting = namespace_store(&store, &ancestor)
         .gc(&options, &aged.clock())
         .await
@@ -1034,7 +1034,7 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
         .await
         .expect("retire descendant");
     let descendant_deadline = retired
-        .reclaimable_at_ms
+        .retires_at_ms
         .expect("descendant retired despite compaction");
     let waiting = namespace_store(&store, &parent)
         .gc(&options, &aged.clock())
@@ -1051,13 +1051,13 @@ async fn nested_fork_survives_ancestor_and_parent_delete_and_collection() {
         .await
         .expect("parent releases its fork snapshot");
     assert_eq!(released.deleted_snapshots_by_owner.fork, 1);
-    assert_eq!(released.reclaimable_at_ms, Some(parent_deadline));
+    assert_eq!(released.retires_at_ms, Some(parent_deadline));
     let released = namespace_store(&store, &ancestor)
         .gc(&options, &aged.clock())
         .await
         .expect("collect ancestor after parent releases its snapshot");
     assert_eq!(released.deleted_snapshots_by_owner.fork, 0);
-    assert!(released.reclaimable_at_ms.is_some());
+    assert!(released.retires_at_ms.is_some());
 }
 
 #[tokio::test]
@@ -1869,7 +1869,7 @@ async fn retired_leaf_content_is_reclaimed_while_live_workspaces_keep_their_cont
             .gc(&options, &aged.clock())
             .await
             .expect("collect deleted source");
-        assert_eq!(report.reclaimable_at_ms, Some(source_deadline));
+        assert_eq!(report.retires_at_ms, Some(source_deadline));
         assert!(store
             .head(&source_key)
             .await

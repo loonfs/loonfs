@@ -487,14 +487,14 @@ async fn closing_and_draining_wait_for_commits_at_the_write_stop() {
 }
 
 /// Checks that a commit whose first attempt had an unknown outcome, and that
-/// the engine then refuses at the write stop, keeps `commit_outcome_unknown`
+/// the engine then refuses at the write stop, keeps `outcome_unknown`
 /// under the settling rule instead of waiting.
 ///
 /// The first attempt's epoch fence is written, but its acknowledgement is
 /// lost, so the retry acquires another epoch, and the second fence fills the
 /// tail to the write stop.
 #[tokio::test]
-async fn an_unknown_outcome_before_the_write_stop_keeps_commit_outcome_unknown() {
+async fn an_unknown_outcome_before_the_write_stop_keeps_outcome_unknown() {
     let directory = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("unknown").expect("valid namespace id");
     let prefix = wal_prefix(&namespace_id);
@@ -539,7 +539,7 @@ async fn an_unknown_outcome_before_the_write_stop_keeps_commit_outcome_unknown()
     .await
     .expect("the commit doesn't wait")
     .expect_err("the first attempt's outcome is unknown");
-    assert_eq!(error.code(), ErrorCode::CommitOutcomeUnknown);
+    assert_eq!(error.code(), ErrorCode::OutcomeUnknown);
     assert_eq!(counter(&recorder, "loonfs.publisher.write_stop_waits"), 0);
 
     namespace

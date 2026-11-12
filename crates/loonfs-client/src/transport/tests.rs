@@ -592,7 +592,7 @@ fn retryable_transport_failure_covers_transport_and_unavailability_only() {
     ));
     assert!(!retryable_transport_failure(
         FailureSource::Response,
-        &api("checkpoint_unavailable")
+        &api("snapshot_unavailable")
     ));
     assert!(!retryable_transport_failure(
         FailureSource::Response,

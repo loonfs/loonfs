@@ -2,7 +2,7 @@
 //! and the replay commit that replays the fork's unmerged commits into it
 //! ([design note](https://github.com/loonfs/loonfs/blob/main/docs/design/merge.md#rebasing)).
 
-use super::merges::{missing_fork, MergeOutcome, PlannedMerge};
+use super::merges::{MergeOutcome, PlannedMerge};
 use crate::publisher::MergeReservation;
 use crate::trace::{self, operation_span};
 use crate::{
@@ -51,18 +51,15 @@ impl LoonFs<Writable> {
                     .core
                     .pinned_read(namespace_id, Consistency::Strong)
                     .await?;
-                let fork_point_seq = async {
+                let fork_point_seq = {
                     let fork = self
                         .core
                         .pinned_read(source_namespace_id, Consistency::Strong)
                         .await?;
-                    Ok(main
-                        .engine
+                    main.engine
                         .fork_point_for_rebase(&main.context, &fork.engine, &fork.context)
-                        .await?)
-                }
-                .await
-                .map_err(|error| missing_fork(source_namespace_id, error))?;
+                        .await?
+                };
                 self.install_fork(
                     namespace_id,
                     new_namespace_id,

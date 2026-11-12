@@ -689,7 +689,7 @@ mod tests {
                     || matches!(code.kind(), loonfs_types::ErrorKind::Unavailable)
             });
             for code in kept.chain([
-                ErrorCode::CommitOutcomeUnknown,
+                ErrorCode::OutcomeUnknown,
                 ErrorCode::CommitIdReuseConflict,
                 ErrorCode::DeadlineExceeded,
                 ErrorCode::WriterFenced,

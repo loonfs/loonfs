@@ -460,13 +460,13 @@ fn backfill_status(snapshot: &loonfs_types::Snapshot) -> GrepIndexStatus {
 /// gone": the change feed's cursor fell below the retention floor, the
 /// backfill snapshot was deleted or expired, or it no longer keeps its
 /// manifest. Every other failure is a failure.
-fn rebootstrap_required(error: &GrepError) -> bool {
+fn below_retention_floor(error: &GrepError) -> bool {
     matches!(
         error,
         GrepError::Runtime(loonfs::Error::Core(
-            CoreError::RebootstrapRequired { .. }
+            CoreError::BelowRetentionFloor { .. }
                 | CoreError::SnapshotNotFound { .. }
-                | CoreError::CheckpointUnavailable(_)
+                | CoreError::SnapshotUnavailable(_)
         ))
     )
 }

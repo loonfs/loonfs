@@ -210,7 +210,7 @@ pub enum CoreError {
     #[error("shutting down; new work is not admitted")]
     ShuttingDown,
     #[error("snapshot unavailable: {0}")]
-    CheckpointUnavailable(String),
+    SnapshotUnavailable(String),
     #[error("content `{content_id}` requires content writes that this deployment cannot perform; read through the proxied route")]
     ContentNotMaterialized { content_id: loonfs_types::ContentId },
     #[error("invalid snapshot request: {0}")]
@@ -268,7 +268,7 @@ pub enum CoreError {
         "{below} is older than retention floor `{retention_floor_seq}`{}",
         below.consequence()
     )]
-    RebootstrapRequired {
+    BelowRetentionFloor {
         below: HistoryPosition,
         retention_floor_seq: CommitSeq,
     },
@@ -501,9 +501,10 @@ impl CoreError {
             CoreError::PathNotFound(_) => ErrorCode::PathNotFound,
             CoreError::InodeNotFound(_) => ErrorCode::InodeNotFound,
             CoreError::RevisionNotFound { .. } => ErrorCode::RevisionNotFound,
-            CoreError::ContentTooLarge { .. }
-            | CoreError::CommitTooLarge { .. }
-            | CoreError::AppendTooLarge { .. } => ErrorCode::ContentTooLarge,
+            CoreError::ContentTooLarge { .. } | CoreError::AppendTooLarge { .. } => {
+                ErrorCode::ContentTooLarge
+            }
+            CoreError::CommitTooLarge { .. } => ErrorCode::CommitTooLarge,
             CoreError::MergeTooLarge { .. } => ErrorCode::MergeTooLarge,
             CoreError::NamespaceNotFound { .. } => ErrorCode::NamespaceNotFound,
             CoreError::PoolNotFound { .. } => ErrorCode::PoolNotFound,
@@ -526,12 +527,10 @@ impl CoreError {
             CoreError::WriterSessionClosed { .. } => ErrorCode::WriterSessionClosed,
             CoreError::ShuttingDown => ErrorCode::ShuttingDown,
             CoreError::ContentNotMaterialized { .. } => ErrorCode::ContentNotMaterialized,
-            // An over-budget publication stops before its next write and is retryable
-            // after maintenance, exactly the checkpoint_unavailable contract.
-            CoreError::CheckpointUnavailable(_)
-            | CoreError::MetadataPublicationBudgetExceeded { .. } => {
-                ErrorCode::CheckpointUnavailable
-            }
+            CoreError::SnapshotUnavailable(_) => ErrorCode::SnapshotUnavailable,
+            // An over-budget publication stops before its next write, and
+            // the next maintenance run publishes the metadata.
+            CoreError::MetadataPublicationBudgetExceeded { .. } => ErrorCode::MaintenanceRequired,
             // The deployment's read memory cannot fit this namespace's
             // collection live set; an operator raises the limit.
             CoreError::LiveSetExceedsReadMemory { .. } => ErrorCode::ServerError,
@@ -541,10 +540,11 @@ impl CoreError {
             CoreError::UploadNotFound { .. } => ErrorCode::UploadNotFound,
             CoreError::UploadAlreadyCompleted { .. } => ErrorCode::UploadAlreadyCompleted,
             CoreError::UploadContentConflict { .. } => ErrorCode::UploadContentConflict,
-            CoreError::RebootstrapRequired { .. } => ErrorCode::RebootstrapRequired,
-            CoreError::ExpectedFile { .. }
-            | CoreError::ExpectedDirectory { .. }
-            | CoreError::DestinationExists { .. } => ErrorCode::PathConflict,
+            CoreError::BelowRetentionFloor { .. } => ErrorCode::BelowRetentionFloor,
+            CoreError::ExpectedFile { .. } | CoreError::ExpectedDirectory { .. } => {
+                ErrorCode::WrongKind
+            }
+            CoreError::DestinationExists { .. } => ErrorCode::PathConflict,
             CoreError::WriterFenced(_) => ErrorCode::WriterFenced,
             CoreError::NamespaceCorrupt(_) => ErrorCode::NamespaceCorrupt,
             // Naming which operation or precondition stopped a commit says
@@ -635,7 +635,7 @@ impl CoreError {
             | CoreError::WriterSessionClosed { .. }
             | CoreError::ShuttingDown
             | CoreError::ContentNotMaterialized { .. }
-            | CoreError::CheckpointUnavailable(_)
+            | CoreError::SnapshotUnavailable(_)
             | CoreError::InvalidSnapshotRequest(_)
             | CoreError::SnapshotNotFound { .. }
             | CoreError::MetadataPublicationBudgetExceeded { .. }
@@ -647,7 +647,7 @@ impl CoreError {
             | CoreError::InvalidCursor(_)
             | CoreError::InvalidEventIndex(_)
             | CoreError::InvalidDiffRange { .. }
-            | CoreError::RebootstrapRequired { .. }
+            | CoreError::BelowRetentionFloor { .. }
             | CoreError::NamespaceCorrupt(_)
             | CoreError::WriterFenced(_)
             | CoreError::OutcomeUnknown { .. }
@@ -672,7 +672,8 @@ impl CoreError {
     /// can match the typed variants directly instead.
     pub fn details(&self) -> Option<ErrorDetails> {
         match self {
-            CoreError::NamespaceDeleted { namespace_id } => Some(ErrorDetails {
+            CoreError::NamespaceNotFound { namespace_id }
+            | CoreError::NamespaceDeleted { namespace_id } => Some(ErrorDetails {
                 namespace_id: Some(namespace_id.clone()),
                 ..ErrorDetails::default()
             }),
@@ -708,7 +709,7 @@ impl CoreError {
                 size_bytes: Some(*size_bytes),
                 ..ErrorDetails::default()
             }),
-            CoreError::RebootstrapRequired {
+            CoreError::BelowRetentionFloor {
                 below,
                 retention_floor_seq,
             } => Some(ErrorDetails {
@@ -944,10 +945,6 @@ mod tests {
         assert_eq!(
             ErrorCode::MaintenanceRequired.kind(),
             ErrorKind::Unavailable
-        );
-        assert_eq!(
-            ErrorCode::CommitOutcomeUnknown.kind(),
-            ErrorKind::OutcomeUnknown
         );
         assert_eq!(ErrorCode::OutcomeUnknown.kind(), ErrorKind::OutcomeUnknown);
         assert_eq!(

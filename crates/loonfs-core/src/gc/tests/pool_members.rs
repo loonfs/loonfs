@@ -346,7 +346,7 @@ async fn an_unreadable_member_skips_the_content_sweep_and_the_collection_sweeps_
         assert_eq!(report.deleted.content_objects, 0, "`{}`", members[corrupt]);
         assert_eq!(
             report.skipped,
-            [GcSkippedWork::ContentSweepUnreadableMember]
+            [GcSkippedWork::ContentDeletionUnreadableMember]
         );
         assert!(exists(&store, &unreferenced).await);
         assert_eq!(report.deleted.temporary_objects, 1);
@@ -369,7 +369,7 @@ async fn a_collection_past_the_pool_roots_budget_skips_the_content_sweep() {
         .await
         .expect("the late collection");
     assert_eq!(report.deleted.content_objects, 0);
-    assert_eq!(report.skipped, [GcSkippedWork::ContentSweepPoolBudget]);
+    assert_eq!(report.skipped, [GcSkippedWork::ContentDeletionPoolBudget]);
     assert!(exists(&store, &unreferenced).await);
     let report = collect_pool(&store, &pool_id, &aged).await;
     assert_eq!(report.deleted.content_objects, 1);

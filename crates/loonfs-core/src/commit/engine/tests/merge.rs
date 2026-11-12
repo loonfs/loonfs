@@ -724,7 +724,7 @@ async fn advance_floor_and_compact(
 }
 
 /// Checks that a merge is admitted while the retention floor is at its fork
-/// point, and refused with `rebootstrap_required` once the floor is above
+/// point, and refused with `below_retention_floor` once the floor is above
 /// the fork point. By then a compaction has removed the fork's merge index
 /// rows, so without the refusal the writer would expect the next merge to
 /// start at the fork point, and it would admit a merge that applies the
@@ -777,13 +777,13 @@ async fn a_merge_whose_fork_point_is_below_the_retention_floor_is_refused() {
         )
         .await
         .expect_err("a merge whose fork point is below the floor");
-        assert_eq!(error.code(), ErrorCode::RebootstrapRequired);
+        assert_eq!(error.code(), ErrorCode::BelowRetentionFloor);
         let details = error.details().expect("details");
         assert_eq!(details.fork_point_seq, Some(FORK_POINT));
         assert_eq!(details.retention_floor_seq, Some(floor));
         assert_matches!(
             error,
-            CoreError::RebootstrapRequired {
+            CoreError::BelowRetentionFloor {
                 below: crate::error::HistoryPosition::ForkPoint { fork_point_seq },
                 retention_floor_seq,
             } if fork_point_seq == FORK_POINT && retention_floor_seq == floor

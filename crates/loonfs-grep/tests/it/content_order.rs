@@ -259,7 +259,7 @@ async fn pages_after_the_first_read_at_the_cursors_head_sequence() {
 }
 
 #[tokio::test]
-async fn a_page_after_the_floor_passes_its_cursor_returns_rebootstrap_required() {
+async fn a_page_after_the_floor_passes_its_cursor_returns_below_retention_floor() {
     let fixture = ContentFixture::new("cursor-floor").await;
     fixture.put("/one.txt", b"floor needle one\n").await;
     fixture.put("/two.txt", b"floor needle two\n").await;
@@ -289,7 +289,7 @@ async fn a_page_after_the_floor_passes_its_cursor_returns_rebootstrap_required()
     )
     .await
     .expect_err("the floor passed the cursor's sequence");
-    assert_eq!(error.code(), ErrorCode::RebootstrapRequired);
+    assert_eq!(error.code(), ErrorCode::BelowRetentionFloor);
 }
 
 #[tokio::test]

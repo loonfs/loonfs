@@ -22,7 +22,7 @@ async fn deleted_namespace_uses_its_deletion_clock_without_publishing_a_manifest
         .gc(&options(), &context(deadline.now_ms - 1).clock())
         .await
         .expect("before deadline");
-    assert_eq!(waiting.reclaimable_at_ms, Some(1_000 + retirement_ms()));
+    assert_eq!(waiting.retires_at_ms, Some(1_000 + retirement_ms()));
     assert_eq!(waiting.next_reclamation_at_ms, Some(deadline.now_ms));
     let reclaimed = crate::test_support::namespace_store(&store, &namespace_id)
         .gc(&options(), &deadline.clock())
@@ -213,7 +213,7 @@ async fn open_direct_upload_outlives_retirement_and_still_gets_provider_cleanup(
         .gc(&options, &context(clock.now_ms()).clock())
         .await
         .expect("retire");
-    let deadline = report.reclaimable_at_ms.expect("deadline");
+    let deadline = report.retires_at_ms.expect("deadline");
     assert_eq!(
         deadline,
         clock.now_ms() + NAMESPACE_RETIREMENT_GRACE_WINDOW_MS

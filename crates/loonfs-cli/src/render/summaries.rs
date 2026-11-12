@@ -163,7 +163,7 @@ pub(super) fn gc_summary(report: &GcResponse) -> String {
         report.retained.total(),
         report.retained.top_reason(),
     );
-    if let Some(deadline) = report.reclaimable_at_ms {
+    if let Some(deadline) = report.retires_at_ms {
         summary.push_str(&format!(
             "\nnamespace can be retired at or after {} after snapshot cleanup; only fork snapshots can hold it beyond this deadline",
             format_utc_ms(deadline)
@@ -194,10 +194,10 @@ pub(super) fn pool_gc_summary(report: &PoolGcResponse) -> String {
     }
     lines.extend(report.skipped.iter().map(|reason| {
         match reason {
-            GcSkippedWork::ContentSweepPoolBudget => {
+            GcSkippedWork::ContentDeletionPoolBudget => {
                 "skipped the content sweep: the collection couldn't read every pool member's roots within its budget"
             }
-            GcSkippedWork::ContentSweepUnreadableMember => {
+            GcSkippedWork::ContentDeletionUnreadableMember => {
                 "skipped the content sweep: the collection couldn't read one pool member's roots"
             }
             GcSkippedWork::Unknown => "skipped work for a reason unknown to this CLI",

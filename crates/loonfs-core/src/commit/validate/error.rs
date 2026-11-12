@@ -183,9 +183,9 @@ impl CommitValidationError {
             Self::UpdateAccessBaseRevisionMismatch { .. } => ErrorCode::StaleAccess,
             Self::UpdateAccessRevisionOverflow { .. } => ErrorCode::ServerError,
             Self::NameTaken { .. }
-            | Self::InodeWrongKind { .. }
             | Self::BindingPreconditionMissing { .. }
             | Self::BindingPreconditionMismatch { .. } => ErrorCode::PathConflict,
+            Self::InodeWrongKind { .. } => ErrorCode::WrongKind,
             Self::DirectoryNotEmpty { .. } => ErrorCode::DirectoryNotEmpty,
             Self::InodeMissing { .. } => ErrorCode::PathNotFound,
             Self::RestoreDeletedTargetNotDeleted { .. }

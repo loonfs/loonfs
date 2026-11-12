@@ -105,7 +105,7 @@ pub enum NextMergeRangeOutcome {
         next_after_seq: CommitSeq,
     },
     /// The range starts below the fork's own retention floor, so a merge of the fork returns
-    /// `rebootstrap_required`, because the fork no longer keeps the history that the merge's net
+    /// `below_retention_floor`, because the fork no longer keeps the history that the merge's net
     /// change needs.
     RangeStartBelowFloor {
         /// The fork's newest merge into the namespace, as for `open`. It's absent before the
@@ -119,7 +119,7 @@ pub enum NextMergeRangeOutcome {
         retention_floor_seq: CommitSeq,
     },
     /// The fork point is below the namespace's retention floor, so a merge of the fork returns
-    /// `rebootstrap_required`. The outcome doesn't say where the next merge would start, because
+    /// `below_retention_floor`. The outcome doesn't say where the next merge would start, because
     /// a compaction might have removed the fork's newest merge from the namespace's merge index.
     ForkPointBelowFloor {
         /// The namespace's retention floor, which is above the fork point (for a rebase's new

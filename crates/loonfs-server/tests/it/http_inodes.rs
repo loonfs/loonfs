@@ -258,7 +258,7 @@ async fn http_inode_read_errors_use_identity_codes_and_root_is_nameless() {
             .page()
             .await,
         409,
-        ErrorCode::PathConflict,
+        ErrorCode::WrongKind,
     );
     assert_api_code(
         harness
@@ -266,7 +266,7 @@ async fn http_inode_read_errors_use_identity_codes_and_root_is_nameless() {
             .read_file_by_inode(&namespace, directory_id)
             .await,
         409,
-        ErrorCode::PathConflict,
+        ErrorCode::WrongKind,
     );
     for result in [
         harness
@@ -542,7 +542,7 @@ async fn http_inode_children_errors_use_directory_identity_codes() {
             .page()
             .await,
         409,
-        ErrorCode::PathConflict,
+        ErrorCode::WrongKind,
     );
 
     harness

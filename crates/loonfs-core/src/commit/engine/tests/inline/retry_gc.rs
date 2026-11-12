@@ -38,7 +38,7 @@ async fn inline_retry_after_lost_ack_and_wal_collection_replays_the_original_com
         .pop()
         .expect("result")
         .expect_err("the successful write has an unknown outcome");
-    assert_eq!(error.code(), ErrorCode::CommitOutcomeUnknown);
+    assert_eq!(error.code(), ErrorCode::OutcomeUnknown);
     assert_eq!(failed.attempts(), 1);
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let view = namespace

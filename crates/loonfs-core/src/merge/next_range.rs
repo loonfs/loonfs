@@ -16,7 +16,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// The range starts where [`Self::plan_merge`] would start it, or where
     /// [`Self::plan_replay`] would when this namespace is a rebase's new fork
     /// for `fork`. When a retention floor would refuse the merge with
-    /// `rebootstrap_required`, the response's outcome says which floor
+    /// `below_retention_floor`, the response's outcome says which floor
     /// instead. When the fork point is below this namespace's floor, the
     /// outcome has no start, because the merge index might no longer list
     /// the fork's newest merge. A namespace that isn't a fork of this

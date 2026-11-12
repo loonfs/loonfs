@@ -163,7 +163,7 @@ pub struct GcResponse {
     /// The deletion time of the current tombstone plus the configured retirement grace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
-    pub reclaimable_at_ms: Option<u64>,
+    pub retires_at_ms: Option<u64>,
 }
 
 /// The result of one stateless garbage collection call on a pool.
@@ -196,9 +196,9 @@ pub struct PoolGcResponse {
 pub enum GcSkippedWork {
     /// The collection deleted no content objects, because it couldn't read every pool member's
     /// roots within its budget.
-    ContentSweepPoolBudget,
+    ContentDeletionPoolBudget,
     /// The collection deleted no content objects, because it couldn't read one pool member's roots.
-    ContentSweepUnreadableMember,
+    ContentDeletionUnreadableMember,
     /// A reason from a newer server.
     #[serde(other)]
     Unknown,
@@ -215,7 +215,7 @@ impl GcResponse {
             retained: RetainedCandidates::default(),
             listed_bytes: 0,
             next_reclamation_at_ms: None,
-            reclaimable_at_ms: None,
+            retires_at_ms: None,
         }
     }
 
@@ -426,7 +426,7 @@ mod tests {
         let gc = GcResponse::empty(NamespaceId::parse("demo").expect("namespace id"));
         let gc_json = serde_json::to_value(gc).expect("serialize gc response");
         assert!(gc_json.get("next_reclamation_at_ms").is_none());
-        assert!(gc_json.get("reclaimable_at_ms").is_none());
+        assert!(gc_json.get("retires_at_ms").is_none());
         assert!(gc_json.get("skipped").is_none());
         assert_eq!(
             gc_json["deleted_snapshots_by_owner"],
@@ -436,15 +436,15 @@ mod tests {
         let gc: GcResponse =
             serde_json::from_value(gc_json).expect("decode gc response without optional fields");
         assert_eq!(gc.next_reclamation_at_ms, None);
-        assert_eq!(gc.reclaimable_at_ms, None);
+        assert_eq!(gc.retires_at_ms, None);
         let retired = GcResponse {
             listed_bytes: 4_096,
-            reclaimable_at_ms: Some(2_000_000),
+            retires_at_ms: Some(2_000_000),
             ..gc
         };
         let json = serde_json::to_value(&retired).expect("encode retirement");
         assert_eq!(json["listed_bytes"], 4_096);
-        assert_eq!(json["reclaimable_at_ms"], 2_000_000);
+        assert_eq!(json["retires_at_ms"], 2_000_000);
         assert_eq!(json["deleted"]["extension_segments"], 0);
         assert_eq!(
             serde_json::from_value::<GcResponse>(json).expect("decode retirement"),
@@ -465,28 +465,28 @@ mod tests {
         );
         let skipped = PoolGcResponse {
             listed_bytes: 4_096,
-            skipped: vec![GcSkippedWork::ContentSweepPoolBudget],
+            skipped: vec![GcSkippedWork::ContentDeletionPoolBudget],
             ..gc
         };
         let json = serde_json::to_value(&skipped).expect("encode skipped work");
         assert_eq!(json["listed_bytes"], 4_096);
         assert_eq!(
             json["skipped"],
-            serde_json::json!(["content_sweep_pool_budget"])
+            serde_json::json!(["content_deletion_pool_budget"])
         );
         assert_eq!(
             serde_json::from_value::<PoolGcResponse>(json).expect("decode skipped work"),
             skipped
         );
         let newer: Vec<GcSkippedWork> = serde_json::from_value(serde_json::json!([
-            "content_sweep_unreadable_member",
+            "content_deletion_unreadable_member",
             "a_newer_limit"
         ]))
         .expect("decode a reason from a newer server");
         assert_eq!(
             newer,
             [
-                GcSkippedWork::ContentSweepUnreadableMember,
+                GcSkippedWork::ContentDeletionUnreadableMember,
                 GcSkippedWork::Unknown
             ]
         );

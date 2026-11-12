@@ -529,7 +529,7 @@ impl<M: crate::Mode> Namespace<M> {
     /// next page, pass the returned `to_seq` and `next_after_seq` as
     /// `options.to_seq` and `options.after_seq`. A `from_seq` below the
     /// retention floor of the head that a page reads returns
-    /// `rebootstrap_required`. A `to_seq` above that head returns
+    /// `below_retention_floor`. A `to_seq` above that head returns
     /// `invalid_request`, so a caller that gets this error from an eventual
     /// page reads the page again with [`Consistency::Strong`].
     pub async fn diff_with_options(

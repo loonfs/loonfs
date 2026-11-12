@@ -2,7 +2,7 @@
 //! that keep their reservation, merges from a source that isn't a live fork,
 //! and merges on a runtime that has merges turned off.
 
-use super::{missing_fork, MergeOutcome, PlannedCommit, PlannedMerge};
+use super::{MergeOutcome, PlannedCommit, PlannedMerge};
 use crate::publish::{CommitIntent, FilesystemOperation};
 use crate::publisher::MergeReservation;
 use crate::{
@@ -925,13 +925,13 @@ async fn a_second_plan_after_another_merge_is_a_range_conflict() {
     assert_eq!(error.code(), ErrorCode::MergeRangeConflict);
 }
 
-/// Checks that a source that doesn't exist, and a fork that was deleted,
-/// return `invalid_request` with `param` set to the request's field, and that
-/// the merge leaves the session of the namespace it merges into open. A
-/// retry of a merge that committed before the fork was deleted still
-/// returns the merge.
+/// Checks that a source that doesn't exist returns `namespace_not_found`, and
+/// a fork that was deleted returns `namespace_deleted`, each with
+/// `namespace_id` set to the source, and that the merge leaves the session of
+/// the namespace it merges into open. A retry of a merge that committed
+/// before the fork was deleted still returns the merge.
 #[tokio::test]
-async fn a_source_that_isnt_a_live_fork_is_an_invalid_request() {
+async fn a_source_that_isnt_a_live_fork_returns_the_sources_error() {
     let family = family().await;
     let missing = namespace_id("missing");
     let options = MergeForkOptions {
@@ -950,16 +950,22 @@ async fn a_source_that_isnt_a_live_fork_is_an_invalid_request() {
         .await
         .expect("a retry after the delete");
     assert_eq!(retried, merged);
-    for source in [&missing, family.fork.id()] {
+    for (source, code) in [
+        (&missing, ErrorCode::NamespaceNotFound),
+        (family.fork.id(), ErrorCode::NamespaceDeleted),
+    ] {
         let error = family
             .main
             .merge_fork(source, &actor())
             .await
             .expect_err("not a live fork");
-        assert_eq!(error.code(), ErrorCode::InvalidRequest, "{source}");
+        assert_eq!(error.code(), code, "{source}");
         assert_eq!(
-            error.invalid_request_param().as_deref(),
-            Some("source_namespace_id"),
+            error
+                .details()
+                .and_then(|details| details.namespace_id)
+                .as_ref(),
+            Some(source),
             "{source}"
         );
     }
@@ -969,32 +975,4 @@ async fn a_source_that_isnt_a_live_fork_is_an_invalid_request() {
         .put_file("/after.txt", b"after", &actor())
         .await
         .expect("main still takes writes");
-}
-
-/// Checks that only an error about the fork becomes `invalid_request`. The
-/// same error about the namespace that the merge commits into stays as it
-/// is, so the server's handling of a deleted namespace still applies to it.
-#[test]
-fn only_the_forks_absence_is_an_invalid_request() {
-    let fork = namespace_id("fork");
-    let main = namespace_id("main");
-    for namespace_id in [fork.clone(), main] {
-        for error in [
-            CoreError::NamespaceNotFound {
-                namespace_id: namespace_id.clone(),
-            },
-            CoreError::NamespaceDeleted {
-                namespace_id: namespace_id.clone(),
-            },
-        ] {
-            let code = error.code();
-            let mapped = missing_fork(&fork, error.into());
-            let expected = if namespace_id == fork {
-                ErrorCode::InvalidRequest
-            } else {
-                code
-            };
-            assert_eq!(mapped.code(), expected, "{namespace_id}");
-        }
-    }
 }

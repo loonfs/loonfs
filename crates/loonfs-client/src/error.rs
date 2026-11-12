@@ -145,7 +145,7 @@ mod tests {
             ("stale_revision", ErrorCode::StaleRevision),
             ("content_not_prepared", ErrorCode::ContentNotPrepared),
             ("namespace_deleted", ErrorCode::NamespaceDeleted),
-            ("commit_outcome_unknown", ErrorCode::CommitOutcomeUnknown),
+            ("outcome_unknown", ErrorCode::OutcomeUnknown),
             ("index_corrupt", ErrorCode::IndexCorrupt),
         ] {
             assert_eq!(api_error(500, wire).code(), Some(expected));

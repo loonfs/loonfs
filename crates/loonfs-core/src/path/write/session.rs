@@ -218,7 +218,7 @@ impl<'a, S: ObjectStore + ?Sized> PublishPlanningSession<'a, S> {
             if let CreatedInodeIds::Merge(Some(inode_id)) = operation_session.created_inode_ids {
                 // Only a bug in the merge's planner assigns an ID to an
                 // operation that creates no inode. A panic would return
-                // `commit_outcome_unknown` and panic again on every retry, so
+                // `outcome_unknown` and panic again on every retry, so
                 // the merge fails with an error that the caller doesn't retry.
                 return Err(CoreError::InvalidCommitRequest(format!(
                     "a merge assigned inode `{inode_id}` to an operation that creates no inode"

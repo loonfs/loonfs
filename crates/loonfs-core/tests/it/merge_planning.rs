@@ -1875,12 +1875,12 @@ async fn a_reused_commit_id_with_another_request_conflicts() {
 }
 
 /// Checks that a merge that needs history below a retention floor returns
-/// `rebootstrap_required`, and that the details say which floor: `main`'s
+/// `below_retention_floor`, and that the details say which floor: `main`'s
 /// floor above the fork point, or the fork's own floor above the range's
 /// start. The next-range query reports which floor refuses the merge, and
 /// no start when the fork point is below `main`'s floor.
 #[tokio::test]
-async fn a_merge_below_either_floor_needs_a_rebootstrap() {
+async fn a_merge_below_either_floor_returns_below_retention_floor() {
     let family = Family::new().await;
     let fork_point = resolve_path(&family.store, &family.main, "/")
         .await
@@ -1902,7 +1902,7 @@ async fn a_merge_below_either_floor_needs_a_rebootstrap() {
         .merge("main-floor", None)
         .await
         .expect_err("main's floor");
-    assert_eq!(error.code(), ErrorCode::RebootstrapRequired);
+    assert_eq!(error.code(), ErrorCode::BelowRetentionFloor);
     let details = error.details().expect("details");
     assert_eq!(details.fork_point_seq, Some(fork_point));
     assert_eq!(details.retention_floor_seq, Some(floor));
@@ -1931,7 +1931,7 @@ async fn a_merge_below_either_floor_needs_a_rebootstrap() {
         .merge("fork-floor", None)
         .await
         .expect_err("fork's floor");
-    assert_eq!(error.code(), ErrorCode::RebootstrapRequired);
+    assert_eq!(error.code(), ErrorCode::BelowRetentionFloor);
     let details = error.details().expect("details");
     assert_eq!(details.source_namespace_id, Some(family.fork.clone()));
     assert_eq!(details.source_after_seq, Some(fork_point));

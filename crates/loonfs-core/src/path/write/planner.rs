@@ -93,7 +93,7 @@ impl<S: ObjectStore + ?Sized> OperationPlanningSession<'_, S> {
     /// A merge whose operation creates an inode without an assigned ID, or
     /// more than one inode, fails with `InvalidCommitRequest`. Only a bug in
     /// the merge's planner causes that. A panic would return
-    /// `commit_outcome_unknown` and panic again on every retry, so the merge
+    /// `outcome_unknown` and panic again on every retry, so the merge
     /// fails with an error that the caller doesn't retry.
     pub(super) fn next_inode_id(&mut self) -> Result<InodeId> {
         match &mut self.created_inode_ids {

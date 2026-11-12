@@ -388,8 +388,10 @@ async fn http_maintenance_snapshot_and_retention_are_idempotent_and_soft() {
     assert_eq!(bytes, b"hello maintenance\n");
 
     match client.list_changes(&namespace, CommitSeq(0)).page().await {
-        Err(ClientError::Api { response, .. }) => assert_eq!(response.code, "rebootstrap_required"),
-        other => panic!("expected rebootstrap_required, got {other:?}"),
+        Err(ClientError::Api { response, .. }) => {
+            assert_eq!(response.code, "below_retention_floor")
+        }
+        other => panic!("expected below_retention_floor, got {other:?}"),
     }
 
     let empty = client

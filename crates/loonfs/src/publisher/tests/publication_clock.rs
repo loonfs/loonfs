@@ -110,7 +110,7 @@ async fn runtime_retry_preserves_uncertainty_when_the_content_proof_expires() {
     let error = publish_after_retry_delay(5, false)
         .await
         .expect_err("an expired proof cannot resolve the earlier publication outcome");
-    assert_eq!(error.code(), ErrorCode::CommitOutcomeUnknown);
+    assert_eq!(error.code(), ErrorCode::OutcomeUnknown);
 }
 
 #[tokio::test]

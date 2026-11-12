@@ -1360,7 +1360,7 @@ async fn publisher_resolves_unknown_head_outcome_by_replaying_receipt() {
 
     // The commit is written but the CAS acknowledgement is lost. The publisher
     // retries with the same commit id and replays the durable receipt
-    // instead of reporting `commit_outcome_unknown` to the waiter.
+    // instead of reporting `outcome_unknown` to the waiter.
     store.fail_next(1);
     let response = recv_commit(
         admit_commit(
@@ -1378,7 +1378,7 @@ async fn publisher_resolves_unknown_head_outcome_by_replaying_receipt() {
 /// publisher publishes another candidate of its batch again. A replay of a
 /// committed request settles from its receipt, the new commit's WAL put is
 /// written but loses its answer, and every later request to the namespace
-/// fails, so the new commit stays `commit_outcome_unknown`.
+/// fails, so the new commit stays `outcome_unknown`.
 #[tokio::test]
 async fn a_failed_retry_keeps_the_result_a_batch_already_settled() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1434,7 +1434,7 @@ async fn a_failed_retry_keeps_the_result_a_batch_already_settled() {
         .await
         .expect("unresolved receiver")
         .expect_err("the lost answer stays unknown");
-    assert_eq!(error.code(), ErrorCode::CommitOutcomeUnknown);
+    assert_eq!(error.code(), ErrorCode::OutcomeUnknown);
     assert_eq!(
         recv_commit(replay, "replay").await.committed_seq,
         first.committed_seq,
@@ -1477,7 +1477,7 @@ async fn publisher_survives_publish_panic_and_keeps_serving() {
         .await
         .expect("doomed waiter is answered, not abandoned")
         .expect_err("doomed commit did not complete");
-    assert_eq!(doomed_error.code(), ErrorCode::CommitOutcomeUnknown);
+    assert_eq!(doomed_error.code(), ErrorCode::OutcomeUnknown);
 
     let queued_response = recv_commit(queued, "queued").await;
     assert_eq!(queued_response.committed_seq, CommitSeq(1));
@@ -2225,7 +2225,7 @@ async fn worker_survives_panic_and_processes_later_queue_items() {
         .await
         .expect("doomed submit task")
         .expect_err("doomed commit did not complete");
-    assert_eq!(doomed_error.code(), ErrorCode::CommitOutcomeUnknown);
+    assert_eq!(doomed_error.code(), ErrorCode::OutcomeUnknown);
     let queued_response = queued
         .await
         .expect("queued submit task")

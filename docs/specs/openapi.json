@@ -2662,8 +2662,8 @@
       "GcSkippedWork": {
         "description": "A part of a collection of a pool that the collection skipped.",
         "enum": [
-          "content_sweep_pool_budget",
-          "content_sweep_unreadable_member"
+          "content_deletion_pool_budget",
+          "content_deletion_unreadable_member"
         ],
         "type": "string"
       },
@@ -3543,7 +3543,7 @@
         "type": "object"
       },
       "NextMergeRangeOutcomeForkPointBelowFloor": {
-        "description": "The fork point is below the namespace's retention floor, so a merge of the fork returns\n`rebootstrap_required`. The outcome doesn't say where the next merge would start, because\na compaction might have removed the fork's newest merge from the namespace's merge index.",
+        "description": "The fork point is below the namespace's retention floor, so a merge of the fork returns\n`below_retention_floor`. The outcome doesn't say where the next merge would start, because\na compaction might have removed the fork's newest merge from the namespace's merge index.",
         "properties": {
           "fork_point_seq": {
             "$ref": "#/components/schemas/CommitSeq",
@@ -3609,7 +3609,7 @@
         "type": "object"
       },
       "NextMergeRangeOutcomeRangeStartBelowFloor": {
-        "description": "The range starts below the fork's own retention floor, so a merge of the fork returns\n`rebootstrap_required`, because the fork no longer keeps the history that the merge's net\nchange needs.",
+        "description": "The range starts below the fork's own retention floor, so a merge of the fork returns\n`below_retention_floor`, because the fork no longer keeps the history that the merge's net\nchange needs.",
         "properties": {
           "fork_point_seq": {
             "$ref": "#/components/schemas/CommitSeq",
@@ -4343,15 +4343,15 @@
             "minimum": 0,
             "type": "integer"
           },
-          "reclaimable_at_ms": {
+          "retained": {
+            "$ref": "#/components/schemas/RetainedCandidates",
+            "description": "The candidates that the collection kept at deletion time, counted by reason."
+          },
+          "retires_at_ms": {
             "description": "The deletion time of the current tombstone plus the configured retirement grace.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
-          },
-          "retained": {
-            "$ref": "#/components/schemas/RetainedCandidates",
-            "description": "The candidates that the collection kept at deletion time, counted by reason."
           }
         },
         "required": [
@@ -9288,7 +9288,7 @@
     },
     "/v0/namespaces/{namespace_id}/merges": {
       "get": {
-        "description": "Returns where the fork's next merge into the namespace starts, without planning the merge: the fork's newest merge into the namespace, the fork sequence that the next merge starts after, the fork point, and the fork's head. When the namespace is a rebase's new fork for the fork, the range continues the new fork's replay commits. When a retention floor would refuse the merge with `rebootstrap_required`, the response's `outcome` says which floor instead of failing.",
+        "description": "Returns where the fork's next merge into the namespace starts, without planning the merge: the fork's newest merge into the namespace, the fork sequence that the next merge starts after, the fork point, and the fork's head. When the namespace is a rebase's new fork for the fork, the range continues the new fork's replay commits. When a retention floor would refuse the merge with `below_retention_floor`, the response's `outcome` says which floor instead of failing.",
         "operationId": "get_next_merge_range",
         "parameters": [
           {
@@ -9359,7 +9359,7 @@
                 }
               }
             },
-            "description": "Namespace not found"
+            "description": "The namespace or the fork doesn't exist, and `details.namespace_id` identifies which"
           },
           "410": {
             "content": {
@@ -9369,7 +9369,7 @@
                 }
               }
             },
-            "description": "Namespace deleted"
+            "description": "The namespace or the fork was deleted, and `details.namespace_id` identifies which"
           },
           "501": {
             "content": {
@@ -9469,7 +9469,7 @@
                 }
               }
             },
-            "description": "Namespace not found"
+            "description": "The namespace or the fork doesn't exist, and `details.namespace_id` identifies which"
           },
           "409": {
             "content": {
@@ -9489,7 +9489,7 @@
                 }
               }
             },
-            "description": "Namespace deleted"
+            "description": "The namespace or the fork was deleted, and `details.namespace_id` identifies which"
           },
           "413": {
             "content": {
@@ -9601,7 +9601,7 @@
                 }
               }
             },
-            "description": "Namespace not found"
+            "description": "The namespace or the fork doesn't exist, and `details.namespace_id` identifies which"
           },
           "409": {
             "content": {
@@ -9621,7 +9621,7 @@
                 }
               }
             },
-            "description": "Namespace deleted"
+            "description": "The namespace or the fork was deleted, and `details.namespace_id` identifies which"
           },
           "413": {
             "content": {
