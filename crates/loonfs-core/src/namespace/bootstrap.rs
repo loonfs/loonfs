@@ -36,13 +36,13 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         let clock = self.namespace.start_clock();
         let pool = PoolPayload {
             pool_id: PoolId::generate(),
-            first_member_id: self.namespace.namespace_id.clone(),
+            first_member_namespace_id: self.namespace.namespace_id.clone(),
             created_at_ms: clock.request_at_ms(),
         };
         let start = NamespaceManifestPayload {
             retention_window_ms: options.retention_window_ms,
             ..NamespaceManifestPayload::initial(
-                pool.first_member_id.clone(),
+                pool.first_member_namespace_id.clone(),
                 pool.pool_id.clone(),
                 pool.created_at_ms,
                 actor_id.clone(),

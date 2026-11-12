@@ -416,7 +416,7 @@ pub struct PoolPayload {
     /// The pool that the record describes.
     pub pool_id: PoolId,
     /// The namespace that was created with the pool, the pool's first member.
-    pub first_member_id: NamespaceId,
+    pub first_member_namespace_id: NamespaceId,
     /// The create call's request clock, in unix milliseconds.
     pub created_at_ms: u64,
 }

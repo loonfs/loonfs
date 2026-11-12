@@ -1785,7 +1785,7 @@ A [pool's](glossary.md#pool) content objects are stored under the pool's prefix,
 
 Garbage collection considers every other content object under the pool's content prefix (`pools/{pool_id}/content/`) for deletion once its provider age is at least `T`. It keeps an object younger than `T`, and a key that doesn't parse as a content object key. A namespace's collection lists no content, and the pool's collection collects the pool's content whether its members are active or deleted (see [Retirement](#95-retirement)).
 
-The pool record identifies the pool's first member (`first_member_id`). The members of the pool are the first member and every namespace forked from a member. The collection finds them by walking fork pins. The first member's fork pins identify its first-generation forks, and a fork of a fork pins the fork it was created from, not the first member. So the collection lists the pins of each member in turn. Each fork pin in a listing adds the pin's target (`owner.target_namespace_id`) to the members, and the walk ends when a listing adds no new member. The collection lists each member's pins once, and that listing also finds the manifests that the member's pins keep.
+The pool record identifies the pool's first member (`first_member_namespace_id`). The members of the pool are the first member and every namespace forked from a member. The collection finds them by walking fork pins. The first member's fork pins identify its first-generation forks, and a fork of a fork pins the fork it was created from, not the first member. So the collection lists the pins of each member in turn. Each fork pin in a listing adds the pin's target (`owner.target_namespace_id`) to the members, and the walk ends when a listing adds no new member. The collection lists each member's pins once, and that listing also finds the manifests that the member's pins keep.
 
 A member's content references count as roots until the member is retired. A deleted member's tombstone keeps its runs, and only the member's own collection deletes the member's source pin, when it retires the member (see [Pin cleanup](#117-pin-cleanup)). So until the member is retired, the walk finds the member, and the collection reads the tombstone as one of the member's layout views. Retirement comes at least `NAMESPACE_RETIREMENT_GRACE_WINDOW_MS` after the deletion (see [Retirement](#95-retirement)). The collection MUST read the roots of every member within the retirement grace less the combined allowance (`POOL_ROOTS_READ_BUDGET_MS`, which is `NAMESPACE_RETIREMENT_GRACE_WINDOW_MS - GC_SAFETY_MARGIN_MS`, see [Clock and operation assumptions](#114-clock-and-operation-assumptions)), measured as monotonic time elapsed since the collection captured its `now_ms`. A collection that hasn't read every member's roots by then deletes no content objects, and it reports `content_sweep_pool_budget` as skipped work.
 
@@ -2048,7 +2048,7 @@ These tables list the durable payload fields. The protocol sections define how t
 | Pin record | `namespace_id`, `pin_id`, `head_seq`, `payload_checksum`, `created_at_ms`, `owner` |
 | Upload session record | `namespace_id`, `upload_id`, `content_id`, optional `subject_id`, `mode`, `expires_at_ms` |
 | Upload outcome record | `namespace_id`, `upload_id`, `outcome` |
-| Pool record | `pool_id`, `first_member_id`, `created_at_ms` |
+| Pool record | `pool_id`, `first_member_namespace_id`, `created_at_ms` |
 
 Namespace status is `{"kind":"active"}`, or `{"kind":"deleted"}` with a required `deleted_at_ms` (only on the deleted variant). A missing status is invalid. The genesis commit ID is `c_00000000000000000000000000000000`.
 
@@ -2059,7 +2059,7 @@ Pin owners have the fields in [Records and owners](#81-records-and-owners), and 
 
 Both upload records are stored under the prefix of the pool of the namespace that created the session (see [Object keys](#a8-object-keys)), and their `namespace_id` is that namespace.
 
-A pool record is stored under the prefix of its pool, and its `pool_id` MUST match the key. Its `first_member_id` is the namespace that was created with the pool, and its `created_at_ms` is that create call's request clock (see [Creating a namespace](#91-creating-a-namespace)).
+A pool record is stored under the prefix of its pool, and its `pool_id` MUST match the key. Its `first_member_namespace_id` is the namespace that was created with the pool, and its `created_at_ms` is that create call's request clock (see [Creating a namespace](#91-creating-a-namespace)).
 
 A namespace manifest contains:
 

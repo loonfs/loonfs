@@ -99,7 +99,7 @@ struct MemberRead {
 
 impl PoolRoots {
     /// Lists the pool's upload sessions, and then reads the roots of every
-    /// member, starting from `first_member_id`, whose current manifest is
+    /// member, starting from `first_member_namespace_id`, whose current manifest is
     /// `first_current`.
     ///
     /// The sessions, content IDs, layout segments, and members that the
@@ -108,7 +108,7 @@ impl PoolRoots {
     /// a completed session that `session_cache` has.
     pub(super) async fn load<S: ObjectStore>(
         pool: &PoolStore<S>,
-        first_member_id: &NamespaceId,
+        first_member_namespace_id: &NamespaceId,
         first_current: Result<(LoadedManifest, LoadedHint)>,
         observed: Observation,
         session_cache: Option<&CompletedUploadSessionCache>,
@@ -155,7 +155,13 @@ impl PoolRoots {
             })
             .await?;
             roots
-                .load_members(pool, first_member_id, first_current, observed, clock)
+                .load_members(
+                    pool,
+                    first_member_namespace_id,
+                    first_current,
+                    observed,
+                    clock,
+                )
                 .await
         }
         .await;
@@ -187,7 +193,7 @@ impl PoolRoots {
     async fn load_members<S: ObjectStore>(
         &mut self,
         pool: &PoolStore<S>,
-        first_member_id: &NamespaceId,
+        first_member_namespace_id: &NamespaceId,
         first_current: Result<(LoadedManifest, LoadedHint)>,
         observed: Observation,
         clock: &OperationClock,
@@ -195,16 +201,16 @@ impl PoolRoots {
         // The first member is found before its pin listing, so that a fork pin
         // can't add it to the walk's queue.
         self.members
-            .insert(first_member_id.clone(), MemberState::Found)?;
+            .insert(first_member_namespace_id.clone(), MemberState::Found)?;
         self.walk.members = 1;
         let walked = async {
-            let first = pool.member(first_member_id.clone());
+            let first = pool.member(first_member_namespace_id.clone());
             let read = self.read_member(&first, first_current?, observed).await?;
             if read.status != RetirementStatus::Eligible {
                 self.protect_layout_segments(&read.current)?;
             }
             self.members.insert(
-                first_member_id.clone(),
+                first_member_namespace_id.clone(),
                 MemberState::Read {
                     status: read.status,
                 },
