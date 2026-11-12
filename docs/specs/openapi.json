@@ -351,8 +351,8 @@
         "type": "object"
       },
       "CommitId": {
-        "description": "The client's idempotency key for one logical commit.\n\nReuse the same commit ID when you retry the same request. A commit ID is 1 to 128 lowercase\nASCII letters, digits, dots, underscores, or hyphens, and it starts with a letter or digit.\nGenerated commit IDs have the form `c_` followed by 26 lowercase Crockford base 32\ncharacters, but callers can supply any value that follows these rules.",
-        "example": "c_7kn71d9dq885x91hejz3gvf9p0",
+        "description": "The client's idempotency key for one logical commit.\n\nReuse the same commit ID when you retry the same request. A commit ID is 1 to 128 lowercase\nASCII letters, digits, dots, underscores, or hyphens, and it starts with a letter or digit.\nGenerated commit IDs have the form `cmt_` followed by 26 lowercase Crockford base 32\ncharacters, but callers can supply any value that follows these rules.",
+        "example": "cmt_7kn71d9dq885x91hejz3gvf9p0",
         "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$",
         "type": "string"
       },

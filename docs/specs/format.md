@@ -353,9 +353,9 @@ namespaces/{namespace_id}/
 ├── hint.json
 ├── manifests/{manifest_no:020}.json.zst
 ├── wal/{wal_no:020}.wal.zst
-├── segments/{segment_id}.sst.zst
+├── segments/{segment_id}.sst
 ├── snapshots/{snapshot_id}.json
-└── extensions/{extension_name}/segments/{segment_id}.sst.zst
+└── extensions/{extension_name}/segments/{segment_id}.sst
 
 pools/{pool_id}/
 ├── pool.json
@@ -1908,7 +1908,7 @@ The manifest's `extensions` member maps each extension's name to the extension's
 Core copies the entry's other members unchanged, as JSON values that it doesn't interpret, and the extension's own specification defines them. An extension's segments are stored under the prefix of the namespace that wrote them:
 
 ```text
-namespaces/{owner_namespace_id}/extensions/{extension_name}/segments/{segment_id}.sst.zst
+namespaces/{owner_namespace_id}/extensions/{extension_name}/segments/{segment_id}.sst
 ```
 
 Core handles an entry like this:
@@ -2050,7 +2050,7 @@ These tables list the durable payload fields. The protocol sections define how t
 | Upload outcome record | `namespace_id`, `upload_id`, `outcome` |
 | Pool record | `pool_id`, `first_member_id`, `created_at_ms` |
 
-Namespace status is `{"kind":"active"}`, or `{"kind":"deleted"}` with a required `deleted_at_ms` (only on the deleted variant). A missing status is invalid. The genesis commit ID is `c_00000000000000000000000000000000`.
+Namespace status is `{"kind":"active"}`, or `{"kind":"deleted"}` with a required `deleted_at_ms` (only on the deleted variant). A missing status is invalid. The genesis commit ID is `cmt_00000000000000000000000000`.
 
 Snapshot owners have the fields in [Records and owners](#81-records-and-owners), and a snapshot has no status field. Upload records use these tagged variants, and both use `kind` tags:
 
@@ -2402,8 +2402,8 @@ These patterns define the core object families. A segment's owner can be differe
 | WAL objects | `namespaces/{namespace_id}/wal/{wal_no:020}.wal.zst` |
 | Namespace manifests | `namespaces/{namespace_id}/manifests/{manifest_no:020}.json.zst` |
 | Snapshot records | `namespaces/{namespace_id}/snapshots/{snapshot_id}.json` |
-| Metadata segments | `namespaces/{owner_namespace_id}/segments/{segment_id}.sst.zst` |
-| Extension segments | `namespaces/{owner_namespace_id}/extensions/{extension_name}/segments/{segment_id}.sst.zst` |
+| Metadata segments | `namespaces/{owner_namespace_id}/segments/{segment_id}.sst` |
+| Extension segments | `namespaces/{owner_namespace_id}/extensions/{extension_name}/segments/{segment_id}.sst` |
 | Upload sessions | `pools/{pool_id}/uploads/{upload_id}.json` |
 | Upload outcomes | `pools/{pool_id}/uploads/{upload_id}.outcome.json` |
 | Hint | `namespaces/{namespace_id}/hint.json` |

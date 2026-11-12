@@ -613,7 +613,7 @@ async fn grep_answers_identically_across_tiered_reorganizations() {
 }
 
 fn index_segment_keys() -> KeyPredicate {
-    KeyPredicate::new(|key| key.contains("/extensions/grep/segments/") && key.ends_with(".sst.zst"))
+    KeyPredicate::new(|key| key.contains("/extensions/grep/segments/") && key.ends_with(".sst"))
 }
 
 #[tokio::test]
