@@ -268,20 +268,20 @@ pub fn namespace_store_with_segment_cache<S>(
     }
 }
 
-/// Writes the record of `pool_id` with `first_member_id` as its first member,
+/// Writes the record of `pool_id` with `first_member_namespace_id` as its first member,
 /// created at `created_at_ms`, for a test that writes a namespace's first
 /// manifest without a create call.
 #[cfg(test)]
 pub(crate) async fn write_pool_record<S: ObjectStore>(
     store: S,
     pool_id: &PoolId,
-    first_member_id: &NamespaceId,
+    first_member_namespace_id: &NamespaceId,
     created_at_ms: u64,
 ) {
-    namespace_store(store, first_member_id)
+    namespace_store(store, first_member_namespace_id)
         .write_pool_record(&loonfs_types::format::control::PoolPayload {
             pool_id: pool_id.clone(),
-            first_member_id: first_member_id.clone(),
+            first_member_namespace_id: first_member_namespace_id.clone(),
             created_at_ms,
         })
         .await

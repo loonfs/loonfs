@@ -1148,7 +1148,7 @@ fn control_objects_match_golden_bytes() {
         PoolPayload {
             pool_id: loonfs_types::PoolId::parse("pool_3s0drmj8em84yb4mnetqkz2j0x")
                 .expect("valid pool id"),
-            first_member_id: namespace_id(),
+            first_member_namespace_id: namespace_id(),
             created_at_ms: 1_000,
         },
     );

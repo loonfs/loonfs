@@ -56,7 +56,7 @@ impl<S: ObjectStore> PoolStore<S> {
                 pool_id: self.pool_id.clone(),
             })?;
         let mut report = PoolGcResponse::empty(self.pool_id.clone());
-        let first_member = self.member(record.first_member_id.clone());
+        let first_member = self.member(record.first_member_namespace_id.clone());
         let observed = Observation::now(Arc::clone(&first_member.timer));
         let first_current = match first_member.load_current_manifest_with_hint().await {
             Err(CoreError::NamespaceNotFound { .. }) => None,
@@ -70,7 +70,7 @@ impl<S: ObjectStore> PoolStore<S> {
         };
         let roots = PoolRoots::load(
             self,
-            &record.first_member_id,
+            &record.first_member_namespace_id,
             first_current,
             observed,
             session_cache,
@@ -132,7 +132,7 @@ impl<S: ObjectStore> PoolStore<S> {
             .delete(&key)
             .await
             .map_err(|error| CoreError::store(&key, &error))?;
-        tracing::info!(pool_id = %self.pool_id, namespace_id = %record.first_member_id,
+        tracing::info!(pool_id = %self.pool_id, namespace_id = %record.first_member_namespace_id,
             "deleted the record of a pool without members");
         Ok(())
     }

@@ -162,7 +162,7 @@ async fn a_new_namespace_returns_the_state_its_first_manifest_records() {
             .expect("load the pool record"),
         Some(PoolPayload {
             pool_id: created.pool_id.clone(),
-            first_member_id: source.clone(),
+            first_member_namespace_id: source.clone(),
             created_at_ms: created.created_at_ms,
         })
     );
