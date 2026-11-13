@@ -20,10 +20,10 @@ pub(super) fn render(state: &AppState) -> String {
     render_metadata_cache(&mut rendered, &http.runtime.metadata_cache().stats());
     // A server that doesn't serve grep has no grep cache. Reporting zeros
     // would incorrectly suggest that the cache is idle.
-    if let Some(service) = http.grep.service() {
+    if let Some(service) = &http.grep_service {
         render_grep_block_cache(&mut rendered, &service.block_cache_stats());
     }
-    let grep_worker = http.grep.worker();
+    let grep_worker = http.grep_worker.as_ref();
     if let Some(worker) = grep_worker {
         render_grep_worker_block_cache(&mut rendered, &worker.block_cache_stats());
     }

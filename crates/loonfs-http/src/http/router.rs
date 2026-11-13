@@ -123,7 +123,7 @@ routes! {
     // serves grep, and the three routes that change grep's entry in a
     // namespace manifest exist where it maintains the index.
     "/v0/namespaces/{namespace_id}/grep" => {
-        GET grep = gated(state.grep.service().cloned(), get(grep), get(grep_queries_not_served)),
+        GET grep = gated(state.grep_service.clone(), get(grep), get(grep_queries_not_served)),
     },
     "/v0/namespaces/{namespace_id}/filesystem/revisions" => { GET list_file_revisions },
     "/v0/namespaces/{namespace_id}/inodes/{inode_id}" => { GET get_inode },
@@ -169,21 +169,21 @@ routes! {
     "/v0/maintenance/namespaces/{namespace_id}/diagnostics" => { GET get_namespace_diagnostics },
     "/v0/maintenance/namespaces/{namespace_id}/grep/index" => {
         GET get_grep_index = gated(
-            state.grep.worker().cloned(),
+            state.grep_worker.clone(),
             get(get_grep_index),
             get(grep_index_not_maintained),
         ),
     },
     "/v0/maintenance/namespaces/{namespace_id}/grep/index/enable" => {
         POST enable_grep_index = gated(
-            state.grep.worker().cloned(),
+            state.grep_worker.clone(),
             post(enable_grep_index),
             post(grep_index_not_maintained),
         ),
     },
     "/v0/maintenance/namespaces/{namespace_id}/grep/index/disable" => {
         POST disable_grep_index = gated(
-            state.grep.worker().cloned(),
+            state.grep_worker.clone(),
             post(disable_grep_index),
             post(grep_index_not_maintained),
         ),

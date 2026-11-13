@@ -90,60 +90,17 @@ pub struct HttpConfig {
     pub auth_policy: AuthPolicy,
 }
 
-/// The grep handles of the HTTP API, by job: the HTTP API serves queries
-/// only with a service, and maintains the index only with a worker, so an
-/// advertised capability always has its handle.
-#[derive(Clone)]
-pub enum GrepMode {
-    Disabled,
-    ServeOnly {
-        service: Arc<GrepService>,
-    },
-    MaintainOnly {
-        worker: GrepWorker<SharedObjectStore>,
-    },
-    ServeAndMaintain {
-        service: Arc<GrepService>,
-        worker: GrepWorker<SharedObjectStore>,
-    },
-}
-
-impl GrepMode {
-    /// The service that serves grep queries, or `None` when the HTTP API doesn't serve grep.
-    pub fn service(&self) -> Option<&Arc<GrepService>> {
-        match self {
-            Self::ServeOnly { service } | Self::ServeAndMaintain { service, .. } => Some(service),
-            Self::Disabled | Self::MaintainOnly { .. } => None,
-        }
-    }
-
-    /// The worker that maintains the grep index, or `None` when the HTTP API doesn't maintain grep.
-    pub fn worker(&self) -> Option<&GrepWorker<SharedObjectStore>> {
-        match self {
-            Self::MaintainOnly { worker } | Self::ServeAndMaintain { worker, .. } => Some(worker),
-            Self::Disabled | Self::ServeOnly { .. } => None,
-        }
-    }
-
-    /// Whether the HTTP API serves grep queries.
-    pub fn serves(&self) -> bool {
-        self.service().is_some()
-    }
-
-    /// Whether the HTTP API maintains the grep index.
-    pub fn maintains(&self) -> bool {
-        self.worker().is_some()
-    }
-}
-
 /// The handles that a host supplies to the HTTP API: one runtime over one
-/// store, and the grep handles in `grep`.
+/// store, and the grep handles.
 pub struct HttpHandles {
     pub runtime: LoonFs<Writable>,
     pub namespaces: Arc<dyn WriterSessions>,
     pub maintenance: Maintenance,
     pub direct_transfers: Option<DirectTransferIssuers>,
-    pub grep: GrepMode,
+    /// The service that serves grep queries, or `None` when the HTTP API doesn't serve grep.
+    pub grep_service: Option<Arc<GrepService>>,
+    /// The worker that maintains the grep index, or `None` when the HTTP API doesn't maintain grep.
+    pub grep_worker: Option<GrepWorker<SharedObjectStore>>,
     pub metrics: Arc<HttpMetrics>,
     /// The recorder of one usage report for each namespace request, or `None` to record none.
     pub usage_recorder: Option<Arc<dyn UsageRecorder>>,
@@ -158,7 +115,8 @@ pub struct HttpState {
     pub namespaces: Arc<dyn WriterSessions>,
     pub maintenance: Maintenance,
     pub direct_transfers: Option<DirectTransferIssuers>,
-    pub grep: GrepMode,
+    pub grep_service: Option<Arc<GrepService>>,
+    pub grep_worker: Option<GrepWorker<SharedObjectStore>>,
     pub metrics: Arc<HttpMetrics>,
     pub usage_recorder: Option<Arc<dyn UsageRecorder>>,
     request_limit: Option<RequestLimit>,
@@ -175,7 +133,8 @@ impl HttpState {
             namespaces,
             maintenance,
             direct_transfers,
-            grep,
+            grep_service,
+            grep_worker,
             metrics,
             usage_recorder,
         } = handles;
@@ -189,7 +148,8 @@ impl HttpState {
             namespaces,
             maintenance,
             direct_transfers,
-            grep,
+            grep_service,
+            grep_worker,
             metrics,
             usage_recorder,
         }

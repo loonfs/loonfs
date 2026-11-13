@@ -332,7 +332,7 @@ pub(super) async fn list_snapshot_records(
 pub(super) async fn get_snapshot_record(
     State(state): State<Arc<HttpState>>,
     NamespaceIdPath(namespace_id): NamespaceIdPath,
-    AppPath(SnapshotRecordPathParams { snapshot_id }): AppPath<SnapshotRecordPathParams>,
+    AppPath(SnapshotPathParams { snapshot_id }): AppPath<SnapshotPathParams>,
     AppQuery(_): AppQuery<NoQuery>,
 ) -> Result<Json<SnapshotRecord>, ApiResponseError> {
     let snapshot = state
@@ -341,9 +341,4 @@ pub(super) async fn get_snapshot_record(
         .await
         .map_err(ApiResponseError::runtime)?;
     Ok(Json(snapshot))
-}
-
-#[derive(Debug, serde::Deserialize)]
-pub(super) struct SnapshotRecordPathParams {
-    snapshot_id: SnapshotId,
 }

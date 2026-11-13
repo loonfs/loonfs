@@ -8,7 +8,7 @@ use loonfs::{LoonFs, Maintenance, SharedObjectStore, Writable};
 use loonfs_client::{Body, Client, ClientConfig, TransportError};
 use loonfs_grep::{GrepService, GrepWorker};
 use loonfs_http::{
-    AuthPolicy, GrepMode, HttpConfig, HttpHandles, HttpMetrics, HttpState, Namespaces,
+    AuthPolicy, HttpConfig, HttpHandles, HttpMetrics, HttpState, Namespaces,
     DEFAULT_MAX_CONCURRENT_DOWNLOADS, DEFAULT_MAX_CONCURRENT_UPLOADS, DEFAULT_REQUEST_DEADLINE_MS,
 };
 use loonfs_types::SecretString;
@@ -80,10 +80,8 @@ pub(crate) fn client(
             namespaces: Arc::new(Namespaces::<()>::new(host.runtime.clone())),
             maintenance: host.maintenance.clone(),
             direct_transfers: None,
-            grep: GrepMode::ServeAndMaintain {
-                service: Arc::new(grep_service),
-                worker: host.grep_worker.clone(),
-            },
+            grep_service: Some(Arc::new(grep_service)),
+            grep_worker: Some(host.grep_worker.clone()),
             metrics: HttpMetrics::new(),
             usage_recorder: None,
         },

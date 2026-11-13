@@ -68,7 +68,10 @@ async fn runtime_and_grep_cache_metrics_render_from_the_cache_stats() {
     )
     .await
     .expect("build app");
-    assert!(state.http.grep.serves(), "the test config serves grep");
+    assert!(
+        state.http.grep_service.is_some(),
+        "the test config serves grep"
+    );
     let rendered = super::metrics::render(&state);
 
     for name in [
