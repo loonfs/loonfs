@@ -490,7 +490,7 @@ pub(crate) fn no_manifest_after(current: ManifestNo) -> CoreError {
 
 /// Advances the manifest's run allocator after a producer has taken
 /// `current`.
-pub fn next_run_no_after(current: RunNo) -> Result<RunNo> {
+pub(crate) fn next_run_no_after(current: RunNo) -> Result<RunNo> {
     current.successor().map_err(|_| {
         CoreError::NamespaceCorrupt(format!(
             "the manifest's next run number is {current}, the largest run number, so no \

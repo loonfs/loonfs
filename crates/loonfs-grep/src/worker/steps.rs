@@ -3,14 +3,12 @@
 //! manifest of its own.
 
 use super::reorganize::reorganize_due;
-use super::{
-    next_index_run_no, GramIndexBuildPolicy, GrepBuildOutcome, GrepReorganizeOutcome, GrepWorker,
-};
+use super::{GramIndexBuildPolicy, GrepBuildOutcome, GrepReorganizeOutcome, GrepWorker};
 use crate::entry::{grep_extension_name, GrepEntry, GrepEntryError, GrepIndexStatus};
 use crate::{GrepError, Result};
 use loonfs::engine::{ExtensionBasis, ExtensionPublication};
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::{NamespaceId, RunNo, SnapshotId};
+use loonfs_types::{NamespaceId, SnapshotId};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// How long a run of steps in a host without a maintenance interval of its
@@ -85,12 +83,9 @@ pub(super) struct PendingEntry {
     /// [`Self::for_disable`]).
     published: Option<GrepEntry>,
     /// The entry after the steps since the basis, which the next step starts
-    /// from. Its runs that the change wrote have provisional numbers, from
-    /// the basis's next run number up to `next_run_no` (see
-    /// [`GrepEntry::with_runs_numbered_from`]).
+    /// from. A run that a step writes is assigned its number from this entry
+    /// (see [`GrepEntry::next_run_no`]).
     pub(super) entry: Option<GrepEntry>,
-    /// The provisional number of the next run that the change writes.
-    next_run_no: RunNo,
     /// The backfill snapshots that the change stops referring to, which are
     /// deleted once it publishes.
     released_snapshots: Vec<SnapshotId>,
@@ -101,7 +96,7 @@ pub(super) struct PendingEntry {
 
 impl PendingEntry {
     /// Starts a change from `basis`, after checking that the basis's grep
-    /// entry decodes and that its reorganization's run is allocated.
+    /// entry decodes.
     ///
     /// In a fork, the change clears a reorganization that the fork inherited
     /// from its source (see [`GrepEntry::without_inherited_reorganize`]), so
@@ -144,7 +139,6 @@ impl PendingEntry {
 
     /// Starts a change from `basis`, whose grep entry is `published`.
     fn from_published(basis: ExtensionBasis, published: Option<GrepEntry>) -> Self {
-        let next_run_no = basis.manifest().next_run_no;
         let namespace_id = &basis.manifest().namespace_id;
         let entry = published
             .clone()
@@ -153,7 +147,6 @@ impl PendingEntry {
             basis,
             entry,
             published,
-            next_run_no,
             released_snapshots: Vec::new(),
             created_snapshots: Vec::new(),
         }
@@ -170,14 +163,6 @@ impl PendingEntry {
         self.entry
             .as_ref()
             .filter(|entry| !matches!(entry.status(), GrepIndexStatus::Disabled {}))
-    }
-
-    /// Takes the provisional number of a run that the change writes, which
-    /// the change's publication replaces with the run's number.
-    pub(super) fn allocate_run_no(&mut self) -> Result<RunNo> {
-        let run_no = self.next_run_no;
-        self.next_run_no = next_index_run_no(run_no)?;
-        Ok(run_no)
     }
 
     /// Replaces the pending entry with `entry`.
@@ -212,42 +197,18 @@ impl PendingEntry {
     }
 
     /// Returns whether the steps changed the entry.
-    ///
-    /// Every step that writes a run changes the entry too, so a run number
-    /// that a failed step took isn't published on its own, and `next_run_no`
-    /// is published with the entry's change.
     fn is_changed(&self) -> bool {
         self.entry != self.published
     }
-
-    /// Returns the pending entry with the change's runs numbered from `base`,
-    /// the next run number of the manifest that the change is published
-    /// over, and the next run number after them.
-    fn entry_at(&self, base: RunNo) -> (GrepEntry, RunNo) {
-        let provisional = self.basis.manifest().next_run_no;
-        let entry = self
-            .entry
-            .as_ref()
-            .expect("a changed pending change should have an entry")
-            .with_runs_numbered_from(provisional, base);
-        let new_runs = self.next_run_no.0 - provisional.0;
-        (entry, RunNo(base.0 + new_runs))
-    }
 }
 
-/// Decodes the grep entry that `basis` lists, and checks that its
-/// reorganization's run is allocated.
+/// Decodes the grep entry that `basis` lists.
 fn decode_published(
     basis: &ExtensionBasis,
 ) -> std::result::Result<Option<GrepEntry>, GrepEntryError> {
-    let next_run_no = basis.manifest().next_run_no;
     basis
         .find_entry(&grep_extension_name())
-        .map(|entry| {
-            let entry = GrepEntry::decode(entry)?;
-            entry.ensure_reorganize_allocated(next_run_no)?;
-            Ok(entry)
-        })
+        .map(GrepEntry::decode)
         .transpose()
 }
 
@@ -391,9 +352,8 @@ impl<'w, S: ObjectStore + Clone> GrepSteps<'w, S> {
     /// Publishes the pending change, if the steps changed anything since the
     /// last publication.
     ///
-    /// The change's runs get their numbers when the change is published (see
-    /// [`GrepEntry::with_runs_numbered_from`]). After a publication, the next
-    /// step starts from the published manifest. After another process
+    /// After a publication, the next step starts from the published manifest.
+    /// After another process
     /// changed the entry, the change's new backfill snapshots are deleted, and the
     /// next step loads the current manifest. An error drops the change and
     /// keeps its snapshots, because a put whose outcome is unknown can still list
@@ -407,13 +367,14 @@ impl<'w, S: ObjectStore + Clone> GrepSteps<'w, S> {
             self.pending = Some(pending);
             return Ok(GrepPublishOutcome::NothingPending);
         }
+        let entry = pending
+            .entry
+            .as_ref()
+            .expect("a changed pending change should have an entry");
         let publication = self
             .worker
             .maintenance
-            .publish_extension(&pending.basis, &grep_extension_name(), |base| {
-                let (entry, next_run_no) = pending.entry_at(base);
-                (entry.encode(), next_run_no)
-            })
+            .publish_extension(&pending.basis, &grep_extension_name(), entry.encode())
             .await?;
         let counts = &self.worker.publications;
         match publication {
@@ -438,11 +399,7 @@ impl<'w, S: ObjectStore + Clone> GrepSteps<'w, S> {
                 // created, which no other publisher can create, even after
                 // another process's change over it, or when the current
                 // entry is the change's own, and then the snapshots that it
-                // released are deleted. (The second test compares
-                // provisional run numbers. A change with a new run but no new
-                // segment, which is rare, fails it after a rebuild over a
-                // manifest with another next run number, and its released
-                // snapshots stay until they expire.)
+                // released are deleted.
                 let entry = pending
                     .entry
                     .clone()

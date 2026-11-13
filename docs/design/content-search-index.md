@@ -66,13 +66,13 @@ namespaces/{owner_namespace_id}/extensions/grep/
 └── segments/{segment_id}.sst
 ```
 
-The index's state is grep's entry in the namespace manifest (see [Extensions](../specs/format.md#124-extensions)). The entry contains the lifecycle state, the index's runs with their segment descriptors, and any in-progress reorganization. The index's run numbers are allocated from the manifest's `next_run_no` when grep publishes a change. Every core publication copies the entry forward, so the index needs no manifests, hint, or discovery of its own. [Grep across a pool](grep-across-a-pool.md) explains why.
+The index's state is grep's entry in the namespace manifest (see [Extensions](../specs/format.md#124-extensions)). The entry contains the lifecycle state, the index's runs with their segment descriptors, and any in-progress reorganization. Grep assigns the index's run numbers itself, one above the largest number in its entry. Every core publication copies the entry forward, so the index needs no manifests, hint, or discovery of its own. [Grep across a pool](grep-across-a-pool.md) explains why.
 
 A run of index steps changes a copy of the entry in memory (the "pending entry") and publishes the change in a manifest of its own:
 
 1. The run loads the current manifest.
 2. Each step writes its segments and records its change in the pending entry.
-3. Once the change is one maintenance interval old, or when the run ends, the run creates the next manifest with put-if-absent, and the change's new runs are numbered from the `next_run_no` of the manifest that it's published over.
+3. Once the change is one maintenance interval old, or when the run ends, the run creates the next manifest with put-if-absent.
 4. If the run loses the race to a manifest that copied grep's entry, such as a fold, the run publishes the change over that manifest. If another process changed the entry, the run publishes nothing, and its next step loads the winning manifest and plans again.
 
 A query reads grep's entry from the manifest of its read view, so the index is as current as the view, and the query sends no request to find the index. [Grep extension format](../specs/format.md#appendix-d-grep-extension-format) defines the entry and its publication.
@@ -159,7 +159,7 @@ Reorganization rewrites the index's runs across three tiers: delta, mid, and bas
 
 A reorganization starts when a tier reaches its run limit, eight delta runs or eight mid runs by default. The scheduler and the CLI run a reorganization step instead of a build step whenever a reorganization is in progress or a tier is at its limit, so the delta tier has at most eight runs while the index is behind a writer. Every build step looks up its content values' `texts` rows in the index's segments, so a build step's cost grows with the number of runs. A reorganization that waited for a build step to find the index up to date might never run while a writer keeps committing, and the build steps would keep getting slower.
 
-The thresholds count logical runs, not physical segments. Every build step that writes rows adds one run for its batch, whose `run_no` is allocated from `next_run_no` when the step's change is published. A run can contain several segments, and it still counts as one run toward reorganization. Separate backfill batches stay separate runs, even though they share the same captured target sequence.
+The thresholds count logical runs, not physical segments. Every build step that writes rows adds one run for its batch, whose `run_no` is one above the largest run number in the pending entry. A run can contain several segments, and it still counts as one run toward reorganization. Separate backfill batches stay separate runs, even though they share the same captured target sequence.
 
 With eight delta runs per mid run, and eight mid runs per base rewrite, a simplified sequence of full batches rewrites the base about once every 64 build runs. A two-tier scheme that rewrote the base after every eight delta runs would rewrite it eight times as often in that example. This is a constant-factor reduction. Because the structure always has three tiers, it doesn't provide logarithmic cumulative write amplification as the corpus grows.
 
@@ -171,7 +171,7 @@ Until the scan completes, both the inputs and the completed outputs stay referen
 
 The row budget can be exceeded for rows with equal keys. All the rows with the same key are processed together before the cursor moves past that key.
 
-Grep's entry records each run's `level` (`0`, `1`, or `2`) and `run_no`, and a change's new runs are assigned their numbers from the manifest's `next_run_no` when the change is published. An in-progress reorganization records its `output_level`, its output `run_no` (which doesn't change once a published entry records it), its selected inputs, its outputs, and its cursor. A replacement worker resumes from the last entry that was published successfully.
+Grep's entry records each run's `level` (`0`, `1`, or `2`) and `run_no`. An in-progress reorganization records its `output_level`, its output `run_no` (which grep assigns when the reorganization starts, and which doesn't change after that), its selected inputs, its outputs, and its cursor. A replacement worker resumes from the last entry that was published successfully.
 
 Why can queries see both the inputs and the outputs? A reorganization's output has no posting that its inputs lack, and readers take the union of the batches, so a posting that appears twice doesn't cause a missed candidate. This isn't a general rule for replacing metadata rows that have different retention semantics.
 

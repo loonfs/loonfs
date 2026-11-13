@@ -75,8 +75,6 @@ pub(super) fn validate_manifest_sequence_ranges(
     }
 
     validate_unique_run_numbers(object_key, payload)?;
-    // An extension's publication can allocate run numbers before the first
-    // fold, so an empty manifest's next run number can be above zero.
     if payload.runs.is_empty() {
         if payload.head_seq == CommitSeq(0) {
             return Ok(());
@@ -143,54 +141,32 @@ pub(super) fn validate_manifest_sequence_ranges(
     Ok(())
 }
 
-/// Checks that no two runs of the manifest share a number. One counter,
-/// `next_run_no`, allocates the numbers of the metadata runs and of every
-/// extension's runs, so a number identifies one run among all of them.
+/// Checks that no two metadata runs of the manifest share a number.
 fn validate_unique_run_numbers(
     object_key: &str,
     payload: &NamespaceManifestPayload,
 ) -> Result<(), ManifestLoadError> {
     let mut run_nos = HashSet::new();
-    let extension_runs = payload.extensions.values().flat_map(|entry| &entry.runs);
-    for run_no in payload
-        .runs
-        .iter()
-        .map(|run| run.run_no)
-        .chain(extension_runs.map(|run| run.run_no))
-    {
-        if !run_nos.insert(run_no) {
+    for run in &payload.runs {
+        if !run_nos.insert(run.run_no) {
             return Err(ManifestLoadError::RunManifestMismatch {
                 object_key: object_key.to_owned(),
-                message: format!("duplicate run number `{run_no}`"),
+                message: format!("duplicate run number `{}`", run.run_no),
             });
         }
     }
     Ok(())
 }
 
-/// Checks the runs that each extension entry lists: a run number below the
-/// manifest's next run number, unique segment IDs, and segments with rows in
-/// a nonempty ascending key range and the block layout of a metadata
-/// segment. Core never reads an extension's rows, so these are the
-/// descriptors' own rules.
+/// Checks the runs that each extension entry lists: unique segment IDs, and
+/// segments with rows in a nonempty ascending key range and the block layout
+/// of a metadata segment. Core never reads an extension's rows or run
+/// numbers, so these are the descriptors' own rules.
 fn validate_extension_runs(
     object_key: &str,
     payload: &NamespaceManifestPayload,
 ) -> Result<(), ManifestLoadError> {
     for (name, entry) in &payload.extensions {
-        if let Some(run) = entry
-            .runs
-            .iter()
-            .find(|run| run.run_no >= payload.next_run_no)
-        {
-            return Err(ManifestLoadError::RunManifestMismatch {
-                object_key: object_key.to_owned(),
-                message: format!(
-                    "extension `{name}` run `{}` is not below next run `{}`",
-                    run.run_no, payload.next_run_no
-                ),
-            });
-        }
         let mut seen_segment_ids = HashSet::new();
         for descriptor in entry.segments() {
             let segment_key = extension_segment_object_key(name, descriptor);

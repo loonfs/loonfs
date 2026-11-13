@@ -61,7 +61,7 @@ pub(super) async fn publish_entry<S: ObjectStore + Clone>(
     let engine = fixture.engine();
     let basis = engine.load_extension_basis().await.expect("basis");
     let published = engine
-        .publish_extension(&basis, &grep(), |base| entry_after(&basis, status, base))
+        .publish_extension(&basis, &grep(), entry_after(&basis, status))
         .await
         .expect("publish");
     let ExtensionPublication::Published(published) = published.response else {
@@ -71,25 +71,20 @@ pub(super) async fn publish_entry<S: ObjectStore + Clone>(
 }
 
 /// Returns the entry of `basis` with `status` as its own member and one more
-/// run, numbered `base`, and the next run number after it. The new run's
-/// segment ID is determined by the basis's next run number, so the entry
-/// doesn't depend on the manifest that it's published over.
-fn entry_after(basis: &ExtensionBasis, status: &str, base: RunNo) -> (ExtensionEntry, RunNo) {
+/// run, whose number and segment ID are the basis entry's count of runs.
+fn entry_after(basis: &ExtensionBasis, status: &str) -> ExtensionEntry {
     let mut runs = basis
         .find_entry(&grep())
         .map(|entry| entry.runs.clone())
         .unwrap_or_default();
-    let namespace_id = &basis.manifest().namespace_id;
-    let segment = extension_segment(namespace_id, basis.manifest().next_run_no.0);
-    runs.push(extension_run(base, vec![segment]));
+    let number = runs.len() as u64;
+    let segment = extension_segment(&basis.manifest().namespace_id, number);
+    runs.push(extension_run(RunNo(number), vec![segment]));
     let state = serde_json::json!({ "status": status })
         .as_object()
         .cloned()
         .expect("an object");
-    (
-        ExtensionEntry::new(1, runs, state),
-        base.successor().expect("run"),
-    )
+    ExtensionEntry::new(1, runs, state)
 }
 
 async fn current_manifest(store: &LocalFsStore, namespace_id: &NamespaceId) -> LoadedManifest {
@@ -273,8 +268,7 @@ impl EntryCopy {
 
 /// Checks that an extension's publication that loses its put to a fold, a
 /// compaction, a retention advance, or a compactor claim is published over
-/// the manifest that won, which copied the entry, and that its new run's
-/// number follows the winner's runs.
+/// the manifest that won, which copied the entry.
 #[tokio::test]
 async fn an_extension_publication_that_loses_to_a_copy_of_its_entry_is_rebuilt_over_it() {
     for copy in [
@@ -314,7 +308,7 @@ async fn an_extension_publication_that_loses_to_a_copy_of_its_entry_is_rebuilt_o
 
         let rebuilt = fixture
             .engine()
-            .publish_extension(&stale, &grep(), |base| entry_after(&stale, "rebuilt", base))
+            .publish_extension(&stale, &grep(), entry_after(&stale, "rebuilt"))
             .await
             .expect("publish");
         assert!(
@@ -322,9 +316,7 @@ async fn an_extension_publication_that_loses_to_a_copy_of_its_entry_is_rebuilt_o
             "{copy:?}"
         );
         let current = current_manifest(&store, &namespace_id).await;
-        let next_run_no = winner.payload().next_run_no;
         let entry = &current.payload().extensions[&grep()];
-        assert_eq!(entry.runs.last().expect("the new run").run_no, next_run_no);
         assert_eq!(
             entry.runs[..entry.runs.len() - 1],
             winner.payload().extensions[&grep()].runs
@@ -332,20 +324,15 @@ async fn an_extension_publication_that_loses_to_a_copy_of_its_entry_is_rebuilt_o
         assert_eq!(
             NamespaceManifestPayload {
                 manifest_no: winner.payload().manifest_no,
-                next_run_no,
                 extensions: winner.payload().extensions.clone(),
                 ..current.payload().clone()
             },
             *winner.payload(),
-            "{copy:?}: the rebuilt manifest changes only the entry and the next run number"
+            "{copy:?}: the rebuilt manifest changes only the entry"
         );
         assert_eq!(
             current.payload().manifest_no,
             winner.payload().manifest_no.successor().expect("next")
-        );
-        assert_eq!(
-            current.payload().next_run_no,
-            next_run_no.successor().expect("run")
         );
     }
 }
@@ -372,7 +359,7 @@ async fn an_extension_publication_that_loses_to_another_change_of_its_entry_publ
     let winner = current_manifest(&store, &namespace_id).await;
 
     let lost = engine
-        .publish_extension(&stale, &grep(), |base| entry_after(&stale, "lost", base))
+        .publish_extension(&stale, &grep(), entry_after(&stale, "lost"))
         .await
         .expect("publish");
     assert!(matches!(lost.response, ExtensionPublication::Superseded));
@@ -384,7 +371,6 @@ async fn an_extension_publication_that_loses_to_another_change_of_its_entry_publ
 
     let next = publish_entry(&fixture, "next").await;
     assert_eq!(next.runs[..1], won.runs);
-    assert_eq!(next.runs[1].run_no, winner.payload().next_run_no);
 
     let basis = engine.load_extension_basis().await.expect("basis");
     engine
@@ -392,130 +378,11 @@ async fn an_extension_publication_that_loses_to_another_change_of_its_entry_publ
         .await
         .expect("delete");
     let deleted = engine
-        .publish_extension(&basis, &grep(), |base| entry_after(&basis, "deleted", base))
+        .publish_extension(&basis, &grep(), entry_after(&basis, "deleted"))
         .await
         .expect_err("a tombstone has no successor");
     assert!(
         matches!(deleted, CoreError::NamespaceDeleted { .. }),
         "{deleted:?}"
-    );
-}
-
-/// Checks that the first fold after an extension allocated run numbers
-/// numbers its run after the extension's.
-#[tokio::test]
-async fn a_first_fold_after_an_extension_numbers_its_run_after_the_extensions() {
-    let directory = tempdir().expect("directory");
-    let store = LocalFsStore::new(directory.path()).expect("store");
-    let namespace_id = NamespaceId::parse("extension-first").expect("namespace");
-    let fixture = NamespaceFixture::new(&store, &namespace_id, &test_context());
-    fixture.create().await.expect("create");
-    fixture
-        .write_file_bytes("/a", b"a", None)
-        .await
-        .expect("write");
-    let entry = publish_entry(&fixture, "active").await;
-    assert_eq!(entry.runs[0].run_no, RunNo(0));
-    crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal_tail(None, &fixture.namespace.start_clock())
-        .await
-        .expect("fold");
-    let folded = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_current_manifest()
-        .await
-        .expect("folded");
-    assert_eq!(
-        folded
-            .payload()
-            .runs
-            .iter()
-            .map(|run| run.run_no)
-            .collect::<Vec<_>>(),
-        vec![RunNo(1)]
-    );
-    assert_eq!(folded.payload().next_run_no, RunNo(2));
-    assert_eq!(folded.payload().extensions[&grep()], entry);
-}
-
-/// Checks that no two runs of a manifest share a number, whether metadata
-/// runs or extensions' runs, because one counter allocates the numbers of
-/// the metadata runs and of every extension's runs, and that an extension's
-/// run is below the next run number.
-#[tokio::test]
-async fn no_two_runs_of_a_manifest_share_a_number() {
-    let directory = tempdir().expect("directory");
-    let store = LocalFsStore::new(directory.path()).expect("store");
-    let namespace_id = NamespaceId::parse("extension-run-numbers").expect("namespace");
-    let fixture = NamespaceFixture::new(&store, &namespace_id, &test_context());
-    fixture.create().await.expect("create");
-    fixture
-        .write_file_bytes("/a", b"a", None)
-        .await
-        .expect("write");
-    EntryCopy::Fold.publish(&store, &namespace_id).await;
-    let folded = current_manifest(&store, &namespace_id).await;
-    let metadata_run_no = folded.payload().runs[0].run_no;
-    let run_no = folded.payload().next_run_no;
-    let with_entries = |entries: Vec<(&str, Vec<ExtensionRunRef>)>| {
-        let mut payload = folded.payload().clone();
-        payload.next_run_no = run_no.successor().expect("run");
-        for (name, runs) in entries {
-            payload.extensions.insert(
-                ExtensionName::parse(name).expect("extension name"),
-                ExtensionEntry::new(1, runs, serde_json::Map::new()),
-            );
-        }
-        crate::manifest::validate::validate_manifest(&folded.object_key, &payload)
-    };
-    let segment = |number| extension_segment(&namespace_id, number);
-
-    with_entries(vec![(
-        "grep",
-        vec![extension_run(run_no, vec![segment(1), segment(2)])],
-    )])
-    .expect("two segments of one extension run");
-    for (entries, rejected) in [
-        (
-            vec![(
-                "grep",
-                vec![extension_run(metadata_run_no, vec![segment(1)])],
-            )],
-            "an extension run at a metadata run's number",
-        ),
-        (
-            vec![
-                ("grep", vec![extension_run(run_no, vec![segment(1)])]),
-                ("other", vec![extension_run(run_no, vec![segment(2)])]),
-            ],
-            "two extensions' runs at one number",
-        ),
-        (
-            vec![(
-                "grep",
-                vec![
-                    extension_run(run_no, vec![segment(1)]),
-                    extension_run(run_no, vec![segment(2)]),
-                ],
-            )],
-            "two runs of one extension at one number",
-        ),
-    ] {
-        let error = with_entries(entries).expect_err(rejected);
-        assert!(
-            error.to_string().contains("duplicate run number"),
-            "{error}"
-        );
-    }
-    let error = with_entries(vec![(
-        "grep",
-        vec![extension_run(
-            run_no.successor().expect("run"),
-            vec![segment(1)],
-        )],
-    )])
-    .expect_err("an extension run at the next run number");
-    assert!(
-        error.to_string().contains("is not below next run"),
-        "{error}"
     );
 }
