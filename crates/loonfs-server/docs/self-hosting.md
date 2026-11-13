@@ -62,7 +62,7 @@ export LOONFS_CONTENT_TOKEN_SECRET="$(openssl rand -hex 32)"
 
 Don't expose a server without authentication. LoonFS rejects a config without authentication on a non-loopback address, unless the config has an `[auth]` table with `kind = "open"`. That setting is intended only for controlled testing.
 
-For S3 or Google Cloud Storage, configure the bucket to remove incomplete multipart uploads. Both providers call this action `AbortIncompleteMultipartUpload`.
+For S3, configure the bucket to remove incomplete multipart uploads. S3 calls this action `AbortIncompleteMultipartUpload`. (LoonFS doesn't use multipart uploads on Google Cloud Storage, so a GCS bucket needs no such rule.)
 
 ## Set one number
 
@@ -286,7 +286,7 @@ Before you run a server in production, check this list:
 - Use TLS in LoonFS or in a trusted proxy.
 - Keep secrets in a secret manager or a Kubernetes Secret.
 - Keep a `local_fs` store on durable storage that uid 10001 can write to.
-- Configure cloud buckets to remove incomplete multipart uploads.
+- Configure S3 buckets to remove incomplete multipart uploads.
 - Allow at least 660 seconds for graceful shutdown.
 - Monitor health, readiness, metrics, and repeated error logs.
 - Run the smoke test after installation and after every upgrade.
@@ -562,12 +562,6 @@ This section describes how the server shuts down, and how to upgrade it or roll 
 
 When the server receives `SIGTERM`, it stops accepting new requests, waits for active requests and running maintenance steps, and finishes its shutdown work. The shutdown deadline (600 seconds by default) limits both waits. Docker and the Helm chart should allow 660 seconds before they send `SIGKILL`.
 
-Before an upgrade, fold each namespace with the current version:
-
-```bash
-loonfs maintenance fold --namespace <namespace>
-```
-
 For Docker, pull the new version and replace the container with one that uses the same config, secrets, and object store.
 
 For Kubernetes, run:
@@ -581,7 +575,7 @@ helm upgrade loonfs-server oci://ghcr.io/loonfs/charts/loonfs-server \
 
 The chart stops the old pod before it starts the new one, so the API is unavailable in between. Run the smoke test after the rollout.
 
-Roll back only to a release whose release notes say that it reads this release's durable format. A fold doesn't downgrade the format. To roll back the Helm release, run:
+Roll back only to a release whose release notes say that it reads this release's durable format. To roll back the Helm release, run:
 
 ```bash
 helm rollback loonfs-server --namespace loonfs

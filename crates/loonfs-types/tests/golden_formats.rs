@@ -989,25 +989,6 @@ fn manifest_without_required_fields_is_rejected() {
     }
 }
 
-/// A manifest that records an acknowledged floor is a manifest of the
-/// removed design, and the strict decoder rejects it as it rejects any other
-/// unknown field.
-#[test]
-fn manifest_with_an_acknowledged_floor_is_rejected() {
-    let mut document = serde_json::to_value(sample_manifest_payload())
-        .expect("encode active manifest as a document");
-    document["acknowledged_floor_seq"] = serde_json::Value::from(0);
-
-    let error = serde_json::from_value::<NamespaceManifestPayload>(document)
-        .expect_err("a manifest with an acknowledged floor must be rejected");
-    assert!(
-        error
-            .to_string()
-            .contains("unknown field `acknowledged_floor_seq`"),
-        "the rejection should name the field: {error}"
-    );
-}
-
 #[test]
 fn manifest_status_rejects_unknown_fields_as_corruption() {
     let mut document = serde_json::to_value(sample_manifest_payload())
@@ -1353,26 +1334,6 @@ fn upload_outcomes_reject_a_reference_that_records_a_namespace() {
     );
     assert!(
         message.contains("unknown field `owner_namespace_id`"),
-        "unexpected refusal: {message}"
-    );
-}
-
-#[test]
-fn direct_put_sessions_reject_the_pre_completion_claim_record() {
-    let message = assert_control_payload_edit_is_corrupt::<UploadSessionPayload>(
-        "control_upload_session_direct_put.v1.json",
-        ControlObjectKind::UploadSession,
-        |payload| {
-            payload["mode"]
-                .as_object_mut()
-                .expect("mode object")
-                .remove("checksum_algorithm");
-            payload["mode"]["promised_content"] =
-                serde_json::to_value(sample_content_ref()).expect("content ref");
-        },
-    );
-    assert!(
-        message.contains("unknown field `promised_content`"),
         "unexpected refusal: {message}"
     );
 }
@@ -1733,27 +1694,6 @@ fn wal_decode_rejects_unknown_payload_fields() {
         error,
         WalCodecError::Envelope(EnvelopeCodecError::PayloadDecode(message))
             if message.contains("unknown field") && message.contains("field_from_the_future")
-    );
-}
-
-/// A WAL object that records the floor its writer validated against is an
-/// object of the removed design, and the strict decoder rejects it as it
-/// rejects any other unknown field.
-#[test]
-fn wal_decode_rejects_a_basis_floor() {
-    let document = wal_document_with_payload_edit(&sample_wal_payload(), |payload| {
-        cbor_map_of(payload).push((
-            ciborium::Value::from("basis_floor_seq"),
-            ciborium::Value::from(0),
-        ));
-    });
-
-    let error = decode_wal_object_envelope_zstd(&document)
-        .expect_err("a WAL object with a basis floor must be rejected");
-    assert_matches!(
-        error,
-        WalCodecError::Envelope(EnvelopeCodecError::PayloadDecode(message))
-            if message.contains("unknown field") && message.contains("basis_floor_seq")
     );
 }
 
@@ -3469,20 +3409,6 @@ fn namespace_manifest_rejects_a_zero_retention_window() {
     assert_matches!(
         decode_namespace_manifest_json(&rezstd(&encoded)),
         Err(EnvelopeCodecError::PayloadDecode(message)) if message.contains("nonzero")
-    );
-}
-
-#[test]
-fn namespace_manifest_rejects_a_naming_field() {
-    // Every namespace compares sibling names by the same rule, so a manifest
-    // has no naming mode, and a payload with a `naming` field fails to load.
-    let encoded = control_document_with_payload_edit("manifest.v1.json", |payload| {
-        payload["naming"] = serde_json::Value::from("case_insensitive");
-    });
-    assert_matches!(
-        decode_namespace_manifest_json(&rezstd(&encoded)),
-        Err(EnvelopeCodecError::PayloadDecode(message))
-            if message.contains("unknown field `naming`")
     );
 }
 
