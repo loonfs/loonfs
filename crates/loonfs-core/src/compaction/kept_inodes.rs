@@ -144,7 +144,8 @@ pub(crate) async fn load_kept_inode_filter<S: ObjectStore + ?Sized>(
         ControlFlow::Continue(()) => Ok(Ok(KeptInodeFilter::Reached(walk.filter))),
         ControlFlow::Break(WalkStop::Cancelled) => Ok(Err(CompactionUnitOutcome::Cancelled)),
         ControlFlow::Break(WalkStop::TooDeep) => {
-            tracing::info!(namespace_id = %namespace_id, max_depth = MAX_KEPT_INODE_WALK_DEPTH,
+            tracing::error!(namespace_id = %namespace_id, job_id = spec.job_id().as_str(),
+                families = ?spec.families(), max_depth = MAX_KEPT_INODE_WALK_DEPTH,
                 "kept inode walk exceeded its depth limit; kept every row");
             Ok(Ok(KeptInodeFilter::EveryInodeAtWalkLimit))
         }
