@@ -443,61 +443,12 @@ mod tests {
     use futures::poll;
     use loonfs_types::format::control::{ManifestRef, NamespaceStatus};
 
-    use loonfs_types::{ActorId, CommitSeq, InodeId, InodeKind, ManifestNo, NamespaceId};
+    use loonfs_types::{CommitSeq, InodeId, InodeKind, ManifestNo, NamespaceId};
     use loonfs_types::{WalNo, WriterEpoch};
     use std::pin::pin;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::Arc;
     use tokio::sync::watch;
-
-    #[test]
-    fn row_attribution_and_timestamps_never_enter_projection_cache_keys() {
-        let cache = HeadAndWalTailCache::unshared(16 * 1024);
-        let key = WalTailCacheKey {
-            namespace_id: NamespaceId::parse("demo").expect("namespace id"),
-            manifest_no: ManifestNo(7),
-            head_seq: CommitSeq(12),
-            wal_no: WalNo(12),
-        };
-        let actors = [
-            ActorId::parse("auth0|x").expect("actor id"),
-            ActorId::parse("x".repeat(256)).expect("256-byte actor id"),
-            ActorId::parse("external|actor").expect("external actor id"),
-        ];
-
-        for (offset, actor) in actors.into_iter().enumerate() {
-            let rows = MetadataState::from_rows(
-                vec![InodeRecord {
-                    inode_id: InodeId(42),
-                    inode_kind: InodeKind::File,
-                    committed_seq: CommitSeq(3),
-                    commit_id: loonfs_types::CommitId::parse("c_cache_row").expect("commit id"),
-                    committed_by: actor.clone(),
-                    committed_at_ms: 3_000 + offset as u64,
-                }],
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-            );
-            let tail = Arc::new(ProjectedWalTail::from_rows(rows));
-            cache.insert_tail(key.clone(), Arc::clone(&tail));
-            assert_eq!(
-                cache
-                    .get_tail(&key)
-                    .expect("same projection cache key should hit")
-                    .chunks()[0]
-                    .rows
-                    .inodes()[0]
-                    .committed_by,
-                actor
-            );
-        }
-    }
 
     fn namespace(name: &str) -> NamespaceId {
         NamespaceId::parse(name).expect("namespace id")

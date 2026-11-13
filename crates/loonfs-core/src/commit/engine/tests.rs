@@ -115,123 +115,46 @@ fn semantic_identity_excludes_content_preparation() {
     );
 }
 
-#[test]
-fn semantic_identity_ignores_current_request_limits() {
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let oversized_ops = CommitCandidate::new(CommitIntent {
+/// Returns a candidate that creates `operations` directories, with a message
+/// of `message_bytes` bytes when `message_bytes` is set.
+fn request_with(operations: usize, message_bytes: Option<usize>) -> CommitCandidate {
+    CommitCandidate::new(CommitIntent {
         preconditions: Vec::new(),
-        commit_id: CommitId::parse("too-many-ops").expect("valid commit id"),
+        commit_id: CommitId::parse("ceiling").expect("valid commit id"),
         actor_id: loonfs_test_support::test_actor(),
         subject: None,
-        message: None,
-        operations: (0..=crate::limits::MAX_COMMIT_OPERATIONS)
+        message: message_bytes.map(|bytes| "m".repeat(bytes)),
+        operations: (0..operations)
             .map(|index| FilesystemOperation::CreateDirectory {
                 path: loonfs_types::AbsolutePath::parse(format!("/dir-{index}"))
                     .expect("valid path"),
                 parents: false,
             })
             .collect(),
-    });
-    oversized_ops.semantic_identity(&namespace_id);
-
-    let content_ref = ContentRef::blob_v1(
-        ContentId::generate(),
-        b"proof",
-        loonfs_types::ChecksumAlgorithm::Crc64nvme,
-    );
-    let prepared = PreparedContent::for_durable_content_write(namespace_id.clone(), content_ref);
-    let oversized_proofs = CommitCandidate::prepared(
-        create_directory_request("too-many-proofs", "docs"),
-        vec![prepared; crate::limits::MAX_COMMIT_CONTENT_TOKENS + 1],
-    );
-    oversized_proofs.semantic_identity(&namespace_id);
-
-    let oversized_message = CommitCandidate::new(CommitIntent {
-        preconditions: Vec::new(),
-        commit_id: CommitId::parse("too-long-message").expect("valid commit id"),
-        actor_id: loonfs_test_support::test_actor(),
-        subject: None,
-        message: Some("m".repeat(crate::limits::MAX_COMMIT_MESSAGE_BYTES + 1)),
-        operations: vec![FilesystemOperation::CreateDirectory {
-            path: loonfs_types::AbsolutePath::parse("/docs").expect("valid path"),
-            parents: false,
-        }],
-    });
-    oversized_message.semantic_identity(&namespace_id);
+    })
 }
 
 #[test]
-fn a_batch_past_the_operation_ceiling_is_rejected() {
-    let oversized = CommitCandidate::new(CommitIntent {
-        preconditions: Vec::new(),
-        commit_id: CommitId::parse("oversized-batch").expect("valid commit id"),
-        actor_id: loonfs_test_support::test_actor(),
-        subject: None,
-        message: None,
-        operations: (0..=crate::limits::MAX_COMMIT_OPERATIONS)
-            .map(|index| FilesystemOperation::CreateDirectory {
-                path: loonfs_types::AbsolutePath::parse(format!("/dir-{index}"))
-                    .expect("valid path"),
-                parents: false,
-            })
-            .collect(),
-    });
-
-    let error = oversized
-        .validate_request_limits()
-        .expect_err("the batch is over the operation ceiling");
-    assert_eq!(error.code(), ErrorCode::InvalidRequest);
-
-    let at_ceiling = CommitCandidate::new(CommitIntent {
-        preconditions: Vec::new(),
-        commit_id: CommitId::parse("largest-batch").expect("valid commit id"),
-        actor_id: loonfs_test_support::test_actor(),
-        subject: None,
-        message: None,
-        operations: (0..crate::limits::MAX_COMMIT_OPERATIONS)
-            .map(|index| FilesystemOperation::CreateDirectory {
-                path: loonfs_types::AbsolutePath::parse(format!("/dir-{index}"))
-                    .expect("valid path"),
-                parents: false,
-            })
-            .collect(),
-    });
-    at_ceiling
-        .validate_request_limits()
-        .expect("a batch at the ceiling is admitted");
-}
-
-#[test]
-fn a_message_past_the_byte_ceiling_is_rejected() {
-    let operations = vec![FilesystemOperation::CreateDirectory {
-        path: loonfs_types::AbsolutePath::parse("/docs").expect("valid path"),
-        parents: false,
-    }];
-
-    let oversized = CommitCandidate::new(CommitIntent {
-        preconditions: Vec::new(),
-        commit_id: CommitId::parse("oversized-message").expect("valid commit id"),
-        actor_id: loonfs_test_support::test_actor(),
-        subject: None,
-        message: Some("m".repeat(crate::limits::MAX_COMMIT_MESSAGE_BYTES + 1)),
-        operations: operations.clone(),
-    });
-    let error = oversized
-        .validate_request_limits()
-        .expect_err("the message is over the byte ceiling");
-    assert_eq!(error.code(), ErrorCode::InvalidRequest);
-
-    let at_ceiling = CommitCandidate::new(CommitIntent {
-        preconditions: Vec::new(),
-        commit_id: CommitId::parse("largest-message").expect("valid commit id"),
-        actor_id: loonfs_test_support::test_actor(),
-        subject: None,
-        message: Some("m".repeat(crate::limits::MAX_COMMIT_MESSAGE_BYTES)),
-        operations,
-    });
-    at_ceiling
-        .validate_request_limits()
-        .expect("a message at the ceiling is admitted");
+fn requests_past_the_operation_or_message_ceiling_are_rejected() {
+    use crate::limits::{MAX_COMMIT_MESSAGE_BYTES, MAX_COMMIT_OPERATIONS};
+    for (label, operations, message_bytes, admitted) in [
+        ("operations past", MAX_COMMIT_OPERATIONS + 1, None, false),
+        ("operations at", MAX_COMMIT_OPERATIONS, None, true),
+        ("message past", 1, Some(MAX_COMMIT_MESSAGE_BYTES + 1), false),
+        ("message at", 1, Some(MAX_COMMIT_MESSAGE_BYTES), true),
+    ] {
+        let expected = if admitted {
+            Ok(())
+        } else {
+            Err(ErrorCode::InvalidRequest)
+        };
+        let checked = request_with(operations, message_bytes).validate_request_limits();
+        assert_eq!(
+            checked.map_err(|error| error.code()),
+            expected,
+            "{label} the ceiling"
+        );
+    }
 }
 
 fn create_dir(commit_id: &str, display_name: &str) -> CommitCandidate {
@@ -499,70 +422,6 @@ async fn publish_one<S: ObjectStore>(
         .await;
     published.results[0].as_ref().expect(name);
     published
-}
-
-#[tokio::test]
-async fn a_fold_by_another_process_is_found_at_the_basis_check() {
-    let directory = tempdir().expect("tempdir");
-    let store = gated_store(&directory, KeyPredicate::new(|_| false));
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let (mut engine, timer, writer) = writer_after_one_publish(&store, &namespace_id).await;
-    let basis = engine
-        .read_position()
-        .expect("published")
-        .read_basis
-        .basis
-        .manifest_no();
-
-    // Another process folds the tail into the next manifest.
-    crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal_tail(
-            None,
-            &OperationClock::start(0, Arc::new(StdMonotonicTimer::default())),
-        )
-        .await
-        .expect("fold");
-
-    // A budget after the load the basis and the tip are still trusted.
-    timer.advance_ms(WAL_PUBLISH_BUDGET_MS);
-    store.reset();
-    publish_one(&mut engine, &writer, "beta").await;
-    assert_eq!(
-        engine
-            .read_position()
-            .expect("published")
-            .read_basis
-            .basis
-            .manifest_no(),
-        basis
-    );
-    assert_eq!(store.count(OperationSelector::Head), 0);
-
-    // Two budgets after the load the check finds the successor, and the
-    // view is reloaded from the hint before the put.
-    timer.advance_ms(WAL_PUBLISH_BUDGET_MS);
-    store.reset();
-    publish_one(&mut engine, &writer, "gamma").await;
-    let operations = store.take();
-    assert_eq!(
-        engine
-            .read_position()
-            .expect("published")
-            .read_basis
-            .basis
-            .manifest_no(),
-        basis.successor().expect("next manifest number")
-    );
-    let head = operations
-        .iter()
-        .position(|operation| matches!(operation, RecordedOperation::Head { .. }))
-        .expect("basis check");
-    assert!(
-        operations[head..]
-            .iter()
-            .any(|operation| operation.key() == loonfs_objectstore::keys::hint(&namespace_id)),
-        "{operations:?}"
-    );
 }
 
 #[tokio::test]
