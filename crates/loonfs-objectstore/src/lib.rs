@@ -46,9 +46,9 @@ mod transfer_timeouts;
 
 pub use configured::{ConfiguredObjectStore, ConfiguredObjectStoreKind};
 pub use object_store::{
-    required_etag, AssemblySource, ByteRange, ByteStream, ListedObject, MultipartPart, ObjectBody,
-    ObjectMetadata, ObjectStore, ObjectStoreError, ObjectStoreErrorKind, ObjectStoreExtension,
-    PutMode, Result, SharedObjectStore, StoreIdentity,
+    required_etag, AssemblySource, ByteRange, ByteStream, GetIfChangedOutcome, ListedObject,
+    MultipartPart, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, ObjectStoreErrorKind,
+    ObjectStoreExtension, PutMode, Result, SharedObjectStore, StoreIdentity,
 };
 pub use probe::{run_store_contract_probe, StoreProbeCheck, StoreProbeOutcome, StoreProbeReport};
 pub use provider_limits::{

@@ -7,8 +7,8 @@ use crate::layout::{parse_object_key, DurableObjectFamily};
 use crate::object_store::Result;
 use crate::ListedObject;
 use crate::{
-    AssemblySource, ByteRange, ByteStream, MultipartPart, ObjectBody, ObjectMetadata, ObjectStore,
-    ObjectStoreErrorKind, PutMode,
+    AssemblySource, ByteRange, ByteStream, GetIfChangedOutcome, MultipartPart, ObjectBody,
+    ObjectMetadata, ObjectStore, ObjectStoreErrorKind, PutMode,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -523,6 +523,25 @@ where
                     .as_ref()
                     .ok()
                     .and_then(|body| body.as_ref().map(|body| body.bytes.len() as u64));
+                sample.range_class = Some(RangeKind::FullObject);
+            },
+        )
+        .await
+    }
+
+    async fn get_if_changed(&self, key: &str, etag: &str) -> Result<Option<GetIfChangedOutcome>> {
+        self.measure(
+            ObjectStoreOperation::GetWithMetadata,
+            key,
+            self.inner.get_if_changed(key, etag),
+            classify_optional_result,
+            |result, sample| {
+                sample.bytes_out = result.as_ref().ok().and_then(|outcome| {
+                    outcome.as_ref().map(|outcome| match outcome {
+                        GetIfChangedOutcome::Unchanged => 0,
+                        GetIfChangedOutcome::Changed(body) => body.bytes.len() as u64,
+                    })
+                });
                 sample.range_class = Some(RangeKind::FullObject);
             },
         )
