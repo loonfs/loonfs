@@ -356,7 +356,6 @@ fn compact_rows_with_retention(
 async fn run_planned_compaction<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    _context: &WriterAt,
     policy: MetadataRunPolicy,
     spec: &MetadataCompactionSpec,
 ) -> CompactionUnitOutcome {
@@ -493,10 +492,9 @@ fn copy_directory(from: &std::path::Path, to: &std::path::Path) {
 pub(crate) async fn compact_a_family_group<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    context: &WriterAt,
 ) -> BTreeSet<String> {
-    let (policy, spec) = plan_a_family_group_compaction(store, namespace_id, context).await;
-    publish_planned_compaction(store, namespace_id, context, policy, &spec).await;
+    let (policy, spec) = plan_a_family_group_compaction(store, namespace_id).await;
+    publish_planned_compaction(store, namespace_id, policy, &spec).await;
     segment_keys_of_the_current_manifest(store, namespace_id).await
 }
 
@@ -508,7 +506,6 @@ pub(crate) async fn compact_a_family_group<S: ObjectStore + ?Sized>(
 pub(crate) async fn plan_a_family_group_compaction<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    _context: &WriterAt,
 ) -> (MetadataRunPolicy, MetadataCompactionSpec) {
     let policy = MetadataRunPolicy {
         max_delta_runs: NonZeroUsize::MIN,
@@ -580,11 +577,10 @@ pub(crate) fn dropped_segments(
 pub(crate) async fn publish_planned_compaction<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    context: &WriterAt,
     policy: MetadataRunPolicy,
     spec: &MetadataCompactionSpec,
 ) {
-    let outcome = run_planned_compaction(store, namespace_id, context, policy, spec).await;
+    let outcome = run_planned_compaction(store, namespace_id, policy, spec).await;
     assert_matches!(
         outcome,
         CompactionUnitOutcome::Published { .. },
@@ -782,7 +778,6 @@ fn delta_run_count(payload: &NamespaceManifestPayload) -> usize {
 
 // Test support: a manifest built directly from a MetadataState, used to
 // author arbitrary layouts without driving the full snapshot pipeline.
-#[cfg(test)]
 pub(crate) struct ManifestMetadataSource<'a> {
     pub(crate) head: &'a NamespaceReadState,
     pub(crate) basis_manifest_no: Option<ManifestNo>,
@@ -790,7 +785,6 @@ pub(crate) struct ManifestMetadataSource<'a> {
     pub(crate) metadata_state: &'a MetadataState,
 }
 
-#[cfg(test)]
 pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -815,78 +809,48 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
         .as_ref()
         .map_or(RunNo(0), |previous| previous.manifest.payload().next_run_no);
     let mut next_run_no = next_run_no_after(run_no)?;
-    let runs = match previous_manifest {
-        Some(previous) if is_bootstrap_seed_manifest(previous.manifest.payload()) => {
-            let run_segments = crate::NamespaceStore {
-                run_policy: policy,
-                ..crate::test_support::namespace_store(store, namespace_id)
-            }
-            .build_manifest_segments(metadata_state, &HashMap::new())
-            .await?;
-            debug_assert_manifest_segments_do_not_overlap(&run_segments);
-            vec![MetadataRunRef {
+    let delta_basis = previous_manifest.filter(|previous| {
+        !is_bootstrap_seed_manifest(previous.manifest.payload())
+            && delta_run_count(previous.manifest.payload()) < policy.max_delta_runs.get()
+    });
+    let runs = if let Some(previous) = delta_basis {
+        let mut runs = previous.manifest.payload().runs.clone();
+        if previous.manifest.payload().head_seq < head_seq {
+            runs.push(MetadataRunRef {
                 run_no,
                 run_seq: head_seq,
-                tier: RunTier::Base,
-                segments: flatten_manifest_segments(run_segments),
-            }]
+                tier: RunTier::Delta,
+                segments: flatten_manifest_segments(
+                    crate::NamespaceStore {
+                        run_policy: policy,
+                        ..crate::test_support::namespace_store(store, namespace_id)
+                    }
+                    .build_manifest_delta_run_segments(
+                        previous.manifest.payload().head_seq,
+                        metadata_state,
+                        &HashMap::new(),
+                    )
+                    .await?,
+                ),
+            });
+        } else {
+            next_run_no = run_no;
         }
-        Some(previous)
-            if delta_run_count(previous.manifest.payload()) < policy.max_delta_runs.get() =>
-        {
-            let mut runs = previous.manifest.payload().runs.clone();
-            if previous.manifest.payload().head_seq < head_seq {
-                runs.push(MetadataRunRef {
-                    run_no,
-                    run_seq: head_seq,
-                    tier: RunTier::Delta,
-                    segments: flatten_manifest_segments(
-                        crate::NamespaceStore {
-                            run_policy: policy,
-                            ..crate::test_support::namespace_store(store, namespace_id)
-                        }
-                        .build_manifest_delta_run_segments(
-                            previous.manifest.payload().head_seq,
-                            metadata_state,
-                            &HashMap::new(),
-                        )
-                        .await?,
-                    ),
-                });
-            } else {
-                next_run_no = run_no;
-            }
-            runs
+        runs
+    } else {
+        let run_segments = crate::NamespaceStore {
+            run_policy: policy,
+            ..crate::test_support::namespace_store(store, namespace_id)
         }
-        Some(_) => {
-            let run_segments = crate::NamespaceStore {
-                run_policy: policy,
-                ..crate::test_support::namespace_store(store, namespace_id)
-            }
-            .build_manifest_segments(metadata_state, &HashMap::new())
-            .await?;
-            debug_assert_manifest_segments_do_not_overlap(&run_segments);
-            vec![MetadataRunRef {
-                run_no,
-                run_seq: head_seq,
-                tier: RunTier::Base,
-                segments: flatten_manifest_segments(run_segments),
-            }]
-        }
-        _ => {
-            let run_segments = crate::NamespaceStore {
-                run_policy: policy,
-                ..crate::test_support::namespace_store(store, namespace_id)
-            }
-            .build_manifest_segments(metadata_state, &HashMap::new())
-            .await?;
-            vec![MetadataRunRef {
-                run_no,
-                run_seq: head_seq,
-                tier: RunTier::Base,
-                segments: flatten_manifest_segments(run_segments),
-            }]
-        }
+        .build_manifest_segments(metadata_state, &HashMap::new())
+        .await?;
+        debug_assert_manifest_segments_do_not_overlap(&run_segments);
+        vec![MetadataRunRef {
+            run_no,
+            run_seq: head_seq,
+            tier: RunTier::Base,
+            segments: flatten_manifest_segments(run_segments),
+        }]
     };
 
     Ok(encode_namespace_manifest_json(NamespaceManifestPayload {
@@ -915,7 +879,6 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
     .expect("a test namespace manifest should encode"))
 }
 
-#[cfg(test)]
 fn is_bootstrap_seed_manifest(payload: &NamespaceManifestPayload) -> bool {
     payload.head_seq == CommitSeq(0) && payload.base_seq() == CommitSeq(0)
 }

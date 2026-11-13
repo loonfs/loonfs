@@ -2078,14 +2078,8 @@ impl Interceptor for RivalDuringPublication {
             }
             RivalPublication::OtherGroup(group) | RivalPublication::SameGroup(group) => {
                 let spec = compaction_spec_for_group(rival, namespace_id, group).await;
-                publish_planned_compaction(
-                    rival,
-                    namespace_id,
-                    &test_context(),
-                    compact_everything_policy(),
-                    &spec,
-                )
-                .await;
+                publish_planned_compaction(rival, namespace_id, compact_everything_policy(), &spec)
+                    .await;
             }
         }
         (Intercept::Continue, ())

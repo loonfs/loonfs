@@ -503,27 +503,17 @@ async fn appends_reject_a_base_in_another_store_algorithm() {
             .expect("direct upload");
         crate::test_support::namespace_store(&store, &namespace_id)
             .append_wal_commit(
-                vec![WalDelta::AppendFileRevision {
-                    delta_index: 0,
+                vec![crate::test_support::file_revision_delta(
+                    0,
                     inode_id,
-                    parent_inode_id: loonfs_types::ROOT_INODE_ID,
-                    name_key: loonfs_types::NameKey::parse("file.txt").expect("name key"),
-                    display_name: loonfs_types::DisplayName::parse("file.txt")
-                        .expect("display name"),
-                    bind_position: loonfs_types::format::manifest::DeltaPosition {
-                        seq: loonfs_types::CommitSeq(1),
-                        delta_index: 0,
-                    },
-                    child_created_by: loonfs_types::ActorId::loonfs(),
-                    child_created_at_ms: 0,
-                    revision_no: RevisionNo(revision_no),
-                    content_ref: ContentRef {
+                    RevisionNo(revision_no),
+                    ContentRef {
                         kind: ContentRefKind::BlobV1,
                         content_id: content_id.clone(),
                         size_bytes: 6,
                         checksum: checksum.clone(),
                     },
-                    layout: Some(loonfs_types::ContentLayout {
+                    Some(loonfs_types::ContentLayout {
                         creator_namespace_id: namespace_id.clone(),
                         extents: vec![loonfs_types::ContentExtent {
                             content_id,
@@ -532,8 +522,7 @@ async fn appends_reject_a_base_in_another_store_algorithm() {
                             length: 6,
                         }],
                     }),
-                    append_offset: None,
-                }],
+                )],
                 Vec::new(),
             )
             .await

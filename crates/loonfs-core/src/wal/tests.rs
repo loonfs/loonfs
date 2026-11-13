@@ -18,8 +18,7 @@ use loonfs_test_support::stores::{
 use loonfs_types::format::wal::{decode_wal_object_envelope_zstd, encode_wal_object_envelope_zstd};
 use loonfs_types::options::AttributeInclusion;
 use loonfs_types::{
-    AbsolutePath, CommitId, CommitSeq, ErrorCode, ManifestNo, NamespaceId, WalNo, WriterEpoch,
-    WriterId,
+    CommitId, CommitSeq, ErrorCode, ManifestNo, NamespaceId, WalNo, WriterEpoch, WriterId,
 };
 use std::assert_matches;
 use std::sync::Arc;
@@ -382,15 +381,7 @@ async fn fence_retries_whose_anchor_loads_outlast_the_wal_budget_end_with_the_ac
 }
 
 fn directory(name: &str) -> CommitCandidate {
-    CommitCandidate::new(crate::path::write::CommitIntent::single(
-        CommitId::parse(name).expect("commit"),
-        loonfs_test_support::test_actor(),
-        None,
-        crate::path::write::FilesystemOperation::CreateDirectory {
-            path: AbsolutePath::parse(format!("/{name}")).expect("path"),
-            parents: false,
-        },
-    ))
+    CommitCandidate::new(crate::test_support::create_directory_request(name, name))
 }
 
 pub(crate) async fn publish<S: ObjectStore>(

@@ -416,7 +416,7 @@ pub(crate) fn inline_content_refs(
 mod tests {
     use super::ProjectedWalTail;
     use crate::metadata::MetadataState;
-    use loonfs_types::format::wal::{WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent};
+    use loonfs_types::format::wal::{WalCommitDelta, WalCommitPayload, WalInlineContent};
     use loonfs_types::{CommitId, CommitSeq, ContentId, ContentRef, InodeId, RevisionNo};
 
     fn commit(seq: u64, content_id: &ContentId, whole: &[u8], offset: usize) -> WalCommitPayload {
@@ -430,28 +430,17 @@ mod tests {
             merge: None,
             deltas: vec![WalCommitDelta {
                 semantic_operation_index: 0,
-                delta: WalDelta::AppendFileRevision {
-                    delta_index: 0,
-                    inode_id: InodeId(2),
-                    parent_inode_id: loonfs_types::ROOT_INODE_ID,
-                    name_key: loonfs_types::NameKey::parse("file.txt").expect("name key"),
-                    display_name: loonfs_types::DisplayName::parse("file.txt")
-                        .expect("display name"),
-                    bind_position: loonfs_types::format::manifest::DeltaPosition {
-                        seq: loonfs_types::CommitSeq(1),
-                        delta_index: 0,
-                    },
-                    child_created_by: loonfs_types::ActorId::loonfs(),
-                    child_created_at_ms: 0,
-                    revision_no: RevisionNo(seq),
-                    content_ref: ContentRef::blob_v1(
+                delta: crate::test_support::file_revision_delta(
+                    0,
+                    InodeId(2),
+                    RevisionNo(seq),
+                    ContentRef::blob_v1(
                         content_id.clone(),
                         whole,
                         loonfs_types::ChecksumAlgorithm::Crc64nvme,
                     ),
-                    layout: None,
-                    append_offset: None,
-                },
+                    None,
+                ),
             }],
             inline_content: vec![WalInlineContent {
                 content_id: content_id.clone(),

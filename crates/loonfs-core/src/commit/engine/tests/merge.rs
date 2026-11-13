@@ -46,7 +46,7 @@ fn fork_inode_id() -> InodeId {
 /// A merge of `merge` under `commit_id` that creates `/{name}` under an inode
 /// ID from the fork.
 fn merge_candidate(commit_id: &str, name: &str, merge: MergeRecord) -> CommitCandidate {
-    CommitCandidate::new(create_dir_request(commit_id, name)).with_merge(
+    CommitCandidate::new(create_directory_request(commit_id, name)).with_merge(
         merge,
         FORK_POINT,
         BTreeMap::from([(0, fork_inode_id())]),
@@ -54,15 +54,7 @@ fn merge_candidate(commit_id: &str, name: &str, merge: MergeRecord) -> CommitCan
 }
 
 async fn setup() -> (tempfile::TempDir, LocalFsStore, NamespaceId, WriterAt) {
-    let directory = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(directory.path()).expect("store");
-    let namespace_id = NamespaceId::parse("main").expect("namespace");
-    let writer = context("writer");
-    NamespaceFixture::new(&store, &namespace_id, &writer)
-        .create()
-        .await
-        .expect("bootstrap");
-    (directory, store, namespace_id, writer)
+    crate::test_support::created_namespace("main", context("writer")).await
 }
 
 async fn publish(
@@ -105,7 +97,7 @@ async fn the_feed_reports_a_merge_record_before_and_after_a_fold() {
         &store,
         &namespace_id,
         &writer,
-        CommitCandidate::new(create_dir_request("ordinary", "ordinary")),
+        CommitCandidate::new(create_directory_request("ordinary", "ordinary")),
     )
     .await
     .expect("ordinary commit");
@@ -735,7 +727,7 @@ async fn a_merge_whose_fork_point_is_below_the_retention_floor_is_refused() {
     let mut head = CommitSeq(0);
     while head < FORK_POINT {
         let name = format!("before-{}", head.0);
-        let candidate = CommitCandidate::new(create_dir_request(&name, &name));
+        let candidate = CommitCandidate::new(create_directory_request(&name, &name));
         head = publish(&store, &namespace_id, &writer, candidate)
             .await
             .expect("an ordinary commit")
@@ -753,7 +745,7 @@ async fn a_merge_whose_fork_point_is_below_the_retention_floor_is_refused() {
         .await
         .expect("a merge whose fork point is at the floor");
 
-    let after = CommitCandidate::new(create_dir_request("after", "after"));
+    let after = CommitCandidate::new(create_directory_request("after", "after"));
     publish(&store, &namespace_id, &writer, after)
         .await
         .expect("an ordinary commit after the merges");
@@ -893,7 +885,7 @@ async fn a_merge_whose_inode_ids_dont_match_its_creates_is_refused() {
     let assigned = fork_inode_id();
     let cases = [
         (
-            CommitCandidate::new(create_dir_request("unassigned", "unassigned")).with_merge(
+            CommitCandidate::new(create_directory_request("unassigned", "unassigned")).with_merge(
                 merge(3, 7),
                 FORK_POINT,
                 BTreeMap::new(),

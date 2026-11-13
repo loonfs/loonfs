@@ -2962,7 +2962,7 @@ async fn a_compaction_above_the_base_keeps_the_rows_that_shadow_it() {
     );
     assert!(input_runs.len() > 1);
     let base_before = group_base_runs(&before.manifest, group.families());
-    publish_planned_compaction(&store, &namespace_id, &context, policy, &spec).await;
+    publish_planned_compaction(&store, &namespace_id, policy, &spec).await;
 
     let after = load_manifest_state_for_inspection(
         &store,
@@ -3145,7 +3145,7 @@ async fn a_floor_past_a_snapshot_keeps_its_manifest_and_runs_readable_until_dele
         .fold_wal()
         .await
         .expect("fold");
-    let current_segments = super::compact_a_family_group(&store, &namespace_id, &context).await;
+    let current_segments = super::compact_a_family_group(&store, &namespace_id).await;
     let only_snapshot: Vec<_> = snapshot_segments
         .difference(&current_segments)
         .cloned()

@@ -758,7 +758,7 @@ async fn published_compaction_segments_are_referenced_and_kept() {
             .await
             .expect("fold wal");
     }
-    let staged = compact_a_family_group(&store, &namespace_id, &setup).await;
+    let staged = compact_a_family_group(&store, &namespace_id).await;
 
     // Far past every window this collector knows, including the staging one.
     let long_after = context(
@@ -815,12 +815,8 @@ async fn a_publication_during_a_collection_never_costs_the_job_its_segments() {
     // like to a collector.
     let collection_clock =
         context(now_after_newest_object(&seed, &namespace_id, GRACE_MS + 1).await);
-    let (policy, spec) = crate::manifest::tests::plan_a_family_group_compaction(
-        &seed,
-        &namespace_id,
-        &collection_clock,
-    )
-    .await;
+    let (policy, spec) =
+        crate::manifest::tests::plan_a_family_group_compaction(&seed, &namespace_id).await;
 
     // The collection parks at its first listing, which is after it has collected the
     // roots and long before it reaches the compaction prefix. Everything the
@@ -836,14 +832,8 @@ async fn a_publication_during_a_collection_never_costs_the_job_its_segments() {
     let clock = collection_clock.clock();
     let (report, staged) = tokio::join!(namespace.gc(&collection_options, &clock), async {
         gated.wait_until_blocked().await;
-        crate::manifest::tests::publish_planned_compaction(
-            &seed,
-            &namespace_id,
-            &collection_clock,
-            policy,
-            &spec,
-        )
-        .await;
+        crate::manifest::tests::publish_planned_compaction(&seed, &namespace_id, policy, &spec)
+            .await;
         let staged =
             crate::manifest::tests::segment_keys_of_the_current_manifest(&seed, &namespace_id)
                 .await;

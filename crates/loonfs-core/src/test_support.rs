@@ -73,6 +73,74 @@ pub(crate) fn binding_row(
     }
 }
 
+/// The WAL delta that appends revision `revision_no` with `content_ref` to
+/// file `inode_id`, with the placeholder binding of `file.txt` under the root.
+#[cfg(test)]
+pub(crate) fn file_revision_delta(
+    delta_index: u32,
+    inode_id: loonfs_types::InodeId,
+    revision_no: loonfs_types::RevisionNo,
+    content_ref: loonfs_types::ContentRef,
+    layout: Option<loonfs_types::ContentLayout>,
+) -> loonfs_types::format::wal::WalDelta {
+    loonfs_types::format::wal::WalDelta::AppendFileRevision {
+        delta_index,
+        inode_id,
+        parent_inode_id: loonfs_types::ROOT_INODE_ID,
+        name_key: loonfs_types::NameKey::parse("file.txt").expect("name key"),
+        display_name: loonfs_types::DisplayName::parse("file.txt").expect("display name"),
+        bind_position: loonfs_types::format::manifest::DeltaPosition {
+            seq: loonfs_types::CommitSeq(1),
+            delta_index: 0,
+        },
+        child_created_by: loonfs_types::ActorId::loonfs(),
+        child_created_at_ms: 0,
+        revision_no,
+        content_ref,
+        layout,
+        append_offset: None,
+    }
+}
+
+/// A request under `commit_id` that creates the directory `/{name}`.
+#[cfg(test)]
+pub(crate) fn create_directory_request(
+    commit_id: &str,
+    name: &str,
+) -> crate::path::write::CommitIntent {
+    crate::path::write::CommitIntent::single(
+        loonfs_types::CommitId::parse(commit_id).expect("valid commit id"),
+        loonfs_test_support::test_actor(),
+        None,
+        crate::path::write::FilesystemOperation::CreateDirectory {
+            path: loonfs_types::AbsolutePath::parse(format!("/{name}")).expect("valid path"),
+            parents: false,
+        },
+    )
+}
+
+/// Creates the namespace `name` as `writer` in a new local store.
+#[cfg(test)]
+pub(crate) async fn created_namespace(
+    name: &str,
+    writer: WriterAt,
+) -> (
+    tempfile::TempDir,
+    loonfs_objectstore::local_fs_store::LocalFsStore,
+    NamespaceId,
+    WriterAt,
+) {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let store =
+        loonfs_objectstore::local_fs_store::LocalFsStore::new(directory.path()).expect("store");
+    let namespace_id = NamespaceId::parse(name).expect("valid namespace id");
+    NamespaceFixture::new(&store, &namespace_id, &writer)
+        .create()
+        .await
+        .expect("bootstrap");
+    (directory, store, namespace_id, writer)
+}
+
 /// Builds the record of a service-proxied upload session with new IDs.
 #[cfg(test)]
 pub(crate) fn proxied_upload_session(

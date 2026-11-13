@@ -158,27 +158,17 @@ fn every_provenance_row_copies_the_wal_payload_commit_id() {
             inode_id: InodeId(7),
             inode_kind: InodeKind::File,
         },
-        WalDelta::AppendFileRevision {
-            delta_index: 1,
-            inode_id: InodeId(7),
-            parent_inode_id: loonfs_types::ROOT_INODE_ID,
-            name_key: loonfs_types::NameKey::parse("file.txt").expect("name key"),
-            display_name: loonfs_types::DisplayName::parse("file.txt").expect("display name"),
-            bind_position: loonfs_types::format::manifest::DeltaPosition {
-                seq: loonfs_types::CommitSeq(1),
-                delta_index: 0,
-            },
-            child_created_by: loonfs_types::ActorId::loonfs(),
-            child_created_at_ms: 0,
-            revision_no: RevisionNo(1),
-            content_ref: ContentRef::blob_v1(
+        crate::test_support::file_revision_delta(
+            1,
+            InodeId(7),
+            RevisionNo(1),
+            ContentRef::blob_v1(
                 ContentId::generate(),
                 b"revision",
                 loonfs_types::ChecksumAlgorithm::Crc64nvme,
             ),
-            layout: None,
-            append_offset: None,
-        },
+            None,
+        ),
         WalDelta::TombstoneSubtree {
             delta_index: 2,
             root_inode_id: InodeId(7),

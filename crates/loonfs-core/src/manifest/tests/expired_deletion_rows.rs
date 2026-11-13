@@ -929,7 +929,6 @@ async fn a_compaction_whose_kept_inode_walk_reaches_its_limit_skips_hidden_row_r
     let outcome = run_planned_compaction(
         &store,
         &namespace_id,
-        &context,
         MetadataRunPolicy::default(),
         &whole_group_spec(&current, MetadataFamilyGroup::Revisions),
     )
@@ -980,14 +979,9 @@ async fn a_delta_only_compaction_keeps_an_expired_deletions_rows() {
             },
             floor_seq,
         );
-        let outcome = run_planned_compaction(
-            &store,
-            &namespace_id,
-            &context,
-            MetadataRunPolicy::default(),
-            &spec,
-        )
-        .await;
+        let outcome =
+            run_planned_compaction(&store, &namespace_id, MetadataRunPolicy::default(), &spec)
+                .await;
         assert_matches!(outcome, CompactionUnitOutcome::Published { .. });
     }
     assert_eq!(
@@ -1316,7 +1310,6 @@ async fn kept_inode_filter_and_walk_reads(
 pub(super) async fn compact_group<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    context: &WriterAt,
     group: MetadataFamilyGroup,
 ) {
     let current = crate::test_support::namespace_store(store, namespace_id)
@@ -1324,14 +1317,8 @@ pub(super) async fn compact_group<S: ObjectStore + ?Sized>(
         .await
         .expect("load the current manifest");
     let spec = whole_group_spec(&current, group);
-    let outcome = run_planned_compaction(
-        store,
-        namespace_id,
-        context,
-        MetadataRunPolicy::default(),
-        &spec,
-    )
-    .await;
+    let outcome =
+        run_planned_compaction(store, namespace_id, MetadataRunPolicy::default(), &spec).await;
     assert_matches!(
         outcome,
         CompactionUnitOutcome::Published { .. },
@@ -1393,7 +1380,7 @@ async fn a_base_compaction_walks_the_tree_once_the_floor_is_above_zero() {
     assert_eq!(walk_reads, 0);
 
     advance_floor_through(&store, &namespace_id, expired_seq, &context).await;
-    compact_group(&store, &namespace_id, &context, MetadataFamilyGroup::Trash).await;
+    compact_group(&store, &namespace_id, MetadataFamilyGroup::Trash).await;
     assert_eq!(
         listed_deletions(&store, &namespace_id).await,
         vec![trash_seq],
@@ -1452,7 +1439,7 @@ async fn a_group_compacted_after_the_trash_still_removes_an_expired_deletions_ro
     let hidden = [old, a];
     let before = rows_of(&store, &namespace_id, &hidden).await;
 
-    compact_group(&store, &namespace_id, &context, MetadataFamilyGroup::Trash).await;
+    compact_group(&store, &namespace_id, MetadataFamilyGroup::Trash).await;
     assert_eq!(
         rows_of(&store, &namespace_id, &hidden).await[&ApiMetadataRowFamily::Trash],
         Vec::new(),
