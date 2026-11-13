@@ -442,7 +442,7 @@ Maintenance
 
   loonfs maintenance gc
     Run one collection of the namespace and print its report. Each
-    call reads the current manifest and hint, lists the snapshots, then lists
+    call finds the current manifest, lists the snapshots, then lists
     every family under the namespace's prefix from the beginning and
     sweeps each family to the end. The collection deletes the namespace's
     unreferenced manifests, WAL objects, metadata segments, extension

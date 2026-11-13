@@ -1,9 +1,10 @@
 //! Manifest publications that build on a live session's writer position,
 //! which put the position's successor without a request first and read
-//! neither the hint nor a WAL object before the put.
+//! neither the manifest boundary nor a WAL object before the put.
 
 use super::*;
 use loonfs_test_support::stores::RecordedOperation;
+use loonfs_types::ManifestNo;
 use std::num::NonZeroU64;
 
 struct Fixture {
@@ -49,12 +50,7 @@ impl Fixture {
             )))
             .await
             .expect("the session's first commit");
-        // The claim's hint raise runs in the session's worker after the
-        // commit returns.
-        writer
-            .drain()
-            .await
-            .expect("the claim's hint raise finishes");
+        writer.drain().await.expect("drain");
         Self {
             _directory: directory,
             store,
@@ -74,13 +70,12 @@ impl Fixture {
     }
 
     /// Returns the logged manifest requests, and checks that the log has no
-    /// read of a WAL object and no request for the hint before the first
-    /// manifest put. The hint raise that follows each publication reads and
-    /// writes the hint after its put.
+    /// read of a WAL object and no request for the manifest boundary before
+    /// the first manifest put.
     fn manifest_requests(&self) -> Vec<(&'static str, String)> {
         let operations = self.store.take();
         let wal = wal_prefix(&self.namespace_id);
-        let hint = loonfs_objectstore::keys::hint(&self.namespace_id);
+        let boundary = loonfs_objectstore::keys::boundary(&self.namespace_id);
         let manifests = metadata_manifest_prefix(&self.namespace_id);
         let first_put = operations
             .iter()
@@ -92,7 +87,7 @@ impl Fixture {
         assert!(
             !operations[..first_put]
                 .iter()
-                .any(|operation| operation.key() == hint),
+                .any(|operation| operation.key() == boundary),
             "{operations:?}"
         );
         assert!(
@@ -127,9 +122,9 @@ impl Fixture {
 
 /// Checks that an explicit fold in a runtime with the namespace's live
 /// session folds the session's position, and puts the position's successor
-/// without a request first and without reading the hint.
+/// without a request first.
 #[tokio::test]
-async fn an_explicit_fold_from_a_live_session_puts_on_its_basis_and_reads_no_hint() {
+async fn an_explicit_fold_from_a_live_session_puts_on_its_basis_with_no_request_first() {
     let fixture = Fixture::new(|builder| builder).await;
     fixture.writer.drain().await.expect("drain");
     let next = fixture
@@ -154,21 +149,15 @@ async fn an_explicit_fold_from_a_live_session_puts_on_its_basis_and_reads_no_hin
         fixture.manifest_requests(),
         vec![("put", fixture.manifest(next))]
     );
-    assert_hint_at_current_manifest(
-        &fixture.writer,
-        fixture.store.as_ref(),
-        &fixture.namespace_id,
-    )
-    .await;
     fixture.shut_down().await;
 }
 
 /// Checks that a retention advance in a runtime with the namespace's live
 /// session creates its floor object at the session's tip and then folds the
 /// floor object on the session's position. The fold's put is the advance's
-/// one manifest request, and the advance reads no hint before it.
+/// one manifest request.
 #[tokio::test]
-async fn a_retention_advance_from_a_live_session_folds_on_its_basis_and_reads_no_hint() {
+async fn a_retention_advance_from_a_live_session_folds_on_its_basis_with_no_request_first() {
     let clock = Arc::new(ManualClock::at_system_time());
     let fixture = Fixture::new({
         let clock = Arc::clone(&clock);
@@ -203,20 +192,14 @@ async fn a_retention_advance_from_a_live_session_folds_on_its_basis_and_reads_no
         fixture.manifest_requests(),
         vec![("put", fixture.manifest(next))]
     );
-    assert_hint_at_current_manifest(
-        &fixture.writer,
-        fixture.store.as_ref(),
-        &fixture.namespace_id,
-    )
-    .await;
     fixture.shut_down().await;
 }
 
 /// Checks that the session's fold at the write stop puts the position's
-/// successor without a request first and without reading the hint, and that
-/// the commit waiting for the fold then commits.
+/// successor without a request first, and that the commit waiting for the
+/// fold then commits.
 #[tokio::test]
-async fn a_fold_at_the_write_stop_puts_on_its_basis_and_reads_no_hint() {
+async fn a_fold_at_the_write_stop_puts_on_its_basis_with_no_request_first() {
     let fixture = Fixture::new(|builder| builder).await;
     let publisher = fixture.namespace.session().publisher.clone();
     let tail_objects = || async {
@@ -335,9 +318,9 @@ async fn write_until_compaction_waits<'a>(
 
 /// Checks that a session's compaction unit, after the runtime's compactor
 /// claim, plans from the session's position, and puts the position's
-/// successor without a request first and without reading the hint.
+/// successor without a request first.
 #[tokio::test]
-async fn a_session_compaction_unit_puts_on_its_basis_and_reads_no_hint() {
+async fn a_session_compaction_unit_puts_on_its_basis_with_no_request_first() {
     // The fold threshold is one WAL object, so each write is folded.
     let fixture = Fixture::new(|builder| {
         builder
@@ -349,8 +332,8 @@ async fn a_session_compaction_unit_puts_on_its_basis_and_reads_no_hint() {
     })
     .await;
     let mut files = 0;
-    // The first unit claims the compactor epoch, which loads the current
-    // manifest through the hint.
+    // The first unit claims the compactor epoch, which finds the newest
+    // manifest from the manifest boundary.
     drop(write_until_compaction_waits(&fixture, &mut files).await);
     fixture
         .writer

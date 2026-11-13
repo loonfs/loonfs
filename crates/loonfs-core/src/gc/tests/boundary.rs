@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 const NOW_MS: u64 = GC_GRACE_WINDOW_MS + 1;
 
 /// Creates `namespace_id` and publishes manifests until manifest `newest` is
-/// current, raising the hint to it. Each writer claim publishes a manifest.
+/// current. Each writer claim publishes a manifest.
 async fn publish_manifests<S: ObjectStore>(store: &S, namespace_id: &NamespaceId, newest: u64) {
     crate::test_support::NamespaceFixture::new(store, namespace_id, &context(1_000))
         .create()
@@ -20,8 +20,7 @@ async fn publish_manifests<S: ObjectStore>(store: &S, namespace_id: &NamespaceId
     publish_more(store, namespace_id, newest).await;
 }
 
-/// Publishes manifests until manifest `newest` is current, and raises the
-/// hint to it.
+/// Publishes manifests until manifest `newest` is current.
 async fn publish_more<S: ObjectStore>(store: &S, namespace_id: &NamespaceId, newest: u64) {
     let namespace = crate::test_support::namespace_store(store, namespace_id);
     loop {
@@ -39,7 +38,6 @@ async fn publish_more<S: ObjectStore>(store: &S, namespace_id: &NamespaceId, new
             .await
             .expect("publish a manifest");
     }
-    namespace.raise_hint_to_current_manifest().await;
 }
 
 async fn stored_boundary<S: ObjectStore>(store: &S, namespace_id: &NamespaceId) -> Option<u64> {
@@ -112,10 +110,17 @@ async fn a_collection_deletes_only_the_manifests_that_it_chose() {
         KeyPredicate::manifest(&namespace_id),
     ));
     publish_manifests(&store, &namespace_id, 1).await;
-    let blocked = Arc::new(BlockingStore::new(
+    // The collection's first listing of the manifests finds its newest
+    // manifest, and the gate parks the second, which lists its candidates.
+    let manifests = metadata_manifest_prefix(&namespace_id);
+    let listings = std::sync::atomic::AtomicUsize::new(0);
+    let blocked = Arc::new(BlockingStore::matching(
         Arc::clone(&store),
-        KeyPredicate::exact(metadata_manifest_prefix(&namespace_id)),
-        OperationSelector::List,
+        move |operation| {
+            operation.key() == manifests
+                && OperationSelector::List.matches(operation.kind())
+                && listings.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1
+        },
     ));
     let recorded = RecordingStore::new(
         Arc::clone(&blocked),
@@ -140,13 +145,13 @@ async fn a_collection_deletes_only_the_manifests_that_it_chose() {
     let report_a = report_a.expect("collection A");
     assert_eq!(report_a.deleted.manifests, 0);
     assert!(manifest_exists(&store, &namespace_id, 1).await);
-    assert!(recorded.take().is_empty());
+    assert_eq!(recorded.count(OperationSelector::Put), 0);
 }
 
 /// Checks that the boundary ends at the highest manifest that a collection
 /// deletes: below a young replaced manifest, never at the newest manifest
 /// however old it is, and over a manifest that a snapshot keeps, which stays.
-/// A later collection that deletes no manifest sends no request for the
+/// A later collection that deletes no manifest writes nothing to the
 /// boundary.
 #[tokio::test]
 async fn the_boundary_ends_at_the_highest_deleted_manifest() {
@@ -197,7 +202,7 @@ async fn the_boundary_ends_at_the_highest_deleted_manifest() {
     recorded.reset();
     let report = collect(&recorded, &namespace_id, &context(NOW_MS)).await;
     assert_eq!(report.deleted.manifests, 0);
-    assert!(recorded.take().is_empty());
+    assert_eq!(recorded.count(OperationSelector::Put), 0);
 }
 
 /// Runs one collection of `namespace_id` at `NOW_MS` with a read working

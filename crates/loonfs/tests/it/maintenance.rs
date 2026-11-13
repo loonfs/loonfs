@@ -6,12 +6,14 @@ use loonfs::{
     CommitId, CommitSeq, CreateSnapshotOptions, ErrorCode, FoldWalOutcome, FoldWalResponse,
     ManifestNo, MetadataCompactionOutcome, NamespaceId, SharedObjectStore,
 };
-use loonfs_objectstore::keys::{hint, metadata_manifest_object};
+use loonfs_objectstore::keys::{metadata_manifest_object, metadata_manifest_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_test_support::ids::namespace_id;
-use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationSelector, RecordingStore};
+use loonfs_test_support::stores::{
+    BlockingStore, KeyPredicate, OperationSelector, RecordedOperation, RecordingStore,
+};
 use loonfs_types::format::manifest::decode_namespace_manifest_json;
 use std::assert_matches;
 use std::sync::Arc;
@@ -54,7 +56,25 @@ fn namespace_diagnostics_reports_wal_tail_objects() {
     assert_eq!(status.current_manifest_no, Some(ManifestNo(2)));
     assert_eq!(status.wal_tail_objects, 2);
     assert_eq!(status.retention_floor_seq, CommitSeq(0));
-    assert_eq!(store.count(OperationSelector::List), 1);
+    let listings: Vec<_> = store
+        .snapshot()
+        .into_iter()
+        .filter_map(|operation| match operation {
+            RecordedOperation::List { prefix } => Some(prefix),
+            _ => None,
+        })
+        .collect();
+    // The diagnostics and the snapshot count each find the newest manifest
+    // with one listing of the manifests, and the count lists the snapshots.
+    let manifests = metadata_manifest_prefix(&namespace_id);
+    assert_eq!(
+        listings,
+        [
+            manifests.clone(),
+            manifests,
+            loonfs_objectstore::keys::snapshot_prefix(&namespace_id),
+        ]
+    );
 }
 
 /// Checks that namespace diagnostics count the snapshots that haven't
@@ -135,7 +155,7 @@ fn namespace_diagnostics_and_step_reject_missing_namespace() {
 }
 
 #[test]
-fn namespace_diagnostics_and_step_reject_a_namespace_whose_hint_is_gone() {
+fn namespace_diagnostics_and_step_reject_a_namespace_whose_manifests_are_gone() {
     let temp_dir = tempdir().expect("tempdir");
     let raw_store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local-fs store"));
     let object_store: SharedObjectStore = raw_store.clone();
@@ -144,7 +164,11 @@ fn namespace_diagnostics_and_step_reject_a_namespace_whose_hint_is_gone() {
 
     fs.create_namespace_blocking(&namespace_id, &loonfs_test_support::test_actor())
         .expect("create namespace");
-    block_on(raw_store.delete(&hint(&namespace_id))).expect("delete head");
+    for key in block_on(raw_store.list_prefix(&metadata_manifest_prefix(&namespace_id)))
+        .expect("list manifests")
+    {
+        block_on(raw_store.delete(&key)).expect("delete a manifest");
+    }
 
     assert_core_error_kind(
         fs.namespace_diagnostics_blocking(&namespace_id),

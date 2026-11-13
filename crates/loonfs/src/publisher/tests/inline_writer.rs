@@ -268,8 +268,6 @@ async fn the_fold_trigger_waits_for_the_reloaded_tail_after_an_unknown_outcome()
         .create_directory("/warmup", &actor)
         .await
         .expect("acquire writer epoch");
-    // The gate parks the first read after the lost put, so the claim's hint
-    // raise, which reads the hint in the session's worker, finishes first.
     writer.drain().await.expect("drain");
     let publisher = namespace_writer.session().publisher.clone();
     let folds = hold_every_fold_permit(&writer).await;
@@ -458,9 +456,6 @@ async fn writer_with(
         .create_directory("/warmup", &loonfs_test_support::test_actor())
         .await
         .expect("acquire writer epoch");
-    // The claim's hint raise runs in the session's worker after the commit
-    // returns, so the setup drains the writer before the tests count
-    // requests.
     writer.drain().await.expect("drain");
     store.reset();
     (directory, store, writer, namespace, namespace_writer)
@@ -899,12 +894,7 @@ async fn retained_receipts_answer_retries_before_fallback_when_content_writes_fa
             OperationSelector::Put,
             InjectedError::PermissionDenied("content writes refused".to_owned()),
         ));
-        // The hint raise after the first put's publication runs in the
-        // background, so its write would appear in the counts below.
-        let store = Arc::new(RecordingStore::new(
-            failing.clone(),
-            KeyPredicate::any().except_hints(),
-        ));
+        let store = Arc::new(RecordingStore::new(failing.clone(), KeyPredicate::any()));
         let writer = crate::LoonFs::builder_with_store(store.clone())
             .writer_id(loonfs_test_support::ids::writer_id("inline-writer"))
             .config(crate::RuntimeConfig {

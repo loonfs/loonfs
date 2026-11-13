@@ -7,7 +7,7 @@ use crate::wal::tests::publish;
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_objectstore::{
-    keys::{hint, metadata_manifest_object, metadata_manifest_prefix, pool_record, wal_prefix},
+    keys::{boundary, metadata_manifest_object, metadata_manifest_prefix, pool_record, wal_prefix},
     local_fs_store::LocalFsStore,
     ObjectStore,
 };
@@ -118,12 +118,13 @@ async fn two_creations_race_at_manifest_one() {
     );
 }
 
-/// Checks that a create and a fork each return the state that their manifest
-/// 1 records, and that neither reads the new namespace: the put of manifest 1
-/// decides whether it exists. A create writes its pool record after the hint
-/// and before manifest 1, and a fork writes no pool record.
+/// Checks that a create and a fork each look for the new namespace before
+/// their first write, publish manifest 1 with its put and one read of the
+/// manifest boundary, and return the state that manifest 1 records. A
+/// create writes its pool record between the lookup and manifest 1, and a
+/// fork writes its fork snapshot there and no pool record.
 #[tokio::test]
-async fn a_new_namespace_returns_the_state_its_first_manifest_records() {
+async fn a_new_namespace_is_looked_up_before_its_first_write() {
     let directory = tempdir().expect("directory");
     let store = RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
@@ -143,18 +144,37 @@ async fn a_new_namespace_returns_the_state_its_first_manifest_records() {
             .map(RecordedOperation::key)
             .collect::<Vec<_>>(),
         [
-            hint(&source),
             pool_record(&created.pool_id),
             metadata_manifest_object(&source, &ManifestNo(1)),
         ]
     );
+    let lookup = |namespace_id: &NamespaceId| {
+        vec![
+            ("get", boundary(namespace_id)),
+            ("list", metadata_manifest_prefix(namespace_id)),
+            ("get", boundary(namespace_id)),
+        ]
+    };
+    let first_manifest = |namespace_id: &NamespaceId| {
+        vec![
+            (
+                "put",
+                metadata_manifest_object(namespace_id, &ManifestNo(1)),
+            ),
+            ("get", boundary(namespace_id)),
+        ]
+    };
     assert_eq!(
         control_requests(&source, &operations),
-        vec![
-            ("put", hint(&source)),
-            ("put", metadata_manifest_object(&source, &ManifestNo(1))),
-        ]
+        [lookup(&source), first_manifest(&source)].concat()
     );
+    let position = |key: &str| {
+        operations
+            .iter()
+            .position(|operation| operation.key() == key)
+            .expect(key)
+    };
+    assert!(position(&boundary(&source)) < position(&pool_record(&created.pool_id)));
     assert_eq!(
         crate::test_support::pool_store(&store, &created.pool_id)
             .load_pool_record()
@@ -198,10 +218,24 @@ async fn a_new_namespace_returns_the_state_its_first_manifest_records() {
     let operations = store.take();
     assert_eq!(
         control_requests(&target, &operations),
-        vec![
-            ("put", hint(&target)),
-            ("put", metadata_manifest_object(&target, &ManifestNo(1))),
-        ]
+        [lookup(&target), first_manifest(&target)].concat()
+    );
+    let snapshots = loonfs_objectstore::keys::snapshot_prefix(&source);
+    let snapshot_put = operations
+        .iter()
+        .position(|operation| {
+            matches!(operation, RecordedOperation::Put { key, .. } if key.starts_with(&snapshots))
+        })
+        .expect("the fork snapshot");
+    let target_requests = operations
+        .iter()
+        .enumerate()
+        .filter(|(_, operation)| operation.key() == boundary(&target))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    assert!(
+        target_requests[1] < snapshot_put && snapshot_put < target_requests[2],
+        "{operations:?}"
     );
     assert!(operations
         .iter()
@@ -276,8 +310,8 @@ async fn an_ambiguous_first_manifest_confirms_a_create_and_a_fork() {
 
 /// Checks that a create whose pool record put has an unknown outcome sends the
 /// put again after its read-back finds no record, and that a create whose
-/// manifest put has an unknown outcome keeps its pool record and leaves the
-/// hint, so a later create of the ID succeeds.
+/// manifest put has an unknown outcome keeps its pool record, so a later
+/// create of the ID succeeds.
 #[tokio::test]
 async fn a_lost_pool_record_put_is_sent_again_and_a_lost_manifest_put_keeps_the_pool_record() {
     let namespace_id = NamespaceId::parse("created").expect("namespace");
@@ -298,10 +332,8 @@ async fn a_lost_pool_record_put_is_sent_again_and_a_lost_manifest_put_keeps_the_
             .create()
             .await;
         assert_eq!(pool_record_keys(store.inner()).await.len(), 1);
-        for (key, exists) in [(hint(&namespace_id), true), (manifest_key.clone(), creates)] {
-            let stored = store.inner().head(&key).await.expect("head");
-            assert_eq!(stored.is_some(), exists, "`{key}`");
-        }
+        let stored = store.inner().head(&manifest_key).await.expect("head");
+        assert_eq!(stored.is_some(), creates);
         if creates {
             created.expect("the create sends the pool record put again");
         } else {
@@ -395,15 +427,15 @@ async fn nested_forks_read_copied_runs_without_source_control_reads() {
         owners,
         [source.clone(), target.clone()].into_iter().collect()
     );
-    let source_hint = hint(&source);
-    let target_hint = hint(&target);
+    let source_boundary = boundary(&source);
+    let target_boundary = boundary(&target);
     let source_manifests = loonfs_objectstore::keys::metadata_manifest_prefix(&source);
     let target_manifests = loonfs_objectstore::keys::metadata_manifest_prefix(&target);
     let store = RecordingStore::new(
         store,
         KeyPredicate::new(move |key| {
-            key == source_hint
-                || key == target_hint
+            key == source_boundary
+                || key == target_boundary
                 || key.starts_with(&source_manifests)
                 || key.starts_with(&target_manifests)
         }),
@@ -423,114 +455,6 @@ async fn nested_forks_read_copied_runs_without_source_control_reads() {
         .expect("inherited path");
     }
     assert_eq!(store.count(OperationSelector::Any), 0);
-}
-
-#[tokio::test]
-async fn a_pending_hint_cannot_name_a_manifest_collected_after_its_replacement() {
-    use loonfs_test_support::stores::MetadataMapStore;
-    let directory = tempdir().expect("directory");
-    let namespace_id = NamespaceId::parse("hint-gc").expect("namespace");
-    let grace = crate::limits::GC_GRACE_WINDOW_MS;
-    let store = MetadataMapStore::aged(
-        LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::any(),
-    );
-    let store = MetadataMapStore::new(
-        store,
-        KeyPredicate::new(|key| {
-            loonfs_objectstore::layout::manifest_no_of(key)
-                .is_some_and(|number| number >= ManifestNo(3))
-        }),
-        move |mut metadata| {
-            metadata.last_modified_at_ms = Some(grace + 1);
-            metadata
-        },
-    );
-    let store = BlockingStore::new(
-        store,
-        KeyPredicate::hint(&namespace_id),
-        OperationSelector::CompareAndSwap,
-    );
-    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context())
-        .create()
-        .await
-        .expect("create");
-    let known = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_hint()
-        .await
-        .expect("initial hint");
-    let mut engine = NamespaceCommitEngine::new(
-        crate::test_support::namespace_store(&store, &namespace_id),
-        context().writer_id,
-    );
-    publish(&mut engine, "seed").await.expect("seed");
-    store.block_next();
-    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
-    let (hint_result, ()) =
-        futures::join!(namespace.raise_hint(ManifestNo(2), Some(known)), async {
-            store.wait_until_blocked().await;
-            crate::test_support::namespace_store(store.inner(), &namespace_id)
-                .fold_wal()
-                .await
-                .expect("replace manifest");
-            // A manifest after the fold, so the fold's manifest isn't current.
-            crate::test_support::NamespaceFixture::new(store.inner(), &namespace_id, &context())
-                .engine()
-                .set_retention_window(std::num::NonZeroU64::new(60_000))
-                .await
-                .expect("set the retention window");
-            // The runtime that published the fold and the window raises the
-            // hint after them, while the raise to manifest 2 is still pending.
-            crate::test_support::namespace_store(store.inner(), &namespace_id)
-                .raise_hint(ManifestNo(4), None)
-                .await
-                .expect("raise the hint past the pending raise");
-            let aged = WriterAt {
-                now_ms: grace + 1,
-                ..context()
-            };
-            crate::test_support::namespace_store(store.inner(), &namespace_id)
-                .gc(&aged.clock())
-                .await
-                .expect("collect during pending hint");
-            store.release();
-        });
-    // The pending raise's compare-and-swap loses to the newer raise, and the
-    // raise makes no second attempt.
-    std::assert_matches!(
-        hint_result.expect_err("the pending raise loses its write"),
-        crate::CoreError::StoreContention { .. }
-    );
-    let current = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_current_manifest()
-        .await
-        .expect("discover past lagging hint");
-    assert_eq!(current.manifest().manifest_no, ManifestNo(4));
-    crate::test_support::namespace_store(&store, &namespace_id)
-        .load_current_metadata_view()
-        .await
-        .expect("read committed state");
-    let known = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_hint()
-        .await
-        .expect("hint");
-    crate::test_support::namespace_store(&store, &namespace_id)
-        .raise_hint(ManifestNo(1), Some(known))
-        .await
-        .expect("refresh hint");
-    let aged = WriterAt {
-        now_ms: 2 * grace + 2,
-        ..context()
-    };
-    crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(&aged.clock())
-        .await
-        .expect("collect after grace");
-    assert!(store
-        .head(&metadata_manifest_object(&namespace_id, &ManifestNo(2)))
-        .await
-        .expect("old manifest")
-        .is_none());
 }
 
 #[tokio::test]
@@ -570,11 +494,11 @@ async fn fork_into_a_deleted_id_leaves_no_source_snapshot() {
         .await
         .expect_err("deleted target");
     assert_eq!(error.code(), ErrorCode::NamespaceDeleted);
-    // The fork writes its fork snapshot, has the put of the target's hint
-    // refused, reads the tombstone, and deletes the snapshot.
-    assert_eq!(store.counts().create_if_absent_puts, 2);
+    // The fork finds the target's tombstone before its first write, so it
+    // writes and deletes nothing.
+    assert_eq!(store.counts().create_if_absent_puts, 0);
     assert_eq!(store.counts().compare_and_swaps, 0);
-    assert_eq!(store.counts().deletes, 1);
+    assert_eq!(store.counts().deletes, 0);
     assert!(store
         .list_prefix(&loonfs_objectstore::keys::snapshot_prefix(&source))
         .await
@@ -643,8 +567,9 @@ async fn a_fork_that_loses_target_publication_deletes_its_source_snapshot() {
 
 /// Checks that a writer session's deletion over unfolded commits moves the
 /// session's position onto the fold's manifest, so the attempt that
-/// publishes the tombstone takes the head from the position and reads
-/// neither the hint nor the WAL between the fold and the tombstone.
+/// publishes the tombstone takes the head from the position. Between the
+/// fold and the tombstone, the deletion reads no WAL object, and it reads
+/// the manifest boundary only right after the fold's put.
 #[tokio::test]
 async fn a_deletion_publishes_its_tombstone_from_the_position_its_fold_moved() {
     let directory = tempdir().expect("directory");
@@ -685,12 +610,13 @@ async fn a_deletion_publishes_its_tombstone_from_the_position_its_fold_moved() {
     let [fold, tombstone] = manifest_puts[..] else {
         panic!("the fold and the tombstone, got {operations:?}");
     };
-    let (hint, wal_prefix) = (hint(&namespace_id), wal_prefix(&namespace_id));
+    let (boundary, wal_prefix) = (boundary(&namespace_id), wal_prefix(&namespace_id));
     let between = &operations[fold + 1..tombstone];
     assert!(
-        !between
-            .iter()
-            .any(|operation| operation.key() == hint || operation.key().starts_with(&wal_prefix)),
+        between.first().is_some_and(|read| read.key() == boundary)
+            && !between[1..].iter().any(|operation| {
+                operation.key() == boundary || operation.key().starts_with(&wal_prefix)
+            }),
         "{between:?}"
     );
     let current = crate::test_support::namespace_store(&store, &namespace_id)

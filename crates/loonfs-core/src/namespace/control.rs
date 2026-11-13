@@ -1,17 +1,16 @@
 //! Derives namespace read state from numbered manifests and the WAL tail.
 
-use crate::control_object::{
-    expect_namespace, load_control_object, ControlObjectLoadError, LoadedControl,
-};
+use crate::control_object::ControlObjectLoadError;
 use crate::error::CoreError;
-use crate::limits::MANIFEST_PROBE_WINDOW;
+use crate::limits::{MANIFEST_PROBE_WINDOW, MAX_CONTENTION_ATTEMPTS};
+use crate::namespace::boundary::boundary_manifest_no;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
 use futures::{stream, StreamExt, TryStreamExt};
-use loonfs_objectstore::keys::hint;
+use loonfs_objectstore::keys::{metadata_manifest_object, metadata_manifest_prefix};
+use loonfs_objectstore::layout::manifest_no_of;
 use loonfs_objectstore::ObjectStore;
-use loonfs_objectstore::ObjectStoreExtension;
-use loonfs_types::format::control::{ControlObjectKind, HintPayload, ManifestRef, NamespaceStatus};
+use loonfs_types::format::control::{ManifestRef, NamespaceStatus};
 use loonfs_types::format::manifest::{NamespaceManifestEnvelope, NamespaceManifestPayload};
 use loonfs_types::{CompactorEpoch, ManifestNo, NamespaceId};
 use std::sync::Arc;
@@ -81,75 +80,7 @@ pub(crate) fn ensure_namespace_live(
 }
 
 impl<S: ObjectStore> NamespaceStore<S> {
-    pub(crate) async fn load_hint(&self) -> Result<LoadedHint, ControlObjectLoadError> {
-        load_control_object(
-            &self.store,
-            hint(&self.namespace_id),
-            ControlObjectKind::Hint,
-            |object_key, state: &HintPayload| {
-                expect_namespace(object_key, &self.namespace_id, &state.namespace_id)
-            },
-        )
-        .await
-    }
-
-    /// Raises the namespace's hint to at least `manifest_no` with one
-    /// compare-and-swap, and returns the hint as written, or as loaded when its
-    /// number was already that high.
-    ///
-    /// The runtime that published a manifest calls this after the publication
-    /// returns (format spec, "The current manifest and WAL tip"). `known` is the
-    /// hint as the caller last saw it, so a raise from a current hint needs no
-    /// read, and with `None` the call loads the hint first. A compare-and-swap
-    /// that loses to another raise returns `store_contention` without another
-    /// attempt, because some providers accept about one write per second to one
-    /// object. The number never decreases, so a raise from an old hint can't
-    /// lower the number that a newer raise wrote.
-    pub async fn raise_hint(
-        &self,
-        manifest_no: ManifestNo,
-        known: Option<LoadedHint>,
-    ) -> crate::error::Result<LoadedHint> {
-        let object_key = hint(&self.namespace_id);
-        let current = match known {
-            Some(known) => known,
-            None => match self.load_hint().await {
-                Ok(current) => current,
-                Err(ControlObjectLoadError::MissingObject { .. }) => {
-                    return Err(self.namespace_not_found())
-                }
-                Err(error) => return Err(error.into()),
-            },
-        };
-        if current.state.manifest_no >= manifest_no {
-            return Ok(current);
-        }
-        let raised = HintPayload {
-            namespace_id: self.namespace_id.clone(),
-            manifest_no,
-        };
-        let bytes =
-            loonfs_types::format::control::encode_control_state(ControlObjectKind::Hint, &raised)
-                .expect("a namespace hint should encode");
-        match self
-            .store
-            .compare_and_swap(&object_key, &current.etag, bytes::Bytes::from(bytes))
-            .await
-        {
-            Ok(metadata) => Ok(LoadedControl {
-                etag: loonfs_objectstore::required_etag(&object_key, metadata.etag)
-                    .map_err(|error| CoreError::store(&object_key, &error))?,
-                object_key,
-                state: raised,
-            }),
-            Err(loonfs_objectstore::ObjectStoreError::PreconditionFailed { .. }) => {
-                Err(CoreError::contention_exhausted(&object_key))
-            }
-            Err(error) => Err(CoreError::store(&object_key, &error)),
-        }
-    }
-
-    /// Loads the namespace's current manifest through the hint.
+    /// Loads the namespace's current manifest from the manifest boundary.
     pub async fn load_current_manifest(&self) -> crate::error::Result<LoadedManifest> {
         self.load_current_manifest_if_present()
             .await?
@@ -158,86 +89,75 @@ impl<S: ObjectStore> NamespaceStore<S> {
 
     pub(crate) async fn load_current_manifest_if_present(
         &self,
-    ) -> Result<Option<LoadedManifest>, ControlObjectLoadError> {
-        Ok(self
-            .discover_manifest()
-            .await?
-            .map(|(manifest, _)| manifest))
+    ) -> crate::error::Result<Option<LoadedManifest>> {
+        self.find_newest_manifest().await
     }
 
-    pub(crate) async fn load_current_manifest_with_hint(
-        &self,
-    ) -> crate::error::Result<(LoadedManifest, LoadedHint)> {
-        self.discover_manifest()
-            .await?
-            .ok_or_else(|| self.namespace_not_found())
-    }
-
-    /// Returns the error for a namespace that has no hint, and so no current
-    /// manifest.
+    /// Returns the error for a namespace that has no manifest above its
+    /// manifest boundary and no boundary object.
     pub(crate) fn namespace_not_found(&self) -> CoreError {
         CoreError::NamespaceNotFound {
             namespace_id: self.namespace_id.clone(),
         }
     }
 
-    /// Loads the current manifest through the hint (format spec, "Resolving the
-    /// metadata basis"), with the hint as last read, or returns `None` when the
-    /// namespace has no hint, including a hint that disappears while
-    /// discovery runs.
+    /// Finds the namespace's newest manifest from the manifest boundary
+    /// (format spec, "Resolving the metadata basis"), or returns `None` when
+    /// no namespace has the ID.
     ///
-    /// Discovery loads the hinted manifest, finds the newest manifest above it
-    /// with [`find_newest_manifest_above`], and reads the hint again before it
-    /// returns, unless it found a tombstone.
-    async fn discover_manifest(
-        &self,
-    ) -> Result<Option<(LoadedManifest, LoadedHint)>, ControlObjectLoadError> {
-        let mut hint = match self.load_hint().await {
-            Ok(hint) => hint,
-            Err(ControlObjectLoadError::MissingObject { .. }) => return Ok(None),
-            Err(error) => return Err(error),
-        };
-        let is_deleted = |manifest: &LoadedManifest| manifest.payload().status.is_deleted();
-        loop {
-            let mut manifest_no = hint.state.manifest_no;
-            if manifest_no == loonfs_types::ManifestNo(0) {
-                return Err(ControlObjectLoadError::Codec {
-                    object_key: hint.object_key,
-                    message: "manifest hint must be at least one".to_owned(),
-                });
-            }
-            let mut current = self.load_manifest_by_no(manifest_no).await?;
-            if let Some(loaded) = current.as_ref().filter(|loaded| !is_deleted(loaded)) {
-                if let Some(newest) = self.find_newest_manifest_above(loaded).await? {
-                    manifest_no = newest.payload().manifest_no;
-                    current = Some(newest);
+    /// Each attempt reads the boundary, lists the manifests numbered above
+    /// it, loads the highest-numbered manifest in the listing, and reads the
+    /// boundary again. That manifest is the newest when it's still above the
+    /// boundary. The attempt starts again when the manifest is gone by its
+    /// load or is at or below the boundary by the second read, and when the
+    /// listing is empty and the boundary changed. An empty listing under an
+    /// unchanged missing boundary means that no namespace has the ID, and
+    /// under an unchanged boundary object it means a corrupt store, because
+    /// a collection never leaves a namespace without a manifest above its
+    /// boundary. The call returns `store_contention` after
+    /// [`MAX_CONTENTION_ATTEMPTS`] attempts.
+    async fn find_newest_manifest(&self) -> crate::error::Result<Option<LoadedManifest>> {
+        let prefix = metadata_manifest_prefix(&self.namespace_id);
+        for _attempt in 0..MAX_CONTENTION_ATTEMPTS {
+            let boundary = self.load_boundary().await?;
+            let start_after = boundary.as_ref().map(|loaded| {
+                metadata_manifest_object(&self.namespace_id, &boundary_manifest_no(Some(loaded)))
+            });
+            let highest = self
+                .store
+                .list_entries_from_stream(&prefix, start_after.as_deref())
+                .map_err(|error| CoreError::store(&prefix, &error))
+                .try_fold(None, |highest, entry| async move {
+                    Ok::<_, CoreError>(manifest_no_of(&entry.key).max(highest))
+                })
+                .await?;
+            let Some(manifest_no) = highest else {
+                if self.reload_boundary(boundary.clone()).await? != boundary {
+                    continue;
                 }
-            }
-            // A tombstone is the last manifest of its namespace.
-            if current.as_ref().is_some_and(is_deleted) {
-                return Ok(current.map(|manifest| (manifest, hint)));
-            }
-
-            // A newer hint lets GC remove an old discovery path. Recheck after a
-            // missing object before treating it as either absence or the tip.
-            let refreshed = match self.load_hint().await {
-                Ok(refreshed) => refreshed,
-                Err(ControlObjectLoadError::MissingObject { .. }) => return Ok(None),
-                Err(error) => return Err(error),
-            };
-            let newer = refreshed.state.manifest_no > manifest_no;
-            hint = refreshed;
-            if newer {
-                continue;
-            }
-            if current.is_none() && manifest_no != loonfs_types::ManifestNo(1) {
+                let Some(boundary) = boundary else {
+                    return Ok(None);
+                };
                 return Err(ControlObjectLoadError::Codec {
-                    object_key: hint.object_key,
-                    message: format!("hinted manifest `{manifest_no}` is missing"),
-                });
+                    message: format!(
+                        "no manifest is above the manifest boundary `{}`",
+                        boundary_manifest_no(Some(&boundary))
+                    ),
+                    object_key: boundary.object_key,
+                }
+                .into());
+            };
+            let Some(manifest) = self.load_manifest_by_no(manifest_no).await? else {
+                continue;
+            };
+            let reloaded = self.reload_boundary(boundary).await?;
+            if manifest_no > boundary_manifest_no(reloaded.as_ref()) {
+                return Ok(Some(manifest));
             }
-            return Ok(current.map(|manifest| (manifest, hint)));
         }
+        Err(CoreError::contention_exhausted(
+            &loonfs_objectstore::keys::boundary(&self.namespace_id),
+        ))
     }
 
     /// Returns the newest manifest above `previous`, checked against `previous`
@@ -251,8 +171,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// window, it probes the next window above it. The call then loads the
     /// manifest at the highest number found with one GET, and checks it against
     /// `previous` without the manifests in between. The call returns `None` too
-    /// if that manifest is gone by the GET, which garbage collection does only
-    /// after the hint has moved past it.
+    /// if that manifest is gone by the GET.
     pub(crate) async fn find_newest_manifest_above(
         &self,
         previous: &LoadedManifest,
@@ -367,134 +286,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
     }
 }
 
-pub type LoadedHint = LoadedControl<HintPayload>;
-
 const _: () = assert!(
     0 < MANIFEST_PROBE_WINDOW && MANIFEST_PROBE_WINDOW <= crate::in_flight::STORE_READS_IN_FLIGHT
 );
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use loonfs_objectstore::local_fs_store::LocalFsStore;
-    use loonfs_objectstore::PutMode;
-    use loonfs_test_support::stores::{
-        FailStore, InjectedError, KeyPredicate, MetadataMapStore, OperationSelector,
-        RecordedOperation, RecordingStore,
-    };
-    use std::assert_matches;
-
-    async fn seed_hint(store: &LocalFsStore, namespace_id: &NamespaceId) -> LoadedHint {
-        let state = HintPayload {
-            namespace_id: namespace_id.clone(),
-            manifest_no: ManifestNo(1),
-        };
-        let bytes =
-            loonfs_types::format::control::encode_control_state(ControlObjectKind::Hint, &state)
-                .expect("hint");
-        store
-            .put_if_absent(&hint(namespace_id), bytes.into())
-            .await
-            .expect("create hint");
-        crate::test_support::namespace_store(store, namespace_id)
-            .load_hint()
-            .await
-            .expect("hint")
-    }
-
-    #[tokio::test]
-    async fn a_hint_raise_requires_the_returned_etag() {
-        let directory = tempfile::tempdir().expect("directory");
-        let store = LocalFsStore::new(directory.path()).expect("store");
-        let namespace_id = loonfs_test_support::ids::namespace_id("etag");
-        let known = seed_hint(&store, &namespace_id).await;
-        let store = RecordingStore::new(
-            MetadataMapStore::without_etag(store, KeyPredicate::any()),
-            KeyPredicate::any(),
-        );
-        let error = crate::test_support::namespace_store(&store, &namespace_id)
-            .raise_hint(ManifestNo(2), Some(known))
-            .await
-            .expect_err("etag required");
-        assert_matches!(error, CoreError::Store { .. });
-        assert_eq!(
-            store
-                .take()
-                .iter()
-                .filter(|operation| {
-                    matches!(
-                        operation,
-                        RecordedOperation::Put {
-                            mode: PutMode::CompareAndSwap { .. },
-                            ..
-                        }
-                    )
-                })
-                .count(),
-            1
-        );
-    }
-
-    /// Checks that a raise whose compare-and-swap loses returns
-    /// `store_contention` without loading the hint or writing it again.
-    #[tokio::test]
-    async fn a_hint_raise_that_loses_its_write_makes_no_second_attempt() {
-        let directory = tempfile::tempdir().expect("directory");
-        let store = LocalFsStore::new(directory.path()).expect("store");
-        let namespace_id = loonfs_test_support::ids::namespace_id("contended");
-        let known = seed_hint(&store, &namespace_id).await;
-        let store = RecordingStore::new(
-            FailStore::new(
-                store,
-                KeyPredicate::hint(&namespace_id),
-                OperationSelector::CompareAndSwap,
-                InjectedError::PreconditionFailed,
-            ),
-            KeyPredicate::any(),
-        );
-        store.inner().fail_all();
-        let error = crate::test_support::namespace_store(&store, &namespace_id)
-            .raise_hint(ManifestNo(2), Some(known))
-            .await
-            .expect_err("a lost write fails the raise");
-        assert_matches!(error, CoreError::StoreContention { .. });
-        let counts = store.counts();
-        assert_eq!(
-            (counts.gets_with_metadata, counts.compare_and_swaps),
-            (0, 1)
-        );
-    }
-
-    #[tokio::test]
-    async fn a_hint_raise_loads_an_unknown_hint_and_writes_only_a_higher_number() {
-        let directory = tempfile::tempdir().expect("directory");
-        let store = LocalFsStore::new(directory.path()).expect("store");
-        let namespace_id = loonfs_test_support::ids::namespace_id("unknown");
-        seed_hint(&store, &namespace_id).await;
-        let store = RecordingStore::new(store, KeyPredicate::any());
-        let raised = crate::test_support::namespace_store(&store, &namespace_id)
-            .raise_hint(ManifestNo(3), None)
-            .await
-            .expect("raise");
-        assert_eq!(raised.state.manifest_no, ManifestNo(3));
-        let counts = store.counts();
-        assert_eq!(
-            (counts.gets_with_metadata, counts.compare_and_swaps),
-            (1, 1)
-        );
-        store.reset();
-        let kept = crate::test_support::namespace_store(&store, &namespace_id)
-            .raise_hint(ManifestNo(2), Some(raised.clone()))
-            .await
-            .expect("a raise to a lower number");
-        assert_eq!(kept, raised);
-        assert!(store.take().is_empty());
-        assert_eq!(
-            crate::test_support::namespace_store(&store, &namespace_id)
-                .load_hint()
-                .await
-                .expect("hint"),
-            raised
-        );
-    }
-}

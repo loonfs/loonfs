@@ -1,20 +1,50 @@
 //! Loads and raises a namespace's manifest boundary.
 
 use crate::control_object::{
-    expect_namespace, load_control_object, present, ControlObjectLoadError, LoadedControl,
+    decode_control_object_body, expect_namespace, load_control_object, present, store_load_error,
+    ControlObjectLoadError, LoadedControl,
 };
 use crate::control_update::{retry_while_contended, CasOutcome};
 use crate::error::CoreError;
 use crate::namespace::store::NamespaceStore;
 use bytes::Bytes;
 use loonfs_objectstore::keys::boundary;
-use loonfs_objectstore::{ObjectStore, ObjectStoreError, ObjectStoreExtension};
+use loonfs_objectstore::{
+    GetIfChangedOutcome, ObjectStore, ObjectStoreError, ObjectStoreExtension,
+};
 use loonfs_types::format::control::{
     encode_control_state, BoundaryPayload, ControlObjectKind, ManifestBoundary,
 };
-use loonfs_types::ManifestNo;
+use loonfs_types::{ManifestNo, NamespaceId};
 
 pub(crate) type LoadedBoundary = LoadedControl<BoundaryPayload>;
+
+/// Returns the manifest number of `boundary`, or 0 when the boundary object
+/// is missing.
+pub(crate) fn boundary_manifest_no(boundary: Option<&LoadedBoundary>) -> ManifestNo {
+    boundary.map_or(ManifestNo(0), |loaded| {
+        let ManifestBoundary::Manifest { manifest_no } = loaded.state.boundary;
+        manifest_no
+    })
+}
+
+/// Checks the boundary at `object_key` that names `namespace_id`: the
+/// namespace that its payload embeds and its number of at least one.
+fn check_boundary(
+    object_key: &str,
+    namespace_id: &NamespaceId,
+    state: &BoundaryPayload,
+) -> Result<(), ControlObjectLoadError> {
+    expect_namespace(object_key, namespace_id, &state.namespace_id)?;
+    let ManifestBoundary::Manifest { manifest_no } = state.boundary;
+    if manifest_no == ManifestNo(0) {
+        return Err(ControlObjectLoadError::Codec {
+            object_key: object_key.to_owned(),
+            message: "manifest boundary must be at least one".to_owned(),
+        });
+    }
+    Ok(())
+}
 
 impl<S: ObjectStore> NamespaceStore<S> {
     /// Loads the namespace's manifest boundary, or returns `None` when the
@@ -26,20 +56,50 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 &self.store,
                 boundary(&self.namespace_id),
                 ControlObjectKind::Boundary,
-                |object_key, state: &BoundaryPayload| {
-                    expect_namespace(object_key, &self.namespace_id, &state.namespace_id)?;
-                    let ManifestBoundary::Manifest { manifest_no } = state.boundary;
-                    if manifest_no == ManifestNo(0) {
-                        return Err(ControlObjectLoadError::Codec {
-                            object_key: object_key.to_owned(),
-                            message: "manifest boundary must be at least one".to_owned(),
-                        });
-                    }
-                    Ok(())
-                },
+                |object_key, state| check_boundary(object_key, &self.namespace_id, state),
             )
             .await,
         )
+    }
+
+    /// Returns the namespace's manifest boundary as it is now, where `last`
+    /// is the boundary as last loaded.
+    ///
+    /// When `last` is an object, the call reads the object only if its ETag
+    /// isn't the one that `last` has, and returns `last` when it is. A
+    /// boundary object that `last` found and that's now missing is a corrupt
+    /// store, because nothing deletes the object. When `last` is `None`, the
+    /// call loads the boundary.
+    pub(crate) async fn reload_boundary(
+        &self,
+        last: Option<LoadedBoundary>,
+    ) -> crate::error::Result<Option<LoadedBoundary>> {
+        let Some(last) = last else {
+            return self.load_boundary().await;
+        };
+        let object_key = last.object_key.clone();
+        let read = self
+            .store
+            .get_if_changed(&object_key, &last.etag)
+            .await
+            .map_err(|error| store_load_error(&object_key, &error))?;
+        let reloaded = match read {
+            Some(GetIfChangedOutcome::Unchanged) => return Ok(Some(last)),
+            Some(GetIfChangedOutcome::Changed(body)) => decode_control_object_body(
+                object_key,
+                body,
+                ControlObjectKind::Boundary,
+                |object_key, state| check_boundary(object_key, &self.namespace_id, state),
+            )?,
+            None => {
+                return Err(ControlObjectLoadError::Codec {
+                    object_key,
+                    message: "the manifest boundary is missing after a read found it".to_owned(),
+                }
+                .into())
+            }
+        };
+        Ok(Some(reloaded))
     }
 
     /// Raises the namespace's manifest boundary to at least `manifest_no`

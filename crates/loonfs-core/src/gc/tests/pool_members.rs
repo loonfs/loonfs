@@ -229,7 +229,8 @@ async fn content_that_only_a_member_view_refers_to_stays_through_every_generatio
     let aged = aged_context(&store, &members).await;
     store.reset();
     let report = collect_pool(&store, &pool_id, &aged).await;
-    // A member's roots cost one snapshot listing, and the pool's collection lists
+    // A member's roots cost one listing of its manifests, to find its newest
+    // manifest, and one snapshot listing, and the pool's collection lists
     // nothing else under the member's prefix.
     let listings = store
         .take()
@@ -239,7 +240,13 @@ async fn content_that_only_a_member_view_refers_to_stays_through_every_generatio
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(listings, [snapshot_prefix(&members[1])]);
+    assert_eq!(
+        listings,
+        [
+            metadata_manifest_prefix(&members[1]),
+            snapshot_prefix(&members[1])
+        ]
+    );
     assert_eq!(report.deleted.content_objects, 1);
     assert!(!exists(&store, &unreferenced).await);
     for key in &referenced {

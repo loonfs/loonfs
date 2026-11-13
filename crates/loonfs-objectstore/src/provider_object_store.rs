@@ -983,7 +983,7 @@ mod tests {
     #[tokio::test]
     async fn provider_store_preserves_put_get_head_and_prefix_scoping() {
         let store = memory_store();
-        let key = "namespaces/demo/hint.json";
+        let key = "namespaces/demo/boundary.json";
 
         let metadata = store
             .put_if_absent(key, Bytes::from_static(b"head"))
@@ -1048,12 +1048,12 @@ mod tests {
         let flaky = Arc::new(FlakyStore::default());
         let store = retrying_store(Arc::clone(&flaky));
         for key in [
-            "namespaces/a/hint.json",
+            "namespaces/a/boundary.json",
             "namespaces/a1",
-            "namespaces/b/hint.json",
+            "namespaces/b/boundary.json",
             "namespaces/b/wal/00000000000000000001.wal.zst",
-            "namespaces/b0/hint.json",
-            "namespaces/c/hint.json",
+            "namespaces/b0/boundary.json",
+            "namespaces/c/boundary.json",
         ] {
             store
                 .put_if_absent(key, Bytes::from_static(b"listed"))
@@ -1062,7 +1062,7 @@ mod tests {
         }
         provider_store::ObjectStoreExt::put(
             &flaky.inner,
-            &Path::from("tenant-b/namespaces/z/hint.json"),
+            &Path::from("tenant-b/namespaces/z/boundary.json"),
             PutPayload::from_static(b"outside"),
         )
         .await
@@ -1163,7 +1163,7 @@ mod tests {
     #[tokio::test]
     async fn provider_store_enforces_create_and_cas_preconditions() {
         let store = memory_store();
-        let key = "namespaces/demo/hint.json";
+        let key = "namespaces/demo/boundary.json";
         let first = store
             .put_if_absent(key, Bytes::from_static(b"one"))
             .await
@@ -1182,7 +1182,7 @@ mod tests {
         assert_matches!(
             store
                 .compare_and_swap(
-                    "namespaces/missing/hint.json",
+                    "namespaces/missing/boundary.json",
                     "missing",
                     Bytes::from_static(b"two")
                 )
@@ -1518,7 +1518,7 @@ mod tests {
     async fn compare_and_swap_never_retries_transport_failures() {
         let flaky = Arc::new(FlakyStore::default());
         let store = retrying_store(Arc::clone(&flaky));
-        let key = "namespaces/demo/hint.json";
+        let key = "namespaces/demo/boundary.json";
         let seeded = store
             .put_if_absent(key, Bytes::from_static(b"one"))
             .await

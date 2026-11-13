@@ -140,10 +140,6 @@ async fn snapshot_removed_after_listing_does_not_make_a_collected_basis_corrupti
         .fold_wal()
         .await
         .expect("fold");
-    // The runtime that published the fold raises the hint.
-    crate::test_support::namespace_store(&base, &namespace_id)
-        .raise_hint_to_current_manifest()
-        .await;
     let old_manifest = metadata_manifest_object(&namespace_id, &snapshot.manifest_no);
     let store = BlockingStore::new(
         base,
@@ -226,10 +222,6 @@ async fn missing_basis_checks_each_snapshot_and_propagates_snapshot_read_errors(
         .fold_wal()
         .await
         .expect("fold");
-    // The runtime that published the fold raises the hint.
-    crate::test_support::namespace_store(&store, &namespace_id)
-        .raise_hint_to_current_manifest()
-        .await;
     // Deliberate corruption checks must stay fail-closed, even when the first
     // listed snapshot for this same manifest is independently eligible for deletion.
     store

@@ -55,9 +55,9 @@ impl<S: ObjectStore> PoolStore<S> {
         let mut report = PoolGcResponse::empty(self.pool_id.clone());
         let first_member = self.member(record.first_member_namespace_id.clone());
         let observed = Observation::now(Arc::clone(&first_member.timer));
-        let first_current = match first_member.load_current_manifest_with_hint().await {
+        let first_current = match first_member.load_current_manifest().await {
             Err(CoreError::NamespaceNotFound { .. }) => None,
-            Ok((manifest, _)) if manifest.payload().pool_id != self.pool_id => None,
+            Ok(manifest) if manifest.payload().pool_id != self.pool_id => None,
             current => Some(current),
         };
         let Some(first_current) = first_current else {

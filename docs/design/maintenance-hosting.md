@@ -31,8 +31,7 @@ A fold that's due then:
 1. Waits for a fold permit from the runtime's execution budget.
 2. Writes the tail into metadata segments and publishes a manifest that lists them. With a current position, the fold takes the tail from the position without reading the WAL. Without one, it reads the current manifest and the tail from the store.
 3. Moves the session's position onto that manifest.
-4. Raises the namespace's hint to the new manifest number.
-5. Wakes the commits that are waiting at the [write stop](write-stop-wait.md).
+4. Wakes the commits that are waiting at the [write stop](write-stop-wait.md).
 
 Creating a snapshot, a fork, or a merge's plan writes a [snapshot](../specs/glossary.md#snapshot) that keeps the manifest of the fold that served the request, and LoonFS verifies each snapshot after it writes the snapshot. A snapshot keeps the fold lock in shared mode from the moment it has the fold's manifest until its verification. Any number of snapshots can have the lock in shared mode at once. So a fold in the same runtime waits for the snapshots in progress, and a snapshot waits for the fold in progress.
 

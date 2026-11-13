@@ -1,6 +1,6 @@
 //! Reusable key predicates for object-store wrappers.
 
-use loonfs_objectstore::keys::{hint, metadata_manifest_prefix};
+use loonfs_objectstore::keys::metadata_manifest_prefix;
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_types::NamespaceId;
 use std::fmt;
@@ -66,29 +66,9 @@ impl KeyPredicate {
         Self::family(DurableObjectFamily::MetadataSegment)
     }
 
-    /// Selects the manifest discovery hint key for the given namespace.
-    pub fn hint(namespace_id: &NamespaceId) -> Self {
-        Self::exact(hint(namespace_id))
-    }
-
     /// Selects every numbered manifest in the namespace.
     pub fn manifest(namespace_id: &NamespaceId) -> Self {
         Self::prefix(metadata_manifest_prefix(namespace_id))
-    }
-
-    /// Selects the keys that this predicate selects, except every
-    /// namespace's hint.
-    ///
-    /// A runtime raises a namespace's hint in the background after each
-    /// manifest publication, so a test that counts or parks requests leaves
-    /// the hint out when the raise's load and swap would race its count.
-    pub fn except_hints(self) -> Self {
-        let predicate = self.predicate;
-        Self::new(move |key| {
-            predicate(key)
-                && parse_object_key(key)
-                    .is_none_or(|parsed| parsed.family() != DurableObjectFamily::Hint)
-        })
     }
 
     pub fn matches(&self, key: &str) -> bool {

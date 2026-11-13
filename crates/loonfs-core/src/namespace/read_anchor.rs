@@ -5,7 +5,7 @@ use crate::error::{CoreError, Result as CoreResult};
 use crate::limits::MAX_POSITION_MOVES;
 use crate::manifest::{metadata_basis_from_manifest, PublishedManifest};
 use crate::namespace::basis::{MetadataBasis, PublicationBasis};
-use crate::namespace::control::{LoadedHint, LoadedManifest};
+use crate::namespace::control::LoadedManifest;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
 use crate::segment::MetadataSegmentCache;
@@ -21,7 +21,6 @@ use std::sync::Arc;
 pub struct NamespaceReadAnchor {
     pub read_state: NamespaceReadState,
     pub(crate) manifest: LoadedManifest,
-    pub(crate) hint: LoadedHint,
     pub(crate) tail: ValidatedWalTail,
     /// When the anchor's checks began, read before the anchor loaded
     /// `manifest` and confirmed it with a successor check.
@@ -66,8 +65,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
         &self,
         observed: crate::time::Observation,
     ) -> CoreResult<NamespaceReadAnchor> {
-        let (manifest, hint) = self.load_current_manifest_with_hint().await?;
-        self.load_read_anchor_from_manifest(manifest, hint, observed)
+        let manifest = self.load_current_manifest().await?;
+        self.load_read_anchor_from_manifest(manifest, observed)
             .await
     }
 
@@ -87,7 +86,6 @@ impl<S: ObjectStore> NamespaceStore<S> {
     pub(crate) async fn load_read_anchor_from_manifest(
         &self,
         mut manifest: LoadedManifest,
-        mut hint: LoadedHint,
         mut observed: crate::time::Observation,
     ) -> CoreResult<NamespaceReadAnchor> {
         for _attempt in 0..crate::limits::MAX_CONTENTION_ATTEMPTS {
@@ -99,26 +97,24 @@ impl<S: ObjectStore> NamespaceStore<S> {
                             .await?;
                         if successor || !observed.is_within_revalidation_bound() {
                             observed = observed.renew();
-                            (manifest, hint) = self.load_current_manifest_with_hint().await?;
+                            manifest = self.load_current_manifest().await?;
                             continue;
                         }
                     }
                     return Ok(NamespaceReadAnchor {
                         read_state: state,
                         manifest,
-                        hint,
                         tail,
                         checked: observed,
                     });
                 }
                 Err(error @ ControlObjectLoadError::Codec { .. }) => {
                     observed = observed.renew();
-                    let (current, current_hint) = self.load_current_manifest_with_hint().await?;
+                    let current = self.load_current_manifest().await?;
                     if current.manifest().manifest_no == manifest.manifest().manifest_no {
                         return Err(error.into());
                     }
                     manifest = current;
-                    hint = current_hint;
                 }
                 Err(error) => return Err(error.into()),
             }

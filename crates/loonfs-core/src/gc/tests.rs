@@ -13,8 +13,8 @@ use crate::test_support::WriterAt;
 use crate::upload::records::UploadSessionState;
 use futures::StreamExt;
 use loonfs_objectstore::keys::{
-    hint, metadata_manifest_object, metadata_manifest_prefix, metadata_segment,
-    metadata_segment_prefix, snapshot_prefix, wal_prefix,
+    metadata_manifest_object, metadata_manifest_prefix, metadata_segment, metadata_segment_prefix,
+    snapshot_prefix, wal_prefix,
 };
 use loonfs_objectstore::ObjectStore;
 use loonfs_objectstore::ObjectStoreExtension;
@@ -103,15 +103,17 @@ async fn now_after_newest_object<S: ObjectStore>(
 }
 
 /// Sums the listed sizes of the objects under the namespace prefix that a
-/// collection lists: every object except the discovery hint and extension objects.
+/// collection lists: every object except the manifest boundary and extension objects.
 async fn core_listed_bytes<S: ObjectStore + ?Sized>(store: &S, namespace_id: &NamespaceId) -> u64 {
     use futures::{future, TryStreamExt};
     let prefix = loonfs_objectstore::keys::namespace_prefix(namespace_id);
     let extensions = format!("{prefix}extensions/");
-    let hint = hint(namespace_id);
+    let boundary = loonfs_objectstore::keys::boundary(namespace_id);
     store
         .list_entries_from_stream(&prefix, None)
-        .try_filter(|entry| future::ready(entry.key != hint && !entry.key.starts_with(&extensions)))
+        .try_filter(|entry| {
+            future::ready(entry.key != boundary && !entry.key.starts_with(&extensions))
+        })
         .try_fold(0, |total, entry| future::ok(total + entry.size_bytes))
         .await
         .expect("list namespace")
@@ -263,10 +265,6 @@ async fn deleted_namespace_keeps_its_tombstone_and_segments() {
         .delete_namespace(DeleteNamespaceOptions::default())
         .await
         .expect("delete namespace");
-    // The runtime that deleted the namespace raises its hint to the tombstone.
-    crate::test_support::namespace_store(&store, &namespace_id)
-        .raise_hint_to_current_manifest()
-        .await;
 
     let final_activity = crate::test_support::namespace_store(&store, &namespace_id)
         .load_statistics()
@@ -372,11 +370,6 @@ async fn deleted_namespace_keeps_its_tombstone_and_segments() {
         .await
         .expect("tombstone")
         .is_some());
-    assert!(store
-        .head(&hint(&namespace_id))
-        .await
-        .expect("hint")
-        .is_some());
     let again =
         context(now_after_newest_object(&store, &namespace_id, GC_GRACE_WINDOW_MS + 1).await);
     let report = crate::test_support::namespace_store(&store, &namespace_id)
@@ -429,10 +422,6 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
         .delete_namespace(DeleteNamespaceOptions::default())
         .await
         .expect("delete source");
-    // The runtime that deleted the source raises its hint to the tombstone.
-    crate::test_support::namespace_store(&store, &source)
-        .raise_hint_to_current_manifest()
-        .await;
 
     // The deleted source keeps exactly what the living clone needs.
     let fork_record = read_fork_record(&store, &source).await;
@@ -957,10 +946,6 @@ async fn gc_reclaims_manifests_superseded_by_wal_folds() {
             .await
             .expect("fold wal");
     }
-    // The runtime that published the folds raises the hint.
-    crate::test_support::namespace_store(&store, &namespace_id)
-        .raise_hint_to_current_manifest()
-        .await;
 
     // Record-less maintenance: nothing accumulates under `snapshots/`.
     assert!(
@@ -1133,10 +1118,6 @@ async fn gc_retains_active_snapshot_bases() {
     create_snapshot(&store, &namespace_id, &setup)
         .await
         .expect("second snapshot");
-    // The runtime that published the snapshots' folds raises the hint.
-    crate::test_support::namespace_store(&store, &namespace_id)
-        .raise_hint_to_current_manifest()
-        .await;
 
     let aged =
         context(now_after_newest_object(&store, &namespace_id, GC_GRACE_WINDOW_MS + 1).await);
@@ -1224,10 +1205,6 @@ async fn retired_targets_release_their_source_snapshots_and_retry_failed_deletes
     create_snapshot(&store, &source, &setup)
         .await
         .expect("advance manifest past the fork basis");
-    // The runtime that published the snapshot's fold raises the hint.
-    crate::test_support::namespace_store(&store, &source)
-        .raise_hint_to_current_manifest()
-        .await;
 
     let before = context(now_after_newest_object(&store, &source, GC_GRACE_WINDOW_MS + 1).await);
     let report = collect(&store, &source, &before).await;
@@ -1293,9 +1270,9 @@ async fn an_unreadable_or_corrupt_fork_target_keeps_its_snapshot_and_the_collect
     let clone = NamespaceId::parse("clone").expect("namespace id");
     let store = FailStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::exact(hint(&clone)),
+        KeyPredicate::exact(loonfs_objectstore::keys::boundary(&clone)),
         OperationSelector::Read,
-        InjectedError::Transport("target hint timed out".to_owned()),
+        InjectedError::Transport("target boundary timed out".to_owned()),
     );
     let setup = context(1_000);
     crate::test_support::NamespaceFixture::new(&store, &source, &setup)
@@ -1324,9 +1301,13 @@ async fn an_unreadable_or_corrupt_fork_target_keeps_its_snapshot_and_the_collect
     assert!(snapshot_record_exists(store.inner(), &source, &fork_record.snapshot_id).await);
 
     store.clear();
-    replace_object(&store, &hint(&clone), Bytes::from_static(b"not json"))
-        .await
-        .expect("corrupt target manifest");
+    replace_object(
+        &store,
+        &metadata_manifest_object(&clone, &ManifestNo(1)),
+        Bytes::from_static(b"not json"),
+    )
+    .await
+    .expect("corrupt target manifest");
     let report = collect(&store, &source, &aged).await;
     assert_eq!(report.deleted_snapshots_by_owner.fork, 0);
     assert!(snapshot_record_exists(store.inner(), &source, &fork_record.snapshot_id).await);
@@ -1664,7 +1645,7 @@ async fn gc_retains_everything_without_provider_timestamps() {
 }
 
 #[tokio::test]
-async fn gc_of_an_absent_namespace_reads_the_hint_and_reports_it_missing() {
+async fn gc_of_an_absent_namespace_lists_only_its_manifests_and_reports_it_missing() {
     let temp_dir = tempdir().expect("tempdir");
     let inner = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("orphan").expect("namespace id");
@@ -1675,7 +1656,22 @@ async fn gc_of_an_absent_namespace_reads_the_hint_and_reports_it_missing() {
         .await
         .expect_err("gc absent namespace");
     assert_eq!(error.code(), crate::error::ErrorCode::NamespaceNotFound);
-    assert_eq!(store.counts().lists, 0);
+    let lists: Vec<_> = store
+        .snapshot()
+        .into_iter()
+        .filter(|operation| {
+            matches!(
+                operation,
+                loonfs_test_support::stores::RecordedOperation::List { .. }
+            )
+        })
+        .collect();
+    assert_eq!(
+        lists,
+        vec![loonfs_test_support::stores::RecordedOperation::List {
+            prefix: metadata_manifest_prefix(&namespace_id)
+        }]
+    );
     assert_eq!(store.counts().deletes, 0);
 }
 
@@ -1815,8 +1811,7 @@ async fn completed_upload_waits_for_namespace_retirement_then_reclaims() {
 }
 
 #[tokio::test]
-async fn gc_keeps_snapshot_and_current_numbers_and_preserves_discovery_from_a_lagging_hint() {
-    use loonfs_types::format::control::{encode_control_state, ControlObjectKind, HintPayload};
+async fn gc_keeps_only_the_snapshot_and_current_manifests() {
     let directory = tempdir().expect("directory");
     let store = LocalFsStore::new(directory.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace");
@@ -1843,58 +1838,21 @@ async fn gc_keeps_snapshot_and_current_numbers_and_preserves_discovery_from_a_la
             .await
             .expect("fold");
     }
+    write_test_file(&store, &namespace_id, "/four", "four", &setup).await;
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .fold_wal()
+        .await
+        .expect("fold");
     let current = crate::test_support::namespace_store(&store, &namespace_id)
         .load_current_manifest()
         .await
         .expect("current");
-    let bytes = encode_control_state(
-        ControlObjectKind::Hint,
-        &HintPayload {
-            namespace_id: namespace_id.clone(),
-            manifest_no: ManifestNo(1),
-        },
-    )
-    .expect("hint");
-    replace_object(
-        &store,
-        &loonfs_objectstore::keys::hint(&namespace_id),
-        Bytes::from(bytes),
-    )
-    .await
-    .expect("rewind hint");
     let aged =
         context(now_after_newest_object(&store, &namespace_id, GC_GRACE_WINDOW_MS + 1).await);
     let report = crate::test_support::namespace_store(&store, &namespace_id)
         .gc(&aged.clock())
         .await
         .expect("collect");
-    assert_eq!(report.deleted.manifests, 0);
-    assert_eq!(
-        crate::test_support::namespace_store(&store, &namespace_id)
-            .load_current_manifest()
-            .await
-            .expect("discovery after deferred sweep"),
-        current
-    );
-    write_test_file(&store, &namespace_id, "/four", "four", &setup).await;
-    crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal()
-        .await
-        .expect("fold");
-    // The runtime that published the fold raises the hint past the rewind.
-    crate::test_support::namespace_store(&store, &namespace_id)
-        .raise_hint_to_current_manifest()
-        .await;
-    let current = crate::test_support::namespace_store(&store, &namespace_id)
-        .load_current_manifest()
-        .await
-        .expect("current");
-    let aged =
-        context(now_after_newest_object(&store, &namespace_id, GC_GRACE_WINDOW_MS + 1).await);
-    let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(&aged.clock())
-        .await
-        .expect("collect after publication");
     assert_eq!(report.deleted.manifests, 7);
     assert_eq!(
         store
@@ -2120,11 +2078,13 @@ async fn a_pool_without_members_retries_deletes_and_collects_late_writes() {
         .await
         .expect("pool record")
         .is_some());
-    assert!(store
-        .head(&hint(&namespace_id))
+    assert!(crate::test_support::namespace_store(&store, &namespace_id)
+        .load_current_manifest()
         .await
         .expect("tombstone")
-        .is_some());
+        .payload()
+        .status
+        .is_deleted());
 }
 
 #[tokio::test]
@@ -2262,11 +2222,6 @@ async fn a_snapshot_naming_an_absent_manifest_is_corruption_before_sweeping() {
         .fold_wal()
         .await
         .expect("fold");
-    // The runtime that published the fold raises the hint, so discovery
-    // starts above the deleted manifest.
-    crate::test_support::namespace_store(&store, &namespace_id)
-        .raise_hint_to_current_manifest()
-        .await;
     store
         .delete(&metadata_manifest_object(
             &namespace_id,
@@ -2338,9 +2293,9 @@ async fn fork_snapshot_grace_skips_targets_and_aged_snapshots_read_only_manifest
     write_test_file(&store, &targets[0], "/own.txt", "target-write", &setup).await;
     store
         .inner()
-        .delete(&hint(&targets[5]))
+        .delete(&metadata_manifest_object(&targets[5], &ManifestNo(1)))
         .await
-        .expect("absent target hint");
+        .expect("absent target manifest");
     store.reset();
     let young = collect(
         &store,
@@ -2353,7 +2308,8 @@ async fn fork_snapshot_grace_skips_targets_and_aged_snapshots_read_only_manifest
     let aged = collect(&store, &source, &context(setup.now_ms + GC_GRACE_WINDOW_MS)).await;
     assert_eq!(aged.deleted_snapshots_by_owner.fork, 1);
     let counts = store.counts();
-    assert_eq!(counts.lists, 0);
+    // One listing of each target's manifests.
+    assert_eq!(counts.lists, 6);
     assert_eq!(counts.puts, 0);
     assert_eq!(counts.compare_and_swaps, 0);
     assert_eq!(counts.deletes, 0);
@@ -2397,8 +2353,9 @@ async fn create_on_a_deleted_id_fails_before_and_after_content_reclamation() {
                     .await
                     .expect_err("deleted id");
             assert_eq!(error.code(), loonfs_types::ErrorCode::NamespaceDeleted);
-            // The creation's hint put is refused, and nothing is deleted.
-            assert_eq!(store.counts().create_if_absent_puts, 1);
+            // The create finds the tombstone before its first write, and
+            // writes and deletes nothing.
+            assert_eq!(store.counts().create_if_absent_puts, 0);
             assert_eq!(store.counts().compare_and_swaps, 0);
             assert_eq!(store.counts().deletes, 0);
         }

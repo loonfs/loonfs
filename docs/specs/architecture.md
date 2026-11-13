@@ -16,16 +16,16 @@ Each namespace is stored as six main kinds of objects:
 | --- | --- |
 | Manifest | The namespace's identity and status, the current writer, the metadata runs that make up its files and directories, and its retention floor. Manifests are numbered. |
 | WAL object | Commits made after the most recent manifest, a writer fence, or a "[floor object](glossary.md#floor-object)", which records a new retention floor and contains no commits. WAL objects are numbered. |
-| Hint | The number of a recent manifest, where readers start looking for the current one. |
+| Manifest boundary | A manifest number at or below which every manifest has been replaced by a newer one. Garbage collection raises it before it deletes manifests. |
 | Snapshot | A reference to one manifest that keeps it, and everything it lists, from being deleted. Callers create user snapshots, and forks create fork snapshots on their source. |
 | Metadata segment | Sorted metadata rows, in blocks that can be read independently. |
 | Content object | File bytes, stored under the namespace's pool. Content objects are immutable, and a file's bytes can span several of them. |
 
 Manifests and WAL objects are numbered 1, 2, 3, and so on, with a separate counter for each. LoonFS creates every numbered object with put-if-absent, so when two processes try to write the same number, exactly one of them succeeds. Successfully writing the next WAL object commits every record in it. Writing the next manifest publishes a new set of metadata segments or a change to the namespace's state (for example, a new writer or a deletion).
 
-The hint is a best-effort pointer to a recent manifest. It's a safe place to start, but not an authoritative pointer to the current manifest, so readers load the hinted manifest and then check for newer ones. The [format specification](format.md#2-objects-and-references) defines the complete layout and the stored fields.
+To find the current manifest, a reader reads the [manifest boundary](glossary.md#manifest-boundary), lists the manifests numbered above it, and loads the highest one. A publisher reads the boundary after it writes a manifest, so a manifest written at a number that garbage collection emptied doesn't count. The [format specification](format.md#2-objects-and-references) defines the complete layout and the stored fields.
 
-Why have a hint at all? Without it, a reader would have to list the namespace's manifests to find a place to start, and object-storage listings are slow (LoonFS keeps them off every hot path). Why is it best effort? Updating the hint is a separate write from publishing a manifest. Keeping the two in step would need a transaction across two objects, which object storage doesn't support.
+Why not list every manifest? A namespace keeps one manifest for each snapshot and each fork, so a namespace's manifest folder can contain thousands of manifests. The listing above the boundary returns only the manifests published since garbage collection last raised the boundary.
 
 ## Writing a file
 

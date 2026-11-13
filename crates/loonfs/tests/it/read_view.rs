@@ -248,11 +248,9 @@ async fn snapshot_views_with_and_without_an_expiry_keep_missing_segments_corrupt
     use std::sync::Arc;
 
     let directory = tempdir().expect("tempdir");
-    // The writer raises the hint in the background after each publication,
-    // so the recording leaves the hint out of the write counts.
     let store = Arc::new(RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::any().except_hints(),
+        KeyPredicate::any(),
     ));
     let namespace_id = NamespaceId::parse("missing-pinned-segment").expect("namespace");
     let runtime = open_runtime_async(store.clone(), "missing-pinned-segment").await;
@@ -1367,8 +1365,6 @@ async fn a_missing_current_segment_stays_corrupt_and_manifest_read_failures_prop
         .fold_wal(&namespace_id)
         .await
         .expect("fold");
-    // The fold raised the hint to its manifest, so the reader's hint reads
-    // find the current manifest.
     runtime.writer.drain().await.expect("drain");
     let reader = loonfs::LoonFs::builder_with_store(store.clone())
         .read_only()
@@ -1390,7 +1386,7 @@ async fn a_missing_current_segment_stays_corrupt_and_manifest_read_failures_prop
         store
             .snapshot()
             .iter()
-            .filter(|operation| operation.key() == keys::hint(&namespace_id))
+            .filter(|operation| operation.key() == keys::boundary(&namespace_id))
             .count(),
         2
     );

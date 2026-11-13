@@ -170,7 +170,7 @@ pub mod control {
     pub use crate::control_object::{ControlObjectLoadError, LoadedControl};
     pub use crate::manifest::{load_position_basis, NamespaceStatistics};
     pub use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
-    pub use crate::namespace::control::{LoadedHint, LoadedManifest};
+    pub use crate::namespace::control::LoadedManifest;
     pub use crate::namespace::read_anchor::{project_anchor_tail, NamespaceReadAnchor};
     pub use crate::namespace::state::NamespaceReadState;
     pub use crate::namespace::status::NamespaceStorageDiagnostics;

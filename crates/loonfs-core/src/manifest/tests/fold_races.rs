@@ -455,43 +455,34 @@ async fn a_fold_whose_tail_is_already_folded_loses_its_one_manifest_put() {
 }
 
 /// Checks that a fold from a session's position publishes on the position's
-/// manifest with its put and no request for the hint or the manifest's
-/// successor, whether the hint points to that manifest or lags below it, and
-/// leaves the hint for the runtime to raise.
+/// manifest with its put and no request for the manifest boundary or the
+/// manifest's successor before the put, and reads the boundary once after
+/// the put.
 #[tokio::test]
-async fn a_fold_from_a_fresh_position_puts_on_its_basis_and_reads_no_hint() {
-    for hint_lags in [false, true] {
-        let mut writer = Writer::open().await;
-        writer.commit("first", Vec::new(), &["/a"]).await;
-        // The runtime that published the session's claim raises the hint,
-        // or hasn't raised it yet.
-        if !hint_lags {
-            crate::test_support::namespace_store(writer.store.as_ref(), &writer.namespace_id)
-                .raise_hint_to_current_manifest()
-                .await;
-        }
-        let basis = writer
-            .engine
-            .writer_position()
-            .expect("tail")
-            .read_basis
-            .basis
-            .manifest_no();
-        let next = basis.successor().expect("next manifest number");
-        writer.store.reset();
-        let folded = writer.fold().await;
-        assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
-        let manifest = |number| metadata_manifest_object(&writer.namespace_id, &number);
-        assert_eq!(
-            control_requests(&writer.namespace_id, &writer.store.take()),
-            vec![
-                // The session's basis, for its segments.
-                ("get", manifest(basis)),
-                ("put", manifest(next)),
-            ],
-            "the hint lags: {hint_lags}"
-        );
-    }
+async fn a_fold_from_a_fresh_position_puts_on_its_basis_with_no_request_first() {
+    let mut writer = Writer::open().await;
+    writer.commit("first", Vec::new(), &["/a"]).await;
+    let basis = writer
+        .engine
+        .writer_position()
+        .expect("tail")
+        .read_basis
+        .basis
+        .manifest_no();
+    let next = basis.successor().expect("next manifest number");
+    writer.store.reset();
+    let folded = writer.fold().await;
+    assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
+    let manifest = |number| metadata_manifest_object(&writer.namespace_id, &number);
+    assert_eq!(
+        control_requests(&writer.namespace_id, &writer.store.take()),
+        vec![
+            // The session's basis, for its segments.
+            ("get", manifest(basis)),
+            ("put", manifest(next)),
+            ("get", boundary(&writer.namespace_id)),
+        ]
+    );
 }
 
 /// Checks that a fold from a position whose last check is at the
@@ -508,8 +499,7 @@ async fn a_fold_from_a_position_past_the_bound_loads_the_tail_from_the_store() {
     let superseded =
         metadata_manifest_object(&writer.namespace_id, &held.read_basis.basis.manifest_no());
 
-    // Another process folds the tail and raises the hint, and garbage
-    // collection removes the position's manifest, which the fold replaced,
+    // Another process folds the tail, and garbage collection removes the position's manifest, which the fold replaced,
     // once that manifest is older than the grace window.
     let other = writer.other_process();
     let folded_by_other = crate::test_support::namespace_store(&other, &writer.namespace_id)
@@ -517,9 +507,6 @@ async fn a_fold_from_a_position_past_the_bound_loads_the_tail_from_the_store() {
         .await
         .expect("the other process folds");
     assert_eq!(folded_by_other.outcome, FoldWalOutcome::Published);
-    crate::test_support::namespace_store(&other, &writer.namespace_id)
-        .raise_hint_to_current_manifest()
-        .await;
     writer
         .store
         .delete(&superseded)
@@ -540,13 +527,62 @@ async fn a_fold_from_a_position_past_the_bound_loads_the_tail_from_the_store() {
     let requests = control_requests(&writer.namespace_id, &writer.store.take());
     assert_eq!(
         requests.first(),
-        Some(&("get", hint(&writer.namespace_id))),
-        "the fold starts from the hint: {requests:?}"
+        Some(&("get", boundary(&writer.namespace_id))),
+        "the fold starts from the manifest boundary: {requests:?}"
     );
     assert!(
         !requests.contains(&("get", superseded)),
         "the fold never reads the position's manifest: {requests:?}"
     );
+}
+
+/// Checks that a fold whose put succeeds at a manifest number that a
+/// collection emptied counts the put as lost, and publishes on the newest
+/// manifest.
+#[tokio::test]
+async fn a_fold_whose_put_lands_at_an_emptied_number_publishes_on_the_newest_manifest() {
+    let mut writer = Writer::open().await;
+    writer.commit("first", Vec::new(), &["/a"]).await;
+    let held = writer.engine.writer_position().expect("tail");
+    let basis = held.read_basis.basis.manifest_no();
+    let emptied = metadata_manifest_object(
+        &writer.namespace_id,
+        &basis.successor().expect("next manifest number"),
+    );
+    // Another process publishes two manifests, and a collection deletes the
+    // first of them, the only manifest old enough.
+    let other = writer.other_process();
+    for _ in 0..2 {
+        Rival::CompactorClaim
+            .publish(&other, &writer.namespace_id)
+            .await;
+    }
+    let report = crate::test_support::namespace_store(
+        &loonfs_test_support::stores::MetadataMapStore::aged(other, KeyPredicate::exact(&emptied)),
+        &writer.namespace_id,
+    )
+    .gc(&WriterAt {
+        now_ms: crate::limits::GC_GRACE_WINDOW_MS + 1,
+        ..writer.context.clone()
+    }
+    .clock())
+    .await
+    .expect("collect");
+    assert_eq!(report.deleted.manifests, 1);
+    let folded = crate::test_support::namespace_store(&*writer.store, &writer.namespace_id)
+        .fold_wal_tail(Some(held), &deadline())
+        .await
+        .expect("fold");
+    assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
+    assert_eq!(folded.response.manifest_no, ManifestNo(basis.0 + 3));
+    // The fold's first put created the emptied number again, below the
+    // boundary.
+    assert!(writer
+        .store
+        .head(&emptied)
+        .await
+        .expect("the emptied number")
+        .is_some());
 }
 
 /// Checks that a fold keeps the tail it read through a claim at each
@@ -615,16 +651,13 @@ async fn a_retried_fold_leaves_the_session_where_an_unraced_fold_does() {
                 .manifest(),
             &folded.manifest.manifest
         );
-        // The runtimes that published the manifests raise the hint, so the
-        // next fold's discovery starts at the current manifest in both cases.
-        crate::test_support::namespace_store(writer.store.inner(), &writer.namespace_id)
-            .raise_hint_to_current_manifest()
-            .await;
         writer.commit("second", Vec::new(), &["/b"]).await;
         let publish = request_counts(&writer.store);
-        let hint = hint(&writer.namespace_id);
+        let boundary = boundary(&writer.namespace_id);
         let operations = writer.store.take();
-        assert!(!operations.iter().any(|operation| operation.key() == hint));
+        assert!(!operations
+            .iter()
+            .any(|operation| operation.key() == boundary));
         writer.fold().await;
         let fold = request_counts(&writer.store);
         let operations = writer.store.take();

@@ -353,12 +353,9 @@ async fn session_steps_never_advance_the_floor_and_the_next_sweep_does() {
 async fn a_sweep_that_finds_session_steps_running_leaves_its_advance_to_those_steps() {
     let directory = tempdir().expect("tempdir");
     let namespace_id = namespace_id("busy");
-    // The runtime raises the hint in the background after each publication,
-    // so the gate doesn't select the hint.
     let store = Arc::new(BlockingStore::new(
         LocalFsStore::new(directory.path()).expect("local store"),
-        KeyPredicate::prefix(loonfs_objectstore::keys::namespace_prefix(&namespace_id))
-            .except_hints(),
+        KeyPredicate::prefix(loonfs_objectstore::keys::namespace_prefix(&namespace_id)),
         OperationSelector::Any,
     ));
     let config = retention_config(Some(WINDOW_MS));
@@ -509,9 +506,7 @@ async fn an_idle_sweep_costs_the_same_requests_whichever_window_applies() {
             .put_file("/old.txt", b"history", &test_actor())
             .await
             .expect("write a file");
-        // The fold's raise of the hint could lose its compare-and-swap to
-        // the commit's raise, so the commit's raise finishes first.
-        writer.drain().await.expect("raise the hint");
+        writer.drain().await.expect("drain");
         writer
             .maintenance(writer_id("before-the-server"))
             .fold_wal(&namespace_id)
@@ -530,8 +525,8 @@ async fn an_idle_sweep_costs_the_same_requests_whichever_window_applies() {
         .await;
         // The first sweep moves the floor to the head when a window applies,
         // which creates a floor object and folds it, and it collects
-        // what the seed left behind. Each publication raises the hint, so
-        // each sweep collects the manifests that the previous sweep replaced.
+        // what the seed left behind. Each sweep collects the manifests that
+        // the previous sweep replaced.
         for _ in 0..3 {
             server.scheduler.run_sweep().await.expect("list namespaces");
         }

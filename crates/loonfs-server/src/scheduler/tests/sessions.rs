@@ -591,8 +591,6 @@ async fn a_fenced_compactor_stops_before_a_unit_and_waits_for_the_retry_interval
         .compact_metadata(&namespace_id, &loonfs::MaintenanceCancellation::new())
         .await
         .expect("claim newer compactor");
-    // The other runtime's claim raised the hint to the current manifest
-    // before the test counts the session steps' requests.
     store.reset();
     server
         .run_steps_after(config.maintenance_interval_ms.get())
@@ -674,8 +672,9 @@ async fn collection_runs_hourly_only_when_the_session_moved() {
     let operations = store.take();
     assert_eq!(
         list_count(&operations),
-        5,
-        "collection lists the namespace's garbage without listing namespaces"
+        6,
+        "collection finds the newest manifest with one listing and lists the namespace's \
+         garbage without listing namespaces"
     );
     assert!(operations.iter().all(|op| op
         .key()
@@ -694,7 +693,7 @@ async fn collection_runs_hourly_only_when_the_session_moved() {
         .await;
     assert_eq!(
         list_count(&store.take()),
-        5,
+        6,
         "the first run after the commit collects, because collection comes before the \
          index step"
     );
@@ -806,11 +805,9 @@ async fn idle_sessions_close_only_after_the_idle_threshold_and_all_callers_relea
 #[tokio::test]
 async fn session_steps_close_a_fenced_session_and_the_session_of_a_deleted_namespace() {
     let directory = tempdir().expect("tempdir");
-    // The runtimes raise hints in the background after each publication, so
-    // the recording doesn't select the hint.
     let store = Arc::new(RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::any().except_hints(),
+        KeyPredicate::any(),
     ));
     let config = scheduler_config(None);
     let server = SchedulerServer::start(store.clone(), &config, 0).await;

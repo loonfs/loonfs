@@ -2684,8 +2684,8 @@ async fn a_new_compactor_epoch_an_expired_job_and_a_deletion_each_prevent_public
             && store.take().iter().all(|operation| {
                 matches!(
                     parse_object_key(operation.key()).map(|key| key.family()),
-                    Some(DurableObjectFamily::Hint | DurableObjectFamily::MetadataManifest)
-                )
+                    Some(DurableObjectFamily::Boundary | DurableObjectFamily::MetadataManifest)
+                ) || operation.key() == metadata_manifest_prefix(&namespace)
             })
     };
     store.reset();
@@ -2874,10 +2874,10 @@ async fn two_groups_with_one_epoch_publish_after_a_number_conflict() {
     );
 }
 
-/// Checks that a finalization without a basis discovers the current manifest
-/// once, through the hint, the hinted manifest, a HEAD request for the
-/// missing manifest after it, and the hint again, and leaves the hint for
-/// the runtime to raise.
+/// Checks that a finalization without a basis finds the current manifest
+/// once, with the manifest boundary, a listing of the manifests, the newest
+/// manifest, and the boundary again, and reads the boundary once after its
+/// put.
 #[tokio::test]
 async fn a_finalization_attempt_loads_the_current_manifest_once() {
     use loonfs_test_support::stores::RecordingStore;
@@ -2898,12 +2898,6 @@ async fn a_finalization_attempt_loads_the_current_manifest_once() {
     .await
     .expect("compact");
     let current = current_manifest_number(&store, &namespace).await;
-    // The runtime that published the seed raises the hint afterward, so
-    // discovery starts at the current manifest.
-    crate::test_support::namespace_store(&store, &namespace)
-        .raise_hint(current, None)
-        .await
-        .expect("raise the hint");
     let next = current.successor().expect("next manifest number");
     let store = RecordingStore::new(store, KeyPredicate::any());
     let manifest_no =
@@ -2911,29 +2905,37 @@ async fn a_finalization_attempt_loads_the_current_manifest_once() {
     assert_eq!(manifest_no, next);
     let operations = store.take();
     let mut expected = discovery_requests(&namespace, current);
-    expected.push(("put", metadata_manifest_object(&namespace, &next)));
+    expected.extend(publication_requests(&namespace, next));
     assert_eq!(control_requests(&namespace, &operations), expected);
     assert_eq!(operations.len(), expected.len(), "{operations:?}");
 }
 
-/// Returns the requests of a discovery whose hint points to `current`, the
-/// current manifest: the hint, the manifest, a HEAD request for the missing
-/// manifest after it, and the hint again.
+/// Returns the requests of a search for the newest manifest, which is
+/// `current`: the manifest boundary, a listing of the manifests, the
+/// manifest, and the boundary again.
 fn discovery_requests(namespace: &NamespaceId, current: ManifestNo) -> Vec<(&'static str, String)> {
-    let hint = hint(namespace);
-    let next = current.successor().expect("next manifest number");
+    let boundary = boundary(namespace);
     vec![
-        ("get", hint.clone()),
+        ("get", boundary.clone()),
+        ("list", metadata_manifest_prefix(namespace)),
         ("get", metadata_manifest_object(namespace, &current)),
-        ("head", metadata_manifest_object(namespace, &next)),
-        ("get", hint),
+        ("get", boundary),
     ]
 }
 
-/// Checks that a compaction unit without a basis discovers the current
-/// manifest once to plan, that a unit with a basis loads nothing to plan,
-/// and that both publish on the manifest they planned from with their put
-/// and no request before it, leaving the hint for the runtime to raise.
+/// Returns the requests of a publication of manifest `next`: its put and one
+/// read of the manifest boundary.
+fn publication_requests(namespace: &NamespaceId, next: ManifestNo) -> Vec<(&'static str, String)> {
+    vec![
+        ("put", metadata_manifest_object(namespace, &next)),
+        ("get", boundary(namespace)),
+    ]
+}
+
+/// Checks that a compaction unit without a basis finds the current manifest
+/// once to plan, that a unit with a basis loads nothing to plan, and that
+/// both publish on the manifest they planned from with their put and no
+/// request before it, and read the manifest boundary after the put.
 #[tokio::test]
 async fn a_unit_loads_the_current_manifest_only_without_a_basis() {
     use loonfs_test_support::stores::RecordingStore;
@@ -2944,12 +2946,6 @@ async fn a_unit_loads_the_current_manifest_only_without_a_basis() {
         let store = LocalFsStore::new(directory.path()).expect("store");
         seed_bindings_workload(&store, &namespace).await;
         let current = current_manifest_number(&store, &namespace).await;
-        // The runtime that published the seed raises the hint afterward, so
-        // discovery starts at the current manifest.
-        crate::test_support::namespace_store(&store, &namespace)
-            .raise_hint(current, None)
-            .await
-            .expect("raise the hint");
         let basis = match with_basis {
             true => {
                 let checked = crate::test_support::observed_now();
@@ -2990,7 +2986,7 @@ async fn a_unit_loads_the_current_manifest_only_without_a_basis() {
             true => Vec::new(),
             false => discovery_requests(&namespace, current),
         };
-        expected.push(("put", metadata_manifest_object(&namespace, &next)));
+        expected.extend(publication_requests(&namespace, next));
         assert_eq!(
             control_requests(&namespace, &store.take()),
             expected,
@@ -3128,8 +3124,7 @@ async fn direct_output_is_published_by_number_and_failed_output_ages_out() {
         .all(|key| key.starts_with(&metadata_segment_prefix(&namespace))
             || key.starts_with(&loonfs_objectstore::keys::metadata_manifest_prefix(
                 &namespace
-            ))
-            || key == &loonfs_objectstore::keys::hint(&namespace)));
+            ))));
 
     // The first job left the group with one base run, which the planner does
     // not select; one more binding gives it a delta run to select.

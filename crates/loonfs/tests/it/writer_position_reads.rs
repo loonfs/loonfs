@@ -10,7 +10,7 @@ use loonfs::{
     ReadOnly, SharedObjectStore, StatOptions, Writable,
 };
 use loonfs_core::limits::MAX_POSITION_MOVES;
-use loonfs_objectstore::keys::{hint, metadata_manifest_object, metadata_manifest_prefix};
+use loonfs_objectstore::keys::{boundary, metadata_manifest_object, metadata_manifest_prefix};
 use loonfs_test_support::clock::{bounded, ManualClock};
 use loonfs_test_support::ids::{namespace_id, writer_id};
 use loonfs_test_support::stores::{
@@ -192,14 +192,14 @@ impl Fixture {
     /// Asserts that the requests since the last reset start with a successor
     /// check of a manifest, that the walk after it loads that manifest and
     /// no later one, and that the read then reloads the namespace from its
-    /// hint.
+    /// manifest boundary.
     fn assert_check_stopped_at_the_claim(&self) {
         let operations = self.recording.take();
         let Some(reload) = operations
             .iter()
-            .position(|operation| operation.key() == hint(&self.namespace_id))
+            .position(|operation| operation.key() == boundary(&self.namespace_id))
         else {
-            panic!("no reload from the hint: {operations:?}");
+            panic!("no reload from the manifest boundary: {operations:?}");
         };
         let walked: Vec<&str> = operations[..reload]
             .iter()
@@ -416,7 +416,7 @@ async fn another_writers_takeover_is_seen_by_a_strong_read_and_past_the_stalenes
 
 /// Checks that a check whose walk finds more manifests above the position
 /// than one check moves the position onto drops the position, and that the
-/// read reloads the namespace from its hint.
+/// read reloads the namespace from its manifest boundary.
 ///
 /// Another runtime folds each of the session's commits, one fold more than
 /// the cap, under the session's writer epoch, so the walk loads one manifest
@@ -447,8 +447,8 @@ async fn a_walk_past_its_cap_drops_the_position() {
     let operations = fixture.recording.take();
     let reload = operations
         .iter()
-        .position(|operation| operation.key() == hint(&fixture.namespace_id))
-        .expect("a reload from the hint");
+        .position(|operation| operation.key() == boundary(&fixture.namespace_id))
+        .expect("a reload from the manifest boundary");
     let walked = operations[..reload]
         .iter()
         .filter(|operation| matches!(operation, RecordedOperation::Get { .. }))
@@ -498,7 +498,7 @@ async fn another_runtimes_fold_moves_the_position_past_the_staleness() {
             && is_manifest_get(&operations[2], &fixture.namespace_id, after_fold)
             && operations
                 .iter()
-                .all(|operation| operation.key() != hint(&fixture.namespace_id)),
+                .all(|operation| operation.key() != boundary(&fixture.namespace_id)),
         "the check finds the fold's manifest, loads it, finds nothing after it, and runs no \
          discovery: {operations:?}"
     );
@@ -688,9 +688,9 @@ async fn a_change_of_unknown_effect_drops_the_view_and_the_next_read_loads_it() 
         matches!(
             operations.first(),
             Some(RecordedOperation::GetWithMetadata { key, .. })
-                if *key == hint(&fixture.namespace_id)
+                if *key == boundary(&fixture.namespace_id)
         ),
-        "the read loads the namespace from its hint: {operations:?}"
+        "the read loads the namespace from its manifest boundary: {operations:?}"
     );
     assert_eq!(fixture.head_sources(), (positions, anchors + 1));
 }
@@ -746,9 +746,9 @@ async fn a_refresh_that_spans_a_change_of_unknown_effect_installs_nothing() {
         matches!(
             operations.first(),
             Some(RecordedOperation::GetWithMetadata { key, .. })
-                if *key == hint(&fixture.namespace_id)
+                if *key == boundary(&fixture.namespace_id)
         ),
-        "the read loads the namespace from its hint: {operations:?}"
+        "the read loads the namespace from its manifest boundary: {operations:?}"
     );
     assert_eq!(fixture.head_sources(), (positions, anchors + 1));
 }
@@ -769,9 +769,9 @@ async fn a_position_past_the_revalidation_bound_is_not_read_from() {
         matches!(
             operations.first(),
             Some(RecordedOperation::GetWithMetadata { key, .. })
-                if *key == hint(&fixture.namespace_id)
+                if *key == boundary(&fixture.namespace_id)
         ),
-        "the read reloads from the hint without a successor check: {operations:?}"
+        "the read reloads from the manifest boundary without a successor check: {operations:?}"
     );
     assert_eq!(fixture.head_sources(), (positions, anchors + 1));
 

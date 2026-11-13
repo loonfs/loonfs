@@ -118,10 +118,6 @@ async fn an_own_fold_discovers_later_commits_after_the_projection_is_dropped() {
             .expect("fold");
         assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
         engine.record_manifest_published(folded.manifest);
-        // The runtime that published the fold raises the hint.
-        crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
-            .raise_hint_to_current_manifest()
-            .await;
         timer.advance_ms(100);
         store.reset();
 
@@ -167,9 +163,10 @@ async fn an_own_fold_discovers_later_commits_after_the_projection_is_dropped() {
                 .count()
         };
         assert_eq!(
-            gets(DurableObjectFamily::Hint),
+            gets(DurableObjectFamily::Boundary),
             2,
-            "discovery and its GC recheck read the hint; {operations:?}"
+            "the search for the newest manifest reads the manifest boundary twice; \
+             {operations:?}"
         );
         assert_eq!(
             gets(DurableObjectFamily::MetadataManifest),
@@ -181,9 +178,8 @@ async fn an_own_fold_discovers_later_commits_after_the_projection_is_dropped() {
                 .iter()
                 .filter(|operation| matches!(operation, RecordedOperation::Head { .. }))
                 .count(),
-            2,
-            "discovery's probe after the fold's manifest and the anchor's successor check; \
-             {operations:?}"
+            1,
+            "the anchor's successor check; {operations:?}"
         );
         if replay_receipt {
             assert!(!operations
@@ -633,7 +629,7 @@ async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
         .expect("after fold");
     assert!(store.snapshot().iter().all(|operation| !matches!(operation,
         RecordedOperation::Get { key, .. } | RecordedOperation::GetWithMetadata { key, .. }
-        if key.ends_with("hint.json") || key.starts_with(&wal_prefix(&engine.namespace.namespace_id))
+        if key.ends_with("boundary.json") || key.starts_with(&wal_prefix(&engine.namespace.namespace_id))
     )));
 }
 

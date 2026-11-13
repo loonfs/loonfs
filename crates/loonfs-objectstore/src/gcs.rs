@@ -761,7 +761,7 @@ mod tests {
         .expect("construct gcs store");
         let error = store
             .compare_and_swap(
-                "namespaces/demo/hint.json",
+                "namespaces/demo/boundary.json",
                 "not-a-generation",
                 Bytes::from_static(b"payload"),
             )

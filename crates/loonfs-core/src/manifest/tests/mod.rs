@@ -61,15 +61,12 @@ use crate::test_support::{drain_compaction, WriterAt};
 use crate::time::{OperationClock, StdMonotonicTimer};
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::stream::BoxStream;
 use loonfs_objectstore::keys::{
-    hint, metadata_manifest_object, metadata_manifest_prefix, metadata_segment_object_key,
+    boundary, metadata_manifest_object, metadata_manifest_prefix, metadata_segment_object_key,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStoreExtension;
-use loonfs_objectstore::{
-    ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
-};
+use loonfs_objectstore::{ByteRange, ObjectStore, ObjectStoreError, PutMode};
 use loonfs_test_support::stores::{
     BlockingStore, FailStore, InjectedError, KeyPredicate, LostCreateStore, OperationSelector,
     RecordingStore,
@@ -899,7 +896,7 @@ pub(crate) async fn write_namespace_manifest<S: ObjectStore + ?Sized>(
     Ok(envelope)
 }
 
-/// Returns the requests for the namespace's hint and manifests in
+/// Returns the requests for the namespace's manifest boundary and manifests in
 /// `operations`, as a request kind and a key, with each run of HEAD requests
 /// sorted by key (see `sort_head_runs`).
 pub(crate) fn control_requests(
@@ -908,10 +905,10 @@ pub(crate) fn control_requests(
 ) -> Vec<(&'static str, String)> {
     use loonfs_test_support::stores::RecordedOperation;
     let manifests = metadata_manifest_prefix(namespace_id);
-    let hint = hint(namespace_id);
+    let boundary = boundary(namespace_id);
     let mut operations = operations
         .iter()
-        .filter(|operation| operation.key() == hint || operation.key().starts_with(&manifests))
+        .filter(|operation| operation.key() == boundary || operation.key().starts_with(&manifests))
         .cloned()
         .collect::<Vec<_>>();
     loonfs_test_support::stores::sort_head_runs(&mut operations);

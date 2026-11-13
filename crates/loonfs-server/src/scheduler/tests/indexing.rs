@@ -19,11 +19,9 @@ use tempfile::tempdir;
 #[tokio::test]
 async fn session_steps_index_publishes_and_lifecycle_changes_then_cost_nothing() {
     let directory = tempdir().expect("tempdir");
-    // The runtime raises the hint in the background after each publication,
-    // so the recording leaves out the hint's requests.
     let store = Arc::new(RecordingStore::new(
         LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::any().except_hints(),
+        KeyPredicate::any(),
     ));
     let mut config = scheduler_config(Some(GrepWorkerConfig::default()));
     config.idle_fold_after_ms = Some(0);

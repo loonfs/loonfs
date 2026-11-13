@@ -83,12 +83,9 @@ impl<S: ObjectStore> NamespaceStore<S> {
             .await?;
         let claim = update.current_manifest();
         let acquired = update.response;
-        let hint = update
-            .hint
-            .expect("a claim starts from no basis, so it loads the hint");
         let mut tip = clock.observe();
         let mut anchor = self
-            .load_read_anchor_from_manifest(update.current, hint, clock.origin())
+            .load_read_anchor_from_manifest(update.current, clock.origin())
             .await?;
         // Only the publication budget bounds this loop, because a lost fence race means the
         // old writer wrote a WAL object, and stopping after a count would make the

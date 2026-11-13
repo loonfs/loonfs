@@ -305,23 +305,6 @@ fn normalized_commit_id(commit_id: Option<&CommitId>) -> CommitId {
 }
 
 impl<S: ObjectStore> NamespaceStore<S> {
-    /// Raises the namespace's hint to its current manifest, as the runtime
-    /// that published that manifest does after the publication. A test hook.
-    ///
-    /// A publication in core leaves the hint where it was, so a test that
-    /// needs garbage collection or discovery to see a current hint calls this.
-    pub async fn raise_hint_to_current_manifest(&self) {
-        let current = self
-            .load_current_manifest()
-            .await
-            .expect("load the current manifest")
-            .manifest()
-            .manifest_no;
-        self.raise_hint(current, None)
-            .await
-            .expect("raise the hint");
-    }
-
     /// Publishes `deltas` and `inline_content` as one commit in the next WAL
     /// object, without planning, so a test controls the exact deltas and
     /// pieces. A test hook.

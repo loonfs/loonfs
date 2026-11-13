@@ -1,4 +1,4 @@
-//! Durable control-object shapes: the discovery hint, the manifest boundary,
+//! Durable control-object shapes: the manifest boundary,
 //! snapshots, upload session and outcome records, pool records, and their envelopes
 //! ([Appendix A.4](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a4-control-and-manifest-payloads)).
 
@@ -18,8 +18,6 @@ use std::num::NonZeroU64;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ControlObjectKind {
-    /// Starts forward discovery of numbered manifests.
-    Hint,
     /// Keeps a manifest basis for a user or fork lifecycle.
     Snapshot,
     /// Starts one upload session.
@@ -35,8 +33,7 @@ pub enum ControlObjectKind {
 
 impl ControlObjectKind {
     /// Lists every registered control-object family in stable registry order.
-    pub const ALL: [Self; 6] = [
-        Self::Hint,
+    pub const ALL: [Self; 5] = [
         Self::Snapshot,
         Self::UploadSession,
         Self::UploadOutcome,
@@ -52,7 +49,6 @@ impl ControlObjectKind {
     /// a raw JSON fragment whose checksum covers its exact bytes.
     pub const fn format_version(self) -> u32 {
         match self {
-            Self::Hint => 1,
             Self::Snapshot => 1,
             Self::UploadSession => 1,
             Self::UploadOutcome => 1,
@@ -64,7 +60,6 @@ impl ControlObjectKind {
     /// Returns the frozen envelope discriminator for this control-object family.
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Hint => "hint",
             Self::Snapshot => "snapshot",
             Self::UploadSession => "upload_session",
             Self::UploadOutcome => "upload_outcome",
@@ -77,16 +72,6 @@ impl ControlObjectKind {
     pub fn parse(value: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|kind| kind.as_str() == value)
     }
-}
-
-/// Starts manifest discovery without selecting the current version.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HintPayload {
-    /// Namespace whose manifest collection is probed.
-    pub namespace_id: NamespaceId,
-    /// Positive manifest number from which discovery begins.
-    pub manifest_no: ManifestNo,
 }
 
 /// The manifest boundary of one namespace.
@@ -455,8 +440,8 @@ pub struct UploadOutcomePayload {
 /// The record that a namespace's create call writes when the call generates
 /// a pool.
 ///
-/// LoonFS writes the record once, with put-if-absent, after the namespace's
-/// hint and before manifest 1, and never changes the record.
+/// LoonFS writes the record once, with put-if-absent, before the namespace's
+/// manifest 1, and never changes the record.
 ///
 /// See [pools and pool records](https://github.com/loonfs/loonfs/blob/main/docs/design/pools.md#pools-and-pool-records).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

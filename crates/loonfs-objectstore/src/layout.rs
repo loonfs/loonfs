@@ -3,10 +3,9 @@
 
 use crate::keys::{
     namespace_prefix, pool_prefix, BOUNDARY_NAME, CONTENT_DIRECTORY, EXTENSIONS_DIRECTORY,
-    HINT_NAME, MANIFEST_DIRECTORY, MANIFEST_SUFFIX, NAMESPACES_DIRECTORY, POOLS_DIRECTORY,
-    POOL_RECORD_NAME, SEGMENT_DIRECTORY, SEGMENT_SUFFIX, SNAPSHOT_DIRECTORY, SNAPSHOT_SUFFIX,
-    TEMPORARY_DIRECTORY, UPLOAD_DIRECTORY, UPLOAD_OUTCOME_SUFFIX, UPLOAD_SESSION_SUFFIX,
-    WAL_DIRECTORY, WAL_SUFFIX,
+    MANIFEST_DIRECTORY, MANIFEST_SUFFIX, NAMESPACES_DIRECTORY, POOLS_DIRECTORY, POOL_RECORD_NAME,
+    SEGMENT_DIRECTORY, SEGMENT_SUFFIX, SNAPSHOT_DIRECTORY, SNAPSHOT_SUFFIX, TEMPORARY_DIRECTORY,
+    UPLOAD_DIRECTORY, UPLOAD_OUTCOME_SUFFIX, UPLOAD_SESSION_SUFFIX, WAL_DIRECTORY, WAL_SUFFIX,
 };
 use crate::{ObjectStore, Result};
 use loonfs_types::{ContentId, EffectiveLimit, ManifestNo, NamespaceId, PoolId, UploadId};
@@ -33,8 +32,6 @@ pub const MAX_NAMESPACE_IDS_PER_PAGE: NonZeroU32 = NonZeroU32::new(1_000).unwrap
 pub enum DurableObjectFamily {
     /// Classifies an immutable numbered object in a namespace's WAL.
     WalObject,
-    /// Starts forward discovery of namespace manifests.
-    Hint,
     /// Records the manifest number at or below which every manifest of a
     /// namespace is replaced.
     Boundary,
@@ -63,7 +60,7 @@ pub enum DurableObjectFamily {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyPrefix<'a> {
     /// The prefix of a namespace (`namespaces/{namespace_id}/`), which
-    /// contains the namespace's WAL objects, manifests, hint, manifest
+    /// contains the namespace's WAL objects, manifests, manifest
     /// boundary, snapshots, and the metadata and extension segments that the
     /// namespace owns.
     Namespace(&'a str),
@@ -149,11 +146,6 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
                     Some(identifier),
                 )
             }),
-        [NAMESPACES_DIRECTORY, namespace, HINT_NAME] => Some(parsed(
-            DurableObjectFamily::Hint,
-            KeyPrefix::Namespace(namespace),
-            None,
-        )),
         [NAMESPACES_DIRECTORY, namespace, BOUNDARY_NAME] => Some(parsed(
             DurableObjectFamily::Boundary,
             KeyPrefix::Namespace(namespace),
@@ -432,9 +424,9 @@ mod tests {
 
     use super::{parse_object_key, DurableObjectFamily, KeyPrefix};
     use crate::keys::{
-        boundary, content_blob, extension_segment, hint, metadata_manifest_object,
-        metadata_segment, metadata_segment_prefix, pool_record, snapshot_record, temporary_object,
-        upload_outcome, upload_session, wal_object, wal_prefix,
+        boundary, content_blob, extension_segment, metadata_manifest_object, metadata_segment,
+        metadata_segment_prefix, pool_record, snapshot_record, temporary_object, upload_outcome,
+        upload_session, wal_object, wal_prefix,
     };
     use loonfs_test_support::ids::numbered_pool_id;
     use loonfs_types::{
@@ -493,12 +485,6 @@ mod tests {
                 DurableObjectFamily::WalObject,
                 namespace,
                 Some("00000000000000000001"),
-            ),
-            (
-                hint(&namespace_id),
-                DurableObjectFamily::Hint,
-                namespace,
-                None,
             ),
             (
                 boundary(&namespace_id),
@@ -615,7 +601,7 @@ mod tests {
 
         assert!(segment.starts_with(&metadata_segment_prefix(&namespace_id)));
         let wal_objects = wal_prefix(&namespace_id);
-        assert!(!hint(&namespace_id).starts_with(&wal_objects));
+        assert!(!boundary(&namespace_id).starts_with(&wal_objects));
     }
 
     #[test]
@@ -637,14 +623,14 @@ mod tests {
             "namespaces/ns-1/uploads/upl_00000000000000000000000001.outcome.json",
             "namespaces/ns-1/temporary/tmp_00000000000000000000000001",
             "pools/pool_00000000000000000000000001/content/nested/object",
-            "pools/pool_00000000000000000000000001/hint.json",
+            "pools/pool_00000000000000000000000001/boundary.json",
             "pools/pool_00000000000000000000000001/wal/00000000000000000001.wal.zst",
             "private/random.json",
             "namespaces/ns-1/unknown/file.json",
-            "../namespaces/ns-1/hint.json",
-            "namespaces/ns-1/../hint.json",
+            "../namespaces/ns-1/boundary.json",
+            "namespaces/ns-1/../boundary.json",
             "namespaces/ns-1/content/nested/object",
-            "namespaces/ns-1/extensions/grep/hint.json",
+            "namespaces/ns-1/extensions/grep/boundary.json",
             "namespaces/ns-1/extensions/grep/manifests/00000000000000000001.json",
             "namespaces/ns-1/extensions/grep/segments/idx_1.tmp",
             "namespaces/ns-1/extensions/grep/segments/nested/idx_1.sst",

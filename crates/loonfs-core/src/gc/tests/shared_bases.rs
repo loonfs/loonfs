@@ -9,7 +9,6 @@ use crate::storage::content_location::extent_object_key;
 use loonfs_objectstore::keys::{content_blob, content_prefix, metadata_segment_object_key};
 use loonfs_objectstore::ByteRange;
 use loonfs_test_support::stores::RecordedOperation;
-use loonfs_types::format::control::{encode_control_state, HintPayload};
 use loonfs_types::format::manifest::{
     ContentLayoutRecord, MetadataRowFamily, NamespaceManifestPayload,
 };
@@ -94,27 +93,14 @@ async fn layout_manifest(
     (manifest.payload().clone(), keys)
 }
 
-/// Publishes `manifest` as a namespace's first manifest, with the hint and
-/// the record of the pool that the manifest records.
+/// Publishes `manifest` as a namespace's first manifest, with the record of
+/// the pool that the manifest records.
 async fn publish_layout_manifest(store: &impl ObjectStore, manifest: NamespaceManifestPayload) {
     crate::test_support::write_pool_record(store, &manifest.pool_id, &manifest.namespace_id, 0)
         .await;
-    let hint_key = hint(&manifest.namespace_id);
-    let hint_bytes = encode_control_state(
-        ControlObjectKind::Hint,
-        &HintPayload {
-            namespace_id: manifest.namespace_id.clone(),
-            manifest_no: manifest.manifest_no,
-        },
-    )
-    .expect("hint");
     write_namespace_manifest(store, manifest)
         .await
         .expect("write manifest");
-    store
-        .put_if_absent(&hint_key, Bytes::from(hint_bytes))
-        .await
-        .expect("write hint");
 }
 
 /// Returns the object key and byte range of the extent filter of each layout

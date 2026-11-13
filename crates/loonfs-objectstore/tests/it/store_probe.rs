@@ -15,7 +15,7 @@ use tempfile::TempDir;
 
 const POISON_PROVIDER_DETAIL: &str = "<Error>AccessDenied</Error> \
     arn:aws:iam::123456789012:role/private-role private-bucket \
-    namespaces/customer-a/hint.json x-amz-request-id=provider-request \
+    namespaces/customer-a/boundary.json x-amz-request-id=provider-request \
     x-amz-id-2=provider-host-id AKIAEXAMPLE";
 
 fn outcome<'a>(report: &'a StoreProbeReport, name: &str) -> &'a StoreProbeOutcome {
@@ -63,7 +63,7 @@ async fn provider_failures_make_every_probe_message_safe_to_paste() {
             "<Error>AccessDenied</Error>",
             "arn:aws:iam::123456789012:role/private-role",
             "private-bucket",
-            "namespaces/customer-a/hint.json",
+            "namespaces/customer-a/boundary.json",
             "x-amz-request-id=provider-request",
             "x-amz-id-2=provider-host-id",
             "AKIAEXAMPLE",

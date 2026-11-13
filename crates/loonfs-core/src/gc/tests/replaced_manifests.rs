@@ -36,7 +36,6 @@ async fn seed_segments<S: ObjectStore>(store: &S, namespace_id: &NamespaceId) ->
         .expect("list snapshots")
         .is_empty());
     let namespace = crate::test_support::namespace_store(store, namespace_id);
-    namespace.raise_hint_to_current_manifest().await;
     namespace
         .gc(&context(NOW_MS).clock())
         .await
@@ -78,8 +77,6 @@ async fn compact_bindings<S: ObjectStore>(store: &S, namespace_id: &NamespaceId)
         }
     );
     let namespace = crate::test_support::namespace_store(store, namespace_id);
-    // The runtime that published the compaction raises the hint.
-    namespace.raise_hint_to_current_manifest().await;
     namespace
         .load_current_manifest()
         .await
@@ -309,7 +306,6 @@ async fn a_pass_reads_no_replaced_manifest() {
             .await
             .expect("claim the writer epoch");
     }
-    namespace.raise_hint_to_current_manifest().await;
     let current = namespace
         .load_current_manifest()
         .await

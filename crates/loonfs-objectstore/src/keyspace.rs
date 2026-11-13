@@ -143,7 +143,7 @@ impl KeyScope {
 #[cfg(test)]
 mod tests {
     use super::{validate_segments, KeyScope, TrailingSeparator};
-    use crate::keys::hint;
+    use crate::keys::boundary;
     use crate::ObjectStoreError;
     use std::assert_matches;
 
@@ -171,25 +171,32 @@ mod tests {
 
     #[test]
     fn scoped_keys_keep_prefix_isolation() {
-        let hint_key = hint(&loonfs_types::NamespaceId::parse("ns-1").expect("valid namespace id"));
+        let boundary_key =
+            boundary(&loonfs_types::NamespaceId::parse("ns-1").expect("valid namespace id"));
         let scope = KeyScope::new(Some("tenant-a")).expect("prefix");
         assert_matches!(
-            scope.object_key(&hint_key),
-            Ok(scoped) if scoped == format!("tenant-a/{hint_key}")
+            scope.object_key(&boundary_key),
+            Ok(scoped) if scoped == format!("tenant-a/{boundary_key}")
         );
         assert_matches!(
             scope.listing_prefix("namespaces/ns-1/"),
             Ok(scoped) if scoped == "tenant-a/namespaces/ns-1/"
         );
         assert_eq!(
-            scope.unscope(&format!("tenant-a/{hint_key}")),
-            Some(hint_key.clone())
+            scope.unscope(&format!("tenant-a/{boundary_key}")),
+            Some(boundary_key.clone())
         );
-        assert_eq!(scope.unscope("tenant-b/namespaces/ns-1/hint.json"), None);
-        assert_eq!(scope.unscope("tenant-ab/namespaces/ns-1/hint.json"), None);
         assert_eq!(
-            KeyScope::default().unscope(&hint_key),
-            Some(hint_key.clone()),
+            scope.unscope("tenant-b/namespaces/ns-1/boundary.json"),
+            None
+        );
+        assert_eq!(
+            scope.unscope("tenant-ab/namespaces/ns-1/boundary.json"),
+            None
+        );
+        assert_eq!(
+            KeyScope::default().unscope(&boundary_key),
+            Some(boundary_key.clone()),
             "an unscoped store lists every key as the caller wrote it"
         );
     }

@@ -113,6 +113,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         let owner = SnapshotOwner::Fork {
             target_namespace_id: new_namespace_id.clone(),
         };
+        target.ensure_namespace_absent().await?;
         let source_record = match at {
             ForkAt::Head(manifest) => {
                 self.namespace
@@ -160,13 +161,9 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             fork_basis,
             source_manifest.payload(),
         );
-        let installed = async {
-            target.publish_first_hint().await?;
-            target
-                .publish_first_manifest(manifest.clone(), &clock)
-                .await
-        }
-        .await;
+        let installed = target
+            .publish_first_manifest(manifest.clone(), &clock)
+            .await;
         if let Err(error) = installed {
             if matches!(
                 error,
