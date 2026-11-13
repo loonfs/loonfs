@@ -957,7 +957,7 @@ async fn a_swap_through_a_temporary_name_needs_no_right_on_the_temporary_directo
     let writer = context("writer");
     let fixture = NamespaceFixture::new(&store, &namespace_id, &writer);
     fixture
-        .create_with_options(&crate::options::CreateNamespaceOptions {
+        .create_with_options(&loonfs_types::options::CreateNamespaceOptions {
             access: loonfs_types::NamespaceAccess::Acl {
                 principal_scope: loonfs_types::PrincipalScope::parse("org_demo").expect("scope"),
                 root_grants: acl_grants("prn_root", &[AccessRight::Admin]),

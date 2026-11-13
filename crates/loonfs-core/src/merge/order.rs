@@ -312,36 +312,27 @@ impl<'p, 'v, S: ObjectStore + ?Sized> Order<'p, 'v, S> {
 
     fn readiness(&mut self, plan: &InodePlan) -> Readiness {
         let inode_id = plan.inode_id;
-        match &plan.binding {
-            Some(
-                BindingChange::Create {
-                    parent_inode_id, ..
-                }
-                | BindingChange::Move {
-                    parent_inode_id, ..
-                }
-                | BindingChange::RestoreDeleted {
-                    parent_inode_id, ..
-                },
-            ) => {
-                if self.pending_creates.contains(parent_inode_id) {
-                    return Readiness::Waits(*parent_inode_id);
-                }
-                if let Some(holder) = self.holders.get(&inode_id) {
-                    if !self.left.contains(holder) {
-                        return Readiness::Waits(*holder);
-                    }
-                }
-                if plan.kind == InodeKind::Directory
-                    && (*parent_inode_id == inode_id || self.is_below(*parent_inode_id, inode_id))
-                {
-                    return self.moved_between(*parent_inode_id, inode_id);
-                }
-                Readiness::Ready
-            }
-            Some(BindingChange::Delete { .. }) => self.survivors_out(inode_id),
-            None => Readiness::Ready,
+        if matches!(plan.binding, Some(BindingChange::Delete { .. })) {
+            return self.survivors_out(inode_id);
         }
+        let Some((parent_inode_id, _)) = plan.binding.as_ref().and_then(BindingChange::destination)
+        else {
+            return Readiness::Ready;
+        };
+        if self.pending_creates.contains(&parent_inode_id) {
+            return Readiness::Waits(parent_inode_id);
+        }
+        if let Some(holder) = self.holders.get(&inode_id) {
+            if !self.left.contains(holder) {
+                return Readiness::Waits(*holder);
+            }
+        }
+        if plan.kind == InodeKind::Directory
+            && (parent_inode_id == inode_id || self.is_below(parent_inode_id, inode_id))
+        {
+            return self.moved_between(parent_inode_id, inode_id);
+        }
+        Readiness::Ready
     }
 
     /// Returns whether the deleted directory's survivors have left it, or the

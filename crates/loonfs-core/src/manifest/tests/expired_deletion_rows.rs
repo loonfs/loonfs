@@ -42,7 +42,7 @@ async fn bootstrap_restricted_namespace<S: ObjectStore + ?Sized>(
         .engine()
         .bootstrap_namespace(
             &loonfs_test_support::test_actor(),
-            &crate::options::CreateNamespaceOptions {
+            &loonfs_types::options::CreateNamespaceOptions {
                 access: NamespaceAccess::Acl {
                     principal_scope: PrincipalScope::parse(PRINCIPAL_SCOPE)
                         .expect("principal scope"),

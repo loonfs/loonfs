@@ -38,26 +38,12 @@ impl<S: ObjectStore + ?Sized> Classifier<'_, S> {
         for index in 0..self.plans.len() {
             let plan = &self.plans[index];
             let inode_id = plan.inode_id;
-            let (parent_inode_id, display_name) = match &plan.binding {
-                Some(
-                    BindingChange::Create {
-                        parent_inode_id,
-                        display_name,
-                        ..
-                    }
-                    | BindingChange::Move {
-                        parent_inode_id,
-                        display_name,
-                        ..
-                    }
-                    | BindingChange::RestoreDeleted {
-                        parent_inode_id,
-                        display_name,
-                        ..
-                    },
-                ) => (*parent_inode_id, display_name.clone()),
-                _ => continue,
+            let Some((parent_inode_id, display_name)) =
+                plan.binding.as_ref().and_then(BindingChange::destination)
+            else {
+                continue;
             };
+            let display_name = display_name.clone();
             match self
                 .check_target(&rebound, inode_id, parent_inode_id, &display_name)
                 .await?

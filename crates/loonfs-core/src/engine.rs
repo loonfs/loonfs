@@ -129,7 +129,8 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         context: &RuntimeReadContext,
         commit_id: &CommitId,
     ) -> Result<Option<crate::metadata::CommitReceiptRecord>> {
-        self.load_read_view(context)
+        self.namespace
+            .load_metadata_view(context)
             .await?
             .metadata_view()
             .find_commit_receipt(commit_id)
@@ -168,7 +169,8 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             ReadAuthority::Administrator => {
                 return Ok(AuthorizedRead {
                     view: self
-                        .load_read_view(context)
+                        .namespace
+                        .load_metadata_view(context)
                         .instrument(crate::phase_span!(crate::Phase::LoadView))
                         .await?,
                     head_view: None,
@@ -177,7 +179,8 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             }
             ReadAuthority::Subject => None,
             ReadAuthority::SubjectAtHead(head) => Some(
-                self.load_read_view(head)
+                self.namespace
+                    .load_metadata_view(head)
                     .instrument(crate::phase_span!(crate::Phase::LoadView))
                     .await?,
             ),
@@ -188,7 +191,8 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             CommitAuthority::Subject(self.subject.as_ref()),
         )?;
         let view = self
-            .load_read_view(context)
+            .namespace
+            .load_metadata_view(context)
             .instrument(crate::phase_span!(crate::Phase::LoadView))
             .await?;
         Ok(AuthorizedRead {
@@ -216,7 +220,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// retention floor of its metadata, and returns `below_retention_floor`
     /// otherwise.
     pub async fn ensure_retained(&self, context: &RuntimeReadContext) -> Result<()> {
-        self.load_read_view(context).await.map(drop)
+        self.namespace.load_metadata_view(context).await.map(drop)
     }
 
     /// The change feed and bare content reference reads work for the token
@@ -264,7 +268,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
                 namespace_id: self.namespace.namespace_id.clone(),
             });
         }
-        let view = self.load_read_view(context).await?;
+        let view = self.namespace.load_metadata_view(context).await?;
         let row = view
             .metadata_view()
             .latest_access_revision(ROOT_INODE_ID)
@@ -582,7 +586,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         context: &RuntimeReadContext,
     ) -> Result<Vec<u8>> {
         self.ensure_administrator(context).await?;
-        let view = self.load_read_view(context).await?;
+        let view = self.namespace.load_metadata_view(context).await?;
         if !view
             .metadata_view()
             .content_published(&content_ref.content_id)
@@ -636,7 +640,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         context: &RuntimeReadContext,
     ) -> Result<RetainedRevisionsPage> {
         self.ensure_administrator(context).await?;
-        let view = self.load_read_view(context).await?;
+        let view = self.namespace.load_metadata_view(context).await?;
         view.retained_revisions_page(request).await
     }
 
@@ -689,7 +693,7 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         splitting: CommitSplitting,
         context: &RuntimeReadContext,
     ) -> Result<ListChangesResponse> {
-        let view = self.load_read_view(context).await?;
+        let view = self.namespace.load_metadata_view(context).await?;
         crate::changes::list_changes_after(&view, position, limit, splitting).await
     }
 
@@ -705,15 +709,8 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         options: &DiffOptions,
         context: &RuntimeReadContext,
     ) -> Result<DiffPage> {
-        let view = self.load_read_view(context).await?;
+        let view = self.namespace.load_metadata_view(context).await?;
         crate::diff::diff_page(&view, from_seq, options).await
-    }
-
-    async fn load_read_view<'a>(
-        &'a self,
-        context: &'a RuntimeReadContext,
-    ) -> Result<LoadedMetadataView<'a, S>> {
-        self.namespace.load_metadata_view(context).await
     }
 }
 

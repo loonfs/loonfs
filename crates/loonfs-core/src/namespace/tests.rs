@@ -244,7 +244,7 @@ async fn an_ambiguous_first_manifest_confirms_a_create_and_a_fork() {
         .engine()
         .bootstrap_namespace(
             &actor_id,
-            &crate::options::CreateNamespaceOptions {
+            &loonfs_types::options::CreateNamespaceOptions {
                 allow_existing: true,
                 ..Default::default()
             },

@@ -39,7 +39,7 @@ impl History {
         };
         history
             .fixture()
-            .create_with_options(&crate::options::CreateNamespaceOptions {
+            .create_with_options(&loonfs_types::options::CreateNamespaceOptions {
                 access,
                 ..Default::default()
             })

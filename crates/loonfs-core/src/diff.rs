@@ -9,6 +9,7 @@ use crate::limits::{CHANGE_FEED_PAGE_BYTES, DIFF_PAGE_TOUCHES};
 use crate::metadata::{
     MetadataView, MetadataViewSession, MetadataVisibilityReads, ResolvedVisiblePath,
 };
+use crate::path::mutation_path::name_keys;
 use crate::path::read::{resolve_visible_inode, LoadedMetadataView};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::{
@@ -573,13 +574,6 @@ pub(crate) fn touched_inodes(deltas: &[WalCommitDelta]) -> BTreeSet<InodeId> {
 /// rename that changes only the name's case changes the edge.
 fn edge(resolved: &ResolvedVisiblePath) -> (Option<InodeId>, &str) {
     (resolved.parent_inode_id, &resolved.display_name)
-}
-
-fn name_keys(path: &AbsolutePath) -> Vec<NameKey> {
-    path.components()
-        .iter()
-        .map(|component| NameKey::for_display_name(&component.to_display_name()))
-        .collect()
 }
 
 /// Returns whether `path` is the path whose name keys are `subtree`, or is

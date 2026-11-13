@@ -373,19 +373,10 @@ impl<'v, S: ObjectStore + ?Sized> Classifier<'v, S> {
         for index in 0..self.plans.len() {
             let plan = &self.plans[index];
             let inode_id = plan.inode_id;
-            let parent_inode_id = match &plan.binding {
-                Some(
-                    BindingChange::Create {
-                        parent_inode_id, ..
-                    }
-                    | BindingChange::Move {
-                        parent_inode_id, ..
-                    }
-                    | BindingChange::RestoreDeleted {
-                        parent_inode_id, ..
-                    },
-                ) => *parent_inode_id,
-                _ => continue,
+            let Some((parent_inode_id, _)) =
+                plan.binding.as_ref().and_then(BindingChange::destination)
+            else {
+                continue;
             };
             if self.conflicted.contains(&inode_id)
                 || !created_directories.contains(&parent_inode_id)

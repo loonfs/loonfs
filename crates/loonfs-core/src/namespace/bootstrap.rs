@@ -3,10 +3,10 @@
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
 use crate::metadata::{AccessRevisionRecord, InodeRecord, MetadataState};
-use crate::options::CreateNamespaceOptions;
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::PoolPayload;
 use loonfs_types::format::manifest::{NamespaceAccess, NamespaceManifestPayload};
+use loonfs_types::options::CreateNamespaceOptions;
 use loonfs_types::{
     AccessRevisionNo, AccessRight, ActorId, CommitSeq, InodeKind, NamespaceMetadata, PoolId,
     ROOT_INODE_ID,

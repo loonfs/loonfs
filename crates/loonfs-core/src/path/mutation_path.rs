@@ -1,7 +1,7 @@
 //! Path parsing helpers shared by the read and write paths.
 
 use crate::error::{CoreError, Result};
-use loonfs_types::{AbsolutePath, DisplayName};
+use loonfs_types::{AbsolutePath, DisplayName, NameKey};
 
 pub(crate) fn parse_absolute_path_for_core(absolute_path: &str) -> Result<AbsolutePath> {
     AbsolutePath::parse(absolute_path).map_err(CoreError::from)
@@ -39,4 +39,13 @@ pub(crate) fn final_component(absolute_path: &AbsolutePath) -> Result<DisplayNam
         .final_component()
         .map(|component| component.to_display_name())
         .ok_or_else(|| CoreError::InvalidPath(absolute_path.as_str().to_owned()))
+}
+
+/// Returns the name keys of `path`'s components, which compare names as
+/// path lookups do.
+pub(crate) fn name_keys(path: &AbsolutePath) -> Vec<NameKey> {
+    path.components()
+        .iter()
+        .map(|component| NameKey::for_display_name(&component.to_display_name()))
+        .collect()
 }
