@@ -5,7 +5,6 @@ use crate::error::{CoreError, Result};
 use crate::in_flight::STORE_READS_IN_FLIGHT;
 use crate::manifest::validate::validate_manifest_row_seq_range;
 use crate::read_working_memory::ReadReservation;
-use crate::segment::block_memo::SessionBlockMemo;
 use crate::segment::data_block_load::load_segment_data_block_span;
 use crate::segment::index_block_load::load_segment_index_for_compaction;
 use futures::{stream, StreamExt, TryStreamExt};
@@ -296,12 +295,11 @@ impl MetadataSegmentRowIterator {
 
 pub(crate) struct MetadataSegmentBlockLoader<'a, S: ?Sized> {
     store: &'a S,
-    index_memo: Option<&'a SessionBlockMemo>,
 }
 
 impl<'a, S: ?Sized> MetadataSegmentBlockLoader<'a, S> {
-    pub(crate) fn new(store: &'a S, index_memo: Option<&'a SessionBlockMemo>) -> Self {
-        Self { store, index_memo }
+    pub(crate) fn new(store: &'a S) -> Self {
+        Self { store }
     }
 }
 
@@ -314,7 +312,7 @@ impl<S: ObjectStore + ?Sized> SegmentBlockLoader<MetadataRow, MetadataSegmentInp
         &self,
         segment: MetadataSegmentInput,
     ) -> Result<Arc<Vec<SegmentIndexEntry>>> {
-        load_segment_index_for_compaction(self.store, None, self.index_memo, &segment.descriptor)
+        load_segment_index_for_compaction(self.store, &segment.descriptor)
             .await
             .map_err(CoreError::from)
     }

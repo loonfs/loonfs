@@ -508,7 +508,7 @@ mod tests {
             let session = PublishPlanningSession::new(
                 view.head(),
                 view.wal_tail(),
-                view.projected_metadata_view(),
+                view.metadata_view(),
                 ContentWrites::new(&namespace.store, &content_writes, view.head()),
                 1,
             );
@@ -572,7 +572,7 @@ mod tests {
         let session = PublishPlanningSession::new(
             view.head(),
             view.wal_tail(),
-            view.projected_metadata_view(),
+            view.metadata_view(),
             ContentWrites::new(&namespace.store, &content_writes, view.head()),
             1,
         );

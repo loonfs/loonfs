@@ -180,7 +180,7 @@ async fn commit_piece(
                     &crate::test_support::content_writes(),
                     view.head(),
                 ),
-                &view.projected_metadata_view(),
+                &view.metadata_view(),
                 content.as_ref(),
                 &base,
             )

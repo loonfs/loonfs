@@ -1692,10 +1692,9 @@ async fn written_segment_blocks<S: ObjectStore + ?Sized>(
     let mut blocks = 0;
     for descriptor in descriptors {
         assert!(index_block_load::segment_object_bytes(descriptor) <= 256 * 1024);
-        let index =
-            index_block_load::load_segment_index_for_compaction(store, None, None, descriptor)
-                .await
-                .expect("load the segment index");
+        let index = index_block_load::load_segment_index_for_compaction(store, descriptor)
+            .await
+            .expect("load the segment index");
         blocks += 2 + index.len();
     }
     blocks

@@ -236,7 +236,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupCompaction<'a, S> {
                 count.saturating_add(segment.row_count)
             });
         let mut filter = BloomFilter::new(expected_ids, self.output_run_no.0);
-        let loader = MetadataSegmentBlockLoader::new(self.store, None);
+        let loader = MetadataSegmentBlockLoader::new(self.store);
         for run in self.basis_runs {
             let segments = group_run_descriptors(run, MetadataFamilyGroup::Revisions)
                 .cloned()
@@ -448,7 +448,7 @@ impl<'a, S: ObjectStore + ?Sized> GroupCompaction<'a, S> {
     /// then contains.
     async fn refill(&mut self, iterators: &mut [MetadataSegmentRowIterator]) -> Result<()> {
         let resident = refill_iterators(
-            &MetadataSegmentBlockLoader::new(self.store, None),
+            &MetadataSegmentBlockLoader::new(self.store),
             iterators,
             self.run_policy.max_decoded_input_bytes_per_step.get(),
         )
@@ -575,7 +575,7 @@ fn resolve_input_runs<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     spec: &MetadataCompactionSpec,
 ) -> Result<Vec<MetadataRunManifest>> {
-    spec.inputs
+    spec.inputs()
         .iter()
         .map(|run_no| {
             segments

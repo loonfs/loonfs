@@ -398,16 +398,16 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             .await?;
         let content_ref = crate::path::read::file_content_ref(&entry)?;
         range.ensure_within(content_ref.size_bytes)?;
-        Ok(FileContentStream::open_inner(
+        Ok(FileContentStream::open(
             self.namespace.store.clone(),
             read.view.resolve_content_location(&content_ref).await?,
             Some(entry),
             content_ref,
             chunk_bytes,
             range,
+            Arc::clone(&self.namespace.object_cache),
         )
-        .await?
-        .with_object_cache(Arc::clone(&self.namespace.object_cache)))
+        .await?)
     }
 
     /// Streams inode content: one retained revision without requiring a
@@ -438,16 +438,16 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         }
         .content_ref;
         range.ensure_within(content_ref.size_bytes)?;
-        Ok(FileContentStream::open_inner(
+        Ok(FileContentStream::open(
             self.namespace.store.clone(),
             read.view.resolve_content_location(&content_ref).await?,
             None,
             content_ref,
             chunk_bytes,
             range,
+            Arc::clone(&self.namespace.object_cache),
         )
-        .await?
-        .with_object_cache(Arc::clone(&self.namespace.object_cache)))
+        .await?)
     }
 
     /// Prepares a file's content object for a direct download.
