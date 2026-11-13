@@ -1,7 +1,6 @@
 //! Host configuration, operational routes, and shutdown contracts.
 
 mod admission;
-mod composition;
 
 use super::serve::{build_handles, RuntimeHandles, Settlement};
 use super::{app, serve_with_shutdown, AppConfig};

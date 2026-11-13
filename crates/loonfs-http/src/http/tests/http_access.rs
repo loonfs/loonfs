@@ -1,6 +1,6 @@
 //! Subject headers and their invalid-request parameter names.
 
-use super::fixtures::{test_app, test_options, TestAppOptions};
+use super::fixtures::{self, test_app, test_options, TestAppOptions};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use loonfs_test_support::ids::namespace_id;
@@ -430,20 +430,8 @@ async fn read_handlers_accept_the_subject_headers() {
 }
 
 fn request(method: &str, uri: &str, body: Option<&str>, headers: &[(&str, &str)]) -> Request<Body> {
-    let mut request = Request::builder()
-        .method(method)
-        .uri(uri)
-        .header("authorization", "Bearer test-token")
-        .header("Loonfs-Actor", "service");
-    if body.is_some() {
-        request = request.header("content-type", "application/json");
-    }
-    for (name, value) in headers {
-        request = request.header(*name, *value);
-    }
-    request
-        .body(body.map_or_else(Body::empty, |body| Body::from(body.to_owned())))
-        .expect("request")
+    let headers = [&[("Loonfs-Actor", "service")][..], headers].concat();
+    fixtures::request(method, uri, body, &headers)
 }
 
 async fn json_body(response: axum::response::Response) -> serde_json::Value {

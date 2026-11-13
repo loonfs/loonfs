@@ -166,6 +166,3 @@ fn escape_label(value: &str) -> String {
 fn escape_help(value: &str) -> String {
     value.replace('\\', "\\\\").replace('\n', "\\n")
 }
-
-// A poisoned instrument table is recovered rather than propagated:
-// reporting a metric must never be the thing that takes the server down.

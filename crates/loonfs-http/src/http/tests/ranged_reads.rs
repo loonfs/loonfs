@@ -2,12 +2,12 @@
 //! 400, and 416 responses, the download limit, and the content objects that
 //! a ranged read reads and never writes.
 
-use super::fixtures::{test_app, test_options, TestAppOptions, TestOptions};
+use super::fixtures::{self, serve, test_app, test_options, TestAppOptions, TestOptions};
 use crate::JobMode;
-use axum::body::{Body, Bytes};
-use axum::http::{header, HeaderMap, Request, StatusCode};
+use axum::body::Bytes;
+use axum::http::{header, HeaderMap, StatusCode};
 use loonfs::{LoonFs, SharedObjectStore};
-use loonfs_client::{Client, ClientConfig, ClientError, NamespacePath, ReadRange};
+use loonfs_client::{ClientError, NamespacePath, ReadRange};
 use loonfs_objectstore::keys::{content_prefix, content_span};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStoreExtension;
@@ -17,7 +17,6 @@ use loonfs_types::{ErrorCode, ErrorResponse, NamespaceId, PoolId};
 use std::num::NonZeroU64;
 use std::sync::Arc;
 use tempfile::TempDir;
-use tower::ServiceExt as _;
 
 const PATH: &str = "/file.bin";
 /// The bytes of revision 1, which a fold writes to a content object.
@@ -150,23 +149,8 @@ impl Fixture {
 
     /// Sends a GET with one header for each value in `ranges`.
     async fn get(&self, uri: &str, ranges: &[&str]) -> (StatusCode, HeaderMap, Bytes) {
-        let mut request = Request::builder()
-            .uri(uri)
-            .header(header::AUTHORIZATION, "Bearer test-token");
-        for range in ranges {
-            request = request.header(header::RANGE, *range);
-        }
-        let response = self
-            .router
-            .clone()
-            .oneshot(request.body(Body::empty()).expect("request"))
-            .await
-            .expect("response");
-        let (parts, body) = response.into_parts();
-        let body = axum::body::to_bytes(body, usize::MAX)
-            .await
-            .expect("response body");
-        (parts.status, parts.headers, body)
+        let ranges: Vec<_> = ranges.iter().map(|range| ("range", *range)).collect();
+        fixtures::send(&self.router, fixtures::request("GET", uri, None, &ranges)).await
     }
 
     /// Checks a 206 response for `range`, which returns `expected` of the
@@ -344,22 +328,7 @@ async fn unranged_reads_advertise_byte_ranges() {
 #[tokio::test]
 async fn the_download_limit_applies_to_the_length_of_a_range() {
     let fixture = fixture(|options| options.http.max_download_bytes = Some(64)).await;
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind listener");
-    let addr = listener.local_addr().expect("listener addr");
-    let router = fixture.router.clone();
-    let server = tokio::spawn(async move {
-        axum::serve(listener, router).await.expect("serve app");
-    });
-    let client = Client::new(ClientConfig {
-        server_url: format!("http://{addr}"),
-        auth_token: Some("test-token".into()),
-        request_timeout_ms: None,
-        disable_transient_retry: false,
-        ca_cert_path: None,
-    })
-    .expect("client");
+    let (client, _, server) = serve(fixture.router.clone()).await;
     let spec = NamespacePath::parse("ranged", PATH).expect("namespace path");
     let range = |start_offset, length: Option<u64>| ReadRange {
         start_offset,
