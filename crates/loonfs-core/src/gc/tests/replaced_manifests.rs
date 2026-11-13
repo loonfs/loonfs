@@ -5,9 +5,9 @@ use super::*;
 use crate::authorize::{Authorizer, ReadAccess};
 use crate::compaction::CompactionUnitOutcome;
 use crate::error::MetadataProjectionLoadError;
+use crate::manifest::tests::{dropped_segments, segment_keys};
 use crate::manifest::ManifestLoadError;
 use crate::namespace::control::LoadedManifest;
-use loonfs_objectstore::keys::metadata_segment_object_key;
 use loonfs_types::MetadataFamilyGroup;
 
 /// A time past both the collection grace and the unreferenced segment grace
@@ -56,21 +56,20 @@ async fn seed_segments<S: ObjectStore>(store: &S, namespace_id: &NamespaceId) ->
 }
 
 async fn compact_bindings<S: ObjectStore>(store: &S, namespace_id: &NamespaceId) -> LoadedManifest {
-    let mut fixture = crate::test_support::NamespaceFixture::new(
+    let outcome = crate::test_support::NamespaceFixture::new(
         store,
         namespace_id,
         &crate::test_support::writer_at("test-writer", 0),
-    );
-    fixture.namespace.run_policy = crate::test_support::one_delta_run_policy();
-    let outcome = fixture
-        .engine()
-        .compact_metadata_unit(
-            None,
-            loonfs_types::CompactorEpoch(0),
-            &crate::compaction::MetadataCompactionCancellation::default(),
-        )
-        .await
-        .expect("compact bindings");
+    )
+    .with_run_policy(crate::test_support::one_delta_run_policy())
+    .engine()
+    .compact_metadata_unit(
+        None,
+        loonfs_types::CompactorEpoch(0),
+        &crate::compaction::MetadataCompactionCancellation::default(),
+    )
+    .await
+    .expect("compact bindings");
     assert_matches!(
         outcome,
         CompactionUnitOutcome::Published {
@@ -85,26 +84,6 @@ async fn compact_bindings<S: ObjectStore>(store: &S, namespace_id: &NamespaceId)
         .load_current_manifest()
         .await
         .expect("compacted manifest")
-}
-
-fn segment_keys(manifest: &LoadedManifest) -> BTreeSet<String> {
-    manifest
-        .payload()
-        .runs
-        .iter()
-        .flat_map(|run| &run.segments)
-        .map(metadata_segment_object_key)
-        .collect()
-}
-
-/// Returns the segments that `previous` lists and `current` doesn't.
-fn dropped_segments(previous: &LoadedManifest, current: &LoadedManifest) -> BTreeSet<String> {
-    let dropped: BTreeSet<_> = segment_keys(previous)
-        .difference(&segment_keys(current))
-        .cloned()
-        .collect();
-    assert!(!dropped.is_empty());
-    dropped
 }
 
 async fn assert_objects_exist<S: ObjectStore>(store: &S, keys: &BTreeSet<String>, exists: bool) {

@@ -29,6 +29,83 @@ fn name_key(value: &str) -> NameKey {
     NameKey::parse(value).expect("valid name key")
 }
 
+fn inode(inode_id: InodeId, inode_kind: InodeKind, seq: u64) -> InodeRecord {
+    InodeRecord {
+        inode_id,
+        inode_kind,
+        committed_seq: CommitSeq(seq),
+        commit_id: commit_id(seq),
+        committed_by: actor(),
+        committed_at_ms: 4_200,
+    }
+}
+
+/// A row that binds `child` at `name_key` under `parent`, written at `seq` and
+/// `delta_index`. A file child carries a revision and a directory child doesn't.
+fn bound(
+    parent: InodeId,
+    name_key: &str,
+    display_name: &str,
+    child: InodeId,
+    kind: InodeKind,
+    seq: u64,
+    delta_index: u32,
+) -> DirentryBindingRecord {
+    DirentryBindingRecord {
+        parent_inode_id: parent,
+        name_key: NameKey::parse(name_key).expect("valid name key"),
+        state: loonfs_types::format::manifest::DirentryBindingState::Bound {
+            display_name: loonfs_types::DisplayName::parse(display_name)
+                .expect("valid display name"),
+            revision: (kind == InodeKind::File).then(crate::test_support::revision_summary),
+        },
+        child_inode_id: child,
+        child_kind: kind,
+        child_created_by: actor(),
+        child_created_at_ms: 4_200,
+        committed_seq: CommitSeq(seq),
+        delta_index,
+        commit_id: crate::test_support::binding_commit_id(),
+        committed_by: loonfs_types::ActorId::loonfs(),
+        committed_at_ms: 0,
+        bind_position: loonfs_types::format::manifest::DeltaPosition {
+            seq: CommitSeq(seq),
+            delta_index,
+        },
+    }
+}
+
+/// A row that unbinds `child` from `name_key` under `parent`, written at `seq`
+/// and `delta_index`.
+fn unbound(
+    parent: InodeId,
+    name_key: &str,
+    child: InodeId,
+    kind: InodeKind,
+    seq: u64,
+    delta_index: u32,
+) -> DirentryBindingRecord {
+    DirentryBindingRecord {
+        state: loonfs_types::format::manifest::DirentryBindingState::Unbound,
+        ..bound(parent, name_key, name_key, child, kind, seq, delta_index)
+    }
+}
+
+/// A row state of `inodes` and `binds` and no other rows.
+fn state_from_rows(inodes: Vec<InodeRecord>, binds: Vec<DirentryBindingRecord>) -> MetadataState {
+    MetadataState::from_rows(
+        inodes,
+        binds,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    )
+}
+
 fn deleted_binding(parent_inode_id: InodeId, display_name: &str) -> DeletedBinding {
     DeletedBinding {
         parent_inode_id,
@@ -192,54 +269,20 @@ fn bind_direntry_replay_uses_persisted_name_key() {
 
 #[test]
 fn child_lookup_uses_persisted_name_key_without_recanonicalizing() {
-    let metadata_state = MetadataState::from_rows(
+    let metadata_state = state_from_rows(
         vec![
-            InodeRecord {
-                inode_id: ROOT_INODE_ID,
-                inode_kind: InodeKind::Directory,
-                committed_seq: CommitSeq(1),
-                commit_id: commit_id(1),
-                committed_by: actor(),
-                committed_at_ms: 4_200,
-            },
-            InodeRecord {
-                inode_id: InodeId(2),
-                inode_kind: InodeKind::File,
-                committed_seq: CommitSeq(1),
-                commit_id: commit_id(1),
-                committed_by: actor(),
-                committed_at_ms: 4_200,
-            },
+            inode(ROOT_INODE_ID, InodeKind::Directory, 1),
+            inode(InodeId(2), InodeKind::File, 1),
         ],
-        vec![DirentryBindingRecord {
-            parent_inode_id: ROOT_INODE_ID,
-            name_key: NameKey::parse("persisted-key").expect("valid name key"),
-            state: loonfs_types::format::manifest::DirentryBindingState::Bound {
-                display_name: loonfs_types::DisplayName::parse("Report.TXT")
-                    .expect("valid display name"),
-                revision: Some(crate::test_support::revision_summary()),
-            },
-            child_inode_id: InodeId(2),
-            child_kind: loonfs_types::InodeKind::File,
-            child_created_by: actor(),
-            child_created_at_ms: 4_200,
-            committed_seq: CommitSeq(1),
-            delta_index: 0,
-            commit_id: crate::test_support::binding_commit_id(),
-            committed_by: loonfs_types::ActorId::loonfs(),
-            committed_at_ms: 0,
-            bind_position: loonfs_types::format::manifest::DeltaPosition {
-                seq: CommitSeq(1),
-                delta_index: 0,
-            },
-        }],
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
+        vec![bound(
+            ROOT_INODE_ID,
+            "persisted-key",
+            "Report.TXT",
+            InodeId(2),
+            InodeKind::File,
+            1,
+            0,
+        )],
     );
 
     assert!(metadata_state
@@ -252,86 +295,32 @@ fn child_lookup_uses_persisted_name_key_without_recanonicalizing() {
 
 #[test]
 fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
-    let metadata_state = MetadataState::from_rows(
+    let metadata_state = state_from_rows(
         vec![
-            InodeRecord {
-                inode_id: ROOT_INODE_ID,
-                inode_kind: InodeKind::Directory,
-                committed_seq: CommitSeq(0),
-                commit_id: commit_id(0),
-                committed_by: actor(),
-                committed_at_ms: 4_200,
-            },
-            InodeRecord {
-                inode_id: InodeId(2),
-                inode_kind: InodeKind::Directory,
-                committed_seq: CommitSeq(1),
-                commit_id: commit_id(1),
-                committed_by: actor(),
-                committed_at_ms: 4_200,
-            },
-            InodeRecord {
-                inode_id: InodeId(3),
-                inode_kind: InodeKind::File,
-                committed_seq: CommitSeq(2),
-                commit_id: commit_id(2),
-                committed_by: actor(),
-                committed_at_ms: 4_200,
-            },
+            inode(ROOT_INODE_ID, InodeKind::Directory, 0),
+            inode(InodeId(2), InodeKind::Directory, 1),
+            inode(InodeId(3), InodeKind::File, 2),
         ],
         vec![
-            DirentryBindingRecord {
-                parent_inode_id: ROOT_INODE_ID,
-                name_key: NameKey::parse("docs").expect("valid name key"),
-                state: loonfs_types::format::manifest::DirentryBindingState::Bound {
-                    display_name: loonfs_types::DisplayName::parse("docs")
-                        .expect("valid display name"),
-                    revision: None,
-                },
-                child_inode_id: InodeId(2),
-                child_kind: loonfs_types::InodeKind::Directory,
-                child_created_by: actor(),
-                child_created_at_ms: 4_200,
-                committed_seq: CommitSeq(1),
-                delta_index: 0,
-                commit_id: crate::test_support::binding_commit_id(),
-                committed_by: loonfs_types::ActorId::loonfs(),
-                committed_at_ms: 0,
-                bind_position: loonfs_types::format::manifest::DeltaPosition {
-                    seq: CommitSeq(1),
-                    delta_index: 0,
-                },
-            },
-            DirentryBindingRecord {
-                parent_inode_id: InodeId(2),
-                name_key: NameKey::parse("report.txt").expect("valid name key"),
-                state: loonfs_types::format::manifest::DirentryBindingState::Bound {
-                    display_name: loonfs_types::DisplayName::parse("report.txt")
-                        .expect("valid display name"),
-                    revision: Some(crate::test_support::revision_summary()),
-                },
-                child_inode_id: InodeId(3),
-                child_kind: loonfs_types::InodeKind::File,
-                child_created_by: actor(),
-                child_created_at_ms: 4_200,
-                committed_seq: CommitSeq(2),
-                delta_index: 0,
-                commit_id: crate::test_support::binding_commit_id(),
-                committed_by: loonfs_types::ActorId::loonfs(),
-                committed_at_ms: 0,
-                bind_position: loonfs_types::format::manifest::DeltaPosition {
-                    seq: CommitSeq(2),
-                    delta_index: 0,
-                },
-            },
+            bound(
+                ROOT_INODE_ID,
+                "docs",
+                "docs",
+                InodeId(2),
+                InodeKind::Directory,
+                1,
+                0,
+            ),
+            bound(
+                InodeId(2),
+                "report.txt",
+                "report.txt",
+                InodeId(3),
+                InodeKind::File,
+                2,
+                0,
+            ),
         ],
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
     );
 
     assert_eq!(metadata_state.indexed_seq(), CommitSeq(2));
@@ -454,104 +443,33 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
 
 #[test]
 fn stale_binding_is_not_active_after_newer_bind_claims_same_name() {
-    let metadata_state = MetadataState::from_rows(
+    let metadata_state = state_from_rows(
         vec![
-            InodeRecord {
-                inode_id: ROOT_INODE_ID,
-                inode_kind: InodeKind::Directory,
-                committed_seq: CommitSeq(0),
-                commit_id: commit_id(0),
-                committed_by: actor(),
-                committed_at_ms: 4_200,
-            },
-            InodeRecord {
-                inode_id: InodeId(2),
-                inode_kind: InodeKind::File,
-                committed_seq: CommitSeq(1),
-                commit_id: commit_id(1),
-                committed_by: actor(),
-                committed_at_ms: 4_200,
-            },
-            InodeRecord {
-                inode_id: InodeId(3),
-                inode_kind: InodeKind::File,
-                committed_seq: CommitSeq(2),
-                commit_id: commit_id(2),
-                committed_by: actor(),
-                committed_at_ms: 4_200,
-            },
+            inode(ROOT_INODE_ID, InodeKind::Directory, 0),
+            inode(InodeId(2), InodeKind::File, 1),
+            inode(InodeId(3), InodeKind::File, 2),
         ],
         vec![
-            DirentryBindingRecord {
-                parent_inode_id: ROOT_INODE_ID,
-                name_key: NameKey::parse("report").expect("valid name key"),
-                state: loonfs_types::format::manifest::DirentryBindingState::Bound {
-                    display_name: loonfs_types::DisplayName::parse("report")
-                        .expect("valid display name"),
-                    revision: Some(crate::test_support::revision_summary()),
-                },
-                child_inode_id: InodeId(2),
-                child_kind: loonfs_types::InodeKind::File,
-                child_created_by: actor(),
-                child_created_at_ms: 4_200,
-                committed_seq: CommitSeq(1),
-                delta_index: 0,
-                commit_id: crate::test_support::binding_commit_id(),
-                committed_by: loonfs_types::ActorId::loonfs(),
-                committed_at_ms: 0,
-                bind_position: loonfs_types::format::manifest::DeltaPosition {
-                    seq: CommitSeq(1),
-                    delta_index: 0,
-                },
-            },
-            DirentryBindingRecord {
-                parent_inode_id: ROOT_INODE_ID,
-                name_key: NameKey::parse("report").expect("valid name key"),
-                child_inode_id: InodeId(2),
-                child_kind: loonfs_types::InodeKind::File,
-                child_created_by: actor(),
-                child_created_at_ms: 4_200,
-                committed_seq: CommitSeq(2),
-                delta_index: 0,
-                commit_id: crate::test_support::binding_commit_id(),
-                committed_by: loonfs_types::ActorId::loonfs(),
-                committed_at_ms: 0,
-                bind_position: loonfs_types::format::manifest::DeltaPosition {
-                    seq: CommitSeq(2),
-                    delta_index: 0,
-                },
-                state: loonfs_types::format::manifest::DirentryBindingState::Unbound,
-            },
-            DirentryBindingRecord {
-                parent_inode_id: ROOT_INODE_ID,
-                name_key: NameKey::parse("report").expect("valid name key"),
-                state: loonfs_types::format::manifest::DirentryBindingState::Bound {
-                    display_name: loonfs_types::DisplayName::parse("report")
-                        .expect("valid display name"),
-                    revision: Some(crate::test_support::revision_summary()),
-                },
-                child_inode_id: InodeId(3),
-                child_kind: loonfs_types::InodeKind::File,
-                child_created_by: actor(),
-                child_created_at_ms: 4_200,
-                committed_seq: CommitSeq(2),
-                delta_index: 1,
-                commit_id: crate::test_support::binding_commit_id(),
-                committed_by: loonfs_types::ActorId::loonfs(),
-                committed_at_ms: 0,
-                bind_position: loonfs_types::format::manifest::DeltaPosition {
-                    seq: CommitSeq(2),
-                    delta_index: 1,
-                },
-            },
+            bound(
+                ROOT_INODE_ID,
+                "report",
+                "report",
+                InodeId(2),
+                InodeKind::File,
+                1,
+                0,
+            ),
+            unbound(ROOT_INODE_ID, "report", InodeId(2), InodeKind::File, 2, 0),
+            bound(
+                ROOT_INODE_ID,
+                "report",
+                "report",
+                InodeId(3),
+                InodeKind::File,
+                2,
+                1,
+            ),
         ],
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
     );
 
     assert_eq!(
@@ -572,54 +490,20 @@ fn stale_binding_is_not_active_after_newer_bind_claims_same_name() {
 
 #[test]
 fn resolve_visible_path_folds_names_and_uses_stored_display_name() {
-    let metadata_state = MetadataState::from_rows(
+    let metadata_state = state_from_rows(
         vec![
-            InodeRecord {
-                inode_id: ROOT_INODE_ID,
-                inode_kind: InodeKind::Directory,
-                committed_seq: CommitSeq(1),
-                commit_id: commit_id(1),
-                committed_by: actor(),
-                committed_at_ms: 4_200,
-            },
-            InodeRecord {
-                inode_id: InodeId(2),
-                inode_kind: InodeKind::File,
-                committed_seq: CommitSeq(1),
-                commit_id: commit_id(1),
-                committed_by: actor(),
-                committed_at_ms: 4_200,
-            },
+            inode(ROOT_INODE_ID, InodeKind::Directory, 1),
+            inode(InodeId(2), InodeKind::File, 1),
         ],
-        vec![DirentryBindingRecord {
-            parent_inode_id: ROOT_INODE_ID,
-            name_key: NameKey::parse("report.txt").expect("valid name key"),
-            state: loonfs_types::format::manifest::DirentryBindingState::Bound {
-                display_name: loonfs_types::DisplayName::parse("Report.TXT")
-                    .expect("valid display name"),
-                revision: Some(crate::test_support::revision_summary()),
-            },
-            child_inode_id: InodeId(2),
-            child_kind: loonfs_types::InodeKind::File,
-            child_created_by: actor(),
-            child_created_at_ms: 4_200,
-            committed_seq: CommitSeq(1),
-            delta_index: 0,
-            commit_id: crate::test_support::binding_commit_id(),
-            committed_by: loonfs_types::ActorId::loonfs(),
-            committed_at_ms: 0,
-            bind_position: loonfs_types::format::manifest::DeltaPosition {
-                seq: CommitSeq(1),
-                delta_index: 0,
-            },
-        }],
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
+        vec![bound(
+            ROOT_INODE_ID,
+            "report.txt",
+            "Report.TXT",
+            InodeId(2),
+            InodeKind::File,
+            1,
+            0,
+        )],
     );
 
     let resolved = metadata_state
@@ -682,14 +566,7 @@ fn metadata_builder_tracks_the_highest_row_sequence() {
     );
 
     let mut builder = MetadataStateBuilder::default();
-    builder.push_inode(InodeRecord {
-        inode_id: InodeId(7),
-        inode_kind: InodeKind::File,
-        committed_seq: CommitSeq(1),
-        commit_id: commit_id(1),
-        committed_by: actor(),
-        committed_at_ms: 4_200,
-    });
+    builder.push_inode(inode(InodeId(7), InodeKind::File, 1));
     builder.push_revision(RevisionRecord {
         inode_id: InodeId(7),
         revision_no: RevisionNo(1),
@@ -1182,54 +1059,20 @@ fn has_visible_children_sees_through_unbinds() {
     let store = MemoryStore::new(ChecksumAlgorithm::Crc64nvme);
     let manifest = VerifiedMetadataSegments::initial(&store);
     let dir = ROOT_INODE_ID;
-    let state = MetadataState::from_rows(
+    let state = state_from_rows(
         vec![
-            InodeRecord {
-                inode_id: dir,
-                inode_kind: InodeKind::Directory,
-                committed_seq: CommitSeq(1),
-                commit_id: commit_id(1),
-                committed_by: actor(),
-                committed_at_ms: 4_200,
-            },
-            InodeRecord {
-                inode_id: InodeId(2),
-                inode_kind: InodeKind::File,
-                committed_seq: CommitSeq(2),
-                commit_id: commit_id(2),
-                committed_by: actor(),
-                committed_at_ms: 4_200,
-            },
+            inode(dir, InodeKind::Directory, 1),
+            inode(InodeId(2), InodeKind::File, 2),
         ],
-        vec![DirentryBindingRecord {
-            parent_inode_id: dir,
-            name_key: NameKey::parse("doc.txt").expect("valid name key"),
-            state: loonfs_types::format::manifest::DirentryBindingState::Bound {
-                display_name: loonfs_types::DisplayName::parse("doc.txt")
-                    .expect("valid display name"),
-                revision: Some(crate::test_support::revision_summary()),
-            },
-            child_inode_id: InodeId(2),
-            child_kind: loonfs_types::InodeKind::File,
-            child_created_by: actor(),
-            child_created_at_ms: 4_200,
-            committed_seq: CommitSeq(2),
-            delta_index: 0,
-            commit_id: crate::test_support::binding_commit_id(),
-            committed_by: loonfs_types::ActorId::loonfs(),
-            committed_at_ms: 0,
-            bind_position: loonfs_types::format::manifest::DeltaPosition {
-                seq: CommitSeq(2),
-                delta_index: 0,
-            },
-        }],
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
+        vec![bound(
+            dir,
+            "doc.txt",
+            "doc.txt",
+            InodeId(2),
+            InodeKind::File,
+            2,
+            0,
+        )],
     );
     let base = crate::wal::ProjectedWalTail::from_rows(state.clone());
     let view = MetadataView::in_memory(&manifest, &base, None, CommitSeq(2));
@@ -1243,37 +1086,13 @@ fn has_visible_children_sees_through_unbinds() {
             .expect("probe non-directory")
     );
 
-    let emptied = MetadataState::from_rows(
+    let emptied = state_from_rows(
         state.inodes().to_vec(),
         [
             state.direntry_binds().to_vec(),
-            vec![DirentryBindingRecord {
-                parent_inode_id: dir,
-                name_key: NameKey::parse("doc.txt").expect("valid name key"),
-                child_inode_id: InodeId(2),
-                child_kind: loonfs_types::InodeKind::File,
-                child_created_by: actor(),
-                child_created_at_ms: 4_200,
-                committed_seq: CommitSeq(3),
-                delta_index: 0,
-                commit_id: crate::test_support::binding_commit_id(),
-                committed_by: loonfs_types::ActorId::loonfs(),
-                committed_at_ms: 0,
-                bind_position: loonfs_types::format::manifest::DeltaPosition {
-                    seq: CommitSeq(3),
-                    delta_index: 0,
-                },
-                state: loonfs_types::format::manifest::DirentryBindingState::Unbound,
-            }],
+            vec![unbound(dir, "doc.txt", InodeId(2), InodeKind::File, 3, 0)],
         ]
         .concat(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
     );
     let emptied = crate::wal::ProjectedWalTail::from_rows(emptied);
     let view = MetadataView::in_memory(&manifest, &emptied, None, CommitSeq(3));

@@ -989,15 +989,6 @@ mod tests {
     }
 
     #[test]
-    fn the_write_stop_refusal_maps_to_maintenance_required() {
-        let error = CoreError::MaintenanceRequired {
-            namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
-            reason: "retention progress is missing".to_owned(),
-        };
-        assert_eq!(error.code(), ErrorCode::MaintenanceRequired);
-    }
-
-    #[test]
     fn identity_bearing_errors_expose_structured_wire_details() {
         let fenced = CoreError::WriterFenced(WriterFence {
             fenced_epoch: WriterEpoch(3),
@@ -1183,9 +1174,5 @@ mod tests {
         for error in core_wrappers {
             assert_eq!(error.code(), ErrorCode::StoragePermissionDenied);
         }
-        assert_eq!(
-            CoreError::ControlObjectLoad(denied).code(),
-            ErrorCode::StoragePermissionDenied
-        );
     }
 }

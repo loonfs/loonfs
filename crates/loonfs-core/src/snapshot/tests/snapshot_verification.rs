@@ -102,22 +102,7 @@ pub(super) async fn compact_and_collect_replaced_segments<S: ObjectStore>(
         .await
         .expect("current manifest");
     assert_ne!(selected.manifest(), current.manifest());
-    let current_segments: BTreeSet<_> = current
-        .payload()
-        .runs
-        .iter()
-        .flat_map(|run| &run.segments)
-        .map(metadata_segment_object_key)
-        .collect();
-    let replaced: Vec<_> = selected
-        .payload()
-        .runs
-        .iter()
-        .flat_map(|run| &run.segments)
-        .map(metadata_segment_object_key)
-        .filter(|key| !current_segments.contains(key))
-        .collect();
-    assert!(!replaced.is_empty());
+    let replaced = crate::manifest::tests::dropped_segments(selected, &current);
     assert!(store
         .list_prefix(&snapshot_prefix(namespace_id))
         .await

@@ -195,12 +195,12 @@ async fn snapshot_views_add_segment_reads_only_for_uncovered_layout_segments() {
             .await
             .expect("take a snapshot of the previous manifest");
         if own_runs {
-            let mut fixture = crate::test_support::NamespaceFixture::new(
+            let fixture = crate::test_support::NamespaceFixture::new(
                 &store,
                 &namespace_id,
                 &crate::test_support::writer_at("test-writer", 0),
-            );
-            fixture.namespace.run_policy = crate::test_support::one_delta_run_policy();
+            )
+            .with_run_policy(crate::test_support::one_delta_run_policy());
             for _ in 0..16 {
                 let outcome = fixture
                     .engine()
@@ -314,12 +314,12 @@ async fn a_collection_reads_each_extent_filter_once_however_many_snapshot_views_
     assert_eq!((base.len(), segments.len()), (1, DELTA_RUNS + 1));
     // Compacting the layouts replaces the base, so each fold's manifest except
     // the last adds a layout segment that no earlier root lists.
-    let mut fixture = crate::test_support::NamespaceFixture::new(
+    let fixture = crate::test_support::NamespaceFixture::new(
         setup_store,
         &namespace_id,
         &crate::test_support::writer_at("test-writer", 0),
-    );
-    fixture.namespace.run_policy = crate::test_support::one_delta_run_policy();
+    )
+    .with_run_policy(crate::test_support::one_delta_run_policy());
     while !matches!(
         fixture
             .engine()

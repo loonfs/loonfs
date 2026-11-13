@@ -74,15 +74,10 @@ async fn a_failed_final_session_read_publishes_no_content() {
         .boxed()
     };
 
-    let error = crate::test_support::NamespaceFixture::new(
-        &recording,
-        &namespace_id,
-        &crate::test_support::writer_at("test-writer", 1_000),
-    )
-    .engine()
-    .upload_content_stream(&session.upload_id, body)
-    .await
-    .expect_err("the final session read must succeed");
+    let error = engine_at(&recording, &namespace_id, 1_000)
+        .upload_content_stream(&session.upload_id, body)
+        .await
+        .expect_err("the final session read must succeed");
 
     assert_matches!(error, CoreError::ControlObjectLoad(_));
     assert_eq!(recording.count(OperationSelector::Read), 2);
@@ -122,33 +117,18 @@ async fn a_retried_upload_of_the_same_bytes_succeeds_and_other_bytes_conflict() 
 
     // The write is applied, but its response is lost.
     store.fail_next(1);
-    crate::test_support::NamespaceFixture::new(
-        &store,
-        &namespace_id,
-        &crate::test_support::writer_at("test-writer", 1_000),
-    )
-    .engine()
-    .upload_content(&session.upload_id, BYTES)
-    .await
-    .expect_err("the content write fails");
-    let retry = crate::test_support::NamespaceFixture::new(
-        &store,
-        &namespace_id,
-        &crate::test_support::writer_at("test-writer", 1_000),
-    )
-    .engine()
-    .upload_content(&session.upload_id, BYTES)
-    .await
-    .expect("a retry of the same bytes finds its own object");
-    let other = crate::test_support::NamespaceFixture::new(
-        &store,
-        &namespace_id,
-        &crate::test_support::writer_at("test-writer", 1_000),
-    )
-    .engine()
-    .upload_content(&session.upload_id, b"other bytes\n")
-    .await
-    .expect_err("other bytes conflict with the stored object");
+    engine_at(&store, &namespace_id, 1_000)
+        .upload_content(&session.upload_id, BYTES)
+        .await
+        .expect_err("the content write fails");
+    let retry = engine_at(&store, &namespace_id, 1_000)
+        .upload_content(&session.upload_id, BYTES)
+        .await
+        .expect("a retry of the same bytes finds its own object");
+    let other = engine_at(&store, &namespace_id, 1_000)
+        .upload_content(&session.upload_id, b"other bytes\n")
+        .await
+        .expect_err("other bytes conflict with the stored object");
 
     assert_eq!(
         retry.content_ref(),
@@ -242,12 +222,7 @@ async fn a_buffered_upload_aborted_during_its_write_is_refused_and_records_nothi
         .await
         .expect("begin upload");
     store.block_next();
-    let engine = crate::test_support::NamespaceFixture::new(
-        &store,
-        &namespace_id,
-        &crate::test_support::writer_at("test-writer", 1_000),
-    )
-    .engine();
+    let engine = engine_at(&store, &namespace_id, 1_000);
     let (result, ()) = tokio::join!(engine.upload_content(&session.upload_id, BYTES), async {
         store.wait_until_blocked().await;
         abort(store.inner(), &namespace_id, &session.upload_id, &setup)
@@ -299,15 +274,10 @@ async fn staged_session(
         .begin_upload()
         .await
         .expect("begin upload");
-    let staged = crate::test_support::NamespaceFixture::new(
-        store,
-        &namespace_id,
-        &crate::test_support::writer_at("test-writer", context.now_ms),
-    )
-    .engine()
-    .upload_content(&begin.upload_id, BYTES)
-    .await
-    .expect("stage upload");
+    let staged = engine_at(store, &namespace_id, context.now_ms)
+        .upload_content(&begin.upload_id, BYTES)
+        .await
+        .expect("stage upload");
     let pool_id = crate::test_support::load_pool_id(&store, &namespace_id).await;
     let content_key = content_blob(
         &pool_id,
@@ -321,15 +291,41 @@ async fn staged_session(
     )
 }
 
+/// Returns an engine over `namespace_id` whose clock reads `now_ms`.
+fn engine_at<S: ObjectStore + Clone>(
+    store: S,
+    namespace_id: &NamespaceId,
+    now_ms: u64,
+) -> crate::engine::NamespaceWriterEngine<S> {
+    crate::test_support::NamespaceFixture::new(store, namespace_id, &context(now_ms)).engine()
+}
+
 async fn complete<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
     context: &WriterAt,
 ) -> Result<CompletedUpload> {
+    complete_with(
+        store,
+        namespace_id,
+        upload_id,
+        CompleteUploadBody::ServiceProxied {},
+        context,
+    )
+    .await
+}
+
+async fn complete_with<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    upload_id: &UploadId,
+    body: CompleteUploadBody,
+    context: &WriterAt,
+) -> Result<CompletedUpload> {
     crate::test_support::NamespaceFixture::new(store, namespace_id, context)
         .engine()
-        .complete_upload(upload_id, CompleteUploadBody::ServiceProxied {})
+        .complete_upload(upload_id, body)
         .await
 }
 
@@ -473,15 +469,10 @@ async fn every_upload_writes_its_session_record_and_its_outcome_record_once() {
         .begin_upload()
         .await
         .expect("begin proxied upload");
-    crate::test_support::NamespaceFixture::new(
-        &store,
-        &namespace_id,
-        &crate::test_support::writer_at("test-writer", 1_000),
-    )
-    .engine()
-    .upload_content(&proxied.upload_id, BYTES)
-    .await
-    .expect("upload proxied bytes");
+    engine_at(&store, &namespace_id, 1_000)
+        .upload_content(&proxied.upload_id, BYTES)
+        .await
+        .expect("upload proxied bytes");
     complete(&store, &namespace_id, &proxied.upload_id, &setup)
         .await
         .expect("complete proxied upload");
@@ -499,19 +490,20 @@ async fn every_upload_writes_its_session_record_and_its_outcome_record_once() {
         )
         .await
         .expect("write direct-put bytes");
-    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
-        .engine()
-        .complete_upload(
-            &direct.session.upload_id,
-            CompleteUploadBody::DirectPut {
-                content: UploadContentClaim {
-                    size_bytes: BYTES.len() as u64,
-                    checksum: Checksum::crc64nvme(BYTES),
-                },
+    complete_with(
+        &store,
+        &namespace_id,
+        &direct.session.upload_id,
+        CompleteUploadBody::DirectPut {
+            content: UploadContentClaim {
+                size_bytes: BYTES.len() as u64,
+                checksum: Checksum::crc64nvme(BYTES),
             },
-        )
-        .await
-        .expect("complete direct put");
+        },
+        &setup,
+    )
+    .await
+    .expect("complete direct put");
 
     let prepared =
         crate::test_support::NamespaceFixture::new(&store, catalog.namespace_id(), &setup)
@@ -617,20 +609,20 @@ async fn a_direct_put_requires_the_session_algorithm_and_replays_completion() {
         .await
         .expect("begin direct put");
 
-    let wrong_algorithm =
-        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context(2_000))
-            .engine()
-            .complete_upload(
-                &begin.session.upload_id,
-                CompleteUploadBody::DirectPut {
-                    content: UploadContentClaim {
-                        size_bytes: BYTES.len() as u64,
-                        checksum: Checksum::crc32c(BYTES),
-                    },
-                },
-            )
-            .await
-            .expect_err("a different checksum algorithm is invalid content");
+    let wrong_algorithm = complete_with(
+        &store,
+        &namespace_id,
+        &begin.session.upload_id,
+        CompleteUploadBody::DirectPut {
+            content: UploadContentClaim {
+                size_bytes: BYTES.len() as u64,
+                checksum: Checksum::crc32c(BYTES),
+            },
+        },
+        &context(2_000),
+    )
+    .await
+    .expect_err("a different checksum algorithm is invalid content");
     assert_matches!(wrong_algorithm, CoreError::InvalidUploadContent(_));
     let open = load_session_state(&store, &namespace_id, &begin.session.upload_id)
         .await
@@ -651,16 +643,24 @@ async fn a_direct_put_requires_the_session_algorithm_and_replays_completion() {
             checksum: Checksum::crc64nvme(BYTES),
         },
     };
-    let first = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context(3_000))
-        .engine()
-        .complete_upload(&begin.session.upload_id, completion.clone())
-        .await
-        .expect("complete direct put");
-    let replay = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context(3_000))
-        .engine()
-        .complete_upload(&begin.session.upload_id, completion)
-        .await
-        .expect("replay direct-put completion");
+    let first = complete_with(
+        &store,
+        &namespace_id,
+        &begin.session.upload_id,
+        completion.clone(),
+        &context(3_000),
+    )
+    .await
+    .expect("complete direct put");
+    let replay = complete_with(
+        &store,
+        &namespace_id,
+        &begin.session.upload_id,
+        completion,
+        &context(3_000),
+    )
+    .await
+    .expect("replay direct-put completion");
     assert_eq!(replay, first);
 }
 
@@ -758,19 +758,20 @@ async fn a_mismatched_direct_put_claim_is_rejected_and_a_matching_one_completes(
         .await
         .expect("write direct-put bytes");
 
-    let error = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context(2_000))
-        .engine()
-        .complete_upload(
-            &begin.session.upload_id,
-            CompleteUploadBody::DirectPut {
-                content: UploadContentClaim {
-                    size_bytes: BYTES.len() as u64,
-                    checksum: Checksum::crc64nvme(BYTES),
-                },
+    let error = complete_with(
+        &store,
+        &namespace_id,
+        &begin.session.upload_id,
+        CompleteUploadBody::DirectPut {
+            content: UploadContentClaim {
+                size_bytes: BYTES.len() as u64,
+                checksum: Checksum::crc64nvme(BYTES),
             },
-        )
-        .await
-        .expect_err("a claim the object does not match cannot complete");
+        },
+        &context(2_000),
+    )
+    .await
+    .expect_err("a claim the object does not match cannot complete");
     assert_matches!(error, CoreError::InvalidUploadContent(_));
     let state = load_session_state(&store, &namespace_id, &begin.session.upload_id)
         .await
@@ -782,20 +783,20 @@ async fn a_mismatched_direct_put_claim_is_rejected_and_a_matching_one_completes(
         .expect("head direct-put content")
         .is_some());
 
-    let completed =
-        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context(3_000))
-            .engine()
-            .complete_upload(
-                &begin.session.upload_id,
-                CompleteUploadBody::DirectPut {
-                    content: UploadContentClaim {
-                        size_bytes: written.len() as u64,
-                        checksum: Checksum::crc64nvme(&written),
-                    },
-                },
-            )
-            .await
-            .expect("the matching claim completes the session");
+    let completed = complete_with(
+        &store,
+        &namespace_id,
+        &begin.session.upload_id,
+        CompleteUploadBody::DirectPut {
+            content: UploadContentClaim {
+                size_bytes: written.len() as u64,
+                checksum: Checksum::crc64nvme(&written),
+            },
+        },
+        &context(3_000),
+    )
+    .await
+    .expect("the matching claim completes the session");
     assert_eq!(
         completed
             .response
@@ -861,15 +862,10 @@ async fn staging_into_a_terminal_session_is_refused() {
     complete(&store, &namespace_id, &upload_id, &context(2_000))
         .await
         .expect("complete");
-    let error = crate::test_support::NamespaceFixture::new(
-        &store,
-        &namespace_id,
-        &crate::test_support::writer_at("test-writer", 2_000),
-    )
-    .engine()
-    .upload_content(&upload_id, BYTES)
-    .await
-    .expect_err("a completed session takes no more bytes");
+    let error = engine_at(&store, &namespace_id, 2_000)
+        .upload_content(&upload_id, BYTES)
+        .await
+        .expect_err("a completed session takes no more bytes");
     assert_matches!(error, CoreError::UploadAlreadyCompleted { .. });
 
     let aborted = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
@@ -880,15 +876,10 @@ async fn staging_into_a_terminal_session_is_refused() {
     abort(&store, &namespace_id, &aborted.upload_id, &context(3_000))
         .await
         .expect("abort");
-    let error = crate::test_support::NamespaceFixture::new(
-        &store,
-        &namespace_id,
-        &crate::test_support::writer_at("test-writer", 3_000),
-    )
-    .engine()
-    .upload_content(&aborted.upload_id, BYTES)
-    .await
-    .expect_err("an aborted session takes no more bytes");
+    let error = engine_at(&store, &namespace_id, 3_000)
+        .upload_content(&aborted.upload_id, BYTES)
+        .await
+        .expect_err("an aborted session takes no more bytes");
     assert_matches!(error, CoreError::UploadNotFound { .. });
 }
 
@@ -933,27 +924,17 @@ async fn an_open_session_takes_upload_work_only_before_its_expiry() {
         let results = [
             (
                 "staging",
-                crate::test_support::NamespaceFixture::new(
-                    &store,
-                    &namespace_id,
-                    &crate::test_support::writer_at("test-writer", now_ms),
-                )
-                .engine()
-                .upload_content(&proxied_id, BYTES)
-                .await
-                .map(drop),
+                engine_at(&store, &namespace_id, now_ms)
+                    .upload_content(&proxied_id, BYTES)
+                    .await
+                    .map(drop),
             ),
             (
                 "part signing",
-                crate::test_support::NamespaceFixture::new(
-                    &store,
-                    &namespace_id,
-                    &crate::test_support::writer_at("test-writer", now_ms),
-                )
-                .engine()
-                .direct_multipart_part_targets(&multipart_id, &part)
-                .await
-                .map(drop),
+                engine_at(&store, &namespace_id, now_ms)
+                    .direct_multipart_part_targets(&multipart_id, &part)
+                    .await
+                    .map(drop),
             ),
             (
                 "completion",
@@ -980,15 +961,10 @@ async fn an_expired_open_session_still_reports_its_status_and_aborts() {
     let (namespace_id, upload_id, _, _) = staged_session(&store, &setup).await;
     let expired = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS);
 
-    let view = crate::test_support::NamespaceFixture::new(
-        &store,
-        &namespace_id,
-        &crate::test_support::writer_at("test-writer", expired.now_ms),
-    )
-    .engine()
-    .get_upload(&upload_id)
-    .await
-    .expect("status of an expired session");
+    let view = engine_at(&store, &namespace_id, expired.now_ms)
+        .get_upload(&upload_id)
+        .await
+        .expect("status of an expired session");
     assert_matches!(view.session.status, UploadSessionStatus::Open { .. });
     let aborted = abort(&store, &namespace_id, &upload_id, &expired)
         .await
@@ -1012,15 +988,10 @@ async fn only_a_completed_session_mints_evidence() {
         session: open,
         evidence,
         ..
-    } = crate::test_support::NamespaceFixture::new(
-        &store,
-        &namespace_id,
-        &crate::test_support::writer_at("test-writer", 1_500),
-    )
-    .engine()
-    .get_upload(&upload_id)
-    .await
-    .expect("status of an open session");
+    } = engine_at(&store, &namespace_id, 1_500)
+        .get_upload(&upload_id)
+        .await
+        .expect("status of an open session");
     assert_matches!(open.status, UploadSessionStatus::Open { .. });
     assert!(
         evidence.is_none(),
@@ -1034,15 +1005,10 @@ async fn only_a_completed_session_mints_evidence() {
         session: completed,
         evidence,
         ..
-    } = crate::test_support::NamespaceFixture::new(
-        &store,
-        &namespace_id,
-        &crate::test_support::writer_at("test-writer", 2_500),
-    )
-    .engine()
-    .get_upload(&upload_id)
-    .await
-    .expect("status of a completed session");
+    } = engine_at(&store, &namespace_id, 2_500)
+        .get_upload(&upload_id)
+        .await
+        .expect("status of a completed session");
     assert_matches!(completed.status, UploadSessionStatus::Completed { .. });
     assert_eq!(
         evidence.expect("a completed session mints").content_ref(),
@@ -1062,15 +1028,10 @@ async fn only_a_completed_session_mints_evidence() {
         session: aborted,
         evidence,
         ..
-    } = crate::test_support::NamespaceFixture::new(
-        &store,
-        &namespace_id,
-        &crate::test_support::writer_at("test-writer", 3_500),
-    )
-    .engine()
-    .get_upload(&begin.upload_id)
-    .await
-    .expect("status of an aborted session");
+    } = engine_at(&store, &namespace_id, 3_500)
+        .get_upload(&begin.upload_id)
+        .await
+        .expect("status of an aborted session");
     assert_matches!(aborted.status, UploadSessionStatus::Aborted { .. });
     assert!(
         evidence.is_none(),
@@ -1096,15 +1057,10 @@ async fn a_completed_session_keeps_its_content_ref_after_token_minting_closes() 
         session: _,
         evidence,
         ..
-    } = crate::test_support::NamespaceFixture::new(
-        &store,
-        &namespace_id,
-        &crate::test_support::writer_at("test-writer", much_later),
-    )
-    .engine()
-    .get_upload(&upload_id)
-    .await
-    .expect("status inside the receipt window");
+    } = engine_at(&store, &namespace_id, much_later)
+        .get_upload(&upload_id)
+        .await
+        .expect("status inside the receipt window");
     assert_eq!(evidence.expect("still minting").content_ref(), &content_ref);
 
     let past = completed_at_ms + COMPLETED_UPLOAD_RECEIPT_WINDOW_MS;
@@ -1112,15 +1068,10 @@ async fn a_completed_session_keeps_its_content_ref_after_token_minting_closes() 
         session: status,
         evidence,
         ..
-    } = crate::test_support::NamespaceFixture::new(
-        &store,
-        &namespace_id,
-        &crate::test_support::writer_at("test-writer", past),
-    )
-    .engine()
-    .get_upload(&upload_id)
-    .await
-    .expect("status past the receipt window");
+    } = engine_at(&store, &namespace_id, past)
+        .get_upload(&upload_id)
+        .await
+        .expect("status past the receipt window");
     let completed = match status.status {
         UploadSessionStatus::Completed {
             content_ref,
@@ -1177,21 +1128,16 @@ async fn deleted_namespace_refuses_multipart_part_targets() {
     .upload_id;
     delete_upload_namespace(&inner, &namespace_id).await;
     let store = loonfs_test_support::stores::RecordingStore::new(inner, KeyPredicate::any());
-    let error = crate::test_support::NamespaceFixture::new(
-        &store,
-        &namespace_id,
-        &crate::test_support::writer_at("test-writer", 4_000),
-    )
-    .engine()
-    .direct_multipart_part_targets(
-        &upload_id,
-        &[UploadPartChecksumClaim {
-            part_number: 1,
-            checksum: Checksum::crc64nvme(BYTES),
-        }],
-    )
-    .await
-    .expect_err("deleted namespace");
+    let error = engine_at(&store, &namespace_id, 4_000)
+        .direct_multipart_part_targets(
+            &upload_id,
+            &[UploadPartChecksumClaim {
+                part_number: 1,
+                checksum: Checksum::crc64nvme(BYTES),
+            }],
+        )
+        .await
+        .expect_err("deleted namespace");
     assert_matches!(error, CoreError::NamespaceDeleted { .. });
     assert_eq!(store.counts().puts, 0);
     assert_eq!(store.counts().deletes, 0);
@@ -1204,15 +1150,10 @@ async fn deleted_namespace_refuses_proxied_content() {
     let (namespace_id, upload_id, _, _) = staged_session(&inner, &context(1_000)).await;
     delete_upload_namespace(&inner, &namespace_id).await;
     let store = loonfs_test_support::stores::RecordingStore::new(inner, KeyPredicate::any());
-    let error = crate::test_support::NamespaceFixture::new(
-        &store,
-        &namespace_id,
-        &crate::test_support::writer_at("test-writer", 4_000),
-    )
-    .engine()
-    .upload_content(&upload_id, BYTES)
-    .await
-    .expect_err("deleted namespace");
+    let error = engine_at(&store, &namespace_id, 4_000)
+        .upload_content(&upload_id, BYTES)
+        .await
+        .expect_err("deleted namespace");
     assert_matches!(error, CoreError::NamespaceDeleted { .. });
     assert_eq!(store.counts().puts, 0);
     assert_eq!(store.counts().deletes, 0);
@@ -1243,15 +1184,10 @@ async fn deleted_namespace_refuses_upload_status_evidence() {
         .expect("complete");
     delete_upload_namespace(&inner, &namespace_id).await;
     let store = loonfs_test_support::stores::RecordingStore::new(inner, KeyPredicate::any());
-    let error = crate::test_support::NamespaceFixture::new(
-        &store,
-        &namespace_id,
-        &crate::test_support::writer_at("test-writer", 4_000),
-    )
-    .engine()
-    .get_upload(&upload_id)
-    .await
-    .expect_err("deleted namespace");
+    let error = engine_at(&store, &namespace_id, 4_000)
+        .get_upload(&upload_id)
+        .await
+        .expect_err("deleted namespace");
     assert_matches!(error, CoreError::NamespaceDeleted { .. });
     assert_eq!(store.counts().puts, 0);
     assert_eq!(store.counts().deletes, 0);
