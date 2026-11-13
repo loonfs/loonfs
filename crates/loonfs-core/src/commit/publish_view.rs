@@ -3,10 +3,7 @@
 use crate::error::Result;
 use crate::limits::{MAX_UNFOLDED_WAL_BYTES, MAX_UNFOLDED_WAL_OBJECTS};
 use crate::manifest::move_read_basis;
-use crate::manifest::{
-    load_basis_metadata_segments, metadata_basis_from_manifest, LoadedMetadataBasis,
-    PublishedManifest,
-};
+use crate::manifest::{metadata_basis_from_manifest, LoadedMetadataBasis, PublishedManifest};
 use crate::metadata::{CommitReceiptRecord, MetadataView};
 use crate::namespace::basis::{MetadataBasis, ReadBasis};
 use crate::namespace::boundary::LoadedBoundary;
@@ -188,53 +185,57 @@ impl WriterPosition {
     }
 }
 
-enum ViewSource {
-    Cached(Box<WriterPosition>),
+enum ViewSource<'a, S: ObjectStore + ?Sized> {
+    Cached(Box<WriterPosition>, VerifiedMetadataSegments<'a, S>),
     Cold(Box<NamespaceReadAnchor>),
 }
 
 impl<S: ObjectStore> NamespaceStore<S> {
+    /// Loads the view that a batch publishes from. The view starts from
+    /// `acquired_anchor` when the caller passes one, and otherwise from
+    /// `cached_position`, unless the position's manifest is at or below the
+    /// manifest boundary (see `load_held_manifest`). Without either, the
+    /// view starts from the namespace's current state in the store.
     pub(crate) async fn load_publish_metadata_view(
         &self,
         acquired_writer: AcquiredWriter,
         cached_position: Option<WriterPosition>,
         acquired_anchor: Option<NamespaceReadAnchor>,
     ) -> Result<PublishMetadataView<'_, S>> {
-        let source = if let Some(anchor) = acquired_anchor {
-            ViewSource::Cold(Box::new(anchor))
-        } else if let Some(cached) = cached_position {
-            ViewSource::Cached(Box::new(cached))
-        } else {
-            let observed = crate::time::Observation::now(Arc::clone(&self.timer));
-            ViewSource::Cold(Box::new(self.load_read_anchor(observed).await?))
+        let cached = match cached_position.filter(|_| acquired_anchor.is_none()) {
+            Some(cached) => self
+                .load_held_manifest(cached.read_basis.basis.manifest(), cached.boundary.clone())
+                .await?
+                .map(|segments| ViewSource::Cached(Box::new(cached), segments)),
+            None => None,
         };
-        let (basis, loaded_basis, head) = match &source {
-            ViewSource::Cached(cached) => {
-                let basis = cached.read_basis.basis.clone();
-                let loaded_basis =
-                    load_basis_metadata_segments(&self.store, Some(&self.segment_cache), &basis)
-                        .await?;
-                (basis, loaded_basis, &cached.read_basis.head)
+        let source = match (cached, acquired_anchor) {
+            (Some(cached), _) => cached,
+            (None, Some(anchor)) => ViewSource::Cold(Box::new(anchor)),
+            (None, None) => {
+                let observed = crate::time::Observation::now(Arc::clone(&self.timer));
+                ViewSource::Cold(Box::new(self.load_read_anchor(observed).await?))
             }
-            ViewSource::Cold(anchor) => (
-                anchor.basis(),
-                metadata_basis_from_manifest(
-                    &self.store,
-                    Some(&self.segment_cache),
-                    &anchor.manifest,
-                ),
-                &anchor.read_state,
-            ),
+        };
+        let head = match &source {
+            ViewSource::Cached(cached, _) => &cached.read_basis.head,
+            ViewSource::Cold(anchor) => &anchor.read_state,
         };
         ensure_writer_not_fenced(head, &acquired_writer)?;
         ensure_namespace_live(&head.namespace_id, head.status)?;
         let tail_discovered = matches!(source, ViewSource::Cold(_));
-        let position = match source {
-            ViewSource::Cached(cached) => *cached,
-            ViewSource::Cold(anchor) => load_writer_position(&anchor, basis, &loaded_basis)?,
+        let (position, manifest_segments) = match source {
+            ViewSource::Cached(cached, segments) => (*cached, segments),
+            ViewSource::Cold(anchor) => {
+                let loaded_basis = metadata_basis_from_manifest(
+                    &self.store,
+                    Some(&self.segment_cache),
+                    &anchor.manifest,
+                );
+                let position = load_writer_position(&anchor, anchor.basis(), &loaded_basis)?;
+                (position, loaded_basis.segments)
+            }
         };
-
-        let manifest_segments = loaded_basis.segments;
         let write_stop = WriteStop::reached(position.wal_tail_objects(), position.wal_tail_bytes());
         Ok(PublishMetadataView {
             acquired_writer,

@@ -588,21 +588,17 @@ impl Maintenance {
     }
 
     /// Returns the manifest and the retention floor of the view that a
-    /// retention advance plans from: this runtime's writer position when it
-    /// has a current one, and otherwise the current manifest and the WAL
-    /// tail after that manifest.
+    /// retention advance plans from: this runtime's writer position when its
+    /// manifest is above the manifest boundary, and otherwise the current
+    /// manifest and the WAL tail after that manifest.
     async fn load_retention_view(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<(LoadedManifest, CommitSeq)> {
         if let Some(position) = self.publisher.current_position(namespace_id) {
-            let basis = loonfs_core::control::load_position_basis(
-                self.core.store(),
-                &self.core.metadata_segment_cache(),
-                &position,
-            )
-            .await?;
-            return Ok((basis.manifest, position.retention_floor_seq()));
+            if let Some(basis) = self.position_basis(namespace_id, &position).await? {
+                return Ok((basis.manifest, position.retention_floor_seq()));
+            }
         }
         let anchor = self
             .core

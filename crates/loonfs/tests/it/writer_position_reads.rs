@@ -5,8 +5,8 @@ use crate::common::{is_manifest_head, wait_for_operation};
 use loonfs::metrics::DefaultMetricsRecorder;
 use loonfs::test_support::{counter, writer};
 use loonfs::{
-    Commit, Consistency, ErrorCode, FoldWalOutcome, LoonFs, Namespace, ReadAt, ReadFileOptions,
-    ReadOnly, SharedObjectStore, StatOptions, Writable,
+    Commit, Consistency, ErrorCode, FoldWalOutcome, LoonFs, MetadataCache, Namespace, ReadAt,
+    ReadFileOptions, ReadOnly, SharedObjectStore, StatOptions, Writable,
 };
 use loonfs_core::limits::MAX_POSITION_MOVES;
 use loonfs_objectstore::keys::{boundary, metadata_manifest_object, metadata_manifest_prefix};
@@ -78,6 +78,12 @@ pub(crate) enum Parked {
 /// Creates a writer runtime with a one-second maximum staleness, a namespace
 /// with a 1 KiB file, and a reader on the writer's runtime.
 pub(crate) async fn fixture(name: &str, parked: Parked) -> Fixture {
+    fixture_with_cache(name, parked, MetadataCache::default()).await
+}
+
+/// Creates a fixture like [`fixture`] whose runtime reads through
+/// `metadata_cache`.
+async fn fixture_with_cache(name: &str, parked: Parked, metadata_cache: MetadataCache) -> Fixture {
     let namespace_id = namespace_id(name);
     let memory = MemoryStore::new(ChecksumAlgorithm::Crc64nvme);
     let wal = loonfs_objectstore::keys::wal_prefix(&namespace_id);
@@ -122,6 +128,7 @@ pub(crate) async fn fixture(name: &str, parked: Parked) -> Fixture {
         })
         .monotonic_timer(clock.clone())
         .metrics_recorder(recorder.clone())
+        .metadata_cache(metadata_cache)
         .build()
         .await
         .expect("writer");
@@ -821,6 +828,159 @@ async fn a_position_at_the_boundary_is_dropped_by_its_check() {
         "the check reads the boundary after its HEAD: {operations:?}"
     );
     assert_eq!(fixture.head_sources(), (positions, anchors + 1));
+}
+
+/// Returns a metadata cache that keeps no manifest, so a writer position's
+/// manifest is read from the store each time.
+fn no_manifests() -> MetadataCache {
+    MetadataCache::builder().max_manifest_bytes(0).build()
+}
+
+/// Creates a fixture whose runtime keeps no manifest, in which another
+/// process claims the compactor twice and a collection one grace window later
+/// deletes the manifest of the session's position. Returns the fixture and
+/// the number of the deleted manifest.
+async fn collected_position(name: &str) -> (Fixture, ManifestNo) {
+    use loonfs_objectstore::ObjectStore;
+    let fixture = fixture_with_cache(name, Parked::WalPuts, no_manifests()).await;
+    let store: SharedObjectStore = fixture.recording.clone();
+    let namespace =
+        || loonfs_core::test_support::namespace_store(store.clone(), &fixture.namespace_id);
+    let position = namespace()
+        .load_current_manifest()
+        .await
+        .expect("the position's manifest")
+        .manifest()
+        .manifest_no;
+    for _ in 0..2 {
+        loonfs_core::NamespaceEngine::writer(namespace(), writer_id(&format!("{name}-peer")))
+            .claim_compactor()
+            .await
+            .expect("another process claims the compactor");
+    }
+    loonfs::test_support::maintenance_past_the_grace_window(store.clone())
+        .await
+        .gc(&fixture.namespace_id)
+        .await
+        .expect("collect");
+    let deleted = metadata_manifest_object(&fixture.namespace_id, &position);
+    assert!(
+        store.head(&deleted).await.expect("HEAD").is_none(),
+        "the collection deletes the position's manifest"
+    );
+    (fixture, position)
+}
+
+/// Returns whether `operations` include a read of manifest `manifest_no`, or
+/// a check of its successor, which a read from a position on that manifest
+/// sends first.
+fn uses_manifest(
+    operations: &[RecordedOperation],
+    namespace_id: &NamespaceId,
+    manifest_no: ManifestNo,
+) -> bool {
+    let successor = metadata_manifest_object(
+        namespace_id,
+        &manifest_no.successor().expect("next manifest number"),
+    );
+    operations.iter().any(|operation| {
+        is_manifest_get(operation, namespace_id, manifest_no)
+            || matches!(operation, RecordedOperation::Head { key } if *key == successor)
+    })
+}
+
+/// Checks that the session's fold from a position whose manifest a
+/// collection deleted folds from the newest manifest. The position's
+/// manifest isn't in the segment cache, so the fold checks the manifest
+/// against the manifest boundary and doesn't read it, and the position moves
+/// off the deleted manifest, so a strong read after the fold doesn't start
+/// from it.
+#[tokio::test]
+async fn a_fold_from_a_collected_position_starts_from_the_newest_manifest() {
+    let name = "fold-collected";
+    let (fixture, position) = collected_position(name).await;
+    fixture.recording.reset();
+    let folded = fixture
+        .writer
+        .maintenance(writer_id(name))
+        .fold_wal(&fixture.namespace_id)
+        .await
+        .expect("the fold starts from the newest manifest");
+    assert_eq!(folded.outcome, FoldWalOutcome::Published);
+    let operations = fixture.recording.take();
+    assert!(
+        !uses_manifest(&operations, &fixture.namespace_id, position),
+        "{operations:?}"
+    );
+    fixture
+        .reader
+        .stat_with_options("/small.txt", &strong())
+        .await
+        .expect("stat");
+    let operations = fixture.recording.take();
+    assert!(
+        !uses_manifest(&operations, &fixture.namespace_id, position),
+        "{operations:?}"
+    );
+}
+
+/// Checks that a retention advance from a position whose manifest a
+/// collection deleted plans from the newest manifest, and that the advance
+/// drops the position, so a strong read after it doesn't start from the
+/// deleted manifest.
+#[tokio::test]
+async fn a_retention_advance_from_a_collected_position_drops_the_position() {
+    let name = "retention-collected";
+    let (fixture, position) = collected_position(name).await;
+    fixture.recording.reset();
+    fixture
+        .writer
+        .maintenance(writer_id(name))
+        .advance_retention_floor(&fixture.namespace_id)
+        .await
+        .expect("the advance plans from the newest manifest");
+    let operations = fixture.recording.take();
+    assert!(
+        !uses_manifest(&operations, &fixture.namespace_id, position),
+        "{operations:?}"
+    );
+    fixture
+        .reader
+        .stat_with_options("/small.txt", &strong())
+        .await
+        .expect("stat");
+    let operations = fixture.recording.take();
+    assert!(
+        !uses_manifest(&operations, &fixture.namespace_id, position),
+        "{operations:?}"
+    );
+}
+
+/// Checks that a fold from a position whose manifest is missing while the
+/// manifest is above the manifest boundary reports a corrupt namespace.
+#[tokio::test]
+async fn a_missing_manifest_above_the_boundary_is_corrupt() {
+    use loonfs_objectstore::ObjectStore;
+    let name = "missing-above-boundary";
+    let fixture = fixture_with_cache(name, Parked::WalPuts, no_manifests()).await;
+    let store: SharedObjectStore = fixture.recording.clone();
+    let position = loonfs_core::test_support::namespace_store(store.clone(), &fixture.namespace_id)
+        .load_current_manifest()
+        .await
+        .expect("the position's manifest")
+        .manifest()
+        .manifest_no;
+    store
+        .delete(&metadata_manifest_object(&fixture.namespace_id, &position))
+        .await
+        .expect("delete the position's manifest");
+    let error = fixture
+        .writer
+        .maintenance(writer_id(name))
+        .fold_wal(&fixture.namespace_id)
+        .await
+        .expect_err("a missing manifest above the boundary");
+    assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
 }
 
 /// Checks that the reads that need a check of the position share the

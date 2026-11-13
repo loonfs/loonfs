@@ -6,6 +6,7 @@ use crate::control_object::{
 };
 use crate::control_update::{retry_while_contended, CasOutcome};
 use crate::error::CoreError;
+use crate::heap_bytes::HeapBytes;
 use crate::namespace::store::NamespaceStore;
 use bytes::Bytes;
 use loonfs_objectstore::keys::boundary;
@@ -19,6 +20,12 @@ use loonfs_types::{ManifestNo, NamespaceId};
 
 /// A namespace's manifest boundary as a process last read it, with its ETag.
 pub type LoadedBoundary = LoadedControl<BoundaryPayload>;
+
+impl HeapBytes for LoadedBoundary {
+    fn heap_bytes(&self) -> usize {
+        self.object_key.heap_bytes() + self.etag.heap_bytes() + self.state.namespace_id.heap_bytes()
+    }
+}
 
 /// Returns the higher of two boundaries of one namespace, or the one that's
 /// an object when the other is `None`.

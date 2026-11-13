@@ -9,6 +9,7 @@ use crate::{
     MetadataMaintenanceOutcome, MetadataMaintenanceResponse, NamespaceId, SharedObjectStore,
 };
 use loonfs_core::control::PublicationBasis;
+use loonfs_core::publish::WriterPosition;
 use loonfs_core::{CoreError, MetadataCompactionCancellation};
 use loonfs_types::CompactorEpoch;
 use std::ops::ControlFlow;
@@ -90,19 +91,39 @@ impl Maintenance {
 
     /// Returns the manifest of this runtime's writer position as a basis,
     /// loaded through the segment cache, or `None` when the runtime has no
-    /// position for the namespace.
+    /// position for the namespace or the position's manifest is at or below
+    /// the manifest boundary (see [`Self::position_basis`]).
     pub(super) async fn load_position_basis(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<Option<PublicationBasis>> {
-        let Some(position) = self.publisher.current_position(namespace_id) else {
-            return Ok(None);
-        };
-        let segment_cache = self.core.metadata_segment_cache();
-        Ok(Some(
-            loonfs_core::control::load_position_basis(self.core.store(), &segment_cache, &position)
-                .await?,
-        ))
+        match self.publisher.current_position(namespace_id) {
+            Some(position) => self.position_basis(namespace_id, &position).await,
+            None => Ok(None),
+        }
+    }
+
+    /// Returns the manifest of `position`, this runtime's writer position, as
+    /// a basis, or `None` when the manifest is at or below the manifest
+    /// boundary. In that case the call drops the position and then the
+    /// cached head that the position becomes, as a check of the position
+    /// does (see [`RuntimeCore::checked_writer_position`]), so the next use
+    /// starts from the newest manifest.
+    pub(super) async fn position_basis(
+        &self,
+        namespace_id: &NamespaceId,
+        position: &WriterPosition,
+    ) -> Result<Option<PublicationBasis>> {
+        let basis = self
+            .core
+            .namespace_store(namespace_id)
+            .load_position_basis(position)
+            .await?;
+        if basis.is_none() {
+            self.core.drop_writer_position(namespace_id).await;
+            self.core.invalidate_namespace_read_cache(namespace_id);
+        }
+        Ok(basis)
     }
 
     /// Runs size-tiered compaction units on `namespace_id` while a unit is

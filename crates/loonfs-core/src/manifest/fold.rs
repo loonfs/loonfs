@@ -1,6 +1,6 @@
 //! Folds the visible WAL tail and publishes the next manifest number.
 
-use super::load::{load_basis_metadata_segments, metadata_basis_from_manifest};
+use super::load::metadata_basis_from_manifest;
 use super::publish::ManifestChange;
 use super::published::{same_head, PublicationReport, PublishedManifest};
 use crate::commit::publish_view::WriterPosition;
@@ -140,8 +140,10 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// "Publishing a manifest"). A tail of floor objects and no commits is
     /// folded too, into a manifest with no new run. A writer session passes the tail
     /// it keeps as `held`, whatever its age, and every other caller passes
-    /// `None`, which loads the tail from the store. The publication's first
-    /// attempt starts
+    /// `None`, which loads the tail from the store. A `held` tail whose
+    /// manifest is at or below the manifest boundary is discarded, and the
+    /// tail is loaded from the store too (see `load_held_manifest`). The
+    /// publication's first attempt starts
     /// from the manifest that the tail was read above, and each later attempt
     /// starts from the manifest that the attempt before it found (see
     /// `update_manifest`).
@@ -156,15 +158,16 @@ impl<S: ObjectStore> NamespaceStore<S> {
         held: Option<WriterPosition>,
         clock: &OperationClock,
     ) -> Result<FoldedWalTail> {
-        let projection = match held {
-            Some(held) => ManifestProjection {
-                manifest_segments: load_basis_metadata_segments(
-                    &self.store,
-                    Some(&self.segment_cache),
-                    &held.read_basis.basis,
-                )
+        let held = match held {
+            Some(held) => self
+                .load_held_manifest(held.read_basis.basis.manifest(), held.boundary.clone())
                 .await?
-                .segments,
+                .map(|segments| (held, segments)),
+            None => None,
+        };
+        let projection = match held {
+            Some((held, manifest_segments)) => ManifestProjection {
+                manifest_segments,
                 head: held.read_basis.head,
                 basis: held.read_basis.basis,
                 boundary: held.boundary,

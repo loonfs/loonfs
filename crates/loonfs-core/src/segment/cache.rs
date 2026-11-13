@@ -407,6 +407,16 @@ impl MetadataSegmentCache {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Returns whether this view keeps the manifest at `object_key`, without
+    /// marking the manifest recently used or recording a hit or a miss.
+    pub(crate) fn holds_manifest(&self, object_key: &str) -> bool {
+        let key = MetadataSegmentCacheKey::manifest(object_key);
+        self.shared
+            .entries(key.block_kind)
+            .peek(&(self.scope, key))
+            .is_some()
+    }
+
     #[cfg(test)]
     pub(super) fn get(&self, key: &MetadataSegmentCacheKey) -> Option<DecodedMetadataSegmentBlock> {
         self.shared

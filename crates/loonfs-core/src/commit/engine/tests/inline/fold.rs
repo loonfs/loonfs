@@ -541,6 +541,8 @@ async fn a_materialization_transport_failure_remains_retryable() {
 #[tokio::test]
 async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
     let (_directory, store, mut engine, context) = setup().await;
+    // The engine and the fold share a segment cache, as they do in a runtime.
+    engine.namespace.segment_cache = Arc::new(crate::test_support::segment_cache());
     let before = candidate("before", vec![inline(Bytes::from_static(b"before"))]);
     publish(&mut engine, &context, before)
         .await
@@ -579,13 +581,16 @@ async fn a_fold_reanchors_with_only_the_commits_published_since_it_began() {
         .writer_position()
         .expect("the tail with the commits since the fold began")
         .tail;
-    let folded = crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
-        .fold_wal_tail(
-            Some(input.clone()),
-            &OperationClock::start(0, Arc::new(StdMonotonicTimer::default())),
-        )
-        .await
-        .expect("fold");
+    let folded = crate::NamespaceStore {
+        segment_cache: Arc::clone(&engine.namespace.segment_cache),
+        ..crate::test_support::namespace_store(&store, &engine.namespace.namespace_id)
+    }
+    .fold_wal_tail(
+        Some(input.clone()),
+        &OperationClock::start(0, Arc::new(StdMonotonicTimer::default())),
+    )
+    .await
+    .expect("fold");
     assert_eq!(folded.response.outcome, FoldWalOutcome::Published);
     let observed = engine.position.projection_observed.clone();
     engine.record_manifest_published(folded.manifest.clone());

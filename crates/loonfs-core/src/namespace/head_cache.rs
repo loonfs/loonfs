@@ -97,7 +97,9 @@ impl CachedHead {
     }
 
     fn heap_bytes(&self) -> usize {
-        self.read_basis.head.heap_bytes() + self.read_basis.basis.manifest().heap_bytes()
+        self.read_basis.head.heap_bytes()
+            + self.read_basis.basis.manifest().heap_bytes()
+            + self.boundary.heap_bytes()
     }
 }
 
@@ -959,6 +961,32 @@ mod tests {
         );
         let cached = cache.get_head(&namespace("demo")).expect("a cached head");
         assert!(Arc::ptr_eq(&cached, &large));
+    }
+
+    /// Checks that a cached head's weight grows by the strings of the
+    /// manifest boundary that the head keeps.
+    #[test]
+    fn a_head_is_charged_the_boundary_it_keeps() {
+        let now = crate::test_support::observed_now();
+        let without = head_at(5, 1, &now);
+        let boundary = LoadedBoundary {
+            object_key: "namespaces/demo/boundary.json".to_owned(),
+            etag: "\"boundary-etag\"".to_owned(),
+            state: loonfs_types::format::control::BoundaryPayload {
+                namespace_id: namespace("demo"),
+                boundary: loonfs_types::format::control::ManifestBoundary::Manifest {
+                    manifest_no: ManifestNo(1),
+                },
+            },
+        };
+        let kept = boundary.object_key.capacity()
+            + boundary.etag.capacity()
+            + HeapBytes::heap_bytes(&boundary.state.namespace_id);
+        let with = CachedHead {
+            boundary: Some(boundary),
+            ..without.clone()
+        };
+        assert_eq!(Arc::new(with).weight(), Arc::new(without).weight() + kept);
     }
 
     /// Checks that a zero budget keeps no head and no tail and records no

@@ -421,8 +421,9 @@ async fn session_steps_finish_more_than_sixteen_metadata_units_without_another_p
 /// moves onto them, and the unit stops as fenced without
 /// writing a segment or a manifest. The session's own claim manifest is in
 /// the segment cache from its publication, so the metadata step doesn't read it
-/// again. The session waits for the metadata retry interval before it tries
-/// again.
+/// again. The other runtime's claim manifest isn't in the segment cache, so
+/// the unit reads the manifest boundary again before it reads that manifest.
+/// The session waits for the metadata retry interval before it tries again.
 #[tokio::test]
 async fn a_fenced_compactor_stops_before_a_unit_and_waits_for_the_retry_interval() {
     let directory = tempdir().expect("tempdir");
@@ -481,7 +482,7 @@ async fn a_fenced_compactor_stops_before_a_unit_and_waits_for_the_retry_interval
         Vec::<String>::new(),
         "the session writes no segment and no manifest"
     );
-    assert_eq!(operations.len(), 6, "{operations:#?}");
+    assert_eq!(operations.len(), 7, "{operations:#?}");
     assert!(server.metadata_left_due(&namespace_id));
     for _ in 0..59 {
         server

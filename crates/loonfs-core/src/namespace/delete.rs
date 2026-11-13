@@ -3,7 +3,7 @@
 use crate::commit::publish_view::WriterPosition;
 use crate::error::{CoreError, Result};
 use crate::manifest::publish::{ManifestChange, ManifestUpdate};
-use crate::manifest::{load_position_basis, PublicationReport};
+use crate::manifest::PublicationReport;
 use crate::namespace::control::LoadedManifest;
 use crate::namespace::store::NamespaceStore;
 use crate::namespace::writer_epoch::ensure_writer_not_fenced;
@@ -33,9 +33,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         clock: &OperationClock,
     ) -> Result<PublicationReport<DeleteNamespaceResponse>> {
         let basis = match &position {
-            Some(position) => {
-                Some(load_position_basis(&self.store, &self.segment_cache, position).await?)
-            }
+            Some(position) => self.load_position_basis(position).await?,
             None => None,
         };
         // Each attempt's future reads and updates the position through this

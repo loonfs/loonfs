@@ -1174,12 +1174,16 @@ async fn a_writer_moved_to_a_fold_that_missed_its_newest_commit_keeps_that_commi
     let store = gated_store(&directory, KeyPredicate::new(|_| false));
     let (mut engine, timer, writer) = writer_after_one_publish(&store, &namespace_id).await;
     publish_one(&mut engine, &writer, "beta").await;
-    // A maintenance call folds the tail through beta. The writer then
-    // commits gamma on the manifest that the fold replaced.
-    let folded = crate::test_support::namespace_store(&store, &namespace_id)
-        .fold_wal_tail(None, &OperationClock::start(0, timer.clone()))
-        .await
-        .expect("fold");
+    // A maintenance call in the writer's runtime, which shares the writer's
+    // segment cache, folds the tail through beta. The writer then commits
+    // gamma on the manifest that the fold replaced.
+    let folded = crate::NamespaceStore {
+        segment_cache: Arc::clone(&engine.namespace.segment_cache),
+        ..crate::test_support::namespace_store(&store, &namespace_id)
+    }
+    .fold_wal_tail(None, &OperationClock::start(0, timer.clone()))
+    .await
+    .expect("fold");
     let published = folded.published().expect("the fold publishes a manifest");
     publish_one(&mut engine, &writer, "gamma").await;
 

@@ -168,7 +168,7 @@ pub mod cache {
 /// The `loonfs` read and write paths and the layout tests use this module.
 pub mod control {
     pub use crate::control_object::{ControlObjectLoadError, LoadedControl};
-    pub use crate::manifest::{load_position_basis, NamespaceStatistics};
+    pub use crate::manifest::NamespaceStatistics;
     pub use crate::namespace::boundary::{higher_boundary, LoadedBoundary};
     pub use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
     pub use crate::namespace::control::LoadedManifest;
