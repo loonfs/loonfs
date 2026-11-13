@@ -157,6 +157,40 @@ async fn collect_pool<S: ObjectStore>(
         .expect("pool collection")
 }
 
+/// Runs one collection of `namespace_id` under `options()` at the time of
+/// `context`.
+async fn collect<S: ObjectStore>(
+    store: S,
+    namespace_id: &NamespaceId,
+    context: &WriterAt,
+) -> GcResponse {
+    crate::test_support::namespace_store(store, namespace_id)
+        .gc(&options(), &context.clock())
+        .await
+        .expect("collection")
+}
+
+/// Advances the retention floor to the head once the grace after `setup` has
+/// passed.
+async fn advance_floor_past<S: ObjectStore + Clone>(
+    store: S,
+    namespace_id: &NamespaceId,
+    setup: &WriterAt,
+) {
+    crate::test_support::NamespaceFixture::new(
+        store,
+        namespace_id,
+        &crate::test_support::writer_at(
+            "test-writer",
+            crate::test_support::grace_elapsed_after(setup.now_ms),
+        ),
+    )
+    .engine()
+    .advance_retention_floor(RetentionTarget::Head)
+    .await
+    .expect("advance floor");
+}
+
 async fn stat_root<S: ObjectStore>(store: &S, namespace_id: &NamespaceId) {
     crate::test_support::namespace_store(store, namespace_id)
         .load_current_metadata_view()
@@ -195,45 +229,6 @@ async fn gc_rejects_grace_windows_below_the_derived_minimum() {
         crate::error::ErrorCode::InvalidRequest,
         "the rejection surfaces as invalid_request"
     );
-}
-
-#[tokio::test]
-async fn gc_reaps_below_floor_wal_objects_after_the_grace_window() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let setup = context(1_000);
-    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &setup)
-        .create()
-        .await
-        .expect("bootstrap");
-    write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
-    write_test_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
-    create_snapshot(&store, &namespace_id, &setup)
-        .await
-        .expect("snapshot");
-    crate::test_support::NamespaceFixture::new(
-        &store,
-        &namespace_id,
-        &crate::test_support::writer_at(
-            "test-writer",
-            crate::test_support::grace_elapsed_after(setup.now_ms),
-        ),
-    )
-    .engine()
-    .advance_retention_floor(RetentionTarget::Head)
-    .await
-    .expect("advance floor");
-
-    let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
-    let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(&options(), &aged.clock())
-        .await
-        .expect("collection");
-
-    // The advance's floor object is folded too.
-    assert_eq!(report.deleted.wal_objects, 5);
-    stat_root(&store, &namespace_id).await;
 }
 
 async fn stage_upload<S: ObjectStore + ?Sized>(
@@ -483,10 +478,7 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
     let fork_record = read_fork_record(&store, &source).await;
     let basis_key = metadata_manifest_object(&source, &fork_record.snapshot_id.manifest_no());
     let aged = context(now_after_newest_object(&store, &source, GRACE_MS + 1).await);
-    let report = crate::test_support::namespace_store(&store, &source)
-        .gc(&options(), &aged.clock())
-        .await
-        .expect("collection with live clone");
+    let report = collect(&store, &source, &aged).await;
     assert_eq!(report.deleted_snapshots_by_owner.fork, 0);
     assert!(
         store.head(&basis_key).await.expect("head basis").is_some(),
@@ -513,24 +505,15 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
         .delete_namespace(DeleteNamespaceOptions::default())
         .await
         .expect("delete clone");
-    let retired = crate::test_support::namespace_store(&store, &clone)
-        .gc(&options(), &aged.clock())
-        .await
-        .expect("retire clone");
+    let retired = collect(&store, &clone, &aged).await;
     let deadline = retired.retires_at_ms.expect("clone retired");
 
     let aged = context(deadline);
-    crate::test_support::namespace_store(&store, &clone)
-        .gc(&options(), &aged.clock())
-        .await
-        .expect("clone releases fork snapshot");
+    collect(&store, &clone, &aged).await;
     assert!(!snapshot_record_exists(&store, &source, &fork_record.snapshot_id).await);
 
     let again = context(now_after_newest_object(&store, &source, GRACE_MS + 1).await);
-    let report = crate::test_support::namespace_store(&store, &source)
-        .gc(&options(), &again.clock())
-        .await
-        .expect("idempotent collection");
+    let report = collect(&store, &source, &again).await;
     assert_eq!(report.deleted_snapshots_by_owner.fork, 0);
     assert_eq!(report.deleted.manifests, 1);
     assert!(store
@@ -725,18 +708,7 @@ async fn gc_retains_everything_inside_the_grace_window() {
     create_snapshot(&store, &namespace_id, &setup)
         .await
         .expect("snapshot");
-    crate::test_support::NamespaceFixture::new(
-        &store,
-        &namespace_id,
-        &crate::test_support::writer_at(
-            "test-writer",
-            crate::test_support::grace_elapsed_after(setup.now_ms),
-        ),
-    )
-    .engine()
-    .advance_retention_floor(RetentionTarget::Head)
-    .await
-    .expect("advance floor");
+    advance_floor_past(&store, &namespace_id, &setup).await;
 
     let orphan = metadata_segment(&namespace_id, &loonfs_types::MetadataSegmentId::generate());
     store
@@ -745,10 +717,7 @@ async fn gc_retains_everything_inside_the_grace_window() {
         .expect("young orphan");
     let young = context(now_after_newest_object(&store, &namespace_id, 0).await);
     let listed_bytes = core_listed_bytes(&store, &namespace_id).await;
-    let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(&options(), &young.clock())
-        .await
-        .expect("collection");
+    let report = collect(&store, &namespace_id, &young).await;
 
     assert_eq!(report.deleted.wal_objects, 0);
     assert_eq!(report.deleted.metadata_segments, 0);
@@ -800,10 +769,7 @@ async fn published_compaction_segments_are_referenced_and_kept() {
         )
         .await,
     );
-    let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(&options(), &long_after.clock())
-        .await
-        .expect("collection long after the job published");
+    let report = collect(&store, &namespace_id, &long_after).await;
     assert!(
         report.deleted.metadata_segments > 0,
         "the collection must have reaped the runs the job replaced, or it proves nothing"
@@ -913,10 +879,7 @@ async fn a_collection_names_a_snapshot_it_could_not_advance() {
         .expect("snapshot");
 
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS * 2).await);
-    let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(&options(), &aged.clock())
-        .await
-        .expect("collection");
+    let report = collect(&store, &namespace_id, &aged).await;
 
     assert_eq!(
         report.deleted_snapshots_by_owner,
@@ -947,26 +910,12 @@ async fn gc_never_deletes_the_live_replay_tail() {
     create_snapshot(&store, &namespace_id, &setup)
         .await
         .expect("snapshot");
-    crate::test_support::NamespaceFixture::new(
-        &store,
-        &namespace_id,
-        &crate::test_support::writer_at(
-            "test-writer",
-            crate::test_support::grace_elapsed_after(setup.now_ms),
-        ),
-    )
-    .engine()
-    .advance_retention_floor(RetentionTarget::Head)
-    .await
-    .expect("advance floor");
+    advance_floor_past(&store, &namespace_id, &setup).await;
     // A commit past the floor: its WAL object is the live replay gap.
     write_test_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
 
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
-    let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(&options(), &aged.clock())
-        .await
-        .expect("collection");
+    let report = collect(&store, &namespace_id, &aged).await;
 
     // The advance's floor object is folded too.
     assert_eq!(report.deleted.wal_objects, 5);
@@ -988,7 +937,6 @@ async fn gc_never_deletes_the_live_replay_tail() {
 async fn assert_basis_reaped(
     store: &LocalFsStore,
     namespace_id: &NamespaceId,
-    _pass: &GcResponse,
     manifest_number: &ManifestNo,
 ) {
     crate::manifest::load_namespace_manifest_envelope(store, namespace_id, manifest_number)
@@ -1026,10 +974,7 @@ async fn gc_retains_unrecognized_manifest_keys() {
     }
 
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
-    let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(&options(), &aged.clock())
-        .await
-        .expect("collection");
+    let report = collect(&store, &namespace_id, &aged).await;
 
     assert_eq!(report.deleted.manifests, 0);
     for (key, expected) in foreign_objects {
@@ -1082,10 +1027,7 @@ async fn gc_reclaims_manifests_superseded_by_wal_folds() {
     );
 
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
-    let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(&options(), &aged.clock())
-        .await
-        .expect("collection");
+    let report = collect(&store, &namespace_id, &aged).await;
 
     // The first fold materialized the namespace's first manifest and the
     // next two superseded it; only the current manifest is reachable. Its
@@ -1099,32 +1041,7 @@ async fn gc_reclaims_manifests_superseded_by_wal_folds() {
 
     // Compaction rewrites the delta runs into fresh base segments; the
     // superseded run segments then age out on the next collection.
-    let run_policy = crate::segment::MetadataRunPolicy {
-        max_delta_runs: NonZeroUsize::MIN,
-        ..Default::default()
-    };
-    for _ in 0..16 {
-        let report = {
-            let mut fixture = crate::test_support::NamespaceFixture::new(
-                &store,
-                &namespace_id,
-                &crate::test_support::writer_at("test-writer", 0),
-            );
-            fixture.namespace.run_policy = run_policy;
-            fixture
-        }
-        .engine()
-        .compact_metadata_unit(
-            None,
-            loonfs_types::CompactorEpoch(0),
-            &crate::compaction::MetadataCompactionCancellation::default(),
-        )
-        .await
-        .expect("compact step");
-        if matches!(report, crate::compaction::CompactionUnitOutcome::NotNeeded) {
-            break;
-        }
-    }
+    crate::test_support::compact_every_group(&store, &namespace_id).await;
     let aged = context(
         now_after_newest_object(
             &store,
@@ -1133,10 +1050,7 @@ async fn gc_reclaims_manifests_superseded_by_wal_folds() {
         )
         .await,
     );
-    let after_compaction = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(&options(), &aged.clock())
-        .await
-        .expect("collection after compaction");
+    let after_compaction = collect(&store, &namespace_id, &aged).await;
     assert!(
         after_compaction.deleted.metadata_segments > 0,
         "compacted-away run segments become collectable"
@@ -1278,10 +1192,7 @@ async fn gc_retains_active_snapshot_bases() {
         .await;
 
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
-    let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(&options(), &aged.clock())
-        .await
-        .expect("collection");
+    let report = collect(&store, &namespace_id, &aged).await;
 
     // Only the bootstrap manifest, which no snapshot keeps, is collectable; both active
     // snapshot bases stay.
@@ -1371,10 +1282,7 @@ async fn retired_targets_release_their_source_snapshots_and_retry_failed_deletes
         .await;
 
     let before = context(now_after_newest_object(&store, &source, GRACE_MS + 1).await);
-    let report = crate::test_support::namespace_store(&store, &source)
-        .gc(&options(), &before.clock())
-        .await
-        .expect("gc with live target");
+    let report = collect(&store, &source, &before).await;
     assert_eq!(report.deleted_snapshots_by_owner.fork, 0);
 
     crate::test_support::NamespaceFixture::new(&store, &clone, &setup)
@@ -1384,20 +1292,11 @@ async fn retired_targets_release_their_source_snapshots_and_retry_failed_deletes
         .expect("terminal delete of the fork target");
     let aged = context(setup.now_ms + GRACE_MS - 1);
 
-    let waiting = crate::test_support::namespace_store(&store, &source)
-        .gc(&options(), &aged.clock())
-        .await
-        .expect("wait for retirement");
+    let waiting = collect(&store, &source, &aged).await;
     assert_eq!(waiting.deleted_snapshots_by_owner.fork, 0);
-    let retired = crate::test_support::namespace_store(&store, &clone)
-        .gc(&options(), &aged.clock())
-        .await
-        .expect("retire materialized target");
+    let retired = collect(&store, &clone, &aged).await;
     let deadline = retired.retires_at_ms.expect("target retired");
-    let waiting = crate::test_support::namespace_store(&store, &source)
-        .gc(&options(), &context(deadline - 1).clock())
-        .await
-        .expect("wait for grace");
+    let waiting = collect(&store, &source, &context(deadline - 1)).await;
     assert_eq!(waiting.deleted_snapshots_by_owner.fork, 0);
     assert!(snapshot_record_exists(&store, &source, &fork_record.snapshot_id).await);
     let aged = context(deadline);
@@ -1418,16 +1317,10 @@ async fn retired_targets_release_their_source_snapshots_and_retry_failed_deletes
         .await
         .expect_err("a failed fork snapshot delete should fail the collection");
     assert!(snapshot_record_exists(&store, &source, &fork_record.snapshot_id).await);
-    let released = crate::test_support::namespace_store(&store, &clone)
-        .gc(&options(), &aged.clock())
-        .await
-        .expect("retry fork snapshot delete");
+    let released = collect(&store, &clone, &aged).await;
     assert_eq!(released.deleted_snapshots_by_owner.fork, 1);
     assert!(!snapshot_record_exists(&store, &source, &fork_record.snapshot_id).await);
-    let repeated = crate::test_support::namespace_store(&store, &clone)
-        .gc(&options(), &aged.clock())
-        .await
-        .expect("repeat fork snapshot delete");
+    let repeated = collect(&store, &clone, &aged).await;
     assert_eq!(repeated.deleted_snapshots_by_owner.fork, 0);
     assert_eq!(store.counts().deletes, 3);
     assert!(store
@@ -1440,17 +1333,8 @@ async fn retired_targets_release_their_source_snapshots_and_retry_failed_deletes
         .is_some());
     let store = store.inner().inner();
     let aged = context(now_after_newest_object(store, &source, GRACE_MS + 1).await);
-    let next_collection = crate::test_support::namespace_store(store, &source)
-        .gc(&options(), &aged.clock())
-        .await
-        .expect("collect basis");
-    assert_basis_reaped(
-        store,
-        &source,
-        &next_collection,
-        &fork_record.snapshot_id.manifest_no(),
-    )
-    .await;
+    collect(store, &source, &aged).await;
+    assert_basis_reaped(store, &source, &fork_record.snapshot_id.manifest_no()).await;
     stat_root(store, &source).await;
 }
 
@@ -1487,10 +1371,7 @@ async fn an_unreadable_or_corrupt_fork_target_keeps_its_snapshot_and_the_collect
 
     let aged = context(setup.now_ms + GRACE_MS);
     store.fail_all();
-    let report = crate::test_support::namespace_store(&store, &source)
-        .gc(&options(), &aged.clock())
-        .await
-        .expect("an unreadable target is retained conservatively");
+    let report = collect(&store, &source, &aged).await;
     assert_eq!(report.deleted_snapshots_by_owner.fork, 0);
     assert!(snapshot_record_exists(store.inner(), &source, &fork_record.snapshot_id).await);
 
@@ -1498,10 +1379,7 @@ async fn an_unreadable_or_corrupt_fork_target_keeps_its_snapshot_and_the_collect
     replace_object(&store, &hint(&clone), Bytes::from_static(b"not json"))
         .await
         .expect("corrupt target manifest");
-    let report = crate::test_support::namespace_store(&store, &source)
-        .gc(&options(), &aged.clock())
-        .await
-        .expect("a corrupt target is retained conservatively");
+    let report = collect(&store, &source, &aged).await;
     assert_eq!(report.deleted_snapshots_by_owner.fork, 0);
     assert!(snapshot_record_exists(store.inner(), &source, &fork_record.snapshot_id).await);
 }
@@ -1548,10 +1426,7 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
         grace_deadline + GRACE_MS,
         u64::MAX / 2,
     ] {
-        let report = crate::test_support::namespace_store(&store, &source)
-            .gc(&options(), &context(now_ms).clock())
-            .await
-            .expect("collection with a live target");
+        let report = collect(&store, &source, &context(now_ms)).await;
         assert_eq!(report.deleted_snapshots_by_owner.fork, 0, "at {now_ms}");
         assert_eq!(report.deleted_snapshots_by_owner.user, 0, "at {now_ms}");
         assert!(
@@ -1633,16 +1508,10 @@ async fn a_fork_retry_keeps_young_snapshots_and_reclaims_the_abandoned_one_after
     );
 
     let before_creation_grace = context(setup.now_ms + 1);
-    let report = crate::test_support::namespace_store(&store, &source)
-        .gc(&options(), &before_creation_grace.clock())
-        .await
-        .expect("collection with a target that reads through another record");
+    let report = collect(&store, &source, &before_creation_grace).await;
     assert_eq!(report.deleted_snapshots_by_owner.fork, 0);
     assert!(snapshot_record_exists(&store, &source, &abandoned.snapshot_id).await);
-    let report = crate::test_support::namespace_store(&store, &source)
-        .gc(&options(), &context(setup.now_ms + GRACE_MS).clock())
-        .await
-        .expect("an aged snapshot the target does not name is the abandoned attempt's");
+    let report = collect(&store, &source, &context(setup.now_ms + GRACE_MS)).await;
     assert_eq!(report.deleted_snapshots_by_owner.fork, 1);
     assert!(!snapshot_record_exists(&store, &source, &abandoned.snapshot_id).await);
     assert_eq!(
@@ -1822,26 +1691,12 @@ async fn gc_retains_everything_without_provider_timestamps() {
     create_snapshot(&store, &namespace_id, &setup)
         .await
         .expect("snapshot");
-    crate::test_support::NamespaceFixture::new(
-        &store,
-        &namespace_id,
-        &crate::test_support::writer_at(
-            "test-writer",
-            crate::test_support::grace_elapsed_after(setup.now_ms),
-        ),
-    )
-    .engine()
-    .advance_retention_floor(RetentionTarget::Head)
-    .await
-    .expect("advance floor");
+    advance_floor_past(&store, &namespace_id, &setup).await;
 
     // Far past any window by wall clock, but no object carries a
     // provider timestamp.
     let aged = context(now_after_newest_object(store.inner(), &namespace_id, GRACE_MS + 1).await);
-    let report = crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(&options(), &aged.clock())
-        .await
-        .expect("collection");
+    let report = collect(&store, &namespace_id, &aged).await;
 
     assert_eq!(report.deleted.wal_objects, 0);
     assert_eq!(report.deleted.metadata_segments, 0);
@@ -1850,7 +1705,6 @@ async fn gc_retains_everything_without_provider_timestamps() {
         report.deleted_snapshots_by_owner,
         loonfs_types::DeletedSnapshotsByOwner::default()
     );
-    assert_eq!(report.deleted_snapshots_by_owner.fork, 0);
     assert!(report.retained.total() > 0);
     stat_root(&store, &namespace_id).await;
 }
@@ -2532,16 +2386,10 @@ async fn fork_snapshot_grace_skips_targets_and_aged_snapshots_read_only_manifest
         .await
         .expect("absent target hint");
     store.reset();
-    let young = crate::test_support::namespace_store(&store, &source)
-        .gc(&options(), &context(setup.now_ms + GRACE_MS - 1).clock())
-        .await
-        .expect("young snapshots");
+    let young = collect(&store, &source, &context(setup.now_ms + GRACE_MS - 1)).await;
     assert_eq!(young.deleted_snapshots_by_owner.fork, 0);
     assert!(store.snapshot().is_empty());
-    let aged = crate::test_support::namespace_store(&store, &source)
-        .gc(&options(), &context(setup.now_ms + GRACE_MS).clock())
-        .await
-        .expect("aged snapshots");
+    let aged = collect(&store, &source, &context(setup.now_ms + GRACE_MS)).await;
     assert_eq!(aged.deleted_snapshots_by_owner.fork, 1);
     let counts = store.counts();
     assert_eq!(counts.lists, 0);

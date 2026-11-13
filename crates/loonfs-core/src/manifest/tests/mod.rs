@@ -550,6 +550,32 @@ pub(crate) async fn segment_keys_of_the_current_manifest<S: ObjectStore + ?Sized
     staged
 }
 
+/// The keys of the segments that `manifest` lists.
+pub(crate) fn segment_keys(
+    manifest: &crate::namespace::control::LoadedManifest,
+) -> BTreeSet<String> {
+    manifest
+        .payload()
+        .runs
+        .iter()
+        .flat_map(|run| &run.segments)
+        .map(metadata_segment_object_key)
+        .collect()
+}
+
+/// Returns the segments that `previous` lists and `current` doesn't.
+pub(crate) fn dropped_segments(
+    previous: &crate::namespace::control::LoadedManifest,
+    current: &crate::namespace::control::LoadedManifest,
+) -> BTreeSet<String> {
+    let dropped: BTreeSet<_> = segment_keys(previous)
+        .difference(&segment_keys(current))
+        .cloned()
+        .collect();
+    assert!(!dropped.is_empty());
+    dropped
+}
+
 /// Runs one planned job, where anything but a publication is a test failure.
 pub(crate) async fn publish_planned_compaction<S: ObjectStore + ?Sized>(
     store: &S,

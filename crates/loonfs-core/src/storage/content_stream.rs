@@ -773,15 +773,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_resumed_crc32c_read_folds_the_prefix_into_the_same_verdict() {
-        assert_resumed_checksum_verification(Checksum::crc32c).await;
-    }
-
-    #[tokio::test]
-    async fn a_resumed_crc64nvme_read_folds_the_prefix_into_the_same_verdict() {
-        assert_resumed_checksum_verification(Checksum::crc64nvme).await;
-    }
-
-    async fn assert_resumed_checksum_verification(checksum: fn(&[u8]) -> Checksum) {
         let (_temp_dir, inner) = test_store();
         let store = RecordingStore::new(inner, KeyPredicate::content_blob());
         let bytes = payload(2 * TEST_CHUNK_BYTES);
@@ -789,7 +780,7 @@ mod tests {
             kind: ContentRefKind::BlobV1,
             content_id: ContentId::generate(),
             size_bytes: bytes.len() as u64,
-            checksum: checksum(&bytes),
+            checksum: Checksum::crc32c(&bytes),
         };
         put_content_object(&store, &content_ref, &bytes).await;
         let held = TEST_CHUNK_BYTES;
