@@ -643,12 +643,7 @@ impl PositionState {
                 manifest_retention_floor_seq,
             });
         }
-        let floor_object = prepare_floor_object(
-            head.namespace_id.clone(),
-            view.acquired_writer.writer_epoch,
-            &head,
-            target,
-        )?;
+        let floor_object = prepare_floor_object(&head, view.acquired_writer.writer_epoch, target)?;
         let published = publish_wal_object(view.store(), &floor_object, &projection_observed).await;
         let position = view.into_position();
         if let Err(error) = published {

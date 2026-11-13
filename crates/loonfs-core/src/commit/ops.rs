@@ -14,16 +14,19 @@ use loonfs_types::{
 use super::ResolvedBinding;
 
 /// The kind of inode a create makes, with a file's initial content.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum NewChild {
     Directory,
+    /// Immutable initial bytes, which must have valid preparation proof
+    /// before publication.
     File(ContentRef),
 }
 
 /// Semantic operation inside a planned commit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CommitOperation {
-    /// Create a directory under a parent inode.
-    CreateDirectory {
+    /// Create a directory or file under a parent inode.
+    Create {
         /// The inode ID that planning generates once, and that validation
         /// passes through unchanged.
         child_inode_id: InodeId,
@@ -31,19 +34,8 @@ pub(crate) enum CommitOperation {
         parent_inode_id: InodeId,
         /// Requested child spelling, whose derived name key must be absent.
         display_name: DisplayName,
-    },
-    /// Create a file under a parent inode.
-    CreateFile {
-        /// The inode ID that planning generates once, and that validation
-        /// passes through unchanged.
-        child_inode_id: InodeId,
-        /// Visible directory that will own the new binding.
-        parent_inode_id: InodeId,
-        /// Requested child spelling, whose derived name key must be absent.
-        display_name: DisplayName,
-        /// Immutable initial bytes, which must have valid preparation proof
-        /// before publication.
-        content_ref: ContentRef,
+        /// The kind of inode, with a file's initial content.
+        child: NewChild,
     },
     /// Append a new revision to an existing file.
     ReplaceFile {

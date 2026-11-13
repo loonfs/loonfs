@@ -3,7 +3,7 @@
 //!
 //! These tests live in the crate because the operation types are internal.
 
-use super::super::{CommitOperation, ResolvedBinding};
+use super::super::{CommitOperation, NewChild, ResolvedBinding};
 use super::error::CommitOperand;
 use super::session::CommitValidationSession;
 use crate::commit::{CommitFingerprint, CommitPlan, CommitValidationError};
@@ -434,10 +434,11 @@ async fn a_create_for_a_bound_name_is_rejected() {
         "docs".to_owned(),
     )]);
     let context = validation_context(&metadata_state, CommitSeq(1));
-    let request = planned(vec![CommitOperation::CreateDirectory {
+    let request = planned(vec![CommitOperation::Create {
         child_inode_id: InodeId(3),
         parent_inode_id: ROOT_INODE_ID,
         display_name: test_display_name("docs"),
+        child: NewChild::Directory,
     }]);
 
     let error = build_commit_plan(&request, 4_200, &context)
@@ -477,11 +478,11 @@ async fn a_bind_for_an_already_bound_child_is_refused_as_corruption() {
             delta_index: 1,
         },
     };
-    let reused_inode = CommitOperation::CreateFile {
+    let reused_inode = CommitOperation::Create {
         child_inode_id: InodeId(3),
         parent_inode_id: ROOT_INODE_ID,
         display_name: test_display_name("copy.txt"),
-        content_ref: content_ref("content-2"),
+        child: NewChild::File(content_ref("content-2")),
     };
     let unbinds_another_child = CommitOperation::Rename {
         inode_id: InodeId(3),
@@ -560,11 +561,11 @@ async fn create_and_replace_under_ancestor_tombstone_report_corruption() {
     let context = validation_context(&metadata_state, CommitSeq(3));
 
     let create_error = build_commit_plan(
-        &planned(vec![CommitOperation::CreateFile {
+        &planned(vec![CommitOperation::Create {
             child_inode_id: InodeId(4),
             parent_inode_id: InodeId(2),
             display_name: test_display_name("new.txt"),
-            content_ref: content_ref("content-2"),
+            child: NewChild::File(content_ref("content-2")),
         }]),
         4_200,
         &context,

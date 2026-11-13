@@ -75,8 +75,7 @@ impl<'a, S: ObjectStore + ?Sized> CommitValidationSession<'a, S> {
                     ..
                 } = delta
                 {
-                    let carried_layout = revision_layout(content_ref);
-                    *layout = carried_layout.or_else(|| layout.take());
+                    *layout = revision_layout(content_ref);
                 }
             }
             for delta in &operation_deltas {

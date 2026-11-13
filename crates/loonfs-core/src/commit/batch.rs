@@ -16,7 +16,7 @@ use crate::path::write::PublishPlanningSession;
 use crate::phase::Phase;
 use crate::time::{Observation, OperationClock};
 use crate::wal::WalPublishError;
-use crate::wal::{prepare_wal_object_from_payloads, publish_wal_object};
+use crate::wal::{prepare_commits_object, publish_wal_object};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::wal::{
     WalCommitPayload, MAX_WAL_OBJECT_BYTES, MAX_WAL_OBJECT_INLINE_CONTENT_BYTES,
@@ -95,9 +95,6 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     view: &PublishMetadataView<'_, S>,
     clock: PublicationClock<'_>,
 ) -> PublishBatchReport {
-    if candidates.is_empty() {
-        return PublishBatchReport::unchanged(Vec::new());
-    }
     // The publisher puts a merge in a batch of its own, so the WAL object's
     // size bound applies to the merge alone, and no other commit shares a
     // WAL object that the merge's size could refuse.
@@ -156,13 +153,10 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
             if let Some((estimated_bytes, max_bytes)) =
                 exceeded_wal_object_limit(inline_bytes, estimated_bytes)
             {
-                slots.push(settle_admission(
-                    BatchOutcomeSlot::Settled {
-                        outcome: Err(candidate.too_large_error(estimated_bytes, max_bytes)),
-                        depends_on_batch: !accepted_payloads.is_empty(),
-                    },
-                    !accepted_payloads.is_empty(),
-                ));
+                slots.push(BatchOutcomeSlot::Settled {
+                    outcome: Err(candidate.too_large_error(estimated_bytes, max_bytes)),
+                    depends_on_batch: !accepted_payloads.is_empty(),
+                });
                 continue;
             }
             assert_eq!(
@@ -194,10 +188,9 @@ pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     if accepted_payloads.is_empty() {
         return PublishBatchReport::unchanged(finish_batch_outcomes(&slots));
     }
-    let wal = match prepare_wal_object_from_payloads(
-        namespace_id.clone(),
-        view.acquired_writer.writer_epoch,
+    let wal = match prepare_commits_object(
         view.head(),
+        view.acquired_writer.writer_epoch,
         accepted_payloads,
     ) {
         Ok(wal) => wal,

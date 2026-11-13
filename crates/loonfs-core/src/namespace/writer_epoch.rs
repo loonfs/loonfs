@@ -7,7 +7,7 @@ use crate::manifest::{PublicationReport, PublishedManifest};
 use crate::namespace::read_anchor::NamespaceReadAnchor;
 use crate::namespace::state::NamespaceReadState;
 use crate::namespace::store::NamespaceStore;
-use crate::wal::{prepare_wal_object, publish_wal_object};
+use crate::wal::{prepare_fence, publish_wal_object};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::control::WriterBlock;
 use loonfs_types::format::manifest::NamespaceManifestPayload;
@@ -97,8 +97,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
             let head = &anchor.read_state;
             ensure_writer_not_fenced(head, &acquired)?;
             super::control::ensure_namespace_live(&head.namespace_id, head.status)?;
-            let fence =
-                prepare_wal_object(self.namespace_id.clone(), acquired.writer_epoch, head, &[])?;
+            let fence = prepare_fence(head, acquired.writer_epoch)?;
             match publish_wal_object(&self.store, &fence, &tip).await {
                 Ok(()) => {
                     anchor.read_state = head.after_wal_object(fence.envelope().payload());

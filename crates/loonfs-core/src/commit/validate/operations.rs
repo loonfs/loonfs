@@ -21,30 +21,17 @@ impl<S: ObjectStore + ?Sized> CommitValidationSession<'_, S> {
         op: &CommitOperation,
     ) -> Result<Vec<WalDelta>> {
         match op {
-            CommitOperation::CreateDirectory {
+            CommitOperation::Create {
                 child_inode_id,
                 parent_inode_id,
                 display_name,
+                child,
             } => {
                 self.validate_create(
                     *child_inode_id,
                     *parent_inode_id,
                     display_name,
-                    NewChild::Directory,
-                )
-                .await
-            }
-            CommitOperation::CreateFile {
-                child_inode_id,
-                parent_inode_id,
-                display_name,
-                content_ref,
-            } => {
-                self.validate_create(
-                    *child_inode_id,
-                    *parent_inode_id,
-                    display_name,
-                    NewChild::File(content_ref.clone()),
+                    child.clone(),
                 )
                 .await
             }
