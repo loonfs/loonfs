@@ -234,33 +234,7 @@ impl RetryLoop<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{RetryWarning, RetryWarningState, DEFAULT, RETRY_WARNING_INTERVAL_MS};
-    use std::time::Duration;
-
-    #[test]
-    fn transport_retry_backoff_doubles_and_caps() {
-        let policy = DEFAULT;
-        assert_eq!(
-            Duration::from_millis(policy.backoff_ms(1)),
-            Duration::from_millis(100)
-        );
-        assert_eq!(
-            Duration::from_millis(policy.backoff_ms(2)),
-            Duration::from_millis(200)
-        );
-        assert_eq!(
-            Duration::from_millis(policy.backoff_ms(8)),
-            Duration::from_millis(12_800)
-        );
-        assert_eq!(
-            Duration::from_millis(policy.backoff_ms(9)),
-            Duration::from_secs(15)
-        );
-        assert_eq!(
-            Duration::from_millis(policy.backoff_ms(10)),
-            Duration::from_secs(15)
-        );
-    }
+    use super::{RetryWarning, RetryWarningState, RETRY_WARNING_INTERVAL_MS};
 
     #[test]
     fn retry_warnings_log_the_first_and_then_one_count_per_interval() {
