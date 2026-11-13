@@ -109,28 +109,30 @@ Why read the boundary after the probe? Suppose a process has manifest 1, another
 
 To create or fork a namespace, a call:
 
-1. Finds the newest manifest for the new ID. A retired ID returns `namespace_deleted`. A namespace that's found returns `namespace_exists`, or `namespace_deleted` for a tombstone. The call writes nothing in these cases.
-2. Otherwise writes what the call writes before its first manifest: the pool record for a create, or the fork snapshot on the source for a fork.
-3. Publishes manifest 1 as in [Publishing a manifest](#publishing-a-manifest). After a lost put, including a put at or below the boundary, the call finds the newest manifest and returns what it finds, as for any lost manifest 1.
+1. Finds the newest manifest for the new ID. A retired ID returns `namespace_deleted`. A namespace that's found returns `namespace_exists`, or `namespace_deleted` for a tombstone, unless the namespace is still being created. The call writes nothing in these cases.
+2. Otherwise publishes manifest 1 as in [Publishing a manifest](#publishing-a-manifest). After a lost put, including a put at or below the boundary, the call starts again at step 1.
+
+[Creating a namespace and the pool's member list](namespace-creation.md) describes the other objects that a create or fork writes, the order of those writes, and a namespace that's still being created.
 
 A create or fork that's refused or fails can leave a manifest 1 at or below the boundary. No reader takes that manifest as the newest, and cleanup deletes the manifest.
 
 For example, `main` has manifests 45 and 46 and a boundary of 44, and a create of `main` that started before `main` existed puts manifest 1 late. The put succeeds, because manifest 1 was deleted long ago, but the boundary read returns 44. So the put is lost, and the create finds manifest 46 and returns `namespace_exists`.
 
-Why does the call look for the namespace before its first write? Publishing manifest 1 already determines whether the call created the namespace, but the first step keeps a call for a taken ID from writing a pool record or a fork snapshot.
+Why does the call look for the namespace before its first write? Publishing manifest 1 already determines whether the call created the namespace, but the first step keeps a call for a taken ID from writing anything, such as a fork's temporary snapshot.
 
 ### Retiring a namespace
 
 "Retirement" is the point at which a deleted namespace stops being a member of its [pool](../specs/glossary.md#pool) (see [Retirement](../specs/format.md#95-retirement)). A tombstone is eligible for retirement when its retirement deadline has passed and no snapshot is on the namespace. To retire an eligible namespace, a collection:
 
 1. If the namespace is a fork, deletes its fork snapshot on its source.
-2. Raises the boundary to retired.
+2. Deletes the namespace's member entry in its pool (see [Retiring a namespace](namespace-creation.md#retiring-a-namespace)).
+3. Raises the boundary to retired.
 
-After step 2, the namespace has no roots, so every manifest (the tombstone included), WAL object, segment, and snapshot record under its prefix is a candidate. Later collections delete each candidate under the ordinary age rules, in any order, including an object that a provider writes late (see [Candidate and age rules](../specs/format.md#113-candidate-and-age-rules)). A collection keeps `boundary.json`, and it keeps an unrecognized key, as every collection does. A collection that stops after step 1 starts again at step 1, because deleting a missing snapshot succeeds.
+After step 3, the namespace has no roots, so every manifest (the tombstone included), WAL object, segment, and snapshot record under its prefix is a candidate. Later collections delete each candidate under the ordinary age rules, in any order, including an object that a provider writes late (see [Candidate and age rules](../specs/format.md#113-candidate-and-age-rules)). A collection keeps `boundary.json`, and it keeps an unrecognized key, as every collection does. A collection that stops before step 3 starts again at step 1, because deleting a missing object succeeds.
 
 A request to a retired namespace returns `namespace_deleted`, as before the retirement, and so does a create or fork that uses a retired ID.
 
-For example, `sandbox`, a fork of `main`, writes its last segments at 09:50 on Monday, is deleted at 10:00, and with the 24-hour grace window is eligible at 10:00 on Tuesday. The sweep at 03:00 on Wednesday deletes `sandbox`'s fork snapshot on `main`, raises the boundary to retired, and deletes the manifests, the WAL objects, and the segments, which are all more than 24 hours old. Later sweeps list `sandbox`, read its boundary, and find nothing else under the prefix.
+For example, `sandbox`, a fork of `main`, writes its last segments at 09:50 on Monday, is deleted at 10:00, and with the 24-hour grace window is eligible at 10:00 on Tuesday. The sweep at 03:00 on Wednesday deletes `sandbox`'s fork snapshot on `main` and its member entry, raises the boundary to retired, and deletes the manifests, the WAL objects, and the segments, which are all more than 24 hours old. Later sweeps list `sandbox`, read its boundary, and find nothing else under the prefix.
 
 Why is the fork snapshot deleted before the boundary is raised? The tombstone's fork basis is the record of which snapshot to delete, and the tombstone stays until the boundary is retired. If the boundary were raised first and the collection stopped, a later collection could delete the tombstone under the age rules. The fork snapshot would then stay on the source until the source's snapshot cleanup found that the snapshot's target has no manifest (see [Snapshot cleanup](../specs/format.md#117-snapshot-cleanup)).
 
@@ -140,21 +142,15 @@ Why is the boundary object kept? It's the record that the ID was used, which a c
 
 ### The pool's collection
 
-A [pool](../specs/glossary.md#pool)'s collection reads the current manifest of the pool's first member, and finds every other member through the fork snapshot on the member's source (see [Content roots](../specs/format.md#119-content-roots)). A fork's content references count as roots until the first retirement step deletes that fork snapshot, as they do today. The design changes two cases:
+A [pool](../specs/glossary.md#pool)'s collection lists the pool's member entries and finds the newest manifest of each listed namespace (see [The pool's collection](namespace-creation.md#the-pools-collection)). A member's content references count as roots until its retirement deletes its member entry. A listed namespace whose boundary is retired has no roots, and the collection deletes its member entry.
 
-- **The first member is retired.** The collection finds a retired boundary and no manifest. Each fork keeps a fork snapshot on its source, and a namespace can't be retired while a snapshot is on it, so every other member is retired too. The collection reads no member roots, and deletes the pool's content under the age rule, as it does today for a first member that's eligible for retirement.
-- **A fork snapshot's target is retired.** The target has no roots. The source's snapshot cleanup deletes the snapshot, as it does for a target that has no manifest.
-
-A retired boundary doesn't record a pool. Two create calls for one namespace ID each write a pool record, and one call loses (see [Creating a namespace](../specs/format.md#91-creating-a-namespace)). While the namespace has a manifest, a collection of the losing call's pool finds that the manifest records another pool, and deletes the losing pool record after the record's creation grace. Once the namespace is retired, a collection of the losing call's pool finds a retired first member and keeps the pool record. So a losing pool record that no collection deleted before the retirement stays, and that pool has no other object.
-
-Why doesn't the retired boundary record the pool's ID? Only the collection of a losing create call's pool would read the ID, and without the ID that collection keeps one small record.
+When a fork snapshot's target is retired, the target has no roots. The source's snapshot cleanup deletes the snapshot, as it does for a target that has no manifest.
 
 ### Time rules
 
 The design has no rule that a manifest publication's basis was confirmed within `READ_REVALIDATION_BOUND_MS` before its put, and a process's check of whether its manifest is the newest doesn't depend on that bound. These time rules stay:
 
 - A WAL writer that confirmed its tip within `WAL_PUBLISH_BUDGET_MS` puts the next WAL object without a check.
-- A create or fork finishes inside the creation grace of the pool record or fork snapshot that it wrote before manifest 1.
 - The retirement deadline is computed as in [Retirement](../specs/format.md#95-retirement): the grace window (24 hours) after the deletion, which covers a tombstone publication that's applied late and the readers after the tombstone. A manifest put that a provider applies after the retirement doesn't depend on the deadline. Every manifest number is at or below a retired boundary, so the put's publisher counts the put as lost, and no reader takes that manifest as the newest.
 - The age rules for segments, content objects, and upload records.
 
@@ -167,7 +163,6 @@ This section lists the design's costs.
 - A create or fork for a free ID makes those reads before its first write.
 - Each successor probe sends one conditional read of the boundary. A cached view sends the probe at most once per manifest check interval (1 second by default) for each namespace in each process.
 - The prefix of a retired namespace keeps its boundary object. So the sweep lists every retired namespace, and each one costs the sweep one boundary read and one listing of the prefix. That cost grows with the number of retired namespaces. A retired namespace stores no tombstone, segments, or hint.
-- A pool record whose create call lost to another create call can stay after the namespace is retired (see [The pool's collection](#the-pools-collection)).
 
 ## Changes to the specs and glossary
 
@@ -181,7 +176,7 @@ The storage format changes in these sections:
 - [Publication and group commit](../specs/format.md#63-publication-and-group-commit) and [Publishing a manifest](../specs/format.md#72-publishing-a-manifest) replace the hint raise and the basis rule under `READ_REVALIDATION_BOUND_MS` with the boundary read after the put, and [Publication and collection timing](../specs/format.md#c1-publication-and-collection-timing) removes a publication's basis from that constant's meaning.
 - [Creating a namespace](../specs/format.md#91-creating-a-namespace), [Forking a namespace](../specs/format.md#92-forking-a-namespace), and [Conflicting and unknown installations](../specs/format.md#93-conflicting-and-unknown-installations) replace the hint step with the lookup before the first write.
 - [Retirement](../specs/format.md#95-retirement), [One complete collection](../specs/format.md#111-one-complete-collection), [Reference roots](../specs/format.md#112-reference-roots), [Candidate and age rules](../specs/format.md#113-candidate-and-age-rules), and [Retiring an eligible tombstone](../specs/format.md#118-retiring-an-eligible-tombstone) describe the manifest cleanup, the raise to retired, and the cleanup of a retired prefix.
-- [Snapshot cleanup](../specs/format.md#117-snapshot-cleanup) finds a fork's target without a hint and treats a retired target as a target with no manifest, and [Content roots](../specs/format.md#119-content-roots) describes a pool whose first member is retired.
+- [Snapshot cleanup](../specs/format.md#117-snapshot-cleanup) finds a fork's target without a hint and treats a retired target as a target with no manifest, and [Content roots](../specs/format.md#119-content-roots) describes a retired member.
 - [Alternatives considered](../specs/format.md#13-alternatives-considered) removes the hint raised at most once per second.
 
 The API spec's [error table](../specs/api.md#3-standard-error-contract), [Creating and forking namespaces](../specs/api.md#creating-and-forking-namespaces), [`GET /v0/namespaces/{ns}`](../specs/api.md#62-get-v0namespacesns), and [Conformance requirements](../specs/api.md#7-conformance-requirements) change. So do [Read freshness](read-freshness.md), [Pools](pools.md), [Maintenance hosting](maintenance-hosting.md), [The WAL implementation](wal-boundary.md), the [architecture](../specs/architecture.md) overview, and the [self-hosting guide](../../crates/loonfs-server/docs/self-hosting.md#background-maintenance).
