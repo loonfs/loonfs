@@ -65,6 +65,8 @@ To delete the manifests that nothing needs, a namespace's collection:
 4. If it chose any, raises the stored boundary to at least the highest chosen number, with a compare-and-swap that it retries until the stored boundary is that high.
 5. Deletes exactly the manifests that it chose in step 3.
 
+If the chosen manifests don't fit the collection's memory, the collection works through them in number order, a batch at a time, and raises the boundary to a batch's highest number before it deletes that batch.
+
 Cleanup never deletes a manifest above the boundary, and raises the boundary to `N` or higher only to retire the namespace.
 
 For example, `main`'s boundary is 30, its newest manifest is 45, and its snapshots keep manifests 7 and 38. Manifests 31 to 44 are older than the grace window. The collection chooses 31 to 37 and 39 to 44, raises the boundary to 44, and deletes those 13 manifests. Manifests 7 and 38 stay, and both are dead.

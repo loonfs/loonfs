@@ -1,9 +1,10 @@
-//! The manifest boundary: a collection raises it to the highest manifest that
-//! it deletes, before it deletes any manifest.
+//! The manifest boundary: a collection raises it to the highest manifest in
+//! each batch of manifests that it deletes, before it deletes that batch.
 
 use super::*;
 use loonfs_objectstore::keys::boundary;
 use loonfs_types::format::control::ManifestBoundary;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// A time strictly past the grace window for every object that reports an
 /// ancient age.
@@ -197,4 +198,105 @@ async fn the_boundary_ends_at_the_highest_deleted_manifest() {
     let report = collect(&recorded, &namespace_id, &context(NOW_MS)).await;
     assert_eq!(report.deleted.manifests, 0);
     assert!(recorded.take().is_empty());
+}
+
+/// Runs one collection of `namespace_id` at `NOW_MS` with a read working
+/// memory of `limit_bytes`.
+async fn collect_within<S: ObjectStore>(
+    store: S,
+    namespace_id: &NamespaceId,
+    limit_bytes: usize,
+) -> crate::error::Result<GcResponse> {
+    let memory = Arc::new(crate::cache::ReadWorkingMemory::new(limit_bytes, None));
+    crate::NamespaceStore {
+        segment_cache: Arc::new(root_scan_cache(memory)),
+        ..crate::test_support::namespace_store(store, namespace_id)
+    }
+    .gc(&context(NOW_MS).clock())
+    .await
+}
+
+/// Checks that a collection deletes more manifests than its read working
+/// memory can keep at once: under 4 KiB, one collection deletes 100 replaced
+/// manifests and raises the boundary to the highest of them.
+#[tokio::test]
+async fn a_collection_deletes_more_manifests_than_its_memory_keeps_at_once() {
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("boundary-batches").expect("namespace");
+    let store = Arc::new(MetadataMapStore::aged(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::manifest(&namespace_id),
+    ));
+    publish_manifests(&store, &namespace_id, 101).await;
+
+    let report = collect_within(&store, &namespace_id, 4 * 1024)
+        .await
+        .expect("collection");
+    assert_eq!(report.deleted.manifests, 100);
+    assert_eq!(stored_boundary(&store, &namespace_id).await, Some(100));
+    assert!(manifest_exists(&store, &namespace_id, 101).await);
+}
+
+/// Checks a collection that stops between two batches: every manifest delete
+/// after the boundary's second raise fails. The first batch's manifests are
+/// gone, the boundary is at or above the highest of them, and the later
+/// manifests are still there. The next collection deletes the later
+/// manifests and raises the boundary to the highest of them.
+#[tokio::test]
+async fn a_collection_that_stops_between_two_batches_leaves_the_rest_to_the_next() {
+    let directory = tempdir().expect("directory");
+    let namespace_id = NamespaceId::parse("boundary-stops-between").expect("namespace");
+    let store = Arc::new(MetadataMapStore::aged(
+        LocalFsStore::new(directory.path()).expect("store"),
+        KeyPredicate::manifest(&namespace_id),
+    ));
+    publish_manifests(&store, &namespace_id, 101).await;
+    let raises = Arc::new(AtomicUsize::new(0));
+    let failing = FailStore::matching(
+        Arc::clone(&store),
+        {
+            let boundary_key = boundary(&namespace_id);
+            let manifests = KeyPredicate::manifest(&namespace_id);
+            let raises = Arc::clone(&raises);
+            move |operation: &OperationContext<'_>| match operation.kind() {
+                OperationKind::Put { .. } if operation.key() == boundary_key => {
+                    raises.fetch_add(1, Ordering::SeqCst);
+                    false
+                }
+                OperationKind::Delete => {
+                    manifests.matches(operation.key()) && raises.load(Ordering::SeqCst) >= 2
+                }
+                _ => false,
+            }
+        },
+        InjectedError::Transport("delete refused".to_owned()),
+    );
+    failing.fail_all();
+
+    collect_within(&failing, &namespace_id, 4 * 1024)
+        .await
+        .expect_err("the second batch's deletes fail");
+    assert!(failing.attempts() > 0);
+    let mut first_batch = 0;
+    while !manifest_exists(&store, &namespace_id, first_batch + 1).await {
+        first_batch += 1;
+    }
+    assert!(first_batch > 0 && first_batch < 100, "{first_batch}");
+    for number in first_batch + 1..=101 {
+        assert!(
+            manifest_exists(&store, &namespace_id, number).await,
+            "{number}"
+        );
+    }
+    let raised = stored_boundary(&store, &namespace_id)
+        .await
+        .expect("the boundary was raised");
+    assert!(raised >= first_batch, "{raised} {first_batch}");
+
+    let report = collect_within(&store, &namespace_id, 4 * 1024)
+        .await
+        .expect("the next collection");
+    assert_eq!(report.deleted.manifests, 100 - first_batch);
+    assert_eq!(stored_boundary(&store, &namespace_id).await, Some(100));
+    assert!(manifest_exists(&store, &namespace_id, 101).await);
 }
