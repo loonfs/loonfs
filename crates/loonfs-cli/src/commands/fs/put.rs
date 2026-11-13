@@ -101,7 +101,7 @@ pub(crate) async fn run_filesystem_put(
     .map_err(|error| context.fail(error))?;
     let spec = NamespacePath::new(context.namespace().clone(), remote_path);
     let payload = LocalPayload::file(&local_path, metadata.len());
-    let options = put_file_options(&args).map_err(|error| context.fail(error))?;
+    let options = put_file_options(&args);
     commit_put(&context, &spec, &payload, &options, invocation.behavior).await
 }
 
@@ -133,7 +133,7 @@ async fn run_filesystem_put_stdin(
     let remote_path = parse_user_path_arg("remote_path", remote_path, RootPath::Refused)
         .map_err(|error| context.fail(error))?;
     let spec = NamespacePath::new(context.namespace().clone(), remote_path);
-    let options = put_file_options(&args).map_err(|error| context.fail(error))?;
+    let options = put_file_options(&args);
     // A pipe cannot say how long it is, so there is a byte count but never a
     // total, a percentage, or an estimate.
     commit_put(
@@ -170,14 +170,10 @@ async fn commit_put(
     progress.finish();
     let result = result.map_err(|error| context.fail(error))?;
 
-    Ok(context.output(CommandData::FileMutation {
-        human_target: None,
-        target: render_target(context.namespace(), spec.absolute_path()),
-        committed_seq: result.committed_seq,
-        commit_id: result.commit_id,
-        inode_id: None,
-        recovery_command: None,
-    }))
+    Ok(context.output(CommandData::file_mutation(
+        render_target(context.namespace(), spec.absolute_path()),
+        result,
+    )))
 }
 
 /// Uploads one file and commits it at `spec`.
@@ -302,7 +298,7 @@ async fn commit_a_finished_upload(
     Ok(Some(result?))
 }
 
-fn put_file_options(args: &FilesystemPutArgs) -> Result<PutFileOptions> {
+fn put_file_options(args: &FilesystemPutArgs) -> PutFileOptions {
     let expected_revision_no = args.expected_revision;
     let behavior =
         if args.force || args.expected_inode_id.is_some() || expected_revision_no.is_some() {
@@ -310,12 +306,12 @@ fn put_file_options(args: &FilesystemPutArgs) -> Result<PutFileOptions> {
         } else {
             DestinationBehavior::NoReplace
         };
-    Ok(PutFileOptions {
+    PutFileOptions {
         behavior,
         commit: commit_options(&args.commit),
         expected_inode_id: args.expected_inode_id,
         expected_revision_no,
-    })
+    }
 }
 
 pub(crate) async fn run_filesystem_append(
@@ -326,7 +322,7 @@ pub(crate) async fn run_filesystem_append(
     let remote_path = parse_user_path_arg("remote_path", &args.remote_path, RootPath::Refused)
         .map_err(|error| context.fail(error))?;
     let spec = NamespacePath::new(context.namespace().clone(), remote_path);
-    let options = append_file_options(&args).map_err(|error| context.fail(error))?;
+    let options = append_file_options(&args);
     let bytes = read_append_content(&args.local_path)
         .await
         .map_err(|error| context.fail(error))?;
@@ -338,14 +334,10 @@ pub(crate) async fn run_filesystem_append(
         .await
         .map_err(|error| context.fail(error))?;
 
-    Ok(context.output(CommandData::FileMutation {
-        human_target: None,
-        target: render_target(context.namespace(), spec.absolute_path()),
-        committed_seq: result.committed_seq,
-        commit_id: result.commit_id,
-        inode_id: None,
-        recovery_command: None,
-    }))
+    Ok(context.output(CommandData::file_mutation(
+        render_target(context.namespace(), spec.absolute_path()),
+        result,
+    )))
 }
 
 /// Reads the bytes one append includes. The read stops one byte past what an
@@ -367,10 +359,10 @@ async fn read_append_content(local_path: &str) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn append_file_options(args: &FilesystemAppendArgs) -> Result<AppendFileOptions> {
-    Ok(AppendFileOptions {
+fn append_file_options(args: &FilesystemAppendArgs) -> AppendFileOptions {
+    AppendFileOptions {
         commit: commit_options(&args.commit),
         expected_inode_id: args.expected_inode_id,
         expected_revision_no: args.expected_revision,
-    })
+    }
 }

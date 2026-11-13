@@ -35,6 +35,20 @@ enum DoctorCheckName {
     StoreProbe,
 }
 
+/// The doctor's checks in the order it runs and reports them.
+const ORDER: [DoctorCheckName; 10] = [
+    DoctorCheckName::Config,
+    DoctorCheckName::ConfigDecode,
+    DoctorCheckName::Profile,
+    DoctorCheckName::ProviderConfig,
+    DoctorCheckName::Connectivity,
+    DoctorCheckName::Auth,
+    DoctorCheckName::Health,
+    DoctorCheckName::Capabilities,
+    DoctorCheckName::Namespace,
+    DoctorCheckName::StoreProbe,
+];
+
 impl DoctorCheckName {
     fn as_str(self) -> &'static str {
         match self {
@@ -51,64 +65,13 @@ impl DoctorCheckName {
         }
     }
 
+    /// Returns the checks that the doctor runs after this one, in order.
     fn after(self) -> &'static [Self] {
-        match self {
-            Self::Config => &[
-                Self::ConfigDecode,
-                Self::Profile,
-                Self::ProviderConfig,
-                Self::Connectivity,
-                Self::Auth,
-                Self::Health,
-                Self::Capabilities,
-                Self::Namespace,
-                Self::StoreProbe,
-            ],
-            Self::ConfigDecode => &[
-                Self::Profile,
-                Self::ProviderConfig,
-                Self::Connectivity,
-                Self::Auth,
-                Self::Health,
-                Self::Capabilities,
-                Self::Namespace,
-                Self::StoreProbe,
-            ],
-            Self::Profile => &[
-                Self::ProviderConfig,
-                Self::Connectivity,
-                Self::Auth,
-                Self::Health,
-                Self::Capabilities,
-                Self::Namespace,
-                Self::StoreProbe,
-            ],
-            Self::ProviderConfig => &[
-                Self::Connectivity,
-                Self::Auth,
-                Self::Health,
-                Self::Capabilities,
-                Self::Namespace,
-                Self::StoreProbe,
-            ],
-            Self::Connectivity => &[
-                Self::Auth,
-                Self::Health,
-                Self::Capabilities,
-                Self::Namespace,
-                Self::StoreProbe,
-            ],
-            Self::Auth => &[
-                Self::Health,
-                Self::Capabilities,
-                Self::Namespace,
-                Self::StoreProbe,
-            ],
-            Self::Health => &[Self::Capabilities, Self::Namespace, Self::StoreProbe],
-            Self::Capabilities => &[Self::Namespace, Self::StoreProbe],
-            Self::Namespace => &[Self::StoreProbe],
-            Self::StoreProbe => &[],
-        }
+        let index = ORDER
+            .iter()
+            .position(|name| *name == self)
+            .expect("every check is in ORDER");
+        &ORDER[index + 1..]
     }
 }
 
@@ -202,7 +165,6 @@ pub(crate) async fn run_doctor(
                 &profile,
                 transient_retry,
                 args.write_check,
-                target,
             )
             .await
         }
@@ -320,8 +282,8 @@ async fn embedded_checks(
     profile: &ProfileConfig,
     transient_retry: TransientRetry,
     write_check: bool,
-    mut target: Option<ResolvedTarget>,
 ) -> Option<ResolvedTarget> {
+    let mut target = None;
     checks.push(skipped(
         DoctorCheckName::Connectivity,
         "embedded profiles do not use a network connection",

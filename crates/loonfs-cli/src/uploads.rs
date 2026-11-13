@@ -373,17 +373,6 @@ impl PutFileJournal for UploadJournal {
         let upload_id = upload_id
             .cloned()
             .or_else(|| self.resume().map(|resume| resume.upload_id));
-        self.record_prepared(request, actor_id, upload_id.as_ref())
-    }
-}
-
-impl UploadJournal {
-    pub(crate) fn record_prepared(
-        &self,
-        request: &CommitRequest,
-        actor_id: &ActorId,
-        upload_id: Option<&UploadId>,
-    ) -> io::Result<()> {
         if actor_id != &self.actor_id() || !request_matches_options(request, &self.options()) {
             return Err(self.error("prepared request does not match its PUT options"));
         }
@@ -391,14 +380,14 @@ impl UploadJournal {
             UploadProgress::Uploading { .. } => {
                 *progress = UploadProgress::Prepared {
                     request: Box::new(request.clone()),
-                    upload_id: upload_id.cloned(),
+                    upload_id: upload_id.clone(),
                 };
                 Ok(())
             }
             UploadProgress::Prepared {
                 request: saved,
                 upload_id: saved_upload,
-            } if **saved == *request && saved_upload.as_ref() == upload_id => Ok(()),
+            } if **saved == *request && *saved_upload == upload_id => Ok(()),
             UploadProgress::Prepared { .. } => {
                 Err(self.error("the prepared commit request cannot change"))
             }

@@ -4,8 +4,7 @@ use crate::args::{
     FilesystemLsArgs, FilesystemRevisionsArgs, FilesystemStatArgs, PaginationArgs, TrashArgs,
 };
 use crate::commands::context::{
-    namespace_path, render_target, Invocation, NamespaceContext, ProfileSource, RestoreDeletedHint,
-    RootPath,
+    namespace_path, render_target, Invocation, NamespaceContext, RestoreDeletedHint, RootPath,
 };
 use crate::commands::output::{
     CommandData, CommandFailure, CommandOutput, ListingHeadDrift, ListingHeadObservation,
@@ -169,11 +168,7 @@ pub(crate) async fn run_filesystem_trash(
     let PagedListing::Collected(response) = listing else {
         return Ok(context.output(CommandData::StreamedToStdout));
     };
-    let hint = RestoreDeletedHint::new(
-        &context,
-        &invocation.config,
-        ProfileSource::from_selectors(&invocation.selectors),
-    );
+    let hint = RestoreDeletedHint::new(&context, invocation);
     let recovery_commands = response
         .entries
         .iter()

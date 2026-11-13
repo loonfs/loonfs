@@ -25,13 +25,6 @@ macro_rules! cli_error_codes {
                     $(Self::$variant => $value,)+
                 }
             }
-
-            fn parse(value: &str) -> Option<Self> {
-                match value {
-                    $($value => Some(Self::$variant),)+
-                    _ => None,
-                }
-            }
         }
     };
 }
@@ -150,7 +143,7 @@ impl CliError {
 
     /// Whether namespace resolution found no configured default.
     pub(crate) fn is_no_default_namespace(&self) -> bool {
-        CliErrorCode::parse(&self.code) == Some(CliErrorCode::NoDefaultNamespace)
+        self.code == CliErrorCode::NoDefaultNamespace.as_str()
     }
 
     pub(crate) fn profile_already_exists(name: &str) -> Self {

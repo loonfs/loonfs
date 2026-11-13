@@ -2,10 +2,8 @@
 
 use super::context::Invocation;
 use super::output::{CommandData, CommandFailure, CommandOutput};
-use super::profile_config::build_profile_from_command;
-use super::profile_update::{
-    apply_update_flags, apply_update_interactive, validate_update_provider,
-};
+use super::profile_config::{build_profile_from_command, FieldSource};
+use super::profile_update::apply_update;
 use crate::args::{ProfileCommand, ProfileProviderCommand};
 use crate::config::{ProfileConfig, ProfileMode};
 use crate::config_file::{load_config, load_config_if_exists, mutate_config, mutate_config_table};
@@ -97,10 +95,9 @@ fn run_profile_update(
 
         let subject = &invocation.selectors.subject;
         let updated = if command.has_update_flags(subject) {
-            apply_update_flags(existing, &command, subject)?
+            apply_update(existing, &command, subject, FieldSource::Fail)?
         } else if invocation.behavior.interactive {
-            validate_update_provider(&existing, &command)?;
-            apply_update_interactive(&name, existing)?
+            apply_update(existing, &command, subject, FieldSource::Prompt)?
         } else {
             return Err(CliError::non_interactive_input_required(
                 "update flags (e.g. `--root`, `--bucket`)",

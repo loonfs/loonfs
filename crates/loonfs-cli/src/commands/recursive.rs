@@ -104,10 +104,7 @@ impl TreeTally {
                 error,
             })
             .map_err(|error| {
-                CliError::new(
-                    "io_error",
-                    format!("could not save recursive failure report: {error}"),
-                )
+                CliError::io_error(format!("could not save recursive failure report: {error}"))
             })
     }
 }

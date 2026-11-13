@@ -42,21 +42,6 @@ fn rendered_remote_error(server_boundary: &str) -> serde_json::Value {
         .expect("rendered error is valid JSON")
 }
 
-fn assert_server_fields_survive(server_boundary: &str, rendered: &serde_json::Value) {
-    let boundary: serde_json::Value =
-        serde_json::from_str(server_boundary).expect("server boundary is valid JSON");
-    for (field, value) in boundary
-        .as_object()
-        .expect("server error boundary is an object")
-    {
-        assert_eq!(
-            rendered.pointer(&format!("/error/{field}")),
-            Some(value),
-            "server field `{field}` was lost before CLI JSON"
-        );
-    }
-}
-
 #[test]
 fn provider_failure_is_safe_on_embedded_remote_and_doctor_surfaces() {
     let public_message = loonfs::ObjectStoreError::PermissionDenied {
@@ -456,89 +441,41 @@ fn json_error_carries_profile_and_code() {
 }
 
 #[test]
-fn server_feature_survives_client_and_cli_json() {
-    let boundary = r#"{
+fn server_error_fields_survive_client_and_cli_json() {
+    let feature = r#"{
         "code": "not_supported",
         "feature": "query.grep",
         "message": "grep is not served",
         "request_id": "req_feature"
     }"#;
-    let rendered = rendered_remote_error(boundary);
-    let expected: serde_json::Value = serde_json::from_str(
-        r#"{
-            "kind": "config_show",
-            "format_version": 1,
-            "profile": "remote",
-            "mode": "remote",
-            "error": {
-                "code": "not_supported",
-                "feature": "query.grep",
-                "message": "grep is not served",
-                "request_id": "req_feature"
-            }
-        }"#,
-    )
-    .expect("pinned JSON is valid");
-    assert_eq!(rendered, expected);
-    assert_server_fields_survive(boundary, &rendered);
-}
-
-#[test]
-fn malformed_request_param_survives_client_and_cli_json() {
-    let boundary = r#"{
+    let param_with_details = r#"{
         "code": "invalid_request",
         "message": "path must be absolute",
         "param": "/operations/0/path",
         "request_id": "req_param",
         "details": { "operation_index": 0 }
     }"#;
-    let rendered = rendered_remote_error(boundary);
-    let expected: serde_json::Value = serde_json::from_str(
-        r#"{
-            "kind": "config_show",
-            "format_version": 1,
-            "profile": "remote",
-            "mode": "remote",
-            "error": {
-                "code": "invalid_request",
-                "message": "path must be absolute",
-                "param": "/operations/0/path",
-                "request_id": "req_param",
-                "details": { "operation_index": 0 }
-            }
-        }"#,
-    )
-    .expect("pinned JSON is valid");
-    assert_eq!(rendered, expected);
-    assert_server_fields_survive(boundary, &rendered);
-}
-
-#[test]
-fn future_error_code_survives_client_and_cli_json() {
-    let boundary = r#"{
+    let unknown_code = r#"{
         "code": "newer_server_code",
         "message": "a newer server failure",
         "param": "limit",
         "request_id": "req_future"
     }"#;
-    let rendered = rendered_remote_error(boundary);
-    let expected: serde_json::Value = serde_json::from_str(
-        r#"{
-            "kind": "config_show",
-            "format_version": 1,
-            "profile": "remote",
-            "mode": "remote",
-            "error": {
-                "code": "newer_server_code",
-                "message": "a newer server failure",
-                "param": "limit",
-                "request_id": "req_future"
-            }
-        }"#,
-    )
-    .expect("pinned JSON is valid");
-    assert_eq!(rendered, expected);
-    assert_server_fields_survive(boundary, &rendered);
+    for boundary in [feature, param_with_details, unknown_code] {
+        let server_error: serde_json::Value =
+            serde_json::from_str(boundary).expect("server boundary is valid JSON");
+        assert_eq!(
+            rendered_remote_error(boundary),
+            serde_json::json!({
+                "kind": "config_show",
+                "format_version": 1,
+                "profile": "remote",
+                "mode": "remote",
+                "error": server_error
+            }),
+            "{boundary}"
+        );
+    }
 }
 
 #[test]

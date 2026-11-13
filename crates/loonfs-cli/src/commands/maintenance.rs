@@ -285,7 +285,7 @@ pub(crate) async fn run_changes(
                 ..ListChangesOptions::default()
             },
         ),
-        &args.pagination.page_limits,
+        &args.page_limits,
         |_: &loonfs_types::ListChangesResponse| {},
     )
     .await

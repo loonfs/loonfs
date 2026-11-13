@@ -170,6 +170,16 @@ impl Harness {
         }
     }
 
+    /// Returns a harness whose embedded `default` profile uses a new
+    /// namespace named `demo`.
+    pub(super) fn with_demo_namespace() -> Self {
+        let harness = Self::new();
+        harness.add_embedded_profile("default");
+        assert_success(&harness.run(&["namespace", "create", "demo"]));
+        assert_success(&harness.run(&["use", "demo"]));
+        harness
+    }
+
     pub(super) fn run(&self, args: &[&str]) -> Output {
         self.command().args(args).output().expect("run loonfs")
     }

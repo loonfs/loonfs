@@ -373,39 +373,16 @@ pub(crate) struct RestoreDeletedHint {
     context_flags: String,
 }
 
-/// Whether the command line named the profile a command ran against.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ProfileSource {
-    /// `--profile` named the profile.
-    Flag,
-    /// The command line named no profile.
-    Default,
-}
-
-impl ProfileSource {
-    /// Returns `Flag` when the selectors have a `--profile` value.
-    pub(crate) fn from_selectors(selectors: &Selectors) -> Self {
-        if selectors.profile.is_some() {
-            Self::Flag
-        } else {
-            Self::Default
-        }
-    }
-}
-
 impl RestoreDeletedHint {
-    pub(crate) fn new(
-        context: &NamespaceContext,
-        location: &ConfigLocation,
-        profile_source: ProfileSource,
-    ) -> Self {
+    pub(crate) fn new(context: &NamespaceContext, invocation: &Invocation) -> Self {
+        let location = &invocation.config;
         let mut context_flags =
             format!(" --namespace {}", shell_quote(context.namespace().as_str()));
         // A bare invocation resolves the config's default profile, which is
         // exactly the profile this run used whenever `--profile` went
         // unspelled; spelling it means the default may be some other profile,
         // and then the hint has to say which one it meant.
-        if profile_source == ProfileSource::Flag {
+        if invocation.selectors.profile.is_some() {
             context_flags.push_str(&format!(
                 " --profile {}",
                 shell_quote(&context.profile.profile_name)

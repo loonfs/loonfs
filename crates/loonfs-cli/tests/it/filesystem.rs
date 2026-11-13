@@ -5,10 +5,7 @@ use super::common::*;
 #[test]
 fn a_refused_put_allows_force_with_the_same_or_changed_source() {
     for (explicit, changed) in [(false, false), (false, true), (true, false), (true, true)] {
-        let harness = Harness::new();
-        harness.add_embedded_profile("default");
-        assert_success(&harness.run(&["namespace", "create", "demo"]));
-        assert_success(&harness.run(&["use", "demo"]));
+        let harness = Harness::with_demo_namespace();
         let payload = harness.temp_dir.path().join("hello.txt");
         fs::write(&payload, b"hello").expect("payload");
         let mut args = vec![
@@ -41,10 +38,7 @@ fn a_refused_put_allows_force_with_the_same_or_changed_source() {
 
 #[test]
 fn annotate_expected_attributes_revision_rejects_a_stale_update() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
     assert_success(&harness.run(&["mkdir", "/docs"]));
     let stat = harness.run(&["--json", "stat", "/docs"]);
     assert_success(&stat);
@@ -83,10 +77,7 @@ fn annotate_expected_attributes_revision_rejects_a_stale_update() {
 
 #[test]
 fn copy_expected_destination_inode_id_rejects_a_different_binding() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
     let payload = harness.temp_dir.path().join("payload.txt");
     fs::write(&payload, b"source").expect("payload");
     assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), "/source.txt"]));
@@ -133,10 +124,7 @@ fn copy_expected_destination_inode_id_rejects_a_different_binding() {
 
 #[test]
 fn move_expected_destination_revision_rejects_a_stale_replacement() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
     let payload = harness.temp_dir.path().join("payload.txt");
     fs::write(&payload, b"source").expect("payload");
     assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), "/source.txt"]));
@@ -190,10 +178,7 @@ fn move_expected_destination_revision_rejects_a_stale_replacement() {
 
 #[test]
 fn revisions_and_trash_use_the_shared_pagination_flags() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
 
     let payload = harness.temp_dir.path().join("payload.txt");
     fs::write(&payload, b"one\n").expect("payload");
@@ -380,10 +365,7 @@ fn embedded_profile_filesystem_flow_works_end_to_end() {
 
 #[test]
 fn put_expected_revision_replaces_only_the_observed_revision() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
 
     let payload = harness.temp_dir.path().join("doc.txt");
     fs::write(&payload, b"v1").expect("write payload");
@@ -448,10 +430,7 @@ fn put_expected_revision_replaces_only_the_observed_revision() {
 
 #[test]
 fn append_adds_a_local_file_or_standard_input_to_the_end_of_a_file() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
     let payload = harness.temp_dir.path().join("line.txt");
     let payload_path = payload.to_str().expect("utf-8 path");
     fs::write(&payload, b"first\n").expect("write payload");
@@ -512,10 +491,7 @@ fn append_adds_a_local_file_or_standard_input_to_the_end_of_a_file() {
 
 #[test]
 fn concurrent_embedded_puts_commit_or_report_the_fence() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
 
     let mut payloads = Vec::new();
     for index in 0..4 {
@@ -574,10 +550,7 @@ fn concurrent_embedded_puts_commit_or_report_the_fence() {
 
 #[test]
 fn commit_messages_ride_the_feed_and_bind_identity() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
 
     let payload = harness.temp_dir.path().join("doc.txt");
     fs::write(&payload, b"v1").expect("write payload");
@@ -709,10 +682,7 @@ fn commit_messages_ride_the_feed_and_bind_identity() {
 
 #[test]
 fn large_and_piped_puts_round_trip_through_an_embedded_profile() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
     let payload = streaming_payload();
 
     let local = harness.temp_dir.path().join("big.bin");
@@ -783,10 +753,7 @@ fn large_and_piped_puts_round_trip_through_an_embedded_profile() {
 
 #[test]
 fn a_multi_chunk_file_round_trips_to_a_file_and_to_stdout() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
     let payload = multi_chunk_payload();
 
     let local = harness.temp_dir.path().join("chunked.bin");
@@ -809,10 +776,7 @@ fn a_multi_chunk_file_round_trips_to_a_file_and_to_stdout() {
 
 #[test]
 fn a_download_of_corrupted_content_leaves_nothing_at_the_destination() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
 
     // Above the inline threshold, so the bytes live in a content object.
     let payload: Vec<u8> = (0..=u8::MAX).cycle().take(64 * 1024 + 1).collect();
@@ -853,10 +817,7 @@ fn a_download_of_corrupted_content_leaves_nothing_at_the_destination() {
 
 #[test]
 fn an_interrupted_embedded_download_restarts_and_verifies_the_whole_file() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
 
     let payload = streaming_payload();
     let source = harness.temp_dir.path().join("source.bin");
@@ -896,10 +857,7 @@ fn an_interrupted_embedded_download_restarts_and_verifies_the_whole_file() {
 
 #[test]
 fn a_partial_that_does_not_describe_this_file_is_started_over() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
 
     let payload = streaming_payload();
     let source = harness.temp_dir.path().join("source.bin");
@@ -979,10 +937,7 @@ fn large_and_piped_puts_round_trip_over_the_remote_transport() {
 
 #[test]
 fn every_mutating_command_records_its_message() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
 
     let payload = harness.temp_dir.path().join("doc.txt");
     fs::write(&payload, b"body").expect("write payload");
@@ -1083,10 +1038,7 @@ fn commit_messages_ride_the_feed_over_the_remote_transport() {
 
 #[test]
 fn trash_lists_its_entries_with_their_handles() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
 
     let payload = harness.temp_dir.path().join("doc.txt");
     fs::write(&payload, b"body").expect("write payload");
@@ -1157,10 +1109,7 @@ fn trash_lists_its_entries_with_their_handles() {
 
 #[test]
 fn naming_strictness_and_directory_intent_hold_end_to_end() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
 
     let payload = harness.temp_dir.path().join("report.pdf");
     fs::write(&payload, b"body").expect("write payload");
@@ -1204,10 +1153,7 @@ fn naming_strictness_and_directory_intent_hold_end_to_end() {
 
 #[test]
 fn single_file_get_refuses_a_missing_parent_directory() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
 
     let payload = harness.temp_dir.path().join("payload.txt");
     fs::write(&payload, b"body").expect("write payload");
@@ -1303,10 +1249,7 @@ fn embedded_profile_namespace_fork_reads_shared_content_and_diverges() {
 
 #[test]
 fn embedded_namespace_fork_uses_the_selected_snapshot() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
     let payload = harness.temp_dir.path().join("file.txt");
     fs::write(&payload, b"captured").expect("payload");
     assert_success(&harness.run(&["put", payload.to_str().expect("path"), "/first.txt"]));
@@ -1595,10 +1538,7 @@ fn inode_arguments_reject_bare_numbers() {
 
 #[test]
 fn rm_reports_the_inode_and_restore_brings_it_back() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
 
     let payload_one = harness.temp_dir.path().join("one.txt");
     let payload_two = harness.temp_dir.path().join("two.txt");
@@ -1674,10 +1614,7 @@ fn rm_reports_the_inode_and_restore_brings_it_back() {
 
 #[test]
 fn a_restore_without_a_destination_restores_in_place() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
 
     let payload = harness.temp_dir.path().join("report.txt");
     fs::write(&payload, b"quarterly numbers").expect("payload");
@@ -1813,10 +1750,7 @@ fn a_remote_restore_brings_a_deleted_file_back_through_http() {
 
 #[test]
 fn mkdir_parents_get_noclobber_and_version() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
 
     // mkdir still requires the parent by default; -p creates the chain.
     let missing_parent = harness.run(&["--json", "mkdir", "/a/b/c"]);
@@ -1899,10 +1833,7 @@ fn namespace_delete_without_yes_fails_cleanly_when_not_interactive() {
 
 #[test]
 fn namespace_delete_reports_both_head_sequences_when_the_precondition_fails() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
 
     let payload = harness.temp_dir.path().join("doc.txt");
     fs::write(&payload, b"body").expect("write payload");
@@ -2078,10 +2009,7 @@ fn annotate_writes_and_removes_attributes_in_both_modes() {
 
 #[test]
 fn annotate_rejects_a_set_without_an_equals_and_a_document_beside_the_flags() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
     assert_success(&harness.run(&["mkdir", "/docs"]));
 
     let no_equals = harness.run(&["--json", "annotate", "/docs", "--set", "owner"]);
@@ -2380,10 +2308,7 @@ fn a_remote_put_replays_its_exact_request_after_the_upload_session_is_gone() {
 
 #[test]
 fn an_interrupted_historical_download_restarts_at_the_requested_revision() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
     let payload = streaming_payload();
     let source = harness.temp_dir.path().join("source.bin");
     fs::write(&source, &payload).expect("payload");

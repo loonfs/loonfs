@@ -5,10 +5,7 @@ use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
 
 #[test]
 fn grep_allow_scan_searches_an_unindexable_pattern() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
     let payload = harness.temp_dir.path().join("payload.txt");
     fs::write(&payload, b"xy\n").expect("payload");
     assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), "/doc.txt"]));
@@ -26,10 +23,7 @@ fn grep_allow_scan_searches_an_unindexable_pattern() {
 
 #[tokio::test]
 async fn grep_allow_stale_serves_indexed_results_and_warns_for_jsonl() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
     let payload = harness.temp_dir.path().join("payload.txt");
     fs::write(&payload, b"needle\n").expect("payload");
     assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), "/visible.txt"]));
@@ -99,10 +93,7 @@ async fn grep_allow_stale_serves_indexed_results_and_warns_for_jsonl() {
 
 #[test]
 fn maintenance_gc_retires_a_deleted_namespace_instead_of_refusing() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
 
     let payload = harness.temp_dir.path().join("payload.txt");
     fs::write(&payload, b"body").expect("write payload");
@@ -228,10 +219,7 @@ async fn hint_and_current(harness: &Harness) -> (u64, u64) {
 /// and each request drains the runtime before the command exits.
 #[tokio::test]
 async fn each_one_shot_command_that_publishes_raises_the_hint() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
     let payload = harness.temp_dir.path().join("payload.txt");
     fs::write(&payload, b"body").expect("write payload");
     for index in 0..4 {
@@ -467,10 +455,7 @@ fn grep_limit_caps_the_whole_search_while_page_size_sizes_requests() {
 
 #[test]
 fn changes_snapshots_and_grep_jsonl_follow_across_pages() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
 
     let empty_changes = harness.run(&["changes", "--page-size", "1", "--jsonl"]);
     assert_success(&empty_changes);
@@ -543,10 +528,7 @@ fn changes_snapshots_and_grep_jsonl_follow_across_pages() {
 
 #[test]
 fn index_status_reports_each_lifecycle_status_in_its_own_terms() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
 
     let disabled = harness.run(&["--json", "maintenance", "index", "status"]);
     assert_success(&disabled);
@@ -591,10 +573,7 @@ fn index_status_reports_each_lifecycle_status_in_its_own_terms() {
 
 #[test]
 fn index_enable_waits_to_its_target_and_catches_up_with_later_writes() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
     let payload = harness.temp_dir.path().join("one.txt");
     fs::write(&payload, b"needle one\n").expect("write payload");
     assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), "/one.txt"]));
@@ -630,10 +609,7 @@ fn index_enable_waits_to_its_target_and_catches_up_with_later_writes() {
 
 #[test]
 fn index_enable_budgets_exit_nonzero_and_report_progress() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
     let payload = harness.temp_dir.path().join("one.txt");
     fs::write(&payload, b"needle\n").expect("write payload");
     assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), "/one.txt"]));

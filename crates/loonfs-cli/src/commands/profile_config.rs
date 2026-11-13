@@ -229,14 +229,14 @@ pub(crate) fn provider_name(provider: ProfileProvider) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::build_profile_from_command;
+    use super::{build_profile_from_command, FieldSource};
     use crate::args::{
         Cli, Command, CredentialSource, LocalStoreArgs, ProfileActorArgs, ProfileCommand,
         ProfileLocalArgs, ProfileProviderCommand, ProfileR2Args, ProfileRemoteArgs, ProfileS3Args,
         R2StoreArgs, RemoteServerArgs, RuntimeBehavior, S3StoreArgs, SubjectSelectors,
         TopLevelCommand,
     };
-    use crate::commands::profile_update::apply_update_flags;
+    use crate::commands::profile_update::apply_update;
 
     use crate::config::{ProfileConfig, ProfileConnection, ProfileIdentity, StoreConfig};
     use crate::error::Result;
@@ -609,7 +609,12 @@ mod tests {
     }
 
     fn update(profile: ProfileConfig, command: &ProfileProviderCommand) -> Result<ProfileConfig> {
-        apply_update_flags(profile, command, &SubjectSelectors::default())
+        apply_update(
+            profile,
+            command,
+            &SubjectSelectors::default(),
+            FieldSource::Fail,
+        )
     }
 
     fn store(profile: &ProfileConfig) -> &StoreConfig {

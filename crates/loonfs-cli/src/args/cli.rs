@@ -333,7 +333,7 @@ impl Command {
             Self::Grep(args) => Some(&args.pagination.page_limits),
             Self::Revisions(args) => Some(&args.pagination.page_limits),
             Self::Trash(args) => Some(&args.pagination.page_limits),
-            Self::Changes(args) => Some(&args.pagination.page_limits),
+            Self::Changes(args) => Some(&args.page_limits),
             Self::Snapshot {
                 command: SnapshotCommand::List(args),
             } => Some(&args.pagination.page_limits),

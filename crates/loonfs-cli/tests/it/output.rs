@@ -4,10 +4,7 @@ use super::common::*;
 
 #[test]
 fn a_download_reports_its_progress_to_an_agent() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
 
     let payload = streaming_payload();
     let local = harness.temp_dir.path().join("big.bin");
@@ -51,10 +48,7 @@ fn a_download_reports_its_progress_to_an_agent() {
 
 #[test]
 fn an_upload_reports_bytes_read_and_then_the_commit() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
 
     let payload = streaming_payload();
     let local = harness.temp_dir.path().join("big.bin");
@@ -94,10 +88,7 @@ fn an_upload_reports_bytes_read_and_then_the_commit() {
 
 #[test]
 fn progress_is_silent_unless_someone_is_watching() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
 
     let local = harness.temp_dir.path().join("doc.txt");
     fs::write(&local, b"body").expect("write payload");
@@ -137,10 +128,7 @@ fn progress_is_silent_unless_someone_is_watching() {
 
 #[test]
 fn recovery_hints_name_their_namespace_and_quote_the_path() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
 
     let payload = harness.temp_dir.path().join("doc.txt");
     fs::write(&payload, b"body").expect("write payload");
@@ -257,10 +245,7 @@ fn recovery_hints_name_a_profile_and_config_a_bare_invocation_would_miss() {
 
 #[test]
 fn human_output_shows_dates_and_event_names() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
 
     let payload = harness.temp_dir.path().join("doc.txt");
     fs::write(&payload, b"v1").expect("write payload");
@@ -566,10 +551,7 @@ fn help_lists_the_context_commands() {
 
 #[test]
 fn ls_default_all_jsonl_and_cursor_obey_page_boundaries() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
 
     // The pagination policy is fixed at 1,000 entries, so one extra file is
     // the smallest integration fixture that produces a continuation cursor.
@@ -757,10 +739,7 @@ fn ls_surfaces_head_drift_from_paged_responses() {
 
 #[test]
 fn ls_limit_bounds_the_whole_listing_and_json_rejects_all() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
 
     let payload = harness.temp_dir.path().join("entry.txt");
     fs::write(&payload, b"bytes\n").expect("payload");
@@ -832,10 +811,7 @@ fn ls_limit_bounds_the_whole_listing_and_json_rejects_all() {
 
 #[test]
 fn ls_emits_completed_pages_even_when_a_later_page_fails() {
-    let harness = Harness::new();
-    harness.add_embedded_profile("default");
-    assert_success(&harness.run(&["namespace", "create", "demo"]));
-    assert_success(&harness.run(&["use", "demo"]));
+    let harness = Harness::with_demo_namespace();
     assert_success(&harness.run(&["mkdir", "/first-page"]));
     let listing = harness.run(&["--json", "ls", "/"]);
     assert_success(&listing);

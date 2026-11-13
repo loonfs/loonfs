@@ -22,12 +22,6 @@ pub(crate) struct PaginationArgs {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct SeqPaginationArgs {
-    #[command(flatten)]
-    pub page_limits: PageLimitArgs,
-}
-
-#[derive(Debug, Args)]
 pub(crate) struct PageLimitArgs {
     /// Return at most this many items.
     #[arg(long)]
