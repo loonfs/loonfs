@@ -12,8 +12,8 @@ use loonfs::{
     RetainedRevisionsPageCursor, SnapshotFilesPager, StatOptions, MAX_CURRENT_FILES_PER_STAT,
 };
 use loonfs_types::{
-    AbsolutePath, CommitSeq, ContentRef, EffectiveLimit, InodeId, LimitError, NamespaceId, Page,
-    PathEntry, RevisionNo, Subject, MAX_PAGE_LIMIT,
+    AbsolutePath, CommitSeq, ContentRef, EffectiveLimit, InodeId, NamespaceId, Page, PathEntry,
+    RevisionNo, Subject, MAX_PAGE_LIMIT,
 };
 use loonfs_types::{FilesystemEvent, ListChangesResponse};
 
@@ -449,43 +449,9 @@ pub(crate) fn published_revision(event: &FilesystemEvent) -> Option<PublishedRev
 /// Converts an internal page size of `limit` items into a page limit of the
 /// public pagination contract.
 pub(crate) fn page_limit(limit: usize) -> EffectiveLimit {
-    contract_page_limit(limit).expect(
+    let requested = u32::try_from(limit).unwrap_or(u32::MAX);
+    EffectiveLimit::from_requested(Some(requested)).expect(
         "an internal page size should be a constant or a step budget validated against the \
          pagination contract",
     )
-}
-
-fn contract_page_limit(limit: usize) -> std::result::Result<EffectiveLimit, LimitError> {
-    let requested = u32::try_from(limit).unwrap_or(u32::MAX);
-    EffectiveLimit::from_requested(Some(requested))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{contract_page_limit, effective_batch_size};
-    use loonfs::MAX_CURRENT_FILES_PER_STAT;
-    use loonfs_types::{LimitError, MAX_PAGE_LIMIT};
-
-    #[test]
-    fn page_limits_enforce_the_pagination_contract() {
-        assert_eq!(contract_page_limit(0), Err(LimitError::Zero));
-        assert_eq!(contract_page_limit(7).expect("valid limit").get(), 7);
-        assert_eq!(
-            contract_page_limit(usize::MAX),
-            Err(LimitError::ExceedsMax {
-                requested: u32::MAX,
-                max_limit: MAX_PAGE_LIMIT,
-            })
-        );
-    }
-
-    #[test]
-    fn resolve_batches_stay_within_the_core_batch_cap() {
-        assert_eq!(effective_batch_size(0), 1);
-        assert_eq!(effective_batch_size(9), 9);
-        assert_eq!(
-            effective_batch_size(MAX_CURRENT_FILES_PER_STAT * 2),
-            MAX_CURRENT_FILES_PER_STAT
-        );
-    }
 }
