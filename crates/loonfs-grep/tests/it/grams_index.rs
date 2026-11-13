@@ -1,15 +1,15 @@
 //! Tests grep through runtime handles and direct `GrepWorker` operations.
 
-use crate::common::{in_walk_order, page_request, GrepHost};
+use crate::common::{
+    drive_worker_step, in_walk_order, page_request, request, writable_namespace, GrepHost,
+};
 use loonfs::publish::{CommitIntent, FilesystemOperation};
 use loonfs::{
     CommitId, CommitSeq, DestinationBehavior, ErrorCode, LoonFs, MetadataCache, NamespaceId,
     SharedObjectStore,
 };
 use loonfs_grep::codec::MAX_INDEX_GRAMS_FILE_BYTES;
-use loonfs_grep::{
-    GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepReorganizeOutcome, GrepWorker,
-};
+use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepReorganizeOutcome};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_test_support::ids::{first_page, nonzero_usize};
@@ -17,24 +17,12 @@ use loonfs_test_support::stores::{
     ConcurrencyWatchStore, KeyPredicate, OperationSelector, RecordingStore,
 };
 use loonfs_types::GrepIndexStatus;
-use loonfs_types::{
-    decode_cursor, AbsolutePath, GrepCursorPosition, GrepPageCursor, GrepRequest, GrepScope,
-};
+use loonfs_types::{decode_cursor, AbsolutePath, GrepCursorPosition, GrepPageCursor};
 use std::assert_matches;
 use std::collections::BTreeSet;
 use std::num::NonZeroU64;
 use std::sync::Arc;
 use tempfile::tempdir;
-
-fn request(pattern: &str) -> GrepRequest {
-    GrepRequest {
-        pattern: pattern.to_owned(),
-        case_insensitive: false,
-        scope: GrepScope::Namespace,
-        allow_stale: false,
-        allow_scan: false,
-    }
-}
 
 /// Content blob object keys currently in the store, for pinpointing the
 /// object behind one file's bytes by diffing around its write.
@@ -73,23 +61,6 @@ async fn put_new_content(
     content_key.clone()
 }
 
-async fn drive_worker_step(
-    worker: &GrepWorker<SharedObjectStore>,
-    namespace_id: &NamespaceId,
-    policy: GramIndexBuildPolicy,
-) {
-    worker
-        .steps(namespace_id, 0)
-        .build_step(policy)
-        .await
-        .expect("grep build step");
-    worker
-        .steps(namespace_id, 0)
-        .reorganize_step(policy)
-        .await
-        .expect("grep reorganization step");
-}
-
 /// The watermark from the namespace's verified grep manifest.
 async fn grams_built_through_seq(
     store: &SharedObjectStore,
@@ -111,24 +82,9 @@ async fn grep_worker_builds_the_gram_index_once_enabled() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("grams-runtime").expect("namespace id");
 
-    let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id("grams-writer"))
-        .config(loonfs::RuntimeConfig {
-            min_publish_interval_ms: 0,
-            ..loonfs::RuntimeConfig::default()
-        })
-        .build()
-        .await
-        .expect("build writer");
+    let (writer, namespace) = writable_namespace(&store, &namespace_id).await;
     let host = GrepHost::new(&store, "grams-maintenance").await;
 
-    writer
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    let namespace = writer
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
     namespace
         .put_file(
             "/alpha.txt",
@@ -221,28 +177,13 @@ async fn a_worker_policy_bounds_each_build_step() {
     let store: SharedObjectStore = raw_store.clone();
     let namespace_id = NamespaceId::parse("grams-config-policy").expect("namespace id");
 
-    let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id("grams-config-writer"))
-        .config(loonfs::RuntimeConfig {
-            min_publish_interval_ms: 0,
-            ..loonfs::RuntimeConfig::default()
-        })
-        .build()
-        .await
-        .expect("build writer");
+    let (writer, namespace) = writable_namespace(&store, &namespace_id).await;
     let host = GrepHost::new(&store, "grams-config-maintenance").await;
     let policy = GramIndexBuildPolicy {
         max_files_per_step: nonzero_usize(3),
         ..GramIndexBuildPolicy::default()
     };
 
-    writer
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    let namespace = writer
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
     host.enable_grep_index(&namespace_id).await.expect("enable");
     // Materialize the empty backfill so the steps below run pure WAL
     // catch-up, where the file budget maps one-to-one onto the puts.
@@ -549,24 +490,9 @@ async fn grep_answers_identically_across_tiered_reorganizations() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("grams-tiered").expect("namespace id");
 
-    let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id("grams-tiered-writer"))
-        .config(loonfs::RuntimeConfig {
-            min_publish_interval_ms: 0,
-            ..loonfs::RuntimeConfig::default()
-        })
-        .build()
-        .await
-        .expect("build writer");
+    let (writer, namespace) = writable_namespace(&store, &namespace_id).await;
     let host = GrepHost::new(&store, "grams-tiered-maintenance").await;
 
-    writer
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    let namespace = writer
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
     host.enable_grep_index(&namespace_id).await.expect("enable");
 
     let mut expected_paths = Vec::new();
@@ -626,24 +552,9 @@ async fn repeated_grep_serves_posting_blocks_from_the_grep_cache() {
     let store: loonfs::SharedObjectStore = raw_store.clone();
     let namespace_id = NamespaceId::parse("grams-cache").expect("namespace id");
 
-    let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id("grams-cache-writer"))
-        .config(loonfs::RuntimeConfig {
-            min_publish_interval_ms: 0,
-            ..loonfs::RuntimeConfig::default()
-        })
-        .build()
-        .await
-        .expect("build writer");
+    let (writer, namespace) = writable_namespace(&store, &namespace_id).await;
     let host = GrepHost::new(&store, "grams-cache-maintenance").await;
 
-    writer
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    let namespace = writer
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
     namespace
         .put_file(
             "/alpha.txt",
@@ -816,17 +727,7 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
     let store: loonfs::SharedObjectStore = raw_store.clone();
     let namespace_id = NamespaceId::parse("grams-oversized-tail").expect("namespace id");
 
-    let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id(
-            "grams-oversized-writer",
-        ))
-        .config(loonfs::RuntimeConfig {
-            min_publish_interval_ms: 0,
-            ..loonfs::RuntimeConfig::default()
-        })
-        .build()
-        .await
-        .expect("build writer");
+    let (writer, namespace) = writable_namespace(&store, &namespace_id).await;
     // The test counts content GETs at the store, so the reader runs without
     // a content object cache, which would otherwise serve the small
     // candidates.
@@ -835,13 +736,6 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
     })
     .await;
 
-    writer
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    let namespace = writer
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
     namespace
         .put_file(
             "/alpha.txt",
@@ -949,26 +843,9 @@ async fn reorganization_does_not_warm_the_query_cache() {
     let store: loonfs::SharedObjectStore = raw_store.clone();
     let namespace_id = NamespaceId::parse("grams-shared-cache").expect("namespace id");
 
-    let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id(
-            "grams-shared-cache-writer",
-        ))
-        .config(loonfs::RuntimeConfig {
-            min_publish_interval_ms: 0,
-            ..loonfs::RuntimeConfig::default()
-        })
-        .build()
-        .await
-        .expect("build writer");
+    let (writer, namespace) = writable_namespace(&store, &namespace_id).await;
     let host = GrepHost::new(&store, "grams-shared-cache-maintenance").await;
 
-    writer
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    let namespace = writer
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
     host.enable_grep_index(&namespace_id).await.expect("enable");
 
     for round in 1..=8u32 {
@@ -1040,24 +917,9 @@ async fn a_cold_reorganization_fans_out_its_segment_opens_within_the_io_cap() {
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local-fs store"));
     let namespace_id = NamespaceId::parse("grams-reorganization-fan-out").expect("namespace id");
 
-    let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id("grams-fan-out-writer"))
-        .config(loonfs::RuntimeConfig {
-            min_publish_interval_ms: 0,
-            ..loonfs::RuntimeConfig::default()
-        })
-        .build()
-        .await
-        .expect("build writer");
+    let (writer, namespace) = writable_namespace(&store, &namespace_id).await;
     let host = GrepHost::new(&store, "grams-fan-out-maintenance").await;
 
-    writer
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    let namespace = writer
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
     host.enable_grep_index(&namespace_id).await.expect("enable");
 
     // Each round writes one file, and its build step writes one delta run,

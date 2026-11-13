@@ -16,7 +16,7 @@ use crate::entry::{ChangeFeedResume, GrepEntry, GrepIndexStatus};
 use crate::reads::{page_limit, published_revision, NamespaceReads};
 use crate::segments::GrepSegments;
 use crate::value_table::ValueTable;
-use crate::{GrepError, Result};
+use crate::Result;
 use futures::{stream, StreamExt, TryFutureExt, TryStreamExt};
 use loonfs::{CoreError, SnapshotFilesPageCursor};
 use loonfs_objectstore::ObjectStore;
@@ -56,8 +56,8 @@ impl<S: ObjectStore + Clone> GrepSteps<'_, S> {
                     .active_watermark()
                     .expect("an active grep status should have a watermark");
                 match plan_incremental_unit(&reads, resume, policy).await {
-                    Ok(IncrementalWork::Unit(planned)) => Ok(planned),
-                    Ok(IncrementalWork::UpToDate(resume)) => {
+                    Ok(Some(planned)) => Ok(planned),
+                    Ok(None) => {
                         return self
                             .finish_step(
                                 GrepBuildOutcome::UpToDate {
@@ -194,50 +194,25 @@ struct PlannedIndexUnit {
     progress: CollectedProgress,
 }
 
-enum IncrementalWork {
-    Unit(PlannedIndexUnit),
-    UpToDate(ChangeFeedResume),
-}
-
-struct IncrementalCursor {
-    resume: ChangeFeedResume,
-}
-
-impl IncrementalCursor {
-    fn new(resume: ChangeFeedResume) -> Self {
-        Self { resume }
-    }
-
-    fn stop_at(
-        &mut self,
-        change_seq: CommitSeq,
-        event_index: usize,
-        event_count: usize,
-        after_event: bool,
-    ) -> Result<()> {
-        if !after_event && event_index == 0 {
-            return Ok(());
-        }
-        let next_index = event_index
-            .checked_add(usize::from(after_event))
-            .expect("an index below a commit's event count should not overflow");
-        let next_event_index = if next_index < event_count {
-            u32::try_from(next_index).map_err(|_| {
-                CoreError::NamespaceCorrupt(format!(
-                    "commit {change_seq} records {event_count} events, more than a grep \
-                     cursor can address"
-                ))
-            })?
-        } else {
-            0
-        };
-        self.resume = ChangeFeedResume::new(change_seq, next_event_index);
-        Ok(())
-    }
-
-    fn finish_change(&mut self, change_seq: CommitSeq) {
-        self.resume = ChangeFeedResume::new(change_seq, 0);
-    }
+/// Returns the cursor of a step that stops inside the commit at
+/// `change_seq`, before the event at `next_index`. A `next_index` at the end
+/// of the commit is the commit boundary.
+fn stop_at(
+    change_seq: CommitSeq,
+    next_index: usize,
+    event_count: usize,
+) -> Result<ChangeFeedResume> {
+    let next_event_index = if next_index < event_count {
+        u32::try_from(next_index).map_err(|_| {
+            CoreError::NamespaceCorrupt(format!(
+                "commit {change_seq} records {event_count} events, more than a grep \
+                 cursor can address"
+            ))
+        })?
+    } else {
+        0
+    };
+    Ok(ChangeFeedResume::new(change_seq, next_event_index))
 }
 
 #[derive(Default)]
@@ -268,11 +243,8 @@ enum CollectedProgress {
 /// The listing returns the state at that sequence directly (one revision per
 /// retained file, deleted or not, in ascending inode order), so
 /// a step reads pages until one of its budgets is met and records the last
-/// inode it consumed. The budgets are the ones the step always had: at most
-/// `max_files_per_step` files examined, and content planning stops once
-/// `max_content_bytes_per_step` is reached (the file that crosses it is
-/// still included, exactly as the row walk did). A file over the eligibility
-/// cap counts no content bytes, because the step never reads it.
+/// inode it consumed. A file over the eligibility cap counts no content
+/// bytes, because the step never reads it.
 async fn plan_backfill_unit(
     reads: &NamespaceReads,
     captured_seq: CommitSeq,
@@ -331,37 +303,25 @@ async fn plan_backfill_unit(
 /// Plans one incremental step from the semantic change feed. Reads no file
 /// content.
 ///
-/// `IncrementalWork::UpToDate` means the index is already at the namespace
-/// head.
+/// `None` means the index is already at the namespace head.
 async fn plan_incremental_unit(
     reads: &NamespaceReads,
     resume: ChangeFeedResume,
     policy: GramIndexBuildPolicy,
-) -> Result<IncrementalWork> {
+) -> Result<Option<PlannedIndexUnit>> {
     let feed = reads
         .list_changes_after(resume.after_seq(), policy.max_files_per_step.get())
         .await?;
     if feed.changes.is_empty() {
-        return Ok(IncrementalWork::UpToDate(resume));
+        return Ok(None);
     }
-    let mut cursor = IncrementalCursor::new(resume);
+    let mut cursor = resume;
     let mut pending = Vec::new();
     let mut planned_content_bytes = 0u64;
     let mut examined_files = 0usize;
-    'changes: for change in feed.changes {
-        let start_event_index = resume.start_event_index(change.committed_seq);
-        let events = &change.events;
-        if start_event_index > events.len() {
-            return Err(GrepError::IndexCorrupt {
-                message: format!(
-                    "grep event cursor `{}` exceeds commit `{}` length `{}`",
-                    resume.next_event_index(),
-                    change.committed_seq,
-                    events.len()
-                ),
-            });
-        }
-        for (event_index, event) in events.iter().enumerate().skip(start_event_index) {
+    'changes: for change in &feed.changes {
+        let event_count = change.events.len();
+        for (event_index, event) in resume.events_after(change)? {
             let Some(revision) = published_revision(event) else {
                 continue;
             };
@@ -372,7 +332,9 @@ async fn plan_incremental_unit(
                 && planned_content_bytes.saturating_add(content_bytes)
                     > policy.max_content_bytes_per_step.get();
             if examined_files >= policy.max_files_per_step.get() || would_exceed_content_budget {
-                cursor.stop_at(change.committed_seq, event_index, events.len(), false)?;
+                if event_index > 0 {
+                    cursor = stop_at(change.committed_seq, event_index, event_count)?;
+                }
                 break 'changes;
             }
             examined_files += 1;
@@ -386,20 +348,20 @@ async fn plan_incremental_unit(
             if examined_files >= policy.max_files_per_step.get()
                 || planned_content_bytes >= policy.max_content_bytes_per_step.get()
             {
-                cursor.stop_at(change.committed_seq, event_index, events.len(), true)?;
+                cursor = stop_at(change.committed_seq, event_index + 1, event_count)?;
                 break 'changes;
             }
         }
-        cursor.finish_change(change.committed_seq);
+        cursor = ChangeFeedResume::new(change.committed_seq, 0);
     }
-    if cursor.resume == resume {
-        return Ok(IncrementalWork::UpToDate(resume));
+    if cursor == resume {
+        return Ok(None);
     }
-    Ok(IncrementalWork::Unit(PlannedIndexUnit {
+    Ok(Some(PlannedIndexUnit {
         pending,
         progress: CollectedProgress::Incremental {
-            built_through_seq: cursor.resume.built_through_seq(),
-            next_event_index: cursor.resume.next_event_index(),
+            built_through_seq: cursor.built_through_seq(),
+            next_event_index: cursor.next_event_index(),
         },
     }))
 }

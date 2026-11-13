@@ -3,8 +3,8 @@
 //! through the fork snapshot, restarts an inherited backfill in the fork, and
 //! clears an inherited reorganization.
 
-use crate::common::control;
-use crate::content_index::{request, ContentFixture};
+use crate::common::{control, request};
+use crate::content_index::ContentFixture;
 use loonfs::{Namespace, NamespaceId, Writable};
 use loonfs_grep::entry::{GrepEntry, GrepIndexStatus};
 use loonfs_grep::{

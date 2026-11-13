@@ -2,7 +2,7 @@
 //! files refer to it, the `texts` and `content_revisions` families, and the
 //! pruning of a reorganization into the base level.
 
-use crate::common::GrepHost;
+use crate::common::{request, GrepHost};
 use loonfs::publish::{CommitCandidate, CommitIntent, FilesystemOperation, PreparedContent};
 use loonfs::{
     Commit, CommitId, ContentRef, LoonFs, MaintainMetadataOptions, Maintenance, MetadataCache,
@@ -18,9 +18,7 @@ use loonfs_test_support::clock::ManualClock;
 use loonfs_test_support::ids::{first_page, nonzero_usize};
 use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
 use loonfs_types::format::segment_blocks::{decode_data_block_rows, decode_index_block};
-use loonfs_types::{
-    AbsolutePath, CommitSeq, FileContent, GrepRequest, GrepScope, InodeId, RevisionNo, RunNo,
-};
+use loonfs_types::{AbsolutePath, CommitSeq, FileContent, InodeId, RevisionNo, RunNo};
 use std::assert_matches;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -343,16 +341,6 @@ impl ContentFixture {
             .await
             .expect("advance retention")
             .retention_floor_seq
-    }
-}
-
-pub(crate) fn request(pattern: &str) -> GrepRequest {
-    GrepRequest {
-        pattern: pattern.to_owned(),
-        case_insensitive: false,
-        scope: GrepScope::Namespace,
-        allow_stale: false,
-        allow_scan: false,
     }
 }
 

@@ -23,7 +23,7 @@ pub use buffer_watch_store::{BufferPeaks, BufferWatchStore};
 pub use concurrency_watch_store::{
     ConcurrencyWatchInterceptor, ConcurrencyWatchStore, InFlightGuard, StoreConcurrency,
 };
-pub use fail_store::{FailInterceptor, FailStore, FailureMode, InjectedError};
+pub use fail_store::{FailInterceptor, FailStore, InjectedError};
 pub use fake_multipart_store::{FakeMultipartStore, MultipartChecksumEnforcement};
 pub use intercept_store::{Intercept, InterceptStore, Interceptor, Outcome};
 pub use key_predicate::KeyPredicate;

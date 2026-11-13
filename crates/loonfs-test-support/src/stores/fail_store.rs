@@ -46,7 +46,7 @@ impl InjectedError {
 
 /// Whether a selected write is applied before its injected failure is returned.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum FailureMode {
+enum FailureMode {
     /// Return the failure without forwarding the operation.
     #[default]
     BeforeApply,

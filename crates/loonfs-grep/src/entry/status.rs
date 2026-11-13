@@ -1,7 +1,8 @@
 //! The lifecycle of grep's index and its in-progress reorganization, as
 //! grep's entry records them.
 
-use loonfs_types::{CommitSeq, IndexSegmentId, InodeId, RunNo};
+use crate::{GrepError, Result};
+use loonfs_types::{Commit, CommitSeq, FilesystemEvent, IndexSegmentId, InodeId, RunNo};
 use serde::{Deserialize, Serialize};
 
 /// Durable status of grep indexing for one namespace.
@@ -180,12 +181,33 @@ impl ChangeFeedResume {
         self.built_through_seq
     }
 
-    pub(crate) fn start_event_index(self, change_seq: CommitSeq) -> usize {
+    fn start_event_index(self, change_seq: CommitSeq) -> usize {
         if change_seq == self.built_through_seq {
             self.next_event_index as usize
         } else {
             0
         }
+    }
+
+    /// Returns the events of `change` that this cursor doesn't cover, each
+    /// with its index in the commit.
+    pub(crate) fn events_after(
+        self,
+        change: &Commit,
+    ) -> Result<impl Iterator<Item = (usize, &FilesystemEvent)>> {
+        let start_event_index = self.start_event_index(change.committed_seq);
+        let events = &change.events;
+        if start_event_index > events.len() {
+            return Err(GrepError::IndexCorrupt {
+                message: format!(
+                    "grep event cursor `{}` exceeds commit `{}` length `{}`",
+                    self.next_event_index,
+                    change.committed_seq,
+                    events.len()
+                ),
+            });
+        }
+        Ok(events.iter().enumerate().skip(start_event_index))
     }
 
     pub fn next_event_index(self) -> u32 {

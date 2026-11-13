@@ -5,8 +5,9 @@
 
 use crate::common::{
     default_block_cache, grep_with, in_walk_order, page_request, publish_same_content_files,
+    request,
 };
-use crate::content_index::{request, ContentFixture};
+use crate::content_index::ContentFixture;
 use loonfs::{ErrorCode, LoonFs};
 use loonfs_grep::{GrepError, GrepService};
 use loonfs_types::{decode_cursor, ContentId, GrepPageCursor, GrepResponse};
