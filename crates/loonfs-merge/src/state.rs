@@ -161,9 +161,6 @@ pub struct PendingCommit {
     pub commit_id: CommitId,
     /// The fork sequence that the request goes through.
     pub through_seq: CommitSeq,
-    /// The number of times that the request failed with a transient error,
-    /// which is less than [`MAX_MERGE_ATTEMPTS`](crate::MAX_MERGE_ATTEMPTS).
-    pub failed_attempts: u64,
 }
 
 impl PendingCommit {
@@ -172,15 +169,6 @@ impl PendingCommit {
         Self {
             commit_id: CommitId::generate(),
             through_seq,
-            failed_attempts: 0,
-        }
-    }
-
-    /// Returns the same request after one more transient error.
-    pub(crate) fn retried(&self) -> Self {
-        Self {
-            failed_attempts: self.failed_attempts + 1,
-            ..self.clone()
         }
     }
 
@@ -213,9 +201,7 @@ pub struct ConflictReport {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MergeFailure {
-    /// A merge or a rebase returned an error that the loop can't act on, or
-    /// a transient error on its last attempt (see
-    /// [`MAX_MERGE_ATTEMPTS`](crate::MAX_MERGE_ATTEMPTS)).
+    /// A merge or a rebase returned an error that the loop can't act on.
     Refused {
         /// The error that the server returned.
         error: ErrorResponse,

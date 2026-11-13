@@ -3,8 +3,7 @@
 use super::summaries::*;
 use crate::commands::MaintenanceRan;
 use loonfs_merge::{
-    MergeFailure, MergeSessionOutcome, MergeSessionState, MergeSessionStatus, MAX_MERGE_ATTEMPTS,
-    MAX_NEW_FORKS,
+    MergeFailure, MergeSessionOutcome, MergeSessionState, MergeSessionStatus, MAX_NEW_FORKS,
 };
 use loonfs_types::{
     CommitSeq, DeleteNamespaceResponse, DeleteSnapshotResponse, GrepIndex, ListChangesResponse,
@@ -323,13 +322,6 @@ pub(crate) fn human_merge_step(outcome: &MergeSessionOutcome) -> String {
         } => format!(
             "resolved `{fork_id}`; merging it through seq {}",
             through_seq.0
-        ),
-        MergeSessionOutcome::Retrying {
-            error,
-            failed_attempts,
-        } => format!(
-            "attempt {failed_attempts} of {MAX_MERGE_ATTEMPTS} failed with `{}`; trying again",
-            error.code
         ),
         MergeSessionOutcome::Failed => "failed".to_owned(),
         MergeSessionOutcome::Deleted { namespace_id } => {

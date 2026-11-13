@@ -2,7 +2,7 @@
 //! large, rebase a fork whose merge conflicts, hand the new fork to the
 //! resolver, and merge again.
 
-use crate::refusal::{is_gone, refusal, refused, NextRequest, Refusal};
+use crate::refusal::{is_gone, refusal, refused, Refusal};
 use crate::{
     ConflictReport, Mechanics, MergeError, MergeFailure, MergeSessionOutcome, MergeSessionState,
     MergeSessionStatus, PendingCommit, Resolver, Result,
@@ -177,8 +177,8 @@ impl<M: Mechanics, R: Resolver> MergeSession<M, R> {
             Err(error) => refused(error)?,
         };
         Ok(match refusal(merge, &error) {
-            Refusal::Next(next) => {
-                next_request(merge, next, error, |merge| MergeSessionStatus::Merging {
+            Refusal::Split(split_at_seq) => {
+                next_request(error, split_at_seq, |merge| MergeSessionStatus::Merging {
                     fork_id: fork_id.clone(),
                     through_seq,
                     merge,
@@ -254,8 +254,8 @@ impl<M: Mechanics, R: Resolver> MergeSession<M, R> {
             Err(error) => refused(error)?,
         };
         Ok(match refusal(replay, &error) {
-            Refusal::Next(next) => {
-                next_request(replay, next, error, |replay| MergeSessionStatus::Rebasing {
+            Refusal::Split(split_at_seq) => {
+                next_request(error, split_at_seq, |replay| MergeSessionStatus::Rebasing {
                     fork_id: fork_id.clone(),
                     through_seq,
                     new_fork_id: new_fork_id.clone(),
@@ -357,36 +357,21 @@ pub(crate) fn new_fork_id(new_fork_ids: &[NamespaceId]) -> Option<NamespaceId> {
     (new_fork_ids.len() < MAX_NEW_FORKS).then(NamespaceId::generate)
 }
 
-/// Returns the transition to the request that follows `request` after the
-/// server refused it with `error`: the piece through the split hint, or the
-/// same request again. `status` returns the step's status with the next
-/// request pending.
+/// Returns the transition to the piece through the split hint
+/// `split_at_seq` after the server refused a request with `error`. `status`
+/// returns the step's status with the piece pending.
 fn next_request(
-    request: &PendingCommit,
-    next: NextRequest,
     error: ErrorResponse,
+    split_at_seq: CommitSeq,
     status: impl FnOnce(PendingCommit) -> MergeSessionStatus,
 ) -> Transition {
-    match next {
-        NextRequest::Split(split_at_seq) => Transition::new(
-            status(PendingCommit::new(split_at_seq)),
-            MergeSessionOutcome::Split {
-                error,
-                split_at_seq,
-            },
-        ),
-        NextRequest::Retry => {
-            let request = request.retried();
-            let failed_attempts = request.failed_attempts;
-            Transition::new(
-                status(request),
-                MergeSessionOutcome::Retrying {
-                    error,
-                    failed_attempts,
-                },
-            )
-        }
-    }
+    Transition::new(
+        status(PendingCommit::new(split_at_seq)),
+        MergeSessionOutcome::Split {
+            error,
+            split_at_seq,
+        },
+    )
 }
 
 /// Returns the status after the next-range query of `fork_id` returned

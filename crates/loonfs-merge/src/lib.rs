@@ -30,7 +30,6 @@ mod state;
 pub use error::{MergeError, Result};
 pub use mechanics::Mechanics;
 pub use outcome::MergeSessionOutcome;
-pub use refusal::MAX_MERGE_ATTEMPTS;
 pub use resolver::{DefaultResolver, Resolver};
 pub use session::{MergeSession, MergeSessionOptions, MAX_NEW_FORKS};
 pub use state::{

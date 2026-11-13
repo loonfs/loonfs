@@ -7,7 +7,7 @@ use crate::scripted_mechanics::{
 };
 use loonfs_merge::{
     DefaultResolver, MergeError, MergeFailure, MergeSession, MergeSessionOutcome,
-    MergeSessionStatus, MAX_MERGE_ATTEMPTS,
+    MergeSessionStatus,
 };
 use loonfs_types::{CommitSeq, ErrorCode, NextMergeRangeOutcome};
 use std::collections::BTreeSet;
@@ -427,49 +427,43 @@ async fn a_fork_point_below_the_floor_fails_the_session_before_it_merges() {
 }
 
 #[tokio::test]
-async fn a_retry_after_commit_queue_full_returns_the_original_commit() {
+async fn a_busy_server_leaves_the_state_as_it_was_and_the_next_step_sends_the_same_merge() {
     let mechanics = ScriptedMechanics::new([
         Answer::ForkSnapshots(Vec::new()),
         Answer::range(10, 20),
-        Answer::refused(ErrorCode::CommitQueueFull),
+        Answer::refused(ErrorCode::ServerBusy),
         Answer::Committed(31),
     ]);
-    let session = recover(&mechanics, DefaultResolver).await;
+    let mut session = recover(&mechanics, DefaultResolver).await;
+    let before = session.state().clone();
 
+    let busy = session.step().await;
+
+    assert!(
+        matches!(&busy, Err(MergeError::Client(error)) if error.code() == Some(ErrorCode::ServerBusy)),
+        "{busy:?}"
+    );
+    assert_eq!(*session.state(), before);
     let (outcomes, state) = run_to_end(&mechanics, &DefaultResolver, session).await;
-
     assert_eq!(state.status, MergeSessionStatus::Merged);
     assert!(matches!(
         outcomes.as_slice(),
-        [
-            MergeSessionOutcome::Retrying {
-                failed_attempts: 1,
-                ..
-            },
-            MergeSessionOutcome::MergeCommitted {
-                committed_seq: CommitSeq(31),
-                ..
-            },
-        ]
+        [MergeSessionOutcome::MergeCommitted {
+            committed_seq: CommitSeq(31),
+            ..
+        }]
     ));
     let merges = merges(&mechanics.sent());
     assert_eq!(merges.len(), 2);
     assert_eq!(
         merges[0], merges[1],
-        "the retry repeats the request and its commit ID"
+        "the next step sends the same request and its commit ID"
     );
 }
 
 #[tokio::test]
 async fn errors_that_the_loop_cant_act_on_fail_the_session() {
-    let cases: [(&str, Vec<Answer>, ErrorCode); 4] = [
-        (
-            "a busy server past the retry limit",
-            std::iter::repeat_with(|| Answer::refused(ErrorCode::ServerBusy))
-                .take(MAX_MERGE_ATTEMPTS)
-                .collect(),
-            ErrorCode::ServerBusy,
-        ),
+    let cases: [(&str, Vec<Answer>, ErrorCode); 3] = [
         (
             "a namespace that changed after each of the server's plans",
             vec![Answer::refused(ErrorCode::StaleHead)],

@@ -67,14 +67,6 @@ pub enum MergeSessionOutcome {
         /// The new fork's head, which the session merges it through.
         through_seq: CommitSeq,
     },
-    /// A merge or a rebase failed with a transient error, and the next step
-    /// sends the same request again.
-    Retrying {
-        /// The error.
-        error: ErrorResponse,
-        /// The times that the request has failed so far.
-        failed_attempts: u64,
-    },
     /// The session failed, and its status says why.
     Failed,
     /// The session deleted one of its new forks.
