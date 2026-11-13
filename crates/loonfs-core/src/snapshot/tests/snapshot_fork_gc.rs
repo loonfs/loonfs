@@ -50,6 +50,7 @@ impl Fixture {
                 SnapshotOwner::User {
                     name: Some("historical".into()),
                     expires_at_ms: Some(u64::MAX),
+                    deleted_at_ms: None,
                 },
                 crate::test_support::folded_manifest(&namespace)
                     .await
@@ -334,6 +335,7 @@ async fn snapshot_fork_refuses_a_snapshot_that_expired_after_the_fork_call_began
             SnapshotOwner::User {
                 name: Some("short".into()),
                 expires_at_ms: Some(context.now_ms + 10),
+                deleted_at_ms: None,
             },
             crate::test_support::folded_manifest(&namespace)
                 .await

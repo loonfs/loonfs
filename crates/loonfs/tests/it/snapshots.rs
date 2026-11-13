@@ -169,8 +169,8 @@ async fn snapshot_extension_recovers_a_record_write_with_an_ambiguous_outcome() 
 }
 
 /// Checks that a delete whose write acknowledgement is lost succeeds without a
-/// second write, and that the deleted snapshot can't be read but stays listed
-/// as an expired snapshot.
+/// second write, and that the deleted snapshot can't be read, retrieved, or
+/// listed.
 #[tokio::test]
 async fn a_snapshot_delete_succeeds_after_an_uncertain_write() {
     let temp_dir = tempdir().expect("tempdir");
@@ -214,17 +214,14 @@ async fn a_snapshot_delete_succeeds_after_an_uncertain_write() {
         reader.read_view_at_snapshot(&snapshot.snapshot_id).await,
         ErrorCode::SnapshotNotFound,
     );
-    let retrieved = reader
-        .get_snapshot(&snapshot.snapshot_id)
-        .await
-        .expect("retrieve the deleted snapshot");
-    assert!(retrieved.expires_at_ms.is_some_and(|expires_at_ms| {
-        expires_at_ms <= loonfs_types::WallClock::now_ms(&loonfs_types::SystemWallClock)
-    }));
+    assert_core_error_kind(
+        reader.get_snapshot(&snapshot.snapshot_id).await,
+        ErrorCode::SnapshotNotFound,
+    );
     let listed = list_snapshots(&fs.reader, &namespace_id)
         .await
         .expect("list snapshots");
-    assert_eq!(listed.snapshots, vec![retrieved]);
+    assert!(listed.snapshots.is_empty());
 }
 
 /// Checks that after a namespace is deleted, the snapshot inventory still

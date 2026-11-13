@@ -36,6 +36,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 SnapshotOwner::User {
                     name,
                     expires_at_ms,
+                    deleted_at_ms: None,
                 },
                 manifest,
                 &self.namespace.start_clock(),
@@ -91,6 +92,7 @@ fn validate_snapshot_owner(owner: &SnapshotOwner) -> Result<()> {
         SnapshotOwner::User {
             name,
             expires_at_ms,
+            ..
         } => {
             if let Some(name) = name {
                 validate_snapshot_name(name)?;

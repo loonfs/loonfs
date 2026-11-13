@@ -22,9 +22,10 @@ async fn request(
     )
 }
 
-/// Checks that deleting a snapshot writes its expiry once and that repeating
-/// the delete succeeds without a write, that the snapshot inventory has
-/// no create or delete route, and that a deleted snapshot can't be extended.
+/// Checks that deleting a snapshot writes its delete time once and that
+/// repeating the delete succeeds without a write, that the snapshot inventory
+/// has no create or delete route, and that a deleted snapshot can't be
+/// extended.
 #[tokio::test]
 async fn snapshot_deletes_are_idempotent_and_the_snapshot_inventory_is_read_only() {
     let directory = tempdir().expect("tempdir");

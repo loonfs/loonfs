@@ -7,6 +7,7 @@ use loonfs_types::{Snapshot, SnapshotRecord, SnapshotRecordOwner};
 /// returns.
 pub(crate) fn snapshot_record_summary(record: SnapshotPayload) -> SnapshotRecord {
     let expires_at_ms = record.owner.expires_at_ms();
+    let deleted_at_ms = record.owner.deleted_at_ms();
     let owner = match record.owner {
         SnapshotOwner::User { name, .. } => SnapshotRecordOwner::User { name },
         SnapshotOwner::Fork {
@@ -22,16 +23,18 @@ pub(crate) fn snapshot_record_summary(record: SnapshotPayload) -> SnapshotRecord
         owner,
         created_at_ms: record.created_at_ms,
         expires_at_ms,
+        deleted_at_ms,
         captured_seq: record.head_seq,
     }
 }
 
 /// Converts a user snapshot record to the snapshot the API returns, or returns
-/// `None` for a fork snapshot.
+/// `None` for a fork snapshot or a deleted snapshot.
 pub(crate) fn user_snapshot(record: SnapshotPayload) -> Option<Snapshot> {
     let SnapshotOwner::User {
         name,
         expires_at_ms,
+        deleted_at_ms: None,
     } = record.owner
     else {
         return None;
@@ -46,7 +49,8 @@ pub(crate) fn user_snapshot(record: SnapshotPayload) -> Option<Snapshot> {
     })
 }
 
-/// Converts a user snapshot record to the snapshot the API returns.
+/// Converts a user snapshot record that isn't deleted to the snapshot the API
+/// returns.
 pub(crate) fn snapshot_summary(record: SnapshotPayload) -> Snapshot {
     user_snapshot(record)
         .expect("a snapshot record created or loaded as a user snapshot should have a user owner")

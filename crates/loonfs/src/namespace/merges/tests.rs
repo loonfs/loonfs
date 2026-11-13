@@ -498,7 +498,7 @@ async fn a_merge_releases_the_snapshot_its_plan_took_on_the_fork() {
         .await
         .expect("the fork's snapshots after the merge");
     assert!(
-        released.snapshots[0].expires_at_ms < page.snapshots[0].expires_at_ms,
+        released.snapshots.is_empty(),
         "the merge releases its snapshot: {:?}",
         released.snapshots
     );

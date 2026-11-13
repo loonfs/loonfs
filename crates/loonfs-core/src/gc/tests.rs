@@ -1080,6 +1080,7 @@ async fn gc_keeps_a_basis_kept_by_another_owner_after_one_release() {
             SnapshotOwner::User {
                 name: Some("keeper".to_owned()),
                 expires_at_ms: None,
+                deleted_at_ms: None,
             },
             crate::test_support::folded_manifest(&namespace)
                 .await
@@ -1095,6 +1096,7 @@ async fn gc_keeps_a_basis_kept_by_another_owner_after_one_release() {
             SnapshotOwner::User {
                 name: Some("releaser".to_owned()),
                 expires_at_ms: None,
+                deleted_at_ms: None,
             },
             crate::test_support::folded_manifest(&namespace)
                 .await
@@ -2184,14 +2186,17 @@ async fn expiry_and_creation_grace_delete_snapshots_without_a_released_state() {
         SnapshotOwner::User {
             name: Some("permanent".to_owned()),
             expires_at_ms: None,
+            deleted_at_ms: None,
         },
         SnapshotOwner::User {
             name: Some("expiring".to_owned()),
             expires_at_ms: Some(2_000),
+            deleted_at_ms: None,
         },
         SnapshotOwner::User {
             name: Some("snapshot".to_owned()),
             expires_at_ms: Some(2_000),
+            deleted_at_ms: None,
         },
         SnapshotOwner::Fork {
             target_namespace_id: target.clone(),
@@ -2285,6 +2290,7 @@ async fn a_snapshot_naming_an_absent_manifest_is_corruption_before_sweeping() {
             SnapshotOwner::User {
                 name: Some("initial".to_owned()),
                 expires_at_ms: None,
+                deleted_at_ms: None,
             },
             crate::test_support::folded_manifest(&namespace)
                 .await

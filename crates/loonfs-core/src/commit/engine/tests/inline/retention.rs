@@ -96,6 +96,7 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
             SnapshotOwner::User {
                 name: Some("before reuse".into()),
                 expires_at_ms: Some(u64::MAX),
+                deleted_at_ms: None,
             },
             crate::test_support::folded_manifest(&namespace)
                 .await

@@ -1018,8 +1018,8 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
         assert!(listed_text.contains(&snapshot_id));
         assert!(listed_text.contains("nightly"));
 
-        // Deleting one expires it and leaves the other unchanged: a delete is
-        // per record, never per label.
+        // Deleting one records its delete time and leaves the other unchanged:
+        // a delete is per record, never per label.
         assert_success(&harness.run(&[
             "--json",
             "snapshot",
@@ -1043,7 +1043,7 @@ fn maintenance_and_changes_commands_report_the_same_shapes_in_both_modes() {
         assert_eq!(remaining.len(), 2);
         for snapshot in remaining {
             assert_eq!(
-                snapshot.get("expires_at_ms").is_some(),
+                snapshot.get("deleted_at_ms").is_some(),
                 snapshot["snapshot_id"] == second_snapshot_id.as_str()
             );
         }

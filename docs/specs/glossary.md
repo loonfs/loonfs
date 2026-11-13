@@ -363,7 +363,7 @@ The reference server's scheduler listing every namespace in the store, including
 
 ### Compare-and-swap (CAS)
 
-A conditional update that replaces an object only if it hasn't changed since the caller read it (that is, its compare token, such as an ETag, still matches). LoonFS uses compare-and-swap to raise the hint and to extend a user snapshot's expiry.
+A conditional update that replaces an object only if it hasn't changed since the caller read it (that is, its compare token, such as an ETag, still matches). LoonFS uses compare-and-swap to raise the hint, to extend a user snapshot's expiry, and to record a user snapshot's deletion.
 
 ### Publication budget
 

@@ -2,7 +2,8 @@
 //!
 //! The snapshot API reads and changes user snapshots. An unexpired snapshot can be read and forked,
 //! and an expired one can't, but it stays listed until garbage collection
-//! deletes it.
+//! deletes it. A deleted snapshot can't be used or retrieved, and the snapshot
+//! listing leaves it out.
 
 use super::read_basis::load_snapshot_read_basis_from_record;
 use super::record::{encode_snapshot_record, LoadedSnapshotRecord};
@@ -23,8 +24,8 @@ impl<S: ObjectStore> NamespaceStore<S> {
     /// namespace's fork snapshots, which keeps a manifest just as a snapshot does
     /// ([format section 8.3](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#83-reads-deletion-and-expiry)).
     ///
-    /// A missing snapshot, and a snapshot that expired at or before the wall-clock
-    /// time of the call, return `snapshot_not_found`.
+    /// A missing snapshot, a deleted snapshot, and a snapshot that expired at or
+    /// before the wall-clock time of the call return `snapshot_not_found`.
     pub async fn load_snapshot_read_basis(
         &self,
         live_head: &NamespaceReadState,
@@ -36,7 +37,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 snapshot_id: snapshot_id.clone(),
             });
         };
-        let loaded = ensure_unexpired(loaded, now_ms)?;
+        let loaded = ensure_live(loaded, now_ms)?;
         load_snapshot_read_basis_from_record(
             &self.store,
             &self.segment_cache,
@@ -47,24 +48,31 @@ impl<S: ObjectStore> NamespaceStore<S> {
     }
 }
 
-/// Returns `loaded` if it hasn't expired at `now_ms`, and
-/// `snapshot_not_found` if it has.
-pub(crate) fn ensure_unexpired(
+/// Returns `loaded` if it isn't deleted and hasn't expired at `now_ms`, and
+/// `snapshot_not_found` otherwise. A deletion is refused whatever `now_ms`
+/// reads, because the deleting host's clock can be ahead of this one.
+pub(crate) fn ensure_live(
     loaded: LoadedSnapshotRecord,
     now_ms: u64,
 ) -> Result<LoadedSnapshotRecord> {
-    match loaded.state.owner.expires_at_ms() {
-        Some(expires_at_ms) if expires_at_ms <= now_ms => Err(CoreError::SnapshotNotFound {
+    let owner = &loaded.state.owner;
+    if owner.deleted_at_ms().is_some()
+        || owner
+            .expires_at_ms()
+            .is_some_and(|expires_at_ms| expires_at_ms <= now_ms)
+    {
+        return Err(CoreError::SnapshotNotFound {
             snapshot_id: loaded.state.snapshot_id,
-        }),
-        _ => Ok(loaded),
+        });
     }
+    Ok(loaded)
 }
 
 impl<S: ObjectStore, M> NamespaceEngine<S, M> {
     /// Loads one snapshot by id, as the snapshot listing returns it,
     /// including an expired snapshot that garbage collection hasn't deleted.
-    /// A missing id, or the id of a fork snapshot, returns `snapshot_not_found`.
+    /// A missing id, the id of a deleted snapshot, or the id of a fork snapshot
+    /// returns `snapshot_not_found`.
     pub async fn get_snapshot(&self, snapshot_id: &SnapshotId) -> Result<Snapshot> {
         self.namespace.load_current_manifest().await?;
         let loaded = self.namespace.load_user_snapshot(snapshot_id).await?;
@@ -73,8 +81,8 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
 }
 
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
-    /// Moves an unexpired snapshot's expiry to `requested_expires_at_ms`,
-    /// never earlier. A snapshot without an expiry is returned unchanged.
+    /// Moves the expiry of an unexpired snapshot that isn't deleted to
+    /// `requested_expires_at_ms`, never earlier. A snapshot without an expiry is returned unchanged.
     pub async fn extend_snapshot(
         &self,
         snapshot_id: &SnapshotId,
@@ -86,7 +94,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
             // The expiry check reads the clock after the load, so the time the
             // load took counts toward the expiry.
             let loaded = self.namespace.load_user_snapshot(snapshot_id).await?;
-            let loaded = ensure_unexpired(loaded, clock.now_ms())?;
+            let loaded = ensure_live(loaded, clock.now_ms())?;
             let mut next = loaded.state.clone();
             let SnapshotOwner::User {
                 expires_at_ms: Some(expires_at_ms),
@@ -114,7 +122,7 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                     // This read checks whether an earlier compare-and-swap was
                     // written. It doesn't start a new extension, so an expiry
                     // after that write doesn't turn the success into a failure.
-                    let current = ensure_unexpired(
+                    let current = ensure_live(
                         self.namespace.load_user_snapshot(snapshot_id).await?,
                         clock.request_at_ms(),
                     )?;
@@ -137,12 +145,12 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         .await?
     }
 
-    /// Deletes a snapshot by moving its expiry to the current time, so the
-    /// snapshot is expired from then on and garbage collection deletes its
-    /// record after the grace window. A missing or already expired snapshot
-    /// succeeds without a write, so a retried delete returns the same response.
-    /// A fork snapshot returns `snapshot_not_found`, because only garbage
-    /// collection deletes it.
+    /// Deletes a snapshot by recording the current time as its delete time, so
+    /// the snapshot can't be used or retrieved from then on and garbage
+    /// collection deletes its record after the grace window. A missing or
+    /// already deleted snapshot succeeds without a write, so a retried delete
+    /// returns the same response. A fork snapshot returns `snapshot_not_found`,
+    /// because only garbage collection deletes it.
     pub async fn delete_snapshot(
         &self,
         snapshot_id: &SnapshotId,
@@ -154,17 +162,16 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                 return Ok(CasOutcome::Settled(()));
             };
             let mut next = loaded.state.clone();
-            let SnapshotOwner::User { expires_at_ms, .. } = &mut next.owner else {
+            let SnapshotOwner::User { deleted_at_ms, .. } = &mut next.owner else {
                 return Err(CoreError::SnapshotNotFound {
                     snapshot_id: snapshot_id.clone(),
                 });
             };
-            // The clock is read after the load, as an extension reads it.
-            let now_ms = clock.now_ms();
-            if expires_at_ms.is_some_and(|expires_at_ms| expires_at_ms <= now_ms) {
+            if deleted_at_ms.is_some() {
                 return Ok(CasOutcome::Settled(()));
             }
-            *expires_at_ms = Some(now_ms);
+            // The clock is read after the load, as an extension reads it.
+            *deleted_at_ms = Some(clock.now_ms());
             let encoded = encode_snapshot_record(&next);
             match self
                 .namespace
@@ -177,8 +184,8 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
                     CoreError::contention_exhausted(&object_key),
                 )),
                 // The next attempt loads the record again. If this write was
-                // applied, that attempt finds the expiry at or before its clock
-                // and writes nothing.
+                // applied, that attempt finds the delete time and writes
+                // nothing.
                 Err(error @ ObjectStoreError::Transport { .. }) => {
                     Ok(CasOutcome::Contended(CoreError::store(&object_key, &error)))
                 }

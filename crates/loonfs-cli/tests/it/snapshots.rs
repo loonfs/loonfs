@@ -68,12 +68,12 @@ fn snapshot_family_and_captured_read_work_end_to_end() {
     assert_success(&deleted);
     assert_eq!(json_data(&deleted)["kind"], "snapshot_deleted");
 
-    let expired = harness.run(&["--json", "snapshot", "list", "demo"]);
-    assert_success(&expired);
-    let expired = json_data(&expired);
-    let expired = expired["snapshots"].as_array().expect("snapshot array");
-    assert_eq!(expired.len(), 1);
-    assert!(expired[0]["expires_at_ms"].as_u64() < extended_data["expires_at_ms"].as_u64());
+    let empty = harness.run(&["--json", "snapshot", "list", "demo"]);
+    assert_success(&empty);
+    assert!(json_data(&empty)["snapshots"]
+        .as_array()
+        .expect("snapshot array")
+        .is_empty());
 
     let gone = harness.run(&[
         "--json",

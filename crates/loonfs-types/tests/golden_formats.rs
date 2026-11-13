@@ -994,7 +994,8 @@ fn control_objects_match_golden_bytes() {
             created_at_ms: 3_000,
             owner: SnapshotOwner::User {
                 name: Some("nightly".to_owned()),
-                expires_at_ms: None,
+                expires_at_ms: Some(10_000),
+                deleted_at_ms: Some(4_000),
             },
         },
     );
@@ -1010,6 +1011,7 @@ fn control_objects_match_golden_bytes() {
             owner: SnapshotOwner::User {
                 name: None,
                 expires_at_ms: None,
+                deleted_at_ms: None,
             },
         },
     );

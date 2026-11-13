@@ -309,8 +309,8 @@ async fn content_only_a_snapshot_manifest_names_stays_until_the_snapshot_is_rele
         .load_snapshot_record(&snapshot.snapshot_id)
         .await
         .expect("load snapshot")
-        .and_then(|loaded| loaded.state.owner.expires_at_ms())
-        .expect("the deleted snapshot stays, with an expiry");
+        .and_then(|loaded| loaded.state.owner.deleted_at_ms())
+        .expect("the deleted snapshot stays, with its delete time");
     let manifest_key = metadata_manifest_object(&namespace_id, &snapshot.manifest_no);
     let kept = context(deleted_at_ms + GRACE_MS - 1);
     let report = collect(&store, &namespace_id, &kept).await;
