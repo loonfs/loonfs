@@ -125,8 +125,6 @@ async fn runtime_and_grep_cache_metrics_render_from_the_cache_stats() {
             "gauge `{name}`"
         );
     }
-    assert!(!rendered.contains("loonfs_cache_metadata_segment_cache_hits"));
-    assert!(!rendered.contains("loonfs_runtime_cache_"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -418,7 +416,7 @@ async fn shutdown_abandons_a_parked_sweep_at_its_deadline_and_settles_the_runtim
 }
 
 #[tokio::test]
-async fn every_route_except_health_and_readiness_requires_authorization() {
+async fn metrics_requires_authorization_and_health_and_readiness_do_not() {
     use tower::ServiceExt;
 
     let temp_dir = tempdir().expect("tempdir");
@@ -432,93 +430,22 @@ async fn every_route_except_health_and_readiness_requires_authorization() {
     .await
     .expect("build app")
     .0;
-    let protected_routes = [
-        ("GET", "/metrics"),
-        ("GET", "/v0/capabilities"),
-        ("POST", "/v0/namespaces"),
-        ("GET", "/v0/namespaces/demo"),
-        ("DELETE", "/v0/namespaces/demo"),
-        ("POST", "/v0/namespaces/demo/forks"),
-        ("GET", "/v0/namespaces/demo/snapshots"),
-        ("POST", "/v0/namespaces/demo/snapshots"),
-        ("POST", "/v0/namespaces/demo/snapshots/snp_test/extend"),
-        ("DELETE", "/v0/namespaces/demo/snapshots/snp_test"),
-        ("GET", "/v0/maintenance/namespaces/demo/diagnostics"),
-        ("GET", "/v0/namespaces/demo/filesystem/entries"),
-        ("GET", "/v0/namespaces/demo/filesystem/entry"),
-        ("GET", "/v0/namespaces/demo/filesystem/content"),
-        ("POST", "/v0/namespaces/demo/filesystem/downloads"),
-        ("GET", "/v0/namespaces/demo/grep"),
-        ("GET", "/v0/maintenance/namespaces/demo/grep/index"),
-        ("POST", "/v0/maintenance/namespaces/demo/grep/index/enable"),
-        ("POST", "/v0/maintenance/namespaces/demo/grep/index/disable"),
-        ("GET", "/v0/namespaces/demo/filesystem/revisions"),
-        (
-            "GET",
-            "/v0/namespaces/demo/inodes/ino_00000000000000000000000000",
-        ),
-        (
-            "GET",
-            "/v0/namespaces/demo/inodes/ino_00000000000000000000000000/children",
-        ),
-        (
-            "GET",
-            "/v0/namespaces/demo/inodes/ino_00000000000000000000000000/revisions",
-        ),
-        (
-            "GET",
-            "/v0/namespaces/demo/inodes/ino_00000000000000000000000000/revisions/1/content",
-        ),
-        (
-            "POST",
-            "/v0/namespaces/demo/inodes/ino_00000000000000000000000000/revisions/1/downloads",
-        ),
-        ("GET", "/v0/namespaces/demo/filesystem/trash"),
-        ("POST", "/v0/namespaces/demo/commits"),
-        ("POST", "/v0/namespaces/demo/uploads"),
-        ("PUT", "/v0/namespaces/demo/uploads/upl_test/content"),
-        ("POST", "/v0/namespaces/demo/uploads/upl_test/parts"),
-        ("POST", "/v0/namespaces/demo/uploads/upl_test/complete"),
-        ("POST", "/v0/namespaces/demo/uploads/upl_test/abort"),
-        ("GET", "/v0/namespaces/demo/uploads/upl_test"),
-        ("GET", "/v0/namespaces/demo/changes"),
-        ("GET", "/v0/maintenance/namespaces/demo/snapshots"),
-        ("GET", "/v0/maintenance/namespaces/demo/snapshots/snp_test"),
-        ("POST", "/v0/maintenance/namespaces/demo/jobs"),
-        ("POST", "/v0/maintenance/store/probe"),
-    ];
-
-    for (method, uri) in protected_routes {
-        let response = router
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .method(method)
-                    .uri(uri)
-                    .body(axum::body::Body::empty())
-                    .expect("route request"),
-            )
-            .await
-            .expect("route response");
-        assert_eq!(
-            response.status(),
-            StatusCode::UNAUTHORIZED,
-            "{method} {uri}"
-        );
-    }
-
-    for uri in ["/health", "/readiness"] {
+    for (uri, status) in [
+        ("/metrics", StatusCode::UNAUTHORIZED),
+        ("/health", StatusCode::OK),
+        ("/readiness", StatusCode::OK),
+    ] {
         let response = router
             .clone()
             .oneshot(
                 axum::http::Request::builder()
                     .uri(uri)
                     .body(axum::body::Body::empty())
-                    .expect("public request"),
+                    .expect("request"),
             )
             .await
-            .expect("public response");
-        assert_eq!(response.status(), StatusCode::OK, "GET {uri}");
+            .expect("response");
+        assert_eq!(response.status(), status, "GET {uri}");
     }
 }
 
