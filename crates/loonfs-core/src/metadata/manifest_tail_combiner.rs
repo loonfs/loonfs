@@ -3,7 +3,7 @@
 
 use crate::error::Result;
 use loonfs_types::format::manifest::lookup_keys;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 
 /// Which side a combiner takes first when both contain a row with the same key.
@@ -120,6 +120,35 @@ impl<T> ManifestTailCombiner<T> {
             }
         }
     }
+}
+
+/// Returns the `limit` lowest of `rows` whose row keys are at or after
+/// `lower_bound`, with their row keys, in row-key order, for a page whose
+/// every tail row is one of the rows that it returns. `row_key` formats a
+/// row's key.
+///
+/// Only the rows that the function returns are copied, however many rows the
+/// tail has. Of two rows with one key, the function keeps the first.
+pub(super) fn lowest_tail_rows<'a, T: Clone + 'a>(
+    rows: impl Iterator<Item = &'a T>,
+    row_key: impl Fn(&T) -> String,
+    lower_bound: &str,
+    limit: usize,
+) -> Vec<(String, T)> {
+    let mut lowest: BTreeMap<String, &T> = BTreeMap::new();
+    for row in rows {
+        let row_key = row_key(row);
+        if row_key.as_str() >= lower_bound {
+            lowest.entry(row_key).or_insert(row);
+            if lowest.len() > limit {
+                lowest.pop_last();
+            }
+        }
+    }
+    lowest
+        .into_iter()
+        .map(|(row_key, row)| (row_key, row.clone()))
+        .collect()
 }
 
 /// Where a paged scan of manifest rows resumes.

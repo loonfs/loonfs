@@ -205,6 +205,125 @@ async fn bounded_pages_combine_overlapping_runs_and_binding_versions() {
     }
 }
 
+/// Reads the revision rows of `view` in pages of `limit` rows, every
+/// inode's rows or the rows of `inode_id`, and returns the inode and the
+/// revision number of each row in the order read.
+async fn paged_revisions<S: ObjectStore + ?Sized>(
+    view: &crate::metadata::MetadataView<'_, '_, S>,
+    inode_id: Option<InodeId>,
+    limit: usize,
+) -> Vec<(InodeId, RevisionNo)> {
+    use loonfs_types::format::manifest::lookup_keys;
+
+    let mut lower_bound = match inode_id {
+        Some(inode_id) => lookup_keys::revision_prefix(inode_id),
+        None => lookup_keys::REVISION_ROW_PREFIX.to_owned(),
+    };
+    let mut read = Vec::new();
+    loop {
+        let page = view
+            .revisions_page(&lower_bound, inode_id, limit)
+            .await
+            .expect("revision page");
+        assert!(page.len() <= limit, "limit {limit}");
+        if let Some((row_key, _)) = page.last() {
+            lower_bound = lookup_keys::after_row_key(row_key);
+        }
+        read.extend(
+            page.iter()
+                .map(|(_, revision)| (revision.inode_id, revision.revision_no)),
+        );
+        if page.len() < limit {
+            return read;
+        }
+    }
+}
+
+/// Checks that the pages of a view's revision rows, read one after another,
+/// list each revision once in row-key order (by inode, and newest first
+/// within an inode), when the manifest and the WAL tail both have rows and
+/// the tail has more rows than a page.
+#[tokio::test]
+async fn revision_pages_list_each_revision_once_when_the_tail_has_more_rows_than_a_page() {
+    let temp = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp.path()).expect("store");
+    let namespace_id = NamespaceId::parse("revision-pages").expect("namespace");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    let fixture = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context);
+    let paths = |name: &str| -> Vec<String> {
+        (0..4).map(|index| format!("/{name}-{index}.txt")).collect()
+    };
+    let folded = paths("folded");
+    fixture
+        .write_files_bytes(&folded, b"one\n")
+        .await
+        .expect("write the files that the fold moves into the manifest");
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .fold_wal()
+        .await
+        .expect("fold");
+    // The tail has two more revisions of each folded file, whose rows sort
+    // among the manifest's rows, and the first revision of four more files.
+    let unfolded = paths("unfolded");
+    let writes: [(&[String], &[u8]); 3] = [
+        (&folded, b"two\n"),
+        (&folded, b"three\n"),
+        (&unfolded, b"one\n"),
+    ];
+    for (files, bytes) in writes {
+        fixture
+            .write_files_bytes(files, bytes)
+            .await
+            .expect("write the revisions that stay in the tail");
+    }
+
+    let mut expected = Vec::new();
+    for (files, newest) in [(&folded, 3), (&unfolded, 1)] {
+        for path in files {
+            let inode_id = crate::test_support::visible_inode_id(&store, &namespace_id, path).await;
+            expected.extend((1..=newest).map(|revision_no| (inode_id, RevisionNo(revision_no))));
+        }
+    }
+    expected.sort_by_key(|(inode_id, revision_no)| (*inode_id, std::cmp::Reverse(*revision_no)));
+    let rewritten = expected[0].0;
+    let of_rewritten: Vec<_> = expected
+        .iter()
+        .filter(|(inode_id, _)| *inode_id == rewritten)
+        .copied()
+        .collect();
+
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let loaded = namespace
+        .load_current_metadata_view()
+        .await
+        .expect("load the current view");
+    let tail_revisions: usize = loaded
+        .wal_tail
+        .row_states(loaded.visible_seq())
+        .map(|state| state.revisions().len())
+        .sum();
+    assert_eq!(
+        tail_revisions, 12,
+        "the tail has the revisions written after the fold"
+    );
+    let view = loaded.metadata_view();
+    for limit in [1, 3, 100] {
+        assert_eq!(
+            paged_revisions(&view, None, limit).await,
+            expected,
+            "limit {limit}"
+        );
+        assert_eq!(
+            paged_revisions(&view, Some(rewritten), limit).await,
+            of_rewritten,
+            "one inode, limit {limit}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn bounded_pages_open_and_refill_segments_in_a_concurrent_window() {
     let temp = tempdir().expect("tempdir");
