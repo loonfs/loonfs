@@ -12,7 +12,7 @@ use loonfs_core::test_support::{
 };
 use loonfs_core::{CoreError, ErrorCode};
 use loonfs_objectstore::keys::{
-    content_blob, hint, metadata_manifest_object, pool_record, snapshot_record,
+    boundary, content_blob, hint, metadata_manifest_object, pool_record, snapshot_record,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStoreExtension;
@@ -1371,7 +1371,12 @@ async fn gc_preserves_unfolded_data_then_the_current_manifest_tombstone() {
         .load_current_manifest()
         .await
         .expect("current tombstone");
-    let mut expected = vec![hint(&namespace_id), current.object_key.clone()];
+    // The collections deleted manifests, so they raised the manifest boundary.
+    let mut expected = vec![
+        boundary(&namespace_id),
+        hint(&namespace_id),
+        current.object_key.clone(),
+    ];
     expected.extend(
         current
             .payload()

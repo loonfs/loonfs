@@ -898,7 +898,7 @@ A GC response contains counts for that call. Concurrent calls can overlap their 
 
 Each GC request runs one complete, stateless collection. `GcRequest` has no fields, so a request can't include a cursor. No collection runs unless `gc` is present.
 
-Every GC call uses one clock reading for the whole call. It keeps its live set in memory, and it doesn't write any collection progress. For each object family it lists, the call reads the listing from the beginning to the end.
+Every GC call uses one clock reading for the whole call. It keeps its live set in memory, and it doesn't write any collection progress. For each object family it lists, the call reads the listing from the beginning to the end. Before a namespace's call deletes manifests, it raises the namespace's [manifest boundary](glossary.md#manifest-boundary) to the highest manifest number that it deletes (see [One complete collection](format.md#111-one-complete-collection)).
 
 A namespace's call reads the current manifest, lists the namespace's snapshots, and loads the manifests that the snapshots keep. If a manifest read fails, the call fails before it lists or deletes anything. [Reference roots](format.md#112-reference-roots) defines these roots.
 

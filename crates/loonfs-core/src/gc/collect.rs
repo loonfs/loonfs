@@ -1,16 +1,18 @@
 //! One collection of a namespace's own objects, with a fixed clock and no
 //! durable progress.
 
-use super::deletes::apply_decisions;
+use super::charged_set::{ChargedQueue, CollectionMemory};
+use super::deletes::{apply_decisions, Decision};
 use super::families::CandidateFamily;
 use super::live_set::{LiveSet, RetirementStatus};
 use super::sweep::Sweep;
 use crate::error::{CoreError, Result};
 use crate::namespace::store::NamespaceStore;
 use crate::time::OperationClock;
-use futures::{stream, StreamExt, TryStreamExt};
+use futures::{stream, Stream, StreamExt, TryStreamExt};
+use loonfs_objectstore::layout::manifest_no_of;
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::GcResponse;
+use loonfs_types::{GcResponse, ManifestNo};
 use std::sync::atomic::AtomicU64;
 
 impl<S: ObjectStore> NamespaceStore<S> {
@@ -46,7 +48,12 @@ impl<S: ObjectStore> NamespaceStore<S> {
                 .map_err(|error| CoreError::store(&prefix, &error))
                 .map_ok(|entry| sweep.candidate(family, entry))
                 .boxed();
-            apply_decisions(&self.store, decisions, &mut report).await?;
+            if family == CandidateFamily::Manifests {
+                self.collect_manifests(decisions, &live.memory, &mut report)
+                    .await?;
+            } else {
+                apply_decisions(&self.store, decisions, &mut report).await?;
+            }
         }
         report.listed_bytes += sweep.listed_bytes.into_inner() + live.snapshot_listed_bytes;
         // The snapshots go after the objects that they protect, from the listing
@@ -56,4 +63,39 @@ impl<S: ObjectStore> NamespaceStore<S> {
         self.retire_namespace(&live, &mut report).await?;
         Ok(report)
     }
+
+    /// Keeps the collection's decision about every listed manifest, raises
+    /// the manifest boundary to the highest manifest number that the decisions
+    /// delete, and then deletes exactly those manifests.
+    async fn collect_manifests(
+        &self,
+        mut decisions: impl Stream<Item = Result<Decision<GcResponse>>> + Unpin,
+        memory: &CollectionMemory,
+        report: &mut GcResponse,
+    ) -> Result<()> {
+        let mut kept = ChargedQueue::new(memory);
+        while let Some(decision) = decisions.try_next().await? {
+            kept.push_back(decision)?;
+        }
+        if let Some(manifest_no) = raise_target(kept.iter()) {
+            self.raise_boundary(manifest_no).await?;
+        }
+        let kept = std::iter::from_fn(|| kept.pop_front()).map(Ok);
+        apply_decisions(&self.store, stream::iter(kept), report).await
+    }
+}
+
+/// Returns the highest manifest number that `decisions` delete, or `None`
+/// when they delete no manifest.
+fn raise_target<'a>(
+    decisions: impl Iterator<Item = &'a Decision<GcResponse>>,
+) -> Option<ManifestNo> {
+    decisions
+        .filter_map(|decision| match decision {
+            Decision::Delete { keys, .. } => {
+                keys.iter().filter_map(|key| manifest_no_of(key)).max()
+            }
+            Decision::Retain { .. } | Decision::Gone => None,
+        })
+        .max()
 }

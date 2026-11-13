@@ -1,4 +1,4 @@
-//! Durable control-object shapes: the discovery hint,
+//! Durable control-object shapes: the discovery hint, the manifest boundary,
 //! snapshots, upload session and outcome records, pool records, and their envelopes
 //! ([Appendix A.4](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a4-control-and-manifest-payloads)).
 
@@ -28,16 +28,20 @@ pub enum ControlObjectKind {
     UploadOutcome,
     /// Records the creation of one pool.
     Pool,
+    /// Records the manifest number at or below which every manifest of a
+    /// namespace is replaced.
+    Boundary,
 }
 
 impl ControlObjectKind {
     /// Lists every registered control-object family in stable registry order.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Hint,
         Self::Snapshot,
         Self::UploadSession,
         Self::UploadOutcome,
         Self::Pool,
+        Self::Boundary,
     ];
 
     /// Returns the durable format version for this control object kind.
@@ -53,6 +57,7 @@ impl ControlObjectKind {
             Self::UploadSession => 1,
             Self::UploadOutcome => 1,
             Self::Pool => 1,
+            Self::Boundary => 1,
         }
     }
 
@@ -64,6 +69,7 @@ impl ControlObjectKind {
             Self::UploadSession => "upload_session",
             Self::UploadOutcome => "upload_outcome",
             Self::Pool => "pool",
+            Self::Boundary => "boundary",
         }
     }
 
@@ -81,6 +87,34 @@ pub struct HintPayload {
     pub namespace_id: NamespaceId,
     /// Positive manifest number from which discovery begins.
     pub manifest_no: ManifestNo,
+}
+
+/// The manifest boundary of one namespace.
+///
+/// A namespace's collection raises the boundary before it deletes manifests,
+/// and no write lowers it. A missing object means that no manifest is at or
+/// below the boundary.
+///
+/// See [control and manifest payloads](https://github.com/loonfs/loonfs/blob/main/docs/specs/format.md#a4-control-and-manifest-payloads).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BoundaryPayload {
+    /// Namespace whose manifests the boundary covers.
+    pub namespace_id: NamespaceId,
+    /// How far the namespace's collection has raised the boundary.
+    pub boundary: ManifestBoundary,
+}
+
+/// The value of a manifest boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ManifestBoundary {
+    /// Every manifest numbered `manifest_no` or lower has been replaced by a
+    /// newer manifest.
+    Manifest {
+        /// Positive number of the highest manifest at or below the boundary.
+        manifest_no: ManifestNo,
+    },
 }
 
 /// One reference to a namespace manifest.

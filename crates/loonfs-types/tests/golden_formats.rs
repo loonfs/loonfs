@@ -18,9 +18,10 @@
 #![allow(clippy::panic, reason = "an integration test binary is test code")]
 
 use loonfs_types::format::control::{
-    decode_control_object, ControlObjectEnvelope, ControlObjectKind, ForkBasis, HintPayload,
-    ManifestRef, NamespaceStatus, PoolPayload, RebasedFrom, SnapshotOwner, SnapshotPayload,
-    UploadOutcome, UploadOutcomePayload, UploadSessionMode, UploadSessionPayload, WriterBlock,
+    decode_control_object, BoundaryPayload, ControlObjectEnvelope, ControlObjectKind, ForkBasis,
+    HintPayload, ManifestBoundary, ManifestRef, NamespaceStatus, PoolPayload, RebasedFrom,
+    SnapshotOwner, SnapshotPayload, UploadOutcome, UploadOutcomePayload, UploadSessionMode,
+    UploadSessionPayload, WriterBlock,
 };
 use loonfs_types::format::envelope::EnvelopeCodecError;
 use loonfs_types::format::manifest::{
@@ -1120,6 +1121,16 @@ fn control_objects_match_golden_bytes() {
             created_at_ms: 1_000,
         },
     );
+    check_control_golden(
+        "control_boundary.v1.json",
+        ControlObjectKind::Boundary,
+        BoundaryPayload {
+            namespace_id: namespace_id(),
+            boundary: ManifestBoundary::Manifest {
+                manifest_no: ManifestNo(44),
+            },
+        },
+    );
 }
 
 #[test]
@@ -1129,6 +1140,7 @@ fn every_durable_status_is_a_kind_tagged_object() {
         ("manifest.deleted.v1.json", "status"),
         ("control_upload_outcome_completed.v1.json", "outcome"),
         ("control_upload_outcome_aborted.v1.json", "outcome"),
+        ("control_boundary.v1.json", "boundary"),
     ];
     for (fixture, field) in fixtures {
         let document: serde_json::Value =
@@ -1174,6 +1186,11 @@ fn every_control_payload_rejects_unknown_fields_as_corruption() {
     assert_control_payload_edit_is_corrupt::<UploadOutcomePayload>(
         "control_upload_outcome_completed.v1.json",
         ControlObjectKind::UploadOutcome,
+        add_unknown,
+    );
+    assert_control_payload_edit_is_corrupt::<BoundaryPayload>(
+        "control_boundary.v1.json",
+        ControlObjectKind::Boundary,
         add_unknown,
     );
 }
