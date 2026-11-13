@@ -118,13 +118,6 @@ impl AbandonedUpload {
     /// object after it was deleted.
     #[must_use]
     pub(crate) async fn release<S: ObjectStore + ?Sized>(&self, store: &S) -> bool {
-        if !self.release_provider(store).await {
-            return false;
-        }
-        delete_unpublished_content_object(store, &self.pool_id, &self.content_id).await
-    }
-
-    pub(crate) async fn release_provider<S: ObjectStore + ?Sized>(&self, store: &S) -> bool {
         if let Some(provider_upload_id) = &self.provider_multipart_upload_id {
             if !abort_unpublished_multipart_upload(
                 store,
@@ -137,7 +130,7 @@ impl AbandonedUpload {
                 return false;
             }
         }
-        true
+        delete_unpublished_content_object(store, &self.pool_id, &self.content_id).await
     }
 }
 

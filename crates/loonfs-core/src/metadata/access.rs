@@ -40,20 +40,19 @@ where
         let Some(current) = walk.next(reads).await? else {
             // The root of a deletion in the trash has no current binding, and its
             // `set` event's saved parent repairs that one edge.
-            match reads.find_hiding_subtree_tombstone(last).await? {
-                Some(tombstone) if tombstone.committed_seq > reads.retention_floor_seq() => {
-                    match tombstone.action {
-                        TombstoneRowAction::Set {
-                            deleted_binding, ..
-                        } => {
-                            walk.continue_at(deleted_binding.parent_inode_id);
-                            continue;
-                        }
-                        TombstoneRowAction::Revoke { .. } => break,
-                    }
-                }
-                Some(_) | None => break,
-            }
+            let floor = reads.retention_floor_seq();
+            let Some(TombstoneRowAction::Set {
+                deleted_binding, ..
+            }) = reads
+                .find_hiding_subtree_tombstone(last)
+                .await?
+                .filter(|tombstone| tombstone.committed_seq > floor)
+                .map(|tombstone| tombstone.action)
+            else {
+                break;
+            };
+            walk.continue_at(deleted_binding.parent_inode_id);
+            continue;
         };
         if known(current) {
             return Ok(AccessWalk {

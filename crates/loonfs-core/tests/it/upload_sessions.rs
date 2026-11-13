@@ -109,11 +109,8 @@ async fn complete_upload<S: ObjectStore + ?Sized>(
     upload_id: &UploadId,
     context: &WriterAt,
 ) -> Result<loonfs_types::UploadSession, CoreError> {
-    let catalog = namespace_store(store, namespace_id)
-        .load_catalog_entry()
-        .await?;
     namespace_engine(store, namespace_id, context)
-        .complete_upload(&catalog, upload_id, CompleteUploadBody::ServiceProxied {})
+        .complete_upload(upload_id, CompleteUploadBody::ServiceProxied {})
         .await
         .map(|completed| completed.response)
 }
@@ -952,11 +949,8 @@ mod direct_multipart {
         request: &CompleteUploadBody,
         context: &WriterAt,
     ) -> Result<loonfs_types::UploadSession, CoreError> {
-        let catalog = namespace_store(store, namespace_id)
-            .load_catalog_entry()
-            .await?;
         namespace_engine(store, namespace_id, context)
-            .complete_upload(&catalog, upload_id, request.clone())
+            .complete_upload(upload_id, request.clone())
             .await
             .map(|completed| completed.response)
     }

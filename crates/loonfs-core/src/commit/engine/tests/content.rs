@@ -53,14 +53,7 @@ async fn completed_upload<S: ObjectStore + ?Sized>(
     .expect("stage upload");
     let completed = crate::test_support::NamespaceFixture::new(store, namespace_id, context)
         .engine()
-        .complete_upload(
-            &crate::test_support::namespace_store(store, namespace_id)
-                .load_catalog_entry()
-                .await
-                .expect("load the catalog"),
-            &upload.upload_id,
-            CompleteUploadBody::ServiceProxied {},
-        )
+        .complete_upload(&upload.upload_id, CompleteUploadBody::ServiceProxied {})
         .await
         .expect("complete upload");
     completed

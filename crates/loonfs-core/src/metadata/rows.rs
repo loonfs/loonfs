@@ -318,7 +318,7 @@ impl MetadataState {
     }
 
     pub(crate) fn push_revision_record(&mut self, record: RevisionRecord) {
-        self.indexes.record_revision(&record);
+        self.indexes.record_seq(record.committed_seq);
         self.record_row_weight(record.heap_bytes());
         self.revisions.push(record);
     }
@@ -341,13 +341,13 @@ impl MetadataState {
     }
 
     pub(crate) fn push_attributes_revision_record(&mut self, record: AttributesRevisionRecord) {
-        self.indexes.record_attributes_revision(&record);
+        self.indexes.record_seq(record.committed_seq);
         self.record_row_weight(record.heap_bytes());
         self.attributes_revisions.push(record);
     }
 
     pub(crate) fn push_access_revision_record(&mut self, record: AccessRevisionRecord) {
-        self.indexes.record_access_revision(&record);
+        self.indexes.record_seq(record.committed_seq);
         self.record_row_weight(record.heap_bytes());
         self.access_revisions.push(record);
     }

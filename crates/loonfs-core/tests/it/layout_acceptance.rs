@@ -105,16 +105,8 @@ async fn reads_commits_and_change_feed_never_list() {
         .upload_content(&staged.upload_id, b"uploaded\n")
         .await
         .expect("upload content");
-    let catalog = namespace_store(&store, &namespace_id)
-        .load_catalog_entry()
-        .await
-        .expect("load namespace catalog");
     engine
-        .complete_upload(
-            &catalog,
-            &staged.upload_id,
-            CompleteUploadBody::ServiceProxied {},
-        )
+        .complete_upload(&staged.upload_id, CompleteUploadBody::ServiceProxied {})
         .await
         .expect("complete upload");
     put_file(
@@ -221,16 +213,8 @@ async fn maintenance_preserves_the_logical_head() {
         .upload_content(&staged.upload_id, b"more\n")
         .await
         .expect("second upload content");
-    let catalog = namespace_store(&store, &namespace_id)
-        .load_catalog_entry()
-        .await
-        .expect("load namespace catalog");
     engine
-        .complete_upload(
-            &catalog,
-            &staged.upload_id,
-            CompleteUploadBody::ServiceProxied {},
-        )
+        .complete_upload(&staged.upload_id, CompleteUploadBody::ServiceProxied {})
         .await
         .expect("second upload complete");
 

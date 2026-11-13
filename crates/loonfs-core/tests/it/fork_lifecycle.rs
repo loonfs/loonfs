@@ -525,13 +525,8 @@ async fn fork_namespace_reads_inherited_content_and_isolates_metadata() {
             .upload_content(&upload.upload_id, bytes)
             .await
             .expect("upload bytes");
-        let catalog = namespace_store(store, namespace_id)
-            .load_catalog_entry()
-            .await
-            .expect("catalog");
         let completed = engine
             .complete_upload(
-                &catalog,
                 &upload.upload_id,
                 loonfs_types::CompleteUploadBody::ServiceProxied {},
             )

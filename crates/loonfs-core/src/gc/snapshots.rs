@@ -3,7 +3,7 @@
 
 use super::deletes::{Counter, Decision};
 use super::live_set::LiveSet;
-use crate::control_object::ControlObjectLoadError;
+use crate::control_object::present;
 use crate::error::{CoreError, Result};
 use crate::namespace::store::NamespaceStore;
 use crate::snapshot::record::load_snapshot_record_at_key;
@@ -93,11 +93,10 @@ impl<S: ObjectStore> NamespaceStore<S> {
         &self,
         key: &str,
     ) -> Result<Option<SnapshotPayload>> {
-        match load_snapshot_record_at_key(&self.store, key).await {
-            Ok(loaded) => Ok(Some(loaded.state)),
-            Err(ControlObjectLoadError::MissingObject { .. }) => Ok(None),
-            Err(error) => Err(CoreError::ControlObjectLoad(error)),
-        }
+        Ok(
+            present(load_snapshot_record_at_key(&self.store, key).await)?
+                .map(|loaded| loaded.state),
+        )
     }
 
     async fn fork_snapshot_is_retained(

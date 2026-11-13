@@ -2,8 +2,8 @@
 //! incrementally as deltas apply so head reads skip the row scans.
 
 use super::{
-    AccessRevisionRecord, AttributesRevisionRecord, CommitReceiptRecord, ContentLayoutRecord,
-    DirentryBindingRecord, InodeRecord, MetadataState, RevisionRecord, SubtreeTombstoneRecord,
+    CommitReceiptRecord, ContentLayoutRecord, DirentryBindingRecord, InodeRecord, MetadataState,
+    SubtreeTombstoneRecord,
 };
 use crate::heap_bytes::{hash_map_table_bytes, HeapBytes};
 use loonfs_types::{CommitId, CommitSeq, InodeId, NameKey};
@@ -51,7 +51,7 @@ impl MetadataIndexes {
         }
 
         for revision in &state.revisions {
-            indexes.record_revision(revision);
+            indexes.record_seq(revision.committed_seq);
         }
 
         for tombstone in &state.subtree_tombstones {
@@ -66,11 +66,11 @@ impl MetadataIndexes {
         }
 
         for attributes_revision in &state.attributes_revisions {
-            indexes.record_attributes_revision(attributes_revision);
+            indexes.record_seq(attributes_revision.committed_seq);
         }
 
         for access_revision in &state.access_revisions {
-            indexes.record_access_revision(access_revision);
+            indexes.record_seq(access_revision.committed_seq);
         }
 
         indexes
@@ -194,11 +194,12 @@ impl MetadataIndexes {
         }
     }
 
-    /// Revisions contribute only the seq watermark: no read consults an
-    /// in-memory revision index — revision lookups scan the rows, which stay
-    /// tail-sized in memory (the manifest segments serve the bulk).
-    pub(super) fn record_revision(&mut self, record: &RevisionRecord) {
-        self.indexed_seq = self.indexed_seq.max(record.committed_seq);
+    /// Records the sequence of a revision, an attribute revision, or an
+    /// access revision. These rows have no index, because their lookups scan
+    /// the rows in memory, which stay small because the manifest segments
+    /// store the bulk.
+    pub(super) fn record_seq(&mut self, committed_seq: CommitSeq) {
+        self.indexed_seq = self.indexed_seq.max(committed_seq);
     }
 
     pub(super) fn record_tombstone(&mut self, record: &SubtreeTombstoneRecord) {
@@ -239,20 +240,6 @@ impl MetadataIndexes {
             record.clone(),
             |receipt| receipt.committed_seq,
         );
-    }
-
-    /// Attribute revisions contribute only the seq watermark, like revisions:
-    /// attribute lookups scan the rows, which stay tail-sized in memory
-    /// because the manifest segments serve the bulk.
-    pub(super) fn record_attributes_revision(&mut self, record: &AttributesRevisionRecord) {
-        self.indexed_seq = self.indexed_seq.max(record.committed_seq);
-    }
-
-    /// Access revisions contribute only the seq watermark, like revisions:
-    /// access lookups scan the rows, which stay tail-sized in memory
-    /// because the manifest segments serve the bulk.
-    pub(super) fn record_access_revision(&mut self, record: &AccessRevisionRecord) {
-        self.indexed_seq = self.indexed_seq.max(record.committed_seq);
     }
 }
 

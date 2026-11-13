@@ -114,14 +114,13 @@ impl<S: ObjectStore> NamespaceStore<S> {
 /// [`MetadataSegmentWriter`].
 #[cfg(test)]
 pub(crate) fn debug_assert_manifest_segments_do_not_overlap(
-    _segments_by_family: &[MetadataFamilySegments],
+    segments_by_family: &[MetadataFamilySegments],
 ) {
-    #[cfg(debug_assertions)]
-    for family_segments in _segments_by_family {
+    for family_segments in segments_by_family {
         let mut previous_max_row_key: Option<&str> = None;
         for descriptor in &family_segments.segments {
             if let Some(previous) = previous_max_row_key {
-                debug_assert!(
+                assert!(
                     previous < descriptor.min_row_key.as_str(),
                     "overlapping metadata segment ranges for `{:?}`",
                     family_segments.family

@@ -8,7 +8,6 @@ use loonfs_types::{CommitSeq, ContentId};
 use std::collections::HashMap;
 
 #[cfg(test)]
-#[cfg(test)]
 pub(crate) fn metadata_states_equivalent(left: &MetadataState, right: &MetadataState) -> bool {
     MetadataRowFamily::ALL.into_iter().all(|family| {
         manifest_rows_for_family(left, family) == manifest_rows_for_family(right, family)

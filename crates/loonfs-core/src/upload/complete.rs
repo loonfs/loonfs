@@ -10,7 +10,6 @@ use super::session::{
 use crate::engine::{NamespaceEngine, Writable};
 use crate::error::{CoreError, Result};
 use crate::limits::{COMPLETED_UPLOAD_ADMISSION_WINDOW_MS, COMPLETED_UPLOAD_RECEIPT_WINDOW_MS};
-use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::namespace::store::NamespaceStore;
 use crate::storage::content::{verify_durable_content_checksum, DurableContentValidationError};
 use crate::storage::content_admission::{CompletedUploadEvidence, PreparedContent};
@@ -26,8 +25,7 @@ use loonfs_types::{
 
 impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// Completes an upload session and returns time-bounded proof for later
-    /// publication. The caller passes the catalog it already has, which
-    /// must be this engine's namespace's.
+    /// publication.
     ///
     /// Verification of the content happens before the outcome record is
     /// created. An abort can still end the session between this completion's
@@ -36,11 +34,9 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
     /// outcome is created first, the completion finds it and fails.
     pub async fn complete_upload(
         &self,
-        catalog: &VerifiedNamespaceCatalogEntry,
         upload_id: &UploadId,
         completion: CompleteUploadBody,
     ) -> Result<CompletedUpload> {
-        self.own_catalog(catalog);
         let clock = self.namespace.start_clock();
         let catalog = self.namespace.ensure_upload_namespace_available().await?;
         authorize_upload_subject(

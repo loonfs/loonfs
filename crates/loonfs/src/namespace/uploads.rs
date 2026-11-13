@@ -141,16 +141,7 @@ impl Namespace<Writable> {
     ) -> Result<CompletedUpload> {
         trace::in_operation(
             operation_span!(self.core, "complete_upload", self.namespace_id),
-            async {
-                let catalog = self
-                    .core
-                    .load_namespace_catalog_cached(&self.namespace_id)
-                    .await?;
-                Ok(self
-                    .engine()
-                    .complete_upload(&catalog, upload_id, completion)
-                    .await?)
-            },
+            async { Ok(self.engine().complete_upload(upload_id, completion).await?) },
         )
         .await
     }

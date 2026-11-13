@@ -1,7 +1,7 @@
 //! Snapshot creation, point reads, deletion, and manifest verification.
 
 use crate::control_object::{
-    expect_identity_field, expect_namespace, load_control_object, ControlObjectLoadError,
+    expect_identity_field, expect_namespace, load_control_object, present, ControlObjectLoadError,
     LoadedControl,
 };
 use crate::control_update::create_control_object_under_generated_id;
@@ -117,12 +117,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
         snapshot_id: &SnapshotId,
     ) -> Result<Option<LoadedSnapshotRecord>> {
         let object_key = snapshot_record(&self.namespace_id, snapshot_id);
-        let loaded = load_snapshot_record_at_key(&self.store, &object_key).await;
-        match loaded {
-            Ok(loaded) => Ok(Some(loaded)),
-            Err(ControlObjectLoadError::MissingObject { .. }) => Ok(None),
-            Err(error) => Err(CoreError::ControlObjectLoad(error)),
-        }
+        present(load_snapshot_record_at_key(&self.store, &object_key).await)
     }
 
     /// Loads the user snapshot `snapshot_id`. A missing snapshot, or a fork snapshot, returns
