@@ -457,17 +457,11 @@ mod tests {
 
     #[tokio::test]
     async fn sequence_exhaustion_writes_neither_wal_nor_hint() {
-        let temp_dir = tempdir().expect("tempdir");
-        let store = LocalFsStore::new(temp_dir.path()).expect("store");
-        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-        let context = WriterAt {
-            writer_id: loonfs_types::WriterId::parse("writer").expect("writer id"),
-            now_ms: 1_000,
-        };
-        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
-            .create()
-            .await
-            .expect("bootstrap namespace");
+        let (_temp_dir, store, namespace_id, context) = crate::test_support::created_namespace(
+            "demo",
+            crate::test_support::writer_at("writer", 1_000),
+        )
+        .await;
         let acquired_writer = crate::test_support::namespace_store(&store, &namespace_id)
             .acquire_writer_epoch(&context.writer_id)
             .await

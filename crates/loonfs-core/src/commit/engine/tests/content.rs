@@ -77,18 +77,6 @@ fn put_candidate(completed: &CompletedUpload) -> CommitCandidate {
     )
 }
 
-fn directory_request(commit_id: &str, name: &str) -> CommitIntent {
-    CommitIntent::single(
-        CommitId::parse(commit_id).expect("commit id"),
-        loonfs_test_support::test_actor(),
-        None,
-        FilesystemOperation::CreateDirectory {
-            path: AbsolutePath::parse(format!("/{name}")).expect("path"),
-            parents: false,
-        },
-    )
-}
-
 #[tokio::test]
 async fn a_completed_upload_token_cannot_publish_after_namespace_deletion() {
     use crate::content::{mint_content_token, verify_content_token};
@@ -270,7 +258,7 @@ async fn assert_expired_content_stays_rejected_on_retry(elapsed_ms: u64) {
         },
         setup.writer_id.clone(),
     );
-    let replay = CommitCandidate::new(directory_request("original", "original"));
+    let replay = CommitCandidate::new(create_directory_request("original", "original"));
     let original = engine
         .publish_batch(
             vec![replay.clone()],
@@ -288,7 +276,7 @@ async fn assert_expired_content_stays_rejected_on_retry(elapsed_ms: u64) {
     let publication = context(setup.now_ms + COMPLETED_UPLOAD_ADMISSION_WINDOW_MS - 1);
     let primary = put_candidate(&completed);
     let alias = CommitCandidate::new(primary.intent().clone());
-    let later = CommitCandidate::new(directory_request("later", "later"));
+    let later = CommitCandidate::new(create_directory_request("later", "later"));
     store.block_next();
     let candidates = vec![primary, alias, later, replay];
     let batch = OperationClock::start(publication.now_ms, timer.clone());
@@ -406,7 +394,7 @@ async fn content_expiring_after_the_put_starts_does_not_undo_the_commit() {
         },
         setup.writer_id.clone(),
     );
-    let replay = CommitCandidate::new(directory_request("original", "original"));
+    let replay = CommitCandidate::new(create_directory_request("original", "original"));
     let original = engine
         .publish_batch(
             vec![replay.clone()],
@@ -423,7 +411,7 @@ async fn content_expiring_after_the_put_starts_does_not_undo_the_commit() {
     let publication = context(setup.now_ms + COMPLETED_UPLOAD_ADMISSION_WINDOW_MS - 1);
     let primary = put_candidate(&completed);
     let alias = CommitCandidate::new(primary.intent().clone());
-    let later = CommitCandidate::new(directory_request("later", "later"));
+    let later = CommitCandidate::new(create_directory_request("later", "later"));
     store.block_next();
     let batch = OperationClock::start(publication.now_ms, timer.clone());
     let publish = engine.publish_batch(vec![primary, alias, later, replay], &batch);
@@ -534,7 +522,7 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
     let candidate =
         CommitCandidate::prepared(put_candidate(&completed).intent().clone(), proofs.clone());
     let metadata = CommitCandidate::prepared(
-        directory_request("metadata", "metadata"),
+        create_directory_request("metadata", "metadata"),
         proofs[1..].to_vec(),
     );
     let publication = context(setup.now_ms + COMPLETED_UPLOAD_ADMISSION_WINDOW_MS - 1);
@@ -610,7 +598,7 @@ async fn swap_accepts_any_valid_matching_proof_and_expired_receipt_replays_witho
         break;
     }
     let expired = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_WINDOW_MS + 1);
-    let later = CommitCandidate::new(directory_request("later", "later"));
+    let later = CommitCandidate::new(create_directory_request("later", "later"));
     store.reset();
     let replay = engine
         .publish_batch(

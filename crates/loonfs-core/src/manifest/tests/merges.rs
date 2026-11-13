@@ -12,19 +12,6 @@ fn fork(name: &str) -> NamespaceId {
     NamespaceId::parse(name).expect("namespace")
 }
 
-/// A commit that creates the directory `/{name}` under the commit ID `name`.
-fn create_directory(name: &str) -> CommitIntent {
-    CommitIntent::single(
-        CommitId::parse(name).expect("commit id"),
-        loonfs_test_support::test_actor(),
-        None,
-        FilesystemOperation::CreateDirectory {
-            path: AbsolutePath::parse(format!("/{name}")).expect("path"),
-            parents: false,
-        },
-    )
-}
-
 async fn publish<S: ObjectStore>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -53,7 +40,8 @@ async fn publish_merge<S: ObjectStore>(
         source_after_seq: CommitSeq(after_seq),
         source_through_seq: CommitSeq(through_seq),
     };
-    let intent = create_directory(&format!("merge-{fork_name}-{through_seq}"));
+    let name = format!("merge-{fork_name}-{through_seq}");
+    let intent = crate::test_support::create_directory_request(&name, &name);
     let fork_inode_id = InodeId::generate(CommitSeq(through_seq), NonZeroU32::MIN);
     let candidate = CommitCandidate::new(intent).with_merge(
         merge,
@@ -177,20 +165,16 @@ async fn merge_rows_compact_with_the_commits_group_and_leave_no_row_below_the_fl
     let floor = publish(
         &store,
         &namespace_id,
-        CommitCandidate::new(create_directory("between")),
+        CommitCandidate::new(crate::test_support::create_directory_request(
+            "between", "between",
+        )),
     )
     .await
     .committed_seq;
     let repeat = publish_merge(&store, &namespace_id, "fork-a", 3, 7, 9).await;
     assert!(first.committed_seq < floor && floor < repeat.committed_seq);
     advance_floor_through(&store, &namespace_id, floor, &context).await;
-    compact_group(
-        &store,
-        &namespace_id,
-        &context,
-        MetadataFamilyGroup::Commits,
-    )
-    .await;
+    compact_group(&store, &namespace_id, MetadataFamilyGroup::Commits).await;
 
     assert_eq!(
         family_rows(&store, &namespace_id, ApiMetadataRowFamily::Merges).await,

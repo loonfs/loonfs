@@ -127,23 +127,13 @@ fn wal_create_file(
             child_created_at_ms: 4_200,
             revision: Some(crate::test_support::revision_summary()),
         },
-        WalDelta::AppendFileRevision {
-            delta_index: delta_index.saturating_add(2),
+        crate::test_support::file_revision_delta(
+            delta_index.saturating_add(2),
             inode_id,
-            parent_inode_id: loonfs_types::ROOT_INODE_ID,
-            name_key: loonfs_types::NameKey::parse("file.txt").expect("name key"),
-            display_name: loonfs_types::DisplayName::parse("file.txt").expect("display name"),
-            bind_position: loonfs_types::format::manifest::DeltaPosition {
-                seq: loonfs_types::CommitSeq(1),
-                delta_index: 0,
-            },
-            child_created_by: loonfs_types::ActorId::loonfs(),
-            child_created_at_ms: 0,
-            revision_no: RevisionNo(1),
+            RevisionNo(1),
             content_ref,
-            layout: None,
-            append_offset: None,
-        },
+            None,
+        ),
     ]
 }
 
@@ -153,23 +143,13 @@ fn wal_append_revision(
     revision_no: RevisionNo,
     content_ref: ContentRef,
 ) -> Vec<WalDelta> {
-    vec![WalDelta::AppendFileRevision {
+    vec![crate::test_support::file_revision_delta(
         delta_index,
         inode_id,
-        parent_inode_id: loonfs_types::ROOT_INODE_ID,
-        name_key: loonfs_types::NameKey::parse("file.txt").expect("name key"),
-        display_name: loonfs_types::DisplayName::parse("file.txt").expect("display name"),
-        bind_position: loonfs_types::format::manifest::DeltaPosition {
-            seq: loonfs_types::CommitSeq(1),
-            delta_index: 0,
-        },
-        child_created_by: loonfs_types::ActorId::loonfs(),
-        child_created_at_ms: 0,
         revision_no,
         content_ref,
-        layout: None,
-        append_offset: None,
-    }]
+        None,
+    )]
 }
 
 fn wal_tombstone(delta_index: u32, root_inode_id: InodeId) -> Vec<WalDelta> {
@@ -866,23 +846,13 @@ async fn restore_revision_overflow_is_rejected() {
         "overflow.txt".to_owned(),
         content_ref("content-max"),
     );
-    deltas[2] = WalDelta::AppendFileRevision {
-        delta_index: 2,
-        inode_id: InodeId(2),
-        parent_inode_id: loonfs_types::ROOT_INODE_ID,
-        name_key: loonfs_types::NameKey::parse("file.txt").expect("name key"),
-        display_name: loonfs_types::DisplayName::parse("file.txt").expect("display name"),
-        bind_position: loonfs_types::format::manifest::DeltaPosition {
-            seq: loonfs_types::CommitSeq(1),
-            delta_index: 0,
-        },
-        child_created_by: loonfs_types::ActorId::loonfs(),
-        child_created_at_ms: 0,
-        revision_no: RevisionNo(MAX_PUBLIC_INTEGER),
-        content_ref: content_ref("content-max"),
-        layout: None,
-        append_offset: None,
-    };
+    deltas[2] = crate::test_support::file_revision_delta(
+        2,
+        InodeId(2),
+        RevisionNo(MAX_PUBLIC_INTEGER),
+        content_ref("content-max"),
+        None,
+    );
     let metadata_state = MetadataState::default()
         .apply_committed_wal_deltas(
             CommitSeq(0),

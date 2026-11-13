@@ -7,7 +7,7 @@ use loonfs_test_support::stores::{
     BlockingStore, FakeMultipartStore, KeyPredicate, MetadataMapStore, OperationSelector,
     RecordedOperation, RecordingStore,
 };
-use loonfs_types::format::wal::{WalCommitDelta, WalCommitPayload, WalDelta, WalInlineContent};
+use loonfs_types::format::wal::{WalCommitDelta, WalCommitPayload, WalInlineContent};
 use loonfs_types::{CommitId, CommitSeq, ContentId, ContentRef, InodeId, NamespaceId, RevisionNo};
 use std::assert_matches;
 
@@ -41,23 +41,13 @@ fn piece_commit(reference: &ContentRef, offset: u64, bytes: Vec<u8>, seq: u64) -
         merge: None,
         deltas: vec![WalCommitDelta {
             semantic_operation_index: 0,
-            delta: WalDelta::AppendFileRevision {
-                delta_index: 0,
-                inode_id: InodeId(2),
-                parent_inode_id: loonfs_types::ROOT_INODE_ID,
-                name_key: loonfs_types::NameKey::parse("file.txt").expect("name key"),
-                display_name: loonfs_types::DisplayName::parse("file.txt").expect("display name"),
-                bind_position: loonfs_types::format::manifest::DeltaPosition {
-                    seq: loonfs_types::CommitSeq(1),
-                    delta_index: 0,
-                },
-                child_created_by: loonfs_types::ActorId::loonfs(),
-                child_created_at_ms: 0,
-                revision_no: RevisionNo(seq),
-                content_ref: reference.clone(),
-                layout: None,
-                append_offset: None,
-            },
+            delta: crate::test_support::file_revision_delta(
+                0,
+                InodeId(2),
+                RevisionNo(seq),
+                reference.clone(),
+                None,
+            ),
         }],
         inline_content: vec![WalInlineContent {
             content_id: reference.content_id.clone(),

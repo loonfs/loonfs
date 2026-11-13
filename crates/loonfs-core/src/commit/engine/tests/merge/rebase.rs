@@ -15,7 +15,7 @@ async fn reach_fork_point(store: &LocalFsStore, main: &NamespaceId, writer: &Wri
     let mut head = CommitSeq(0);
     while head < FORK_POINT {
         let name = format!("before-{}", head.0);
-        let candidate = CommitCandidate::new(create_dir_request(&name, &name));
+        let candidate = CommitCandidate::new(create_directory_request(&name, &name));
         head = publish(store, main, writer, candidate)
             .await
             .expect("an ordinary commit")
@@ -145,7 +145,7 @@ async fn a_replay_commit_reads_the_rebase_forks_own_fork_point_and_resume_after_
         &store,
         &main,
         &writer,
-        CommitCandidate::new(create_dir_request("later", "later")),
+        CommitCandidate::new(create_directory_request("later", "later")),
     )
     .await
     .expect("a commit after the merge");
@@ -160,7 +160,7 @@ async fn a_replay_commit_reads_the_rebase_forks_own_fork_point_and_resume_after_
         &store,
         &rebase,
         &writer,
-        CommitCandidate::new(create_dir_request("own", "own")),
+        CommitCandidate::new(create_directory_request("own", "own")),
     )
     .await
     .expect("a commit in the rebase fork");

@@ -406,22 +406,13 @@ mod tests {
         NamespaceId, ROOT_INODE_ID,
     };
     use std::assert_matches;
-    use tempfile::tempdir;
 
     fn test_context() -> WriterAt {
         crate::test_support::writer_at("writer", 1)
     }
 
     async fn setup_namespace() -> (tempfile::TempDir, LocalFsStore, NamespaceId, WriterAt) {
-        let temp_dir = tempdir().expect("tempdir");
-        let store = LocalFsStore::new(temp_dir.path()).expect("store");
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let context = test_context();
-        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
-            .create()
-            .await
-            .expect("bootstrap");
-        (temp_dir, store, namespace_id, context)
+        crate::test_support::created_namespace("demo", test_context()).await
     }
 
     fn put_file_candidate(

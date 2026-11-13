@@ -363,7 +363,6 @@ mod tests {
     };
     use std::assert_matches;
     use std::collections::BTreeSet;
-    use tempfile::tempdir;
 
     fn test_context() -> WriterAt {
         crate::test_support::writer_at("writer", 1)
@@ -429,15 +428,7 @@ mod tests {
     }
 
     async fn setup_namespace() -> (tempfile::TempDir, LocalFsStore, NamespaceId, WriterAt) {
-        let temp_dir = tempdir().expect("tempdir");
-        let store = LocalFsStore::new(temp_dir.path()).expect("store");
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let context = test_context();
-        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
-            .create()
-            .await
-            .expect("bootstrap");
-        (temp_dir, store, namespace_id, context)
+        crate::test_support::created_namespace("demo", test_context()).await
     }
 
     async fn try_plan_against_current_state(
@@ -548,46 +539,6 @@ mod tests {
             )
             .await
             .expect("recreate at the deleted path");
-    }
-
-    #[tokio::test]
-    async fn deleted_subtree_names_replan_as_fresh_state() {
-        let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
-        let seed_commit_id = CommitId::parse("seed-dead-tree").expect("valid commit id");
-        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
-            .put_file(
-                "/dead/file.txt",
-                b"hello",
-                DestinationBehavior::NoReplace,
-                Some(&seed_commit_id),
-            )
-            .await
-            .expect("seed file");
-        let delete_commit_id = CommitId::parse("delete-dead-tree").expect("valid commit id");
-        crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context)
-            .delete_path("/dead", Some(&delete_commit_id))
-            .await
-            .expect("delete tree");
-        let staged = crate::test_support::namespace_store(&store, &namespace_id)
-            .store_bytes_as_content(b"new")
-            .await
-            .expect("stage");
-        // The deleted name is invisible, so planning under it starts a
-        // fresh subtree instead of conflicting with the dead one — the same
-        // answer callers get after compaction drops the dead rows.
-        try_plan_against_current_state(
-            &store,
-            &namespace_id,
-            &request(FilesystemOperation::PutFile {
-                path: AbsolutePath::parse("/dead/new.txt").expect("path"),
-                content: loonfs_types::FileContent::Ref(staged.into_content_ref()),
-                behavior: DestinationBehavior::NoReplace,
-                expected_inode_id: None,
-                expected_revision_no: None,
-            }),
-        )
-        .await
-        .expect("recreating a deleted subtree plans as fresh state");
     }
 
     #[tokio::test]

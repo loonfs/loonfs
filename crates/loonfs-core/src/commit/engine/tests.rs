@@ -16,7 +16,7 @@ use crate::namespace::state::NamespaceReadState;
 use crate::path::write::{CommitIntent, FilesystemOperation};
 use crate::storage::content_admission::{ContentTokenError, PreparedContent};
 use crate::storage::inline_content::InlineContent;
-use crate::test_support::WriterAt;
+use crate::test_support::{create_directory_request, WriterAt};
 use crate::time::{MonotonicTimer, StdMonotonicTimer};
 use futures::StreamExt;
 use loonfs_objectstore::keys::wal_prefix;
@@ -43,21 +43,9 @@ fn context(writer_id: &str) -> WriterAt {
     crate::test_support::writer_at(writer_id, 1_000)
 }
 
-fn create_dir_request(commit_id: &str, name: &str) -> CommitIntent {
-    CommitIntent::single(
-        CommitId::parse(commit_id).expect("valid commit id"),
-        loonfs_test_support::test_actor(),
-        None,
-        FilesystemOperation::CreateDirectory {
-            path: loonfs_types::AbsolutePath::parse(format!("/{name}")).expect("valid path"),
-            parents: false,
-        },
-    )
-}
-
 #[test]
 fn admission_weight_includes_annotation_proofs_and_preparation_errors() {
-    let request = create_dir_request("weight", "docs");
+    let request = create_directory_request("weight", "docs");
     let baseline = CommitCandidate::new(request.clone()).estimated_retained_bytes();
     let mut annotated = request.clone();
     annotated.message = Some(String::new());
@@ -92,7 +80,7 @@ fn admission_weight_includes_annotation_proofs_and_preparation_errors() {
 
 #[test]
 fn principals_add_to_candidate_admission_weight() {
-    let candidate = CommitCandidate::new(create_dir_request("subject-weight", "docs"));
+    let candidate = CommitCandidate::new(create_directory_request("subject-weight", "docs"));
     let before = candidate.estimated_retained_bytes();
     let principals = (0..64)
         .map(|index| {
@@ -111,7 +99,7 @@ fn principals_add_to_candidate_admission_weight() {
 #[test]
 fn semantic_identity_excludes_content_preparation() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let request = create_dir_request("same-mutation", "docs");
+    let request = create_directory_request("same-mutation", "docs");
     let ready = CommitCandidate::new(request.clone());
     let rejected = CommitCandidate::rejected(
         request,
@@ -153,7 +141,7 @@ fn semantic_identity_ignores_current_request_limits() {
     );
     let prepared = PreparedContent::for_durable_content_write(namespace_id.clone(), content_ref);
     let oversized_proofs = CommitCandidate::prepared(
-        create_dir_request("too-many-proofs", "docs"),
+        create_directory_request("too-many-proofs", "docs"),
         vec![prepared; crate::limits::MAX_COMMIT_CONTENT_TOKENS + 1],
     );
     oversized_proofs.semantic_identity(&namespace_id);
@@ -247,7 +235,7 @@ fn a_message_past_the_byte_ceiling_is_rejected() {
 }
 
 fn create_dir(commit_id: &str, display_name: &str) -> CommitCandidate {
-    CommitCandidate::new(create_dir_request(commit_id, display_name))
+    CommitCandidate::new(create_directory_request(commit_id, display_name))
 }
 
 async fn wal_object_count(store: &LocalFsStore, namespace_id: &NamespaceId) -> usize {
@@ -515,26 +503,10 @@ async fn publish_one<S: ObjectStore>(
 
 #[tokio::test]
 async fn a_fold_by_another_process_is_found_at_the_basis_check() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = RecordingStore::new(
-        LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::any(),
-    );
+    let directory = tempdir().expect("tempdir");
+    let store = gated_store(&directory, KeyPredicate::new(|_| false));
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let writer = context("writer-a");
-    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &writer)
-        .create()
-        .await
-        .expect("bootstrap");
-    let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
-    let mut engine = NamespaceCommitEngine::new(
-        crate::NamespaceStore {
-            timer: timer.clone(),
-            ..crate::test_support::namespace_store(&store, &namespace_id)
-        },
-        writer.writer_id.clone(),
-    );
-    publish_one(&mut engine, &writer, "alpha").await;
+    let (mut engine, timer, writer) = writer_after_one_publish(&store, &namespace_id).await;
     let basis = engine
         .read_position()
         .expect("published")
@@ -595,32 +567,10 @@ async fn a_fold_by_another_process_is_found_at_the_basis_check() {
 
 #[tokio::test]
 async fn a_basis_check_answered_outside_the_bound_of_the_last_confirmation_reloads_instead() {
-    let temp_dir = tempdir().expect("tempdir");
+    let directory = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let store = RecordingStore::new(
-        BlockingStore::new(
-            LocalFsStore::new(temp_dir.path()).expect("store"),
-            KeyPredicate::prefix(loonfs_objectstore::keys::metadata_manifest_prefix(
-                &namespace_id,
-            )),
-            OperationSelector::Head,
-        ),
-        KeyPredicate::any(),
-    );
-    let writer = context("writer-a");
-    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &writer)
-        .create()
-        .await
-        .expect("bootstrap");
-    let timer = Arc::new(loonfs_test_support::clock::ManualClock::new(0));
-    let mut engine = NamespaceCommitEngine::new(
-        crate::NamespaceStore {
-            timer: timer.clone(),
-            ..crate::test_support::namespace_store(&store, &namespace_id)
-        },
-        writer.writer_id.clone(),
-    );
-    publish_one(&mut engine, &writer, "alpha").await;
+    let store = gated_store(&directory, KeyPredicate::manifest(&namespace_id));
+    let (mut engine, timer, writer) = writer_after_one_publish(&store, &namespace_id).await;
     timer.advance_ms(WAL_PUBLISH_BUDGET_MS - 1);
     publish_one(&mut engine, &writer, "beta").await;
 
