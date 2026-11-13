@@ -545,7 +545,7 @@ fn is_maintenance_required(error: &CoreError) -> bool {
     matches!(error, CoreError::MaintenanceRequired { .. })
 }
 
-pub(super) fn result_label<T, E>(result: &std::result::Result<T, E>) -> PublishOutcome {
+fn result_label<T, E>(result: &std::result::Result<T, E>) -> PublishOutcome {
     if result.is_ok() {
         PublishOutcome::Ok
     } else {

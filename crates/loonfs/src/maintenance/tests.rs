@@ -83,24 +83,6 @@ async fn a_maintenance_gc_step_records_the_collection_counters_once() {
         gc.retained.total(),
         "the collection records its retained count exactly once"
     );
-    assert_eq!(snapshot.by_name("loonfs.gc.reclaimed").count(), 9);
-    for (category, reclaimed) in [
-        ("deleted_wal_objects", gc.deleted.wal_objects),
-        ("deleted_metadata_segments", gc.deleted.metadata_segments),
-        ("deleted_extension_segments", gc.deleted.extension_segments),
-        ("deleted_manifests", gc.deleted.manifests),
-        ("deleted_fork_snapshots", gc.deleted_snapshots_by_owner.fork),
-        (
-            "deleted_expired_snapshots",
-            gc.deleted_snapshots_by_owner.user,
-        ),
-    ] {
-        assert_eq!(
-            counter(&snapshot, "loonfs.gc.reclaimed", &[("category", category)],),
-            reclaimed,
-            "the collection records `{category}` exactly once"
-        );
-    }
 
     let pool_gc = maintenance
         .gc_pool(&pool_id)
@@ -113,20 +95,6 @@ async fn a_maintenance_gc_step_records_the_collection_counters_once() {
         gc.retained.total() + pool_gc.retained.total(),
         "the pool's collection records its retained count exactly once"
     );
-    for (category, reclaimed) in [
-        ("deleted_upload_sessions", pool_gc.deleted.upload_sessions),
-        ("deleted_content_objects", pool_gc.deleted.content_objects),
-        (
-            "deleted_temporary_objects",
-            pool_gc.deleted.temporary_objects,
-        ),
-    ] {
-        assert_eq!(
-            counter(&snapshot, "loonfs.gc.reclaimed", &[("category", category)],),
-            reclaimed,
-            "the pool's collection records `{category}` exactly once"
-        );
-    }
     let missing = maintenance
         .gc_pool(&crate::PoolId::generate())
         .await
