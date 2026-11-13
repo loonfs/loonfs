@@ -488,6 +488,7 @@ async fn assert_start_after_contract(store: &dyn ObjectStore) {
 async fn assert_store_contract_probe_passes(store: &dyn ObjectStore) {
     let probe_id = loonfs_types::ProbeId::generate();
     let report = run_store_contract_probe(store, &probe_id).await;
+    assert_eq!(report.probe_id, probe_id);
     assert!(
         report
             .checks

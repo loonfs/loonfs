@@ -282,7 +282,7 @@ impl S3CompatiblePresigner {
     }
 
     /// Signs a create-only `CompleteMultipartUpload` that includes the
-    /// whole-object checksum when given.
+    /// whole-object checksum.
     ///
     /// AWS S3 treats that checksum as a precondition and refuses to assemble
     /// an object that does not match it. Cloudflare R2 accepts the request
@@ -292,17 +292,15 @@ impl S3CompatiblePresigner {
         &self,
         object_key: &str,
         provider_upload_id: &str,
-        checksum: Option<&Checksum>,
+        checksum: &Checksum,
         ttl: Duration,
         now: SystemTime,
     ) -> Result<PresignedUrl> {
         let mut required_headers = BTreeMap::new();
-        if let Some(checksum) = checksum {
-            required_headers.insert(
-                S3_CRC64NVME_CHECKSUM_HEADER.to_owned(),
-                base64_crc64nvme(object_key, checksum)?,
-            );
-        }
+        required_headers.insert(
+            S3_CRC64NVME_CHECKSUM_HEADER.to_owned(),
+            base64_crc64nvme(object_key, checksum)?,
+        );
         required_headers.insert(S3_CREATE_ONLY_HEADER.to_owned(), "*".to_owned());
         self.presign(
             SigningRequestParts {
@@ -948,8 +946,9 @@ mod tests {
             .presign_create_multipart(CONTENT_KEY, ttl, now)
             .await
             .expect("presign create");
+        let checksum = loonfs_types::Checksum::crc64nvme(b"assembled bytes");
         let completed = signer
-            .presign_complete_multipart(CONTENT_KEY, "upload", None, ttl, now)
+            .presign_complete_multipart(CONTENT_KEY, "upload", &checksum, ttl, now)
             .await
             .expect("presign complete");
         assert_eq!(
@@ -958,7 +957,7 @@ mod tests {
         );
         assert!(completed
             .url
-            .contains("X-Amz-SignedHeaders=host%3Bif-none-match&"));
+            .contains("X-Amz-SignedHeaders=host%3Bif-none-match%3Bx-amz-checksum-crc64nvme&"));
         let base_key = "namespaces/other/content/con_fedcba9876543210fedcba9876543210";
         assert_eq!(
             created
