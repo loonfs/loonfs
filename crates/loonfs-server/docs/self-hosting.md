@@ -376,7 +376,7 @@ Segment sizes, reorganization thresholds, and reorganization step sizes use the 
 
 This section describes the limits on the server's requests, connections, memory, and concurrent work.
 
-`request_deadline_ms` sets the deadline for metadata and query requests, and it defaults to 60000 ms. Streamed content and long-running operator work are exempt. The server sets the write-stop wait to half of this deadline. A commit that reaches the write stop (128 unfolded WAL objects) waits up to that long for the session's fold. Because the wait is half the deadline, such a commit receives `maintenance_required`, which means it wasn't committed, instead of `deadline_exceeded`, which leaves its outcome unknown.
+`request_deadline_ms` sets the deadline for metadata and query requests, and it defaults to 60000 ms. Streamed content and long-running operator work are exempt. The server sets the write-stop wait to half of this deadline. A commit that reaches the write stop (64 MiB of unfolded WAL bytes or 1,024 unfolded WAL objects) waits up to that long for the session's fold. Because the wait is half the deadline, such a commit receives `maintenance_required`, which means it wasn't committed, instead of `deadline_exceeded`, which leaves its outcome unknown.
 
 `max_in_flight_requests` defaults to 256, and `max_connections` defaults to 1,024. Both must be positive. The sizing formula uses the configured connection count. Keep the pod's open-file limit above that count.
 
@@ -454,7 +454,7 @@ Without a memory limit, grep, an SSD tier, or overrides, the budgets in the tabl
 The total leaves out:
 
 - writer sessions,
-- each open writer session's WAL tail, which the write stop (128 unfolded WAL objects) and the inline tail limit bound,
+- each open writer session's WAL tail, which the write stop (64 MiB of unfolded WAL bytes or 1,024 unfolded WAL objects) and the inline tail limit bound,
 - page results,
 - decoded blocks that callers still use after a memo evicts them,
 - the WAL tails that running operations keep outside the WAL tail cache, and
@@ -472,7 +472,7 @@ The server builds one `GrepStepBudget` from `[grep].max_concurrent_steps` for it
 
 A 256 MiB container can't pass the sizing check, because managed memory alone must be at least 256 MiB after `fixed` and the headroom. With the default counts, a 2.5 GiB limit leaves about 157 MiB of managed memory, which is too little, and the smallest limit that passes is 2,684 MiB. On R2, the default 32 content writes take 2,304 MiB, so the smallest limit that passes is 4,476 MiB unless you lower `max_concurrent_content_writes` or `max_merge_bytes`. A deployment that never merges sets `max_merge_bytes = 0`, and then the smallest limit that passes is 2,044 MiB, or 3,836 MiB on R2. Use the formula in [Set one number](#set-one-number) when you change counts or override individual budgets.
 
-The server keeps a writer session open for each namespace it has written to, until background maintenance closes the session (see [Background maintenance](#background-maintenance)). One idle session uses about 3 KiB of heap, so 10,000 open sessions use about 30 MiB. A session also keeps its WAL tail in memory until a fold moves the tail into segments. The write stop (128 unfolded WAL objects) and the inline tail limit bound that tail. The server stops keeping a session when its namespace is deleted, or when the session or the maintenance scheduler finds that the namespace was deleted or doesn't exist.
+The server keeps a writer session open for each namespace it has written to, until background maintenance closes the session (see [Background maintenance](#background-maintenance)). One idle session uses about 3 KiB of heap, so 10,000 open sessions use about 30 MiB. A session also keeps its WAL tail in memory until a fold moves the tail into segments. The write stop (64 MiB of unfolded WAL bytes or 1,024 unfolded WAL objects) and the inline tail limit bound that tail. The server stops keeping a session when its namespace is deleted, or when the session or the maintenance scheduler finds that the namespace was deleted or doesn't exist.
 
 If a request finds that its namespace's session has been fenced, the request fails with `writer_fenced`, and the next request for the namespace drops the session's handle. The fenced session can't be used again, and the server doesn't resubmit the request. A later request starts a new session, and that session's first publish takes the namespace back. While the old session's work ends, opening the namespace can return `writer_session_closed` (503), and a later request can open it once that work ends. Other namespaces keep their sessions.
 
