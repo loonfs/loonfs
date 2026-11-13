@@ -9,11 +9,10 @@ use crate::error::Result;
 use crate::metadata::view::latest_visible_binding;
 use crate::metadata::view::MetadataView;
 use crate::metadata::{
-    listed_trash_entry_from_record, trash_record_from_tombstone, DirentryBindingRecord,
-    ListedTrashEntry, MetadataState, SubtreeTombstoneRecord, TrashRange, TrashRecord,
+    listed_trash_entry_from_record, DirentryBindingRecord, ListedTrashEntry, MetadataState,
+    SubtreeTombstoneRecord, TrashRange, TrashRecord,
 };
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::format::manifest::lookup_keys;
 use loonfs_types::{CommitSeq, InodeId, NameKey, ROOT_INODE_ID};
 
 /// Rows one trash page fetches per manifest round-trip. A page's entries are
@@ -157,34 +156,6 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         .await
     }
 
-    /// Returns the slot-index rows of `parent_inode_id` that the row states
-    /// contain at or after `lower_bound`, with their row keys, in row-key
-    /// order.
-    pub(super) fn tail_direntry_binds(
-        &self,
-        parent_inode_id: InodeId,
-        lower_bound: &str,
-    ) -> Vec<(String, DirentryBindingRecord)> {
-        let mut rows = self
-            .row_states()
-            .flat_map(|state| state.direntry_binds())
-            .filter(|direntry| direntry.parent_inode_id == parent_inode_id)
-            .map(|record| {
-                let row_key = lookup_keys::direntry_bind_row_key(
-                    record.parent_inode_id,
-                    &record.name_key,
-                    record.child_inode_id,
-                    record.committed_seq,
-                    record.delta_index,
-                );
-                (row_key, record.clone())
-            })
-            .filter(|(row_key, _)| row_key.as_str() >= lower_bound)
-            .collect::<Vec<_>>();
-        rows.sort_by(|(left, _), (right, _)| left.cmp(right));
-        rows
-    }
-
     /// Returns one page of the namespace's deletions in `range` that no
     /// restore has cancelled, oldest deletion first.
     ///
@@ -208,21 +179,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let visible_seq = self.visible_seq();
-
-        let mut tail: Vec<(String, TrashRecord)> = Vec::new();
-        for tombstone in self
-            .row_states()
-            .flat_map(|state| state.subtree_tombstones())
-            .filter(|tombstone| tombstone.committed_seq <= visible_seq)
-        {
-            let record = trash_record_from_tombstone(tombstone);
-            let row_key = record.row_key();
-            if range.contains(&row_key) {
-                tail.push((row_key, record));
-            }
-        }
-        tail.sort_by(|(left, _), (right, _)| left.cmp(right));
+        let tail = self.tail_rows::<TrashRecord>(&range.lower_bound, range.upper_bound.as_deref());
 
         let segments = self.manifest_segments();
         let raw_limit = limit.max(TRASH_RAW_SCAN_LIMIT);

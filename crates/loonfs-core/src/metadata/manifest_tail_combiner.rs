@@ -1,9 +1,10 @@
 //! [`ManifestTailCombiner`]: combines a paged scan of manifest rows with the rows
 //! that the WAL tail contains in the same range, in row-key order.
 
+use super::tail_rows::{TailFamily, TailRows};
 use crate::error::Result;
 use loonfs_types::format::manifest::lookup_keys;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
 use std::future::Future;
 
 /// Which side a combiner takes first when both contain a row with the same key.
@@ -20,30 +21,30 @@ pub(super) struct ManifestPage<T> {
     pub(super) more: bool,
 }
 
-/// A combination of manifest pages, read on demand, with a sorted set of tail
+/// A combination of manifest pages, read on demand, with a merge of the tail's
 /// rows.
 ///
 /// A row that both sides hold is one row, so the combiner returns each row key
 /// once.
 ///
 /// The combiner buffers one manifest page at a time, so it keeps at most one
-/// page of manifest rows beside the tail rows.
-pub(super) struct ManifestTailCombiner<T> {
+/// page of manifest rows.
+pub(super) struct ManifestTailCombiner<'a, T: TailFamily> {
     position: ScanPosition,
     manifest: VecDeque<(String, T)>,
-    tail: VecDeque<(String, T)>,
+    tail: TailRows<'a, T>,
     ties: TieOrder,
     last_row_key: Option<String>,
 }
 
-impl<T> ManifestTailCombiner<T> {
+impl<'a, T: TailFamily> ManifestTailCombiner<'a, T> {
     /// Starts a combination of the manifest's rows from `lower_bound` with `tail`,
-    /// whose rows are in row-key order and at or after `lower_bound`.
-    pub(super) fn new(lower_bound: String, tail: Vec<(String, T)>, ties: TieOrder) -> Self {
+    /// whose rows are at or after `lower_bound`.
+    pub(super) fn new(lower_bound: String, tail: TailRows<'a, T>, ties: TieOrder) -> Self {
         Self {
             position: ScanPosition::From(lower_bound),
             manifest: VecDeque::new(),
-            tail: VecDeque::from(tail),
+            tail,
             ties,
             last_row_key: None,
         }
@@ -73,21 +74,21 @@ impl<T> ManifestTailCombiner<T> {
                     continue;
                 }
             }
-            let take_tail = match (self.manifest.front(), self.tail.front()) {
-                (Some((manifest_key, _)), Some((tail_key, _))) => match self.ties {
-                    TieOrder::TailFirst => tail_key <= manifest_key,
-                    TieOrder::ManifestFirst => tail_key < manifest_key,
+            let take_tail = match (self.manifest.front(), self.tail.peek_key()) {
+                (Some((manifest_key, _)), Some(tail_key)) => match self.ties {
+                    TieOrder::TailFirst => tail_key <= manifest_key.as_str(),
+                    TieOrder::ManifestFirst => tail_key < manifest_key.as_str(),
                 },
                 (None, Some(_)) => true,
                 (Some(_), None) => false,
                 (None, None) => return Ok(None),
             };
-            let side = if take_tail {
-                &mut self.tail
+            let (row_key, row) = if take_tail {
+                self.tail.next()
             } else {
-                &mut self.manifest
-            };
-            let (row_key, row) = side.pop_front().expect("the chosen side holds a row");
+                self.manifest.pop_front()
+            }
+            .expect("the chosen side holds a row");
             if self.last_row_key.as_ref() == Some(&row_key) {
                 continue;
             }
@@ -100,13 +101,7 @@ impl<T> ManifestTailCombiner<T> {
     /// the buffered manifest page, the next page starts at `lower_bound`, so
     /// the rows in between are never read.
     pub(super) fn seek(&mut self, lower_bound: &str) {
-        while self
-            .tail
-            .front()
-            .is_some_and(|(row_key, _)| row_key.as_str() < lower_bound)
-        {
-            self.tail.pop_front();
-        }
+        self.tail.seek(lower_bound);
         while self
             .manifest
             .front()
@@ -122,35 +117,6 @@ impl<T> ManifestTailCombiner<T> {
     }
 }
 
-/// Returns the `limit` lowest of `rows` whose row keys are at or after
-/// `lower_bound`, with their row keys, in row-key order, for a page whose
-/// every tail row is one of the rows that it returns. `row_key` formats a
-/// row's key.
-///
-/// Only the rows that the function returns are copied, however many rows the
-/// tail has. Of two rows with one key, the function keeps the first.
-pub(super) fn lowest_tail_rows<'a, T: Clone + 'a>(
-    rows: impl Iterator<Item = &'a T>,
-    row_key: impl Fn(&T) -> String,
-    lower_bound: &str,
-    limit: usize,
-) -> Vec<(String, T)> {
-    let mut lowest: BTreeMap<String, &T> = BTreeMap::new();
-    for row in rows {
-        let row_key = row_key(row);
-        if row_key.as_str() >= lower_bound {
-            lowest.entry(row_key).or_insert(row);
-            if lowest.len() > limit {
-                lowest.pop_last();
-            }
-        }
-    }
-    lowest
-        .into_iter()
-        .map(|(row_key, row)| (row_key, row.clone()))
-        .collect()
-}
-
 /// Where a paged scan of manifest rows resumes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ScanPosition {
@@ -162,66 +128,77 @@ enum ScanPosition {
 
 #[cfg(test)]
 mod tests {
+    use super::super::tail_rows::tests::{inode, state};
     use super::*;
+    use crate::metadata::InodeRecord;
+    use loonfs_types::{CommitSeq, InodeId};
+
+    fn key(inode_id: u128) -> String {
+        lookup_keys::inode_key(InodeId(inode_id))
+    }
+
+    /// Returns a refill that reads pages of at most `page_rows` of the inodes
+    /// `ids`, and records the key that each page starts at.
+    fn refill_of<'a>(
+        ids: &'a [u128],
+        page_rows: usize,
+        starts: &'a std::cell::RefCell<Vec<String>>,
+    ) -> impl FnMut(String) -> std::future::Ready<Result<ManifestPage<InodeRecord>>> + 'a {
+        move |lower_bound: String| {
+            starts.borrow_mut().push(lower_bound.clone());
+            let rows: Vec<(String, InodeRecord)> = ids
+                .iter()
+                .map(|id| (key(*id), inode(*id, 1)))
+                .filter(|(row_key, _)| *row_key >= lower_bound)
+                .take(page_rows)
+                .collect();
+            std::future::ready(Ok(ManifestPage {
+                more: !rows.is_empty(),
+                rows,
+            }))
+        }
+    }
 
     /// Checks that a seek skips the buffered rows before its bound on both
     /// sides, and starts the next manifest page at the bound once the
     /// buffered page is spent.
     #[tokio::test]
     async fn a_seek_skips_both_sides_and_starts_the_next_page_at_its_bound() {
-        let manifest: Vec<String> = ["a1", "a2", "b1", "c1", "c2", "c3", "d1"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect();
+        // An inode's group is its ID without the low four bits.
+        let manifest = [0x11, 0x12, 0x21, 0x31, 0x32, 0x33, 0x41];
         let starts = std::cell::RefCell::new(Vec::new());
-        let refill = |lower_bound: String| {
-            starts.borrow_mut().push(lower_bound.clone());
-            let rows: Vec<(String, ())> = manifest
-                .iter()
-                .filter(|key| key.as_str() >= lower_bound.as_str())
-                .take(2)
-                .map(|key| (key.clone(), ()))
-                .collect();
-            async move {
-                Ok(ManifestPage {
-                    more: !rows.is_empty(),
-                    rows,
-                })
-            }
-        };
-        let tail = vec![("a3".to_owned(), ()), ("c4".to_owned(), ())];
-        let mut combiner = ManifestTailCombiner::new("a".to_owned(), tail, TieOrder::ManifestFirst);
+        let mut refill = refill_of(&manifest, 2, &starts);
+        let tail_state = state(&[inode(0x34, 2), inode(0x13, 2)]);
+        let tail = TailRows::new([(&tail_state, None)], &key(0x10), None, CommitSeq(2));
+        let mut combiner = ManifestTailCombiner::new(key(0x10), tail, TieOrder::ManifestFirst);
         let mut read = Vec::new();
-        while let Some((row_key, ())) = combiner.next(refill).await.expect("next row") {
-            // Read the first row of each letter, then skip to the next one.
-            let letter = row_key[..1].to_owned();
-            read.push(row_key);
-            combiner.seek(&format!("{letter}\u{ff}"));
+        while let Some((_, row)) = combiner.next(&mut refill).await.expect("next row") {
+            // Read the first row of each group, then skip to the next one.
+            let group = row.inode_id.0 >> 4;
+            read.push(row.inode_id.0);
+            combiner.seek(&key((group + 1) << 4));
         }
-        assert_eq!(read, ["a1", "b1", "c1", "d1"]);
-        // The pages after a spent page start at the seek's bound, so `c2` and
-        // `c3` are never read.
-        assert_eq!(*starts.borrow(), ["a", "a\u{ff}", "c\u{ff}", "d\u{ff}"]);
+        assert_eq!(read, [0x11, 0x21, 0x31, 0x41]);
+        // The pages after a spent page start at the seek's bound, so 0x32 and
+        // 0x33 are never read.
+        assert_eq!(
+            *starts.borrow(),
+            [key(0x10), key(0x20), key(0x40), key(0x50)]
+        );
     }
 
     /// Checks that a row both sides hold comes back once.
     #[tokio::test]
     async fn a_row_on_both_sides_comes_back_once() {
-        let manifest = ["a", "b", "c"];
-        let refill = |lower_bound: String| {
-            let rows: Vec<(String, ())> = manifest
-                .iter()
-                .filter(|key| **key >= lower_bound.as_str())
-                .map(|key| ((*key).to_owned(), ()))
-                .collect();
-            async move { Ok(ManifestPage { rows, more: false }) }
-        };
-        let tail = vec![("b".to_owned(), ())];
-        let mut combiner = ManifestTailCombiner::new("a".to_owned(), tail, TieOrder::TailFirst);
+        let starts = std::cell::RefCell::new(Vec::new());
+        let mut refill = refill_of(&[1, 2, 3], usize::MAX, &starts);
+        let tail_state = state(&[inode(2, 1)]);
+        let tail = TailRows::new([(&tail_state, None)], &key(1), None, CommitSeq(1));
+        let mut combiner = ManifestTailCombiner::new(key(1), tail, TieOrder::TailFirst);
         let mut read = Vec::new();
-        while let Some((row_key, ())) = combiner.next(refill).await.expect("next row") {
-            read.push(row_key);
+        while let Some((_, row)) = combiner.next(&mut refill).await.expect("next row") {
+            read.push(row.inode_id.0);
         }
-        assert_eq!(read, ["a", "b", "c"]);
+        assert_eq!(read, [1, 2, 3]);
     }
 }

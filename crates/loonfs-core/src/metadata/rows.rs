@@ -178,14 +178,6 @@ impl TrashRange {
             ..self
         }
     }
-
-    pub(super) fn contains(&self, row_key: &str) -> bool {
-        row_key >= self.lower_bound.as_str()
-            && self
-                .upper_bound
-                .as_deref()
-                .is_none_or(|upper_bound| row_key < upper_bound)
-    }
 }
 
 impl MetadataState {

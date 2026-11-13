@@ -2,7 +2,9 @@
 
 use super::frame::WalObjectError;
 use crate::heap_bytes::{arc_bytes, hash_map_table_bytes, HeapBytes};
-use crate::metadata::{CommitReceiptRecord, ContentLayoutRecord, MetadataState, RevisionRecord};
+use crate::metadata::{
+    CommitReceiptRecord, ContentLayoutRecord, MetadataState, RevisionRecord, RowOrders,
+};
 use bytes::Bytes;
 use loonfs_types::format::manifest::ManifestActivity;
 use loonfs_types::format::wal::{committed_activity, WalCommitPayload, WalDelta, WalInlineContent};
@@ -31,6 +33,8 @@ pub struct ProjectedWalTail {
 pub(crate) struct TailChunk {
     pub(crate) first_seq: CommitSeq,
     pub(crate) rows: MetadataState,
+    /// The order of each listed family's rows, which listings merge.
+    pub(crate) orders: RowOrders,
     activity: ManifestActivity,
     contents: Vec<ProjectedContent>,
     content_positions: HashMap<ContentId, usize>,
@@ -165,11 +169,19 @@ impl ProjectedWalTail {
         &self,
         visible_seq: CommitSeq,
     ) -> impl Iterator<Item = &MetadataState> {
+        self.visible_chunks(visible_seq).map(|chunk| &chunk.rows)
+    }
+
+    /// Every chunk a view at `visible_seq` can see, newest first.
+    pub(crate) fn visible_chunks(
+        &self,
+        visible_seq: CommitSeq,
+    ) -> impl Iterator<Item = &TailChunk> {
         self.chunks
             .iter()
             .rev()
             .filter(move |chunk| chunk.first_seq <= visible_seq)
-            .map(|chunk| &chunk.rows)
+            .map(Arc::as_ref)
     }
 
     /// The unfolded pieces of the content `content_ref` names, when the
@@ -283,6 +295,7 @@ impl TailChunk {
     fn new(first_seq: CommitSeq, rows: MetadataState) -> Self {
         Self {
             first_seq,
+            orders: RowOrders::new(&rows),
             rows,
             activity: ManifestActivity::default(),
             contents: Vec::new(),
@@ -317,6 +330,7 @@ impl TailChunk {
             chunk.rows.apply_committed_wal_record_mut(record);
             chunk.activity = activity;
         }
+        chunk.orders = RowOrders::new(&chunk.rows);
         Ok(chunk)
     }
 
@@ -329,6 +343,7 @@ impl TailChunk {
     fn decoded_bytes(&self) -> usize {
         arc_bytes::<Self>()
             + self.rows.decoded_bytes()
+            + self.orders.heap_bytes()
             + hash_map_table_bytes(&self.content_positions)
             + self.contents.capacity() * size_of::<ProjectedContent>()
             + self.inline_entry_heap_bytes

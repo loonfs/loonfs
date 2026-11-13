@@ -1155,6 +1155,121 @@ async fn a_deletion_committed_after_the_last_manifest_lists_immediately() {
     assert_eq!(entries[0].deletion_seq, fresh.committed_seq);
 }
 
+/// Reads the trash of `view` in pages of `limit` entries, each page in a new
+/// session, and returns the name of each deletion in the order read.
+async fn paged_trash<S: ObjectStore + ?Sized>(
+    view: &crate::metadata::MetadataView<'_, '_, S>,
+    limit: usize,
+) -> Vec<String> {
+    let mut start_after = None;
+    let mut read = Vec::new();
+    loop {
+        let page = view
+            .session()
+            .trash_entries_page(&crate::metadata::TrashRange::after(start_after), limit)
+            .await
+            .expect("trash page");
+        assert!(page.len() <= limit, "limit {limit}");
+        if let Some(last) = page.last() {
+            start_after = Some((last.deletion_seq, last.root_inode_id));
+        }
+        read.extend(
+            page.iter()
+                .map(|entry| entry.deleted_binding.name_key.as_str().to_owned()),
+        );
+        if page.len() < limit {
+            return read;
+        }
+    }
+}
+
+/// Checks that the pages of the trash, read one after another, list each
+/// deletion once, oldest first, when the manifest and the WAL tail both have
+/// trash rows and the tail has more rows than a page. The tail restores a
+/// deletion that the manifest has, and a view at a sequence inside the tail
+/// lists the deletions at that sequence.
+#[tokio::test]
+async fn trash_pages_list_each_deletion_once_when_the_tail_has_more_rows_than_a_page() {
+    let temp = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp.path()).expect("create local-fs store");
+    let namespace_id = NamespaceId::parse("trash-pages").expect("namespace id");
+    let context = writer_at("writer-1", 5_000);
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap namespace");
+    let fixture = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context);
+    let paths: Vec<String> = ["m-0", "m-1", "m-2", "m-3", "m-4", "m-5", "t-0", "t-1"]
+        .into_iter()
+        .map(|name| format!("/{name}"))
+        .collect();
+    fixture
+        .write_files_bytes(&paths, b"one\n")
+        .await
+        .expect("write the files");
+    let restored = inode_id_of(&store, &namespace_id, "/m-1").await;
+    let mut deletion_seqs = std::collections::HashMap::new();
+    for path in ["/m-0", "/m-1", "/m-2", "/m-3"] {
+        let deletion = fixture.delete_path(path, None).await.expect("delete path");
+        deletion_seqs.insert(path, deletion.committed_seq);
+    }
+    create_snapshot(&store, &namespace_id, &context)
+        .await
+        .expect("fold the deletions into the manifest");
+
+    restore_deleted(
+        &store,
+        &namespace_id,
+        "restore-m-1",
+        restored,
+        deletion_seqs["/m-1"],
+        "/m-1-back",
+        &context,
+    )
+    .await;
+    let inside_seq = fixture
+        .delete_path("/m-4", None)
+        .await
+        .expect("delete path")
+        .committed_seq;
+    for path in ["/m-5", "/t-0", "/t-1"] {
+        fixture.delete_path(path, None).await.expect("delete path");
+    }
+    assert_listing_matches_the_old_walk(&store, &namespace_id, 0).await;
+
+    let names = |names: &[&str]| {
+        names
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<Vec<_>>()
+    };
+    let expected = names(&["m-0", "m-2", "m-3", "m-4", "m-5", "t-0", "t-1"]);
+    let expected_inside = names(&["m-0", "m-2", "m-3", "m-4"]);
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let loaded = namespace
+        .load_current_metadata_view()
+        .await
+        .expect("load the current view");
+    let tail_tombstones: usize = loaded
+        .wal_tail
+        .row_states(loaded.visible_seq())
+        .map(|state| state.subtree_tombstones().len())
+        .sum();
+    assert_eq!(
+        tail_tombstones, 5,
+        "a restore and four deletions are in the tail"
+    );
+    let view = loaded.metadata_view();
+    let inside = view.at_seq(inside_seq);
+    for limit in [1, 3, 100] {
+        assert_eq!(paged_trash(&view, limit).await, expected, "limit {limit}");
+        assert_eq!(
+            paged_trash(&inside, limit).await,
+            expected_inside,
+            "a view inside the tail, limit {limit}"
+        );
+    }
+}
+
 async fn fresh_read_context<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,

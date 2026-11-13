@@ -57,11 +57,10 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
             .expect("a slot prefix should end in a hyphen"),
             None => lookup_keys::direntry_parent_prefix(parent_inode_id),
         };
-        let mut combiner = ManifestTailCombiner::new(
-            lower_bound.clone(),
-            self.base.tail_direntry_binds(parent_inode_id, &lower_bound),
-            TieOrder::ManifestFirst,
-        );
+        let upper_bound =
+            string_prefix_upper_bound(&lookup_keys::direntry_parent_prefix(parent_inode_id));
+        let tail = self.base.tail_rows(&lower_bound, upper_bound.as_deref());
+        let mut combiner = ManifestTailCombiner::new(lower_bound, tail, TieOrder::ManifestFirst);
         let mut children = Vec::with_capacity(limit);
         while children.len() < limit {
             let bound = self
@@ -85,7 +84,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
     /// bound edges, or the parent's rows run out.
     async fn next_bound_edges(
         &mut self,
-        combiner: &mut ManifestTailCombiner<DirentryBindingRecord>,
+        combiner: &mut ManifestTailCombiner<'a, DirentryBindingRecord>,
         parent_inode_id: InodeId,
         edge_limit: usize,
     ) -> Result<Vec<DirentryBindingRecord>> {
