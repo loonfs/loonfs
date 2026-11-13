@@ -19,9 +19,8 @@ fn expires_at_ms(now_ms: u64, ttl_ms: NonZeroU64) -> u64 {
 }
 
 impl<M: crate::Mode> Namespace<M> {
-    /// Returns one snapshot, as the listing returns it, including an expired
-    /// snapshot that garbage collection hasn't deleted. A missing id returns
-    /// `snapshot_not_found`.
+    /// Returns one snapshot, as the listing returns it. A missing id, or the id
+    /// of an expired or deleted snapshot, returns `snapshot_not_found`.
     pub async fn get_snapshot(&self, snapshot_id: &SnapshotId) -> Result<Snapshot> {
         trace::in_operation(
             operation_span!(self.core, "get_snapshot", self.namespace_id),
@@ -38,8 +37,8 @@ impl<M: crate::Mode> Namespace<M> {
         .await
     }
 
-    /// Lists snapshots in ascending id order, including expired snapshots
-    /// that garbage collection hasn't deleted.
+    /// Lists the snapshots that haven't expired or been deleted, in ascending
+    /// id order.
     pub fn list_snapshots(&self) -> SnapshotsPager {
         loonfs_types::Pager::with_state(self.read_only(), |reader, request| async move {
             reader

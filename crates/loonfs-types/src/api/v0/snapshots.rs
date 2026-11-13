@@ -104,7 +104,7 @@ pub struct Snapshot {
     /// The time the snapshot record was created, in Unix milliseconds.
     pub created_at_ms: u64,
     /// The time the snapshot expires, in Unix milliseconds. A snapshot without it doesn't expire.
-    /// An expired snapshot can't be read, and it's listed until garbage collection deletes it.
+    /// An expired snapshot can't be read or retrieved, and the snapshot listing leaves it out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub expires_at_ms: Option<u64>,
@@ -133,7 +133,7 @@ pub struct ListSnapshotRecordsResponse {
     pub next_cursor: Option<String>,
 }
 
-/// One page of snapshots, including expired snapshots that garbage collection hasn't deleted yet.
+/// One page of the snapshots that haven't expired or been deleted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ListSnapshotsResponse {

@@ -3067,7 +3067,7 @@
         "type": "object"
       },
       "ListSnapshotsResponse": {
-        "description": "One page of snapshots, including expired snapshots that garbage collection hasn't deleted yet.",
+        "description": "One page of the snapshots that haven't expired or been deleted.",
         "properties": {
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
@@ -4652,7 +4652,7 @@
             "type": "integer"
           },
           "expires_at_ms": {
-            "description": "The time the snapshot expires, in Unix milliseconds. A snapshot without it doesn't expire.\nAn expired snapshot can't be read, and it's listed until garbage collection deletes it.",
+            "description": "The time the snapshot expires, in Unix milliseconds. A snapshot without it doesn't expire.\nAn expired snapshot can't be read or retrieved, and the snapshot listing leaves it out.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -9787,7 +9787,7 @@
     },
     "/v0/namespaces/{namespace_id}/snapshots": {
       "get": {
-        "description": "Lists snapshots in snapshot ID order. An expired snapshot stays in the list until garbage collection deletes it, after its expiry plus the grace window. The list leaves out deleted snapshots and fork snapshots, which the maintenance snapshot inventory lists.",
+        "description": "Lists snapshots in snapshot ID order. The list leaves out expired snapshots, deleted snapshots, and fork snapshots, which the maintenance snapshot inventory lists.",
         "operationId": "list_snapshots",
         "parameters": [
           {
@@ -10067,7 +10067,7 @@
         "x-loonfs-retry": "idempotent"
       },
       "get": {
-        "description": "Returns one snapshot, as the snapshot listing returns it, including an expired snapshot that garbage collection hasn't deleted. A missing ID, the ID of a deleted snapshot, or the ID of a fork snapshot returns `snapshot_not_found`.",
+        "description": "Returns one snapshot, as the snapshot listing returns it. A missing ID, the ID of an expired or deleted snapshot, or the ID of a fork snapshot returns `snapshot_not_found`.",
         "operationId": "get_snapshot",
         "parameters": [
           {

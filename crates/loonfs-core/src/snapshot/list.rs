@@ -105,9 +105,9 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
         .await
     }
 
-    /// Lists one page of snapshots (the user snapshots) in ascending ID order,
-    /// including expired snapshots that garbage collection hasn't deleted. A
-    /// deleted snapshot is left out.
+    /// Lists one page of snapshots (the user snapshots) in ascending ID order.
+    /// A deleted snapshot and a snapshot that expired at or before the
+    /// wall-clock time of the call are left out.
     pub async fn list_snapshots_page(
         &self,
         request: PageRequest<SnapshotPageCursor>,
@@ -116,8 +116,11 @@ impl<S: ObjectStore, M> NamespaceEngine<S, M> {
             limit: request.limit,
             cursor: request.cursor.map(SnapshotRecordPageCursor::from),
         };
+        let now_ms = self.now_ms();
         let page = self
-            .list_mapped_snapshot_records_page(request, super::user_snapshot)
+            .list_mapped_snapshot_records_page(request, |record| {
+                super::user_snapshot(record).filter(|snapshot| snapshot.is_live(now_ms))
+            })
             .await?;
         Ok(Page {
             items: page.items,

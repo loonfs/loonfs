@@ -234,8 +234,8 @@ Snapshot management
 
   loonfs snapshot list <namespace> [--limit <n>] [--page-size <n>]
                                    [--cursor <cursor>] [--all] [--jsonl]
-    List snapshots in snapshot ID order. Expired snapshots remain listed
-    until garbage collection deletes them
+    List snapshots in snapshot ID order. Expired and deleted snapshots
+    are left out
 
   loonfs snapshot extend <namespace> <snapshot-id> --ttl-ms <ms>
     Keep an unexpired snapshot available for longer. The expiry never

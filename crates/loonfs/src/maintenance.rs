@@ -118,7 +118,6 @@ impl Maintenance {
     }
 
     async fn count_live_snapshots(&self, namespace_id: &NamespaceId) -> Result<u64> {
-        let now_ms = self.core.now_ms();
         let mut cursor = None;
         let mut live_snapshots = 0_u64;
         loop {
@@ -130,12 +129,7 @@ impl Maintenance {
                 })
                 .await
                 .map_err(Error::from)?;
-            let live = page
-                .items
-                .iter()
-                .filter(|snapshot| snapshot.is_live(now_ms))
-                .count();
-            live_snapshots = live_snapshots.saturating_add(u64_from_usize(live));
+            live_snapshots = live_snapshots.saturating_add(u64_from_usize(page.items.len()));
             let Some(next_cursor) = page.next_cursor else {
                 return Ok(live_snapshots);
             };
