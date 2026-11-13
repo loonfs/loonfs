@@ -720,7 +720,7 @@
           "max_staleness_ms": {
             "description": "With `consistency` set to `eventual`, how old the server's last confirmation of the head can\nbe, in milliseconds. The default is the server's `max_staleness_ms`.",
             "format": "int64",
-            "maximum": 1155000,
+            "maximum": 1200000,
             "minimum": 0,
             "type": "integer"
           },
@@ -784,7 +784,7 @@
           "max_staleness_ms": {
             "description": "With `consistency` set to `eventual`, how old the server's last confirmation of the head can\nbe, in milliseconds. The default is the server's `max_staleness_ms`.",
             "format": "int64",
-            "maximum": 1155000,
+            "maximum": 1200000,
             "minimum": 0,
             "type": "integer"
           },
@@ -880,7 +880,7 @@
           "max_staleness_ms": {
             "description": "With `consistency` set to `eventual`, how old the server's last confirmation of the head can\nbe, in milliseconds. The default is the server's `max_staleness_ms`.",
             "format": "int64",
-            "maximum": 1155000,
+            "maximum": 1200000,
             "minimum": 0,
             "type": "integer"
           },
@@ -6547,7 +6547,7 @@
             "required": false,
             "schema": {
               "format": "int64",
-              "maximum": 1155000,
+              "maximum": 1200000,
               "minimum": 0,
               "type": "integer"
             }
@@ -6853,7 +6853,7 @@
             "required": false,
             "schema": {
               "format": "int64",
-              "maximum": 1155000,
+              "maximum": 1200000,
               "minimum": 0,
               "type": "integer"
             }
@@ -6993,7 +6993,7 @@
             "required": false,
             "schema": {
               "format": "int64",
-              "maximum": 1155000,
+              "maximum": 1200000,
               "minimum": 0,
               "type": "integer"
             }
@@ -7338,7 +7338,7 @@
             "required": false,
             "schema": {
               "format": "int64",
-              "maximum": 1155000,
+              "maximum": 1200000,
               "minimum": 0,
               "type": "integer"
             }
@@ -7474,7 +7474,7 @@
             "required": false,
             "schema": {
               "format": "int64",
-              "maximum": 1155000,
+              "maximum": 1200000,
               "minimum": 0,
               "type": "integer"
             }
@@ -7608,7 +7608,7 @@
             "required": false,
             "schema": {
               "format": "int64",
-              "maximum": 1155000,
+              "maximum": 1200000,
               "minimum": 0,
               "type": "integer"
             }
@@ -7738,7 +7738,7 @@
             "required": false,
             "schema": {
               "format": "int64",
-              "maximum": 1155000,
+              "maximum": 1200000,
               "minimum": 0,
               "type": "integer"
             }
@@ -8189,7 +8189,7 @@
             "required": false,
             "schema": {
               "format": "int64",
-              "maximum": 1155000,
+              "maximum": 1200000,
               "minimum": 0,
               "type": "integer"
             }
@@ -8354,7 +8354,7 @@
             "required": false,
             "schema": {
               "format": "int64",
-              "maximum": 1155000,
+              "maximum": 1200000,
               "minimum": 0,
               "type": "integer"
             }
@@ -8492,7 +8492,7 @@
             "required": false,
             "schema": {
               "format": "int64",
-              "maximum": 1155000,
+              "maximum": 1200000,
               "minimum": 0,
               "type": "integer"
             }
@@ -8841,7 +8841,7 @@
             "required": false,
             "schema": {
               "format": "int64",
-              "maximum": 1155000,
+              "maximum": 1200000,
               "minimum": 0,
               "type": "integer"
             }
@@ -8988,7 +8988,7 @@
             "required": false,
             "schema": {
               "format": "int64",
-              "maximum": 1155000,
+              "maximum": 1200000,
               "minimum": 0,
               "type": "integer"
             }

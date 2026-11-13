@@ -6,7 +6,7 @@
 /// It's also the largest maximum staleness that a live read accepts.
 /// `loonfs-core` derives the bound from its publication budgets and checks
 /// that derivation against this value at compile time.
-pub const READ_REVALIDATION_BOUND_MS: u64 = 1_155_000;
+pub const READ_REVALIDATION_BOUND_MS: u64 = 1_200_000;
 
 /// Default age of an unreachable object before garbage collection may remove
 /// it, in milliseconds.

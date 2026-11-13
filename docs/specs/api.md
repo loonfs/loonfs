@@ -71,7 +71,7 @@ The example below is the reference deployment's document, with the server's defa
     "commit.max_request_body_bytes": 2097152,
     "download.service_proxied.max_concurrent_requests": 16,
     "download.service_proxied.max_content_bytes": 268435456,
-    "maintenance.gc.min_grace_window_ms": 1335000,
+    "maintenance.gc.min_grace_window_ms": 1500000,
     "pagination.default_limit": 1000,
     "pagination.max_limit": 1000,
     "query.grep.scan_budget_files": 4096,
@@ -1407,7 +1407,7 @@ A read passes `strong` when it has to see a commit that another runtime acknowle
 
 `RuntimeConfig::consistency` sets the runtime's default consistency (`ReadConsistency::Eventual` or `ReadConsistency::Strong`), which is `eventual` unless the host sets `strong`. In the Rust runtime, a read's options leave the consistency unset by default (`None`, or `ReadAt::Live(None)` in the options that can also read a snapshot), and a read that takes no options, such as `Namespace::read_file_revision`, always takes the runtime's default. The reference server has the same setting, `consistency`, which a request without the `consistency` parameter takes, and a deployment whose readers always follow writes made through other servers sets it to `strong`. `RuntimeConfig::max_staleness_ms` sets the runtime's default maximum staleness. It defaults to 1000 milliseconds, and a value of `0` confirms the head on every read. The reference server has the same setting, `max_staleness_ms`. A read can also set its own maximum staleness, with `Consistency::Eventual { max_staleness_ms }` in the Rust runtime, or with `max_staleness_ms` in the HTTP API, which is accepted only together with `consistency=eventual`.
 
-Neither the maximum staleness nor the manifest check interval can exceed `READ_REVALIDATION_BOUND_MS` (1,155,000 milliseconds). A runtime build with a larger `max_staleness_ms` or `manifest_revalidation_interval_ms` fails with a config error, a server whose config sets one fails at startup, and a read that sets a larger maximum staleness returns `invalid_request` with `param` set to `max_staleness_ms`. A cached head whose last manifest check is older than the bound is confirmed before a read with either setting.
+Neither the maximum staleness nor the manifest check interval can exceed `READ_REVALIDATION_BOUND_MS` (1,200,000 milliseconds). A runtime build with a larger `max_staleness_ms` or `manifest_revalidation_interval_ms` fails with a config error, a server whose config sets one fails at startup, and a read that sets a larger maximum staleness returns `invalid_request` with `param` set to `max_staleness_ms`. A cached head whose last manifest check is older than the bound is confirmed before a read with either setting.
 
 In a runtime with the namespace's writer session, a read with either setting starts from the [writer position](glossary.md#writer-position), and the session confirms the position with a HEAD for the next manifest number. An `eventual` read sends no request while the session's last check is younger than the read's maximum staleness, and after that it waits for the session's check. A `strong` read always waits for the session's check, so it sees another writer's claim before it reads. A check counts for a read only if it started after the read did. The session runs one check at a time, so a read that finds a check running waits for it and then for the next one, which every read that arrives during the first check shares, and a wave of concurrent `strong` reads costs at most two checks.
 
@@ -1491,7 +1491,7 @@ A newer server might report an `inode_kind` that this document doesn't define. A
 
 The `include_attributes` parameter selects whether the response includes the inode's attributes. It accepts `true` or `false`, and any other value returns `invalid_request`. The entry route defaults to `true`, because it returns one attribute map, which is limited to 64 KiB.
 
-The `consistency` parameter selects how recently the read confirms the namespace head (see [Read consistency](#read-consistency)). It accepts `eventual` or `strong`, and any other value returns `invalid_request`. A request without it takes the server's default, which is `eventual` unless the server's `consistency` setting is `strong`. With `consistency=eventual`, `max_staleness_ms` sets the read's own maximum staleness in milliseconds, from 0 to 1,155,000. Neither parameter can be combined with `snapshot_id`.
+The `consistency` parameter selects how recently the read confirms the namespace head (see [Read consistency](#read-consistency)). It accepts `eventual` or `strong`, and any other value returns `invalid_request`. A request without it takes the server's default, which is `eventual` unless the server's `consistency` setting is `strong`. With `consistency=eventual`, `max_staleness_ms` sets the read's own maximum staleness in milliseconds, from 0 to 1,200,000. Neither parameter can be combined with `snapshot_id`.
 
 The attributes projection is serialized as prefixed sibling fields of the entry. `attributes_revision_no` and the complete `attributes` map are either both present or both absent. `attributes_updated_by` and `attributes_updated_at_ms` are also present when a stored attributes revision exists.
 

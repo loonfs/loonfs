@@ -1586,7 +1586,7 @@ Segments that no root references are protected until their provider age is at le
 compaction deadline + minimum grace window <= 24 hours
 ```
 
-With the current constants, a compaction can start its publication for at most 23 hours, 37 minutes, and 45 seconds after its timer starts (before it writes any output). After that, it abandons the publication, because its earliest unreferenced output might already be eligible for deletion. A cancelled or crashed compaction leaves output that's subject to the same age rule.
+With the current constants, a compaction can start its publication for at most 23 hours and 35 minutes after its timer starts (before it writes any output). After that, it abandons the publication, because its earliest unreferenced output might already be eligible for deletion. A cancelled or crashed compaction leaves output that's subject to the same age rule.
 
 A compaction applies the row-retention rules for its selected window, and it MUST preserve every retained view. A restart begins a new plan from the current manifest, and there's no durable compaction cursor or output-protection record.
 
@@ -1668,7 +1668,7 @@ For example, suppose a collector observes hint 8 and current manifest 10. It kee
 
 Garbage collection deletes an unreferenced object based on its age, which is calculated as `now_ms.saturating_sub(last_modified_at_ms)`. So safety depends on a bound on how much an age can be overstated. The collector's clock might be ahead of the provider's, timestamps might have limited precision, and a process might pause around a publication check.
 
-The combined allowance (`GC_SAFETY_MARGIN_MS`) is 180,000 ms. It's one allowance for relative clock error, timestamp precision, and scheduling together, not three minutes for each participant. A provider clock that's ahead of the collector's delays garbage collection, but doesn't make it unsafe. Ages based on recorded times (creation, expiry, or completion) use the corresponding bound between the collector and the host that recorded the time.
+The combined allowance (`GC_SAFETY_MARGIN_MS`) is 300,000 ms. It's one allowance for relative clock error, timestamp precision, and scheduling together, not five minutes for each participant. A provider clock that's ahead of the collector's delays garbage collection, but doesn't make it unsafe. Ages based on recorded times (creation, expiry, or completion) use the corresponding bound between the collector and the host that recorded the time.
 
 Publication budgets use monotonic elapsed time, on a clock that keeps running while the host sleeps. The minimum grace window is the longest bounded publication budget, plus the provider publication request bound, plus the combined allowance. Fork installation and compaction reserve that grace window within their own lifetime bounds. [Publication and collection timing](#c1-publication-and-collection-timing) records the exact calculations.
 
@@ -2577,20 +2577,20 @@ Publication and garbage collection use the timing relationships below, and [C.4]
 | `METADATA_PUBLICATION_BUDGET_MS` | 900,000 | From the start of a bounded manifest publication (including an epoch claim) to starting its put. |
 | `PROVIDER_OPERATION_DEADLINE_MS` | 120,000 | The shared retry budget for a client operation. |
 | `PROVIDER_ATTEMPT_TIMEOUT_MS` | 30,000 | One attempt of a control operation. |
-| `PROVIDER_PUBLICATION_REQUEST_BOUND_MS` | 255,000 | The retry budget, the final backoff, and a payload-sized final request. |
-| `GC_SAFETY_MARGIN_MS` | 180,000 | The combined allowance for relative clock error, timestamp precision, and scheduling. |
-| `GC_MIN_GRACE_WINDOW_MS` | 1,335,000 | The derived minimum grace window. |
-| `READ_REVALIDATION_BOUND_MS` | 1,155,000 | The longest gap between a previous basis confirmation and the answer to the next successor check, for a cached view, a writer, a writer position, or a manifest publication's basis. |
+| `PROVIDER_PUBLICATION_REQUEST_BOUND_MS` | 300,000 | The retry budget, the final backoff, and a payload-sized final request, rounded up to 5 minutes. |
+| `GC_SAFETY_MARGIN_MS` | 300,000 | The combined allowance for relative clock error, timestamp precision, and scheduling. |
+| `GC_MIN_GRACE_WINDOW_MS` | 1,500,000 | The derived minimum grace window. |
+| `READ_REVALIDATION_BOUND_MS` | 1,200,000 | The longest gap between a previous basis confirmation and the answer to the next successor check, for a cached view, a writer, a writer position, or a manifest publication's basis. |
 | `GC_DEFAULT_GRACE_WINDOW_MS` | 3,600,000 | The default grace window. |
 | `RETENTION_ADVANCE_MIN_COMMIT_AGE_MS` | 3,600,000 | The minimum commit age of a retention advance. An advance doesn't move the floor past a younger commit. |
 | `UNREFERENCED_SEGMENT_GRACE_WINDOW_MS` | 86,400,000 | An unreferenced segment MUST be strictly older than this before it's deleted. |
-| `METADATA_COMPACTION_BUDGET_MS` | 85,065,000 | The longest time before a compaction starts its publication. |
+| `METADATA_COMPACTION_BUDGET_MS` | 84,900,000 | The longest time before a compaction starts its publication. |
 | `DIRECT_TRANSFER_URL_TTL_MS` | 900,000 | The lifetime of a presigned download URL and of a presigned URL for a whole-object upload. A presigned URL for one part of a multipart upload lasts one hour. |
 | `OPERATION_SNAPSHOT_TTL_MS` | 300,000 | The lifetime of a snapshot that LoonFS takes for one of its own operations (the snapshot of the fork that a merge or a rebase plans from), and of the content proofs of the operation's plan. |
-| `NAMESPACE_RETIREMENT_GRACE_WINDOW_MS` | 2,490,000 | The minimum retirement grace after the deletion call's clock. |
-| `POOL_ROOTS_READ_BUDGET_MS` | 2,310,000 | The monotonic time, from the start of a pool's collection, within which the collection reads the roots of every member of the pool, or skips the pool's content sweep. |
+| `NAMESPACE_RETIREMENT_GRACE_WINDOW_MS` | 2,700,000 | The minimum retirement grace after the deletion call's clock. |
+| `POOL_ROOTS_READ_BUDGET_MS` | 2,400,000 | The monotonic time, from the start of a pool's collection, within which the collection reads the roots of every member of the pool, or skips the pool's content sweep. |
 
-A provider retry can be admitted before its operation deadline, wait up to 15 seconds of backoff, and then take up to 120 seconds for a payload-sized request. The object-store layer never resends a conditional write (see [Required operations](#31-required-operations)), but a conditional WAL or manifest write can still be larger than the payload threshold in its one request. So the publication allowance reserves 120 + 15 + 120 seconds, not the 30-second timeout for small requests. The allowance covers the request phase, not reading the response body. It keeps the relative-clock and scheduling assumptions, and it doesn't prove that a timed-out remote change had no effect.
+A provider retry can be admitted before its operation deadline, wait up to 15 seconds of backoff, and then take up to 120 seconds for a payload-sized request. The object-store layer never resends a conditional write (see [Required operations](#31-required-operations)), but a conditional WAL or manifest write can still be larger than the payload threshold in its one request. So the publication allowance reserves 120 + 15 + 120 seconds, rounded up to 300 seconds, not the 30-second timeout for small requests. The allowance covers the request phase, not reading the response body. It keeps the relative-clock and scheduling assumptions, and it doesn't prove that a timed-out remote change had no effect.
 
 ```text
 GC_MIN_GRACE_WINDOW_MS
@@ -2621,9 +2621,9 @@ The configured grace window `T` can't be lower than the minimum, and retirement 
 | `COMPLETED_UPLOAD_RECEIPT_WINDOW_MS` | 604,800,000 | The seven-day window in which completed content can issue new receipts. |
 | `CONTENT_RECEIPT_TTL_MS` | 3,600,000 | The one-hour token lifetime. |
 | `COMPLETED_UPLOAD_ADMISSION_WINDOW_MS` | 608,400,000 | The receipt issuance window plus the final token's lifetime. |
-| `CONTENT_RECLAMATION_GRACE_WINDOW_MS` | 609,735,000 | The admission window plus the minimum grace window. |
+| `CONTENT_RECLAMATION_GRACE_WINDOW_MS` | 609,900,000 | The admission window plus the minimum grace window. |
 
-The completed-content interval is seven days, one hour, twenty-two minutes, and fifteen seconds. Deletion still depends on the namespace's state and on reference evidence, and reaching that age doesn't delete referenced content.
+The completed-content interval is seven days, one hour, and twenty-five minutes. Deletion still depends on the namespace's state and on reference evidence, and reaching that age doesn't delete referenced content.
 
 A direct multipart upload is also subject to the provider's transfer limits. The current reference limits are 10,000 parts, a 5 MiB minimum configured part size, a 5 GiB maximum configured part size, and 1,000 presigned part URLs per signing request. These limits don't override a provider's lower maximum object size, or other constraints of supported providers.
 
