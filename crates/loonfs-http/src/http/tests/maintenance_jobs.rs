@@ -8,7 +8,6 @@ use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_test_support::ids::writer_id;
 use loonfs_test_support::stores::{RecordedOperation, RecordingStore};
 use loonfs_types::format::segment_blocks::DEFAULT_MAX_DELTA_RUNS;
-use tower::ServiceExt;
 
 async fn run(
     router: &axum::Router,
@@ -25,24 +24,9 @@ async fn send(
     uri: &str,
     body: &str,
 ) -> (StatusCode, serde_json::Value) {
-    let response = router
-        .clone()
-        .oneshot(
-            axum::http::Request::builder()
-                .method(method)
-                .uri(uri)
-                .header("authorization", "Bearer test-token")
-                .header("content-type", "application/json")
-                .header("Loonfs-Actor", "maintenance-jobs")
-                .body(axum::body::Body::from(body.to_owned()))
-                .expect("request"),
-        )
-        .await
-        .expect("response");
-    let status = response.status();
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("response body");
+    let actor = [("Loonfs-Actor", "maintenance-jobs")];
+    let request = fixtures::request(method, uri, Some(body), &actor);
+    let (status, _, bytes) = fixtures::send(router, request).await;
     (
         status,
         serde_json::from_slice(&bytes).expect("JSON response"),

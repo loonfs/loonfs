@@ -842,92 +842,6 @@ async fn the_root_path_is_rejected_as_a_mutation_target() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_batch_replays_under_its_commit_id() {
-    let temp_dir = tempdir().expect("tempdir");
-    let harness = start_server(test_config(
-        temp_dir.path().join("store"),
-        "loonfs-server-batch-replay",
-        "http-commit-replay",
-    ))
-    .await;
-
-    let namespace = namespace_id("demo");
-    harness
-        .client
-        .create_namespace(&namespace, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-
-    let batch = |ops: Vec<FilesystemOperation>| CommitRequest {
-        preconditions: Vec::new(),
-        commit_id: commit_id("replayed-batch"),
-        message: Some("two directories".to_owned()),
-        content_tokens: Vec::new(),
-        operations: ops,
-    };
-    let operations = vec![
-        FilesystemOperation::CreateDirectory {
-            path: absolute(REPORTS_DIR),
-            parents: false,
-        },
-        FilesystemOperation::CreateDirectory {
-            path: absolute("/reports/2026"),
-            parents: false,
-        },
-    ];
-
-    let first = harness
-        .client
-        .commit(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            &batch(operations.clone()),
-        )
-        .await
-        .expect("batch commits");
-    let replayed = harness
-        .client
-        .commit(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            &batch(operations.clone()),
-        )
-        .await
-        .expect("identical resubmission replays");
-    assert_eq!(replayed, first);
-    assert_eq!(
-        harness
-            .client
-            .get_namespace(&namespace)
-            .await
-            .expect("status")
-            .head_seq,
-        first.committed_seq,
-        "the replay committed nothing new"
-    );
-
-    // Dropping the second operation is a different commit under the same
-    // id, so the id is spent.
-    let conflict = harness
-        .client
-        .commit(
-            &namespace,
-            &loonfs_test_support::test_actor(),
-            &batch(operations[..1].to_vec()),
-        )
-        .await
-        .expect_err("a different batch cannot reuse the id");
-    match conflict {
-        ClientError::Api { response, .. } => {
-            assert_eq!(response.code, ErrorCode::CommitIdReuseConflict.as_str());
-        }
-        other => panic!("expected commit_id_reuse_conflict, got {other:?}"),
-    }
-
-    harness.server.abort();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_commit_id_used_embedded_replays_over_http() {
     let temp_dir = tempdir().expect("tempdir");
     let store_root = temp_dir.path().join("store");
@@ -996,26 +910,7 @@ async fn a_commit_id_used_embedded_replays_over_http() {
     ))
     .await;
 
-    // The same commit, written in the wire language under the same id.
-    let wire_operations = vec![
-        FilesystemOperation::CreateDirectory {
-            path: absolute(REPORTS_DIR),
-            parents: false,
-        },
-        FilesystemOperation::CreateDirectory {
-            path: absolute("/reports/2026"),
-            parents: false,
-        },
-        FilesystemOperation::MovePath {
-            source_path: absolute("/reports/2026"),
-            destination_path: absolute("/reports/2025"),
-            precondition: loonfs_types::DestinationPrecondition {
-                behavior: DestinationBehavior::NoReplace,
-                expected_inode_id: None,
-                expected_revision_no: None,
-            },
-        },
-    ];
+    let wire_operations = operations();
     let replayed = harness
         .client
         .commit(

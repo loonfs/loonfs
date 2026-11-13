@@ -25,7 +25,7 @@ mod fixtures;
 use async_trait::async_trait;
 use axum::body::Bytes;
 use axum::http::StatusCode;
-use fixtures::{test_app, test_options, TestAppOptions, TestOptions};
+use fixtures::{request, send, serve, test_app, test_options, TestAppOptions, TestOptions};
 use futures::stream::StreamExt;
 use loonfs::{
     ConfiguredObjectStoreKind, DeleteOptions, LoonFs, PutFileOptions, TraceMode, Writable,
@@ -44,16 +44,13 @@ use loonfs_types::{
 };
 use std::path::Path;
 
+/// The `Loonfs-Actor` header of a request that acts as the test actor.
+const TEST_ACTOR: (&str, &str) = ("Loonfs-Actor", "test-actor");
+
 fn options_with_store(store: SharedObjectStore) -> TestAppOptions {
     TestAppOptions {
-        session_fold_at_wal_objects: None,
-        max_staleness_ms: None,
-        consistency: None,
-        execution_budget: None,
-        usage_recorder: None,
         store: Some(store),
-        direct_transfers: None,
-        monotonic_timer: None,
+        ..TestAppOptions::default()
     }
 }
 
@@ -545,8 +542,6 @@ impl PoisonProviderStore {
 
 #[tokio::test]
 async fn provider_failure_is_projected_in_the_remote_api_envelope() {
-    use tower::ServiceExt;
-
     let temp_dir = tempdir().expect("tempdir");
     let store = FailStore::new(
         LocalFsStore::new(temp_dir.path()).expect("construct local store"),
@@ -562,31 +557,24 @@ async fn provider_failure_is_projected_in_the_remote_api_envelope() {
     .await
     .expect("build app")
     .0;
-    let response = router
-        .oneshot(
-            axum::http::Request::builder()
-                .method(axum::http::Method::POST)
-                .uri("/v0/namespaces")
-                .header(axum::http::header::AUTHORIZATION, "Bearer test-token")
-                .header("Loonfs-Actor", "test-actor")
-                .header(axum::http::header::CONTENT_TYPE, "application/json")
-                .body(axum::body::Body::from(r#"{"namespace_id":"customer-a"}"#))
-                .expect("create namespace request"),
-        )
-        .await
-        .expect("create namespace response");
+    let (status, headers, body) = send(
+        &router,
+        request(
+            "POST",
+            "/v0/namespaces",
+            Some(r#"{"namespace_id":"customer-a"}"#),
+            &[TEST_ACTOR],
+        ),
+    )
+    .await;
 
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    let request_id = response
-        .headers()
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    let request_id = headers
         .get(super::middleware::REQUEST_ID_HEADER)
         .expect("request id header")
         .to_str()
         .expect("request id header is text")
         .to_owned();
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read provider failure body");
     let rendered = String::from_utf8(body.to_vec()).expect("API body is UTF-8");
 
     assert_provider_markers_absent("API body", &rendered);
@@ -658,8 +646,6 @@ fn data_wal_put_for(
 
 #[tokio::test]
 async fn maintenance_namespace_diagnostics_route_answers_storage_fields() {
-    use tower::ServiceExt;
-
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let (router, state) = test_app(
@@ -687,20 +673,17 @@ async fn maintenance_namespace_diagnostics_route_answers_storage_fields() {
         .await
         .expect("publish one WAL object");
 
-    let response = router
-        .oneshot(
-            axum::http::Request::builder()
-                .uri("/v0/maintenance/namespaces/diagnostics/diagnostics")
-                .header(axum::http::header::AUTHORIZATION, "Bearer test-token")
-                .body(axum::body::Body::empty())
-                .expect("diagnostics request"),
-        )
-        .await
-        .expect("diagnostics response");
-    assert_eq!(response.status(), axum::http::StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("diagnostics body");
+    let (status, _, body) = send(
+        &router,
+        request(
+            "GET",
+            "/v0/maintenance/namespaces/diagnostics/diagnostics",
+            None,
+            &[],
+        ),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
     let diagnostics: loonfs_types::NamespaceDiagnostics =
         serde_json::from_slice(&body).expect("namespace diagnostics response");
     assert_eq!(diagnostics.namespace_id, namespace_id);
@@ -1919,8 +1902,6 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
 
 #[tokio::test]
 async fn http_namespace_json_body_over_the_limit_answers_content_too_large() {
-    use tower::ServiceExt;
-
     let directory = tempdir().expect("temporary store");
     let (router, state) = test_app(
         test_options(directory.path(), "json-body-limit"),
@@ -1928,27 +1909,16 @@ async fn http_namespace_json_body_over_the_limit_answers_content_too_large() {
     )
     .await
     .expect("app");
-    let mut body = br#"{"namespace_id":"oversized-body"}"#.to_vec();
-    body.resize(super::MAX_JSON_BODY_BYTES + 1, b' ');
+    let mut body = r#"{"namespace_id":"oversized-body"}"#.to_owned();
+    body.push_str(&" ".repeat(super::MAX_JSON_BODY_BYTES + 1 - body.len()));
 
-    let response = router
-        .oneshot(
-            axum::http::Request::builder()
-                .method("POST")
-                .uri("/v0/namespaces")
-                .header("authorization", "Bearer test-token")
-                .header("loonfs-actor", "test-actor")
-                .header("content-type", "application/json")
-                .body(axum::body::Body::from(body))
-                .expect("request"),
-        )
-        .await
-        .expect("response");
+    let (status, _, body) = send(
+        &router,
+        request("POST", "/v0/namespaces", Some(&body), &[TEST_ACTOR]),
+    )
+    .await;
 
-    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
-    let body = axum::body::to_bytes(response.into_body(), 4096)
-        .await
-        .expect("response body");
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
     let error: loonfs_types::ErrorResponse = serde_json::from_slice(&body).expect("API error");
     assert_eq!(error.code, ErrorCode::ContentTooLarge.as_str());
     state.runtime.shutdown().await.expect("writer shutdown");
@@ -2493,14 +2463,12 @@ async fn download_admission_is_held_until_the_response_body_is_consumed() {
 
     let limit = state.request_limit().expect("request limit");
     let response = crate::router(state.clone())
-        .oneshot(
-            axum::http::Request::builder()
-                .uri("/v0/namespaces/demo/filesystem/content?path=%2Fnote.txt")
-                .header(axum::http::header::AUTHORIZATION, "Bearer test-token")
-                .header("Loonfs-Actor", "test-actor")
-                .body(axum::body::Body::empty())
-                .expect("download request"),
-        )
+        .oneshot(request(
+            "GET",
+            "/v0/namespaces/demo/filesystem/content?path=%2Fnote.txt",
+            None,
+            &[TEST_ACTOR],
+        ))
         .await
         .expect("download response");
     assert_eq!(response.status(), axum::http::StatusCode::OK);
@@ -2820,26 +2788,12 @@ async fn start_server(store: SharedObjectStore, root: &Path, writer_id: &str) ->
 // response arrives, so it runs with `flavor = "multi_thread"` to give the
 // server a second worker.
 async fn start_server_with_config(store: SharedObjectStore, config: TestOptions) -> TestHarness {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind listener");
-    let addr = listener.local_addr().expect("listener addr");
     let (router, state) = test_app(config, options_with_store(store))
         .await
         .expect("build app");
-    let server = tokio::spawn(async move {
-        axum::serve(listener, router).await.expect("serve app");
-    });
-
+    let (client, addr, server) = serve(router).await;
     TestHarness {
-        client: Client::new(ClientConfig {
-            server_url: format!("http://{}", addr),
-            auth_token: Some("test-token".into()),
-            request_timeout_ms: None,
-            disable_transient_retry: false,
-            ca_cert_path: None,
-        })
-        .expect("valid client config"),
+        client,
         addr,
         state,
         server,
@@ -3059,23 +3013,8 @@ mod direct_download {
                 } else {
                     failing.clear();
                 }
-                let response = router
-                    .clone()
-                    .oneshot(
-                        axum::http::Request::builder()
-                            .method("POST")
-                            .uri(&uri)
-                            .header("authorization", "Bearer test-token")
-                            .header("content-type", "application/json")
-                            .body(axum::body::Body::from(body.clone()))
-                            .expect("request"),
-                    )
-                    .await
-                    .expect("response");
-                let status = response.status();
-                let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-                    .await
-                    .expect("body");
+                let (status, _, bytes) =
+                    send(&router, request("POST", &uri, Some(&body), &[])).await;
                 assert_eq!(
                     status,
                     if denied {
@@ -3147,8 +3086,6 @@ mod direct_download {
 
     #[tokio::test]
     async fn download_snapshot_selectors_use_the_body_and_exclude_revisions() {
-        use tower::ServiceExt;
-
         let directory = tempdir().expect("tempdir");
         let (router, _state) = test_app(
             test_options(directory.path(), "download-selectors"),
@@ -3193,24 +3130,12 @@ mod direct_download {
                 "/snapshot_id",
             ),
         ] {
-            let response = router
-                .clone()
-                .oneshot(
-                    axum::http::Request::builder()
-                        .method("POST")
-                        .uri(uri)
-                        .header("authorization", "Bearer test-token")
-                        .header("Loonfs-Actor", "test-actor")
-                        .header("content-type", "application/json")
-                        .body(axum::body::Body::from(body.to_string()))
-                        .expect("request"),
-                )
-                .await
-                .expect("response");
-            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-                .await
-                .expect("response body");
+            let (status, _, bytes) = send(
+                &router,
+                request("POST", &uri, Some(&body.to_string()), &[TEST_ACTOR]),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
             let error: loonfs_types::ErrorResponse =
                 serde_json::from_slice(&bytes).expect("API error");
             assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
@@ -3588,33 +3513,14 @@ mod direct_download {
         let (router, _state) = test_app(
             config,
             TestAppOptions {
-                session_fold_at_wal_objects: None,
-                max_staleness_ms: None,
-                consistency: None,
-                monotonic_timer: None,
-                execution_budget: None,
-                usage_recorder: None,
                 store: Some(store),
                 direct_transfers,
+                ..TestAppOptions::default()
             },
         )
         .await
         .expect("build app");
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind listener");
-        let addr = listener.local_addr().expect("listener addr");
-        tokio::spawn(async move {
-            axum::serve(listener, router).await.expect("serve app");
-        });
-        Client::new(ClientConfig {
-            server_url: format!("http://{addr}"),
-            auth_token: Some("test-token".into()),
-            request_timeout_ms: None,
-            disable_transient_retry: false,
-            ca_cert_path: None,
-        })
-        .expect("valid client config")
+        serve(router).await.0
     }
 
     /// The store the deployment writes to, opened again for the object
@@ -4397,14 +4303,12 @@ async fn download_body_streams_one_chunk_and_aborts_on_late_corruption() {
     for corrupt in [false, true] {
         let response = router
             .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri("/v0/namespaces/demo/filesystem/content?path=%2Flarge.bin")
-                    .header(axum::http::header::AUTHORIZATION, "Bearer test-token")
-                    .header("Loonfs-Actor", "test-actor")
-                    .body(axum::body::Body::empty())
-                    .expect("request"),
-            )
+            .oneshot(request(
+                "GET",
+                "/v0/namespaces/demo/filesystem/content?path=%2Flarge.bin",
+                None,
+                &[TEST_ACTOR],
+            ))
             .await
             .expect("response");
         assert_eq!(response.status(), axum::http::StatusCode::OK);
@@ -4466,8 +4370,6 @@ async fn download_body_streams_one_chunk_and_aborts_on_late_corruption() {
 
 #[tokio::test]
 async fn stale_commit_precondition_returns_409_with_its_index() {
-    use tower::ServiceExt;
-
     let temp_dir = tempdir().expect("tempdir");
     let (router, state) = test_app(
         test_options(temp_dir.path(), "precondition-writer"),
@@ -4483,30 +4385,18 @@ async fn stale_commit_precondition_returns_409_with_its_index() {
         )
         .await
         .expect("namespace");
-    let response = router
-        .oneshot(
-            axum::http::Request::builder()
-                .method("POST")
-                .uri("/v0/namespaces/demo/commits")
-                .header(axum::http::header::AUTHORIZATION, "Bearer test-token")
-                .header("Loonfs-Actor", "test-actor")
-                .header(axum::http::header::CONTENT_TYPE, "application/json")
-                .body(axum::body::Body::from(
-                    serde_json::json!({
-                        "commit_id": "stale-precondition",
-                        "preconditions": [{"kind": "namespace_head", "expected_head_seq": 1}],
-                        "operations": [{"kind": "create_directory", "path": "/docs"}]
-                    })
-                    .to_string(),
-                ))
-                .expect("request"),
-        )
-        .await
-        .expect("response");
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("body");
+    let commit = serde_json::json!({
+        "commit_id": "stale-precondition",
+        "preconditions": [{"kind": "namespace_head", "expected_head_seq": 1}],
+        "operations": [{"kind": "create_directory", "path": "/docs"}]
+    });
+    let uri = "/v0/namespaces/demo/commits";
+    let (status, _, body) = send(
+        &router,
+        request("POST", uri, Some(&commit.to_string()), &[TEST_ACTOR]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
     let error: loonfs_types::ErrorResponse = serde_json::from_slice(&body).expect("error");
     assert_eq!(error.code, ErrorCode::StaleHead.as_str());
     let details = error.details.expect("details");
@@ -4519,8 +4409,6 @@ async fn stale_commit_precondition_returns_409_with_its_index() {
 
 #[tokio::test]
 async fn scoped_commit_precondition_returns_409_with_its_index() {
-    use tower::ServiceExt;
-
     let temp_dir = tempdir().expect("tempdir");
     let (router, state) = test_app(
         test_options(temp_dir.path(), "precondition-writer"),
@@ -4536,30 +4424,18 @@ async fn scoped_commit_precondition_returns_409_with_its_index() {
         )
         .await
         .expect("namespace");
-    let response = router
-        .oneshot(
-            axum::http::Request::builder()
-                .method("POST")
-                .uri("/v0/namespaces/demo/commits")
-                .header(axum::http::header::AUTHORIZATION, "Bearer test-token")
-                .header("Loonfs-Actor", "test-actor")
-                .header(axum::http::header::CONTENT_TYPE, "application/json")
-                .body(axum::body::Body::from(
-                    serde_json::json!({
-                        "commit_id": "stale-precondition",
-                        "preconditions": [{"kind": "namespace_head", "expected_head_seq": 0}, {"kind": "file_revision", "inode_id": "ino_00000000000000000000000033", "expected_revision_no": 1}],
-                        "operations": [{"kind": "create_directory", "path": "/docs"}]
-                    })
-                    .to_string(),
-                ))
-                .expect("request"),
-        )
-        .await
-        .expect("response");
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("body");
+    let commit = serde_json::json!({
+        "commit_id": "stale-precondition",
+        "preconditions": [{"kind": "namespace_head", "expected_head_seq": 0}, {"kind": "file_revision", "inode_id": "ino_00000000000000000000000033", "expected_revision_no": 1}],
+        "operations": [{"kind": "create_directory", "path": "/docs"}]
+    });
+    let uri = "/v0/namespaces/demo/commits";
+    let (status, _, body) = send(
+        &router,
+        request("POST", uri, Some(&commit.to_string()), &[TEST_ACTOR]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
     let error: loonfs_types::ErrorResponse = serde_json::from_slice(&body).expect("error");
     assert_eq!(error.code, ErrorCode::StaleRevision.as_str());
     let details = error.details.expect("details");

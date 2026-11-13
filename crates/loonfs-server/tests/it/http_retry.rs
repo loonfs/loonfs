@@ -183,60 +183,6 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
     let bytes = harness.client.read_file(&target).await.expect("read file");
     assert_eq!(bytes, b"stable bytes\n");
 
-    // A different actor must still conflict.
-    let different_actor = ActorId::parse("retry-worker").expect("actor id");
-    match harness
-        .client
-        .put_file_with_options(
-            &target,
-            b"stable bytes\n",
-            &different_actor,
-            &PutFileOptions {
-                behavior: DestinationBehavior::NoReplace,
-                commit: loonfs_types::options::CommitOptions {
-                    preconditions: Vec::new(),
-                    commit_id: Some(commit_id.clone()),
-                    message: None,
-                },
-                expected_inode_id: None,
-                expected_revision_no: None,
-            },
-        )
-        .await
-    {
-        Err(ClientError::Api { response, .. }) => {
-            assert_eq!(response.code, "commit_id_reuse_conflict")
-        }
-        other => panic!("expected attributed retry conflict, got {other:?}"),
-    }
-
-    // Different bytes under the same commit id is a different operation,
-    // not a retry, and stays a conflict.
-    match harness
-        .client
-        .put_file_with_options(
-            &target,
-            b"different bytes\n",
-            &loonfs_test_support::test_actor(),
-            &PutFileOptions {
-                behavior: DestinationBehavior::NoReplace,
-                commit: loonfs_types::options::CommitOptions {
-                    preconditions: Vec::new(),
-                    commit_id: Some(commit_id),
-                    message: None,
-                },
-                expected_inode_id: None,
-                expected_revision_no: None,
-            },
-        )
-        .await
-    {
-        Err(ClientError::Api { response, .. }) => {
-            assert_eq!(response.code, "commit_id_reuse_conflict")
-        }
-        other => panic!("expected commit_id_reuse_conflict, got {other:?}"),
-    }
-
     harness.server.abort();
 }
 

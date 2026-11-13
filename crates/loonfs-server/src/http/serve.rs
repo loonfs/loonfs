@@ -466,24 +466,17 @@ where
         () = deadline.as_mut() => true,
     };
     let _ = listener_close_tx.send(());
-    let result = if deadline_passed {
-        None
-    } else {
+    if !deadline_passed {
         tokio::select! {
-            result = server.as_mut() => Some(result),
-            () = deadline.as_mut() => None,
-        }
-    };
-    match result {
-        Some(result) => result,
-        None => {
-            tracing::warn!(
-                shutdown_deadline_ms,
-                "graceful drain deadline passed; remaining requests are abandoned"
-            );
-            Ok(())
+            result = server.as_mut() => return result,
+            () = deadline.as_mut() => {}
         }
     }
+    tracing::warn!(
+        shutdown_deadline_ms,
+        "graceful drain deadline passed; remaining requests are abandoned"
+    );
+    Ok(())
 }
 
 /// Installs the handlers for ctrl-c and, on unix, SIGTERM (the stop signal

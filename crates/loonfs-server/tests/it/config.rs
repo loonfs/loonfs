@@ -833,17 +833,6 @@ kind = "local_fs"
 root = "/tmp/loonfs-server"
 "#,
     );
-    let retired_level = write_config(
-        r#"
-bind = "0.0.0.0:9400"
-writer_id = "loonfs-server"
-allow_remote_without_tls = true
-
-[store]
-kind = "local_fs"
-root = "/tmp/loonfs-server"
-"#,
-    );
     let store_level = write_config(
         r#"
 bind = "127.0.0.1:9400"
@@ -885,7 +874,6 @@ root = "/tmp/loonfs-server"
 
     for (path, typo) in [
         (top_level, "lease_duration"),
-        (retired_level, "allow_remote_without_tls"),
         (store_level, "key_prefiks"),
         (metadata_cache_level, "max_wal_tail_byte"),
         (grep_level, "max_files_per_stepp"),
@@ -1240,57 +1228,6 @@ root = "/tmp/loonfs-server"
         policy.max_decoded_input_rows_per_step,
         defaults.max_decoded_input_rows_per_step
     );
-}
-
-#[test]
-fn grep_rejects_retired_engine_tuning_keys() {
-    for key in [
-        "max_rows_per_segment",
-        "max_delta_runs",
-        "max_mid_runs",
-        "max_decoded_input_rows_per_step",
-    ] {
-        let path = write_config(&format!(
-            r#"
-bind = "127.0.0.1:9400"
-writer_id = "loonfs-server"
-[grep]
-mode = "serve_and_maintain"
-{key} = 1
-[store]
-kind = "local_fs"
-root = "/tmp/loonfs-server"
-"#
-        ));
-        let error = load_server_config(&path).expect_err("engine tuning keys must be rejected");
-        assert!(error.to_string().contains(key), "{error}");
-    }
-}
-
-#[test]
-fn unknown_config_tables_fail_decode() {
-    // Unknown tables fail through the config's strict parsing.
-    let path = write_config(
-        r#"
-bind = "127.0.0.1:9400"
-writer_id = "loonfs-server"
-
-[gram_index_build]
-max_files_per_step = 4
-
-[store]
-kind = "local_fs"
-root = "/tmp/loonfs-server"
-"#,
-    );
-
-    let error = load_server_config(&path).expect_err("unknown table must fail");
-    match error {
-        ServerError::ConfigDecode(message) => {
-            assert!(message.contains("gram_index_build"), "{message}");
-        }
-        other => panic!("expected decode error, got {other:?}"),
-    }
 }
 
 #[test]

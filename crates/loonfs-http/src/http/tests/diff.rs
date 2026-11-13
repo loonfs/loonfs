@@ -1,10 +1,9 @@
 //! The diff route: its pages, the parameters it rejects, and its error when
 //! the diff starts below the retention floor.
 
-use super::fixtures::{test_app, test_options, TestAppOptions};
+use super::fixtures::{self, test_app, test_options, TestAppOptions};
 use crate::JobMode;
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::http::StatusCode;
 use loonfs::{DestinationBehavior, PutFileOptions, SharedObjectStore};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::clock::ManualClock;
@@ -13,7 +12,6 @@ use loonfs_types::{CommitSeq, DiffEntryKind, DiffResponse, ErrorCode, ErrorRespo
 use serde_json::Value;
 use std::sync::Arc;
 use tempfile::TempDir;
-use tower::ServiceExt as _;
 
 /// A server over a namespace `demo` that a separate writer runtime wrote
 /// `/a.txt` into, then `/b.txt` and a second revision of `/a.txt`.
@@ -84,20 +82,7 @@ impl Fixture {
 }
 
 async fn get(router: &axum::Router, uri: &str) -> (StatusCode, Vec<u8>) {
-    let response = router
-        .clone()
-        .oneshot(
-            Request::get(uri)
-                .header("authorization", "Bearer test-token")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("response");
-    let status = response.status();
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("body");
+    let (status, _, body) = fixtures::send(router, fixtures::request("GET", uri, None, &[])).await;
     (status, body.to_vec())
 }
 

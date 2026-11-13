@@ -1,6 +1,6 @@
 //! Contract route composition without host operational routes.
 
-use super::fixtures::{test_app, test_options, TestAppOptions};
+use super::fixtures::{self, test_app, test_options, TestAppOptions};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use std::sync::Arc;
@@ -100,23 +100,9 @@ async fn binding_routes_exclude_host_routes_and_preserve_maintenance_admission()
 }
 
 async fn post(router: &axum::Router, uri: &str, body: Body) -> (StatusCode, serde_json::Value) {
-    let response = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(uri)
-                .header("authorization", "Bearer test-token")
-                .header("content-type", "application/json")
-                .body(body)
-                .expect("request"),
-        )
-        .await
-        .expect("response");
-    let status = response.status();
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("body");
+    let mut request = fixtures::request("POST", uri, None, &[("content-type", "application/json")]);
+    *request.body_mut() = body;
+    let (status, _, body) = fixtures::send(router, request).await;
     (status, serde_json::from_slice(&body).expect("JSON body"))
 }
 

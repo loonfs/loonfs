@@ -1,9 +1,12 @@
-//! Runtime handles and options for HTTP API tests.
+//! Runtime handles, options and requests for HTTP API tests.
 
 use crate::{
     AuthPolicy, HttpConfig, HttpHandles, HttpMetrics, HttpState, JobMode, Namespaces, UsageRecorder,
 };
+use axum::body::{Body, Bytes};
+use axum::http::{HeaderMap, Request, StatusCode};
 use loonfs::{InlineContentPolicy, LoonFs, SharedObjectStore, TraceMode};
+use loonfs_client::{Client, ClientConfig};
 use loonfs_grep::{
     GrepBlockCache, GrepService, GrepWorker, DEFAULT_GREP_BLOCK_CACHE_DECODED_BYTES,
 };
@@ -11,8 +14,11 @@ use loonfs_objectstore::{
     local_fs_store::LocalFsStore, presign::DirectTransferIssuers, ConfiguredObjectStoreKind,
 };
 use loonfs_types::{MonotonicTimer, WriterId};
+use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
+use tokio::task::JoinHandle;
+use tower::ServiceExt as _;
 
 #[derive(Clone)]
 pub(super) struct TestOptions {
@@ -150,4 +156,60 @@ pub(super) async fn test_app_with_sessions(
         },
     );
     Ok((crate::router(state.clone()), state, namespaces))
+}
+
+/// Builds a request with the test token, `headers`, and a JSON content type
+/// when it has a body.
+pub(super) fn request(
+    method: &str,
+    uri: &str,
+    body: Option<&str>,
+    headers: &[(&str, &str)],
+) -> Request<Body> {
+    let mut request = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("authorization", "Bearer test-token");
+    if body.is_some() {
+        request = request.header("content-type", "application/json");
+    }
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    request
+        .body(body.map_or_else(Body::empty, |body| Body::from(body.to_owned())))
+        .expect("request")
+}
+
+/// Sends `request` to `router` and reads the whole response.
+pub(super) async fn send(
+    router: &axum::Router,
+    request: Request<Body>,
+) -> (StatusCode, HeaderMap, Bytes) {
+    let response = router.clone().oneshot(request).await.expect("response");
+    let (parts, body) = response.into_parts();
+    let body = axum::body::to_bytes(body, usize::MAX)
+        .await
+        .expect("response body");
+    (parts.status, parts.headers, body)
+}
+
+/// Serves `router` on a loopback port and returns a client pointed at it.
+pub(super) async fn serve(router: axum::Router) -> (Client, SocketAddr, JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.expect("serve app");
+    });
+    let client = Client::new(ClientConfig {
+        server_url: format!("http://{addr}"),
+        auth_token: Some("test-token".into()),
+        request_timeout_ms: None,
+        disable_transient_retry: false,
+        ca_cert_path: None,
+    })
+    .expect("valid client config");
+    (client, addr, server)
 }

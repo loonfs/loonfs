@@ -1,6 +1,6 @@
 //! The writable namespace handles the host holds across requests.
 
-use super::fixtures::test_app_with_sessions;
+use super::fixtures::{self, test_app_with_sessions};
 use super::*;
 use crate::http::error::ApiResponseError;
 use crate::{Namespaces, WriterSessions};
@@ -10,7 +10,6 @@ use loonfs::NamespaceSessionStatus;
 use loonfs_test_support::stores::BlockingStore;
 use std::assert_matches;
 use std::num::NonZeroU64;
-use tower::ServiceExt;
 
 async fn send(
     router: &axum::Router,
@@ -18,24 +17,9 @@ async fn send(
     uri: &str,
     body: String,
 ) -> (StatusCode, Bytes) {
-    let response = router
-        .clone()
-        .oneshot(
-            axum::http::Request::builder()
-                .method(method)
-                .uri(uri)
-                .header("authorization", "Bearer test-token")
-                .header("content-type", "application/json")
-                .header("Loonfs-Actor", "namespace-writers")
-                .body(axum::body::Body::from(body))
-                .expect("request"),
-        )
-        .await
-        .expect("response");
-    let status = response.status();
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("body");
+    let actor = [("Loonfs-Actor", "namespace-writers")];
+    let request = fixtures::request(method.as_str(), uri, Some(&body), &actor);
+    let (status, _, body) = fixtures::send(router, request).await;
     (status, body)
 }
 

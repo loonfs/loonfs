@@ -2,7 +2,7 @@
 //! namespace route.
 
 use super::direct_download::LoopbackIssuer;
-use super::fixtures::{test_app, test_options, TestAppOptions};
+use super::fixtures::{self, test_app, test_options, TestAppOptions};
 use crate::{HttpState, JobMode, UsageRecorder, UsageReport};
 use axum::body::{Body, Bytes};
 use axum::http::{Request, StatusCode};
@@ -109,16 +109,7 @@ async fn fixture(name: &str) -> Fixture {
 impl Fixture {
     /// Sends `request` and reads the response body to the end.
     async fn send(&self, request: Request<Body>) -> (StatusCode, Bytes) {
-        let response = self
-            .router
-            .clone()
-            .oneshot(request)
-            .await
-            .expect("response");
-        let status = response.status();
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body");
+        let (status, _, body) = fixtures::send(&self.router, request).await;
         (status, body)
     }
 

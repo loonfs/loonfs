@@ -1,5 +1,6 @@
 //! Hosted inline publication, retry identity, and admission contracts.
 
+use super::fixtures;
 use super::*;
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_test_support::stores::{RecordedOperation, RecordingStore};
@@ -72,25 +73,9 @@ impl Harness {
     }
 
     async fn request(&self, method: &str, uri: &str, body: Value) -> (StatusCode, Bytes) {
-        let response = self
-            .router
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .method(method)
-                    .uri(uri)
-                    .header("authorization", "Bearer test-token")
-                    .header("Loonfs-Actor", "inline-test")
-                    .header("content-type", "application/json")
-                    .body(axum::body::Body::from(body.to_string()))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        let status = response.status();
-        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body");
+        let actor = [("Loonfs-Actor", "inline-test")];
+        let request = fixtures::request(method, uri, Some(&body.to_string()), &actor);
+        let (status, _, bytes) = fixtures::send(&self.router, request).await;
         (status, bytes)
     }
 

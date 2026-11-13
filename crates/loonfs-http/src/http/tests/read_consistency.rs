@@ -3,7 +3,7 @@
 //! routes take them as fields of the JSON body.
 
 use super::direct_download::LoopbackIssuer;
-use super::fixtures::{test_app, test_options, TestAppOptions};
+use super::fixtures::{self, test_app, test_options, TestAppOptions};
 use crate::JobMode;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -17,7 +17,6 @@ use loonfs_types::{ErrorCode, ErrorResponse};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tempfile::TempDir;
-use tower::ServiceExt as _;
 
 /// A snapshot ID that parses, for the rejections that come before any read.
 const SNAPSHOT_ID: &str = "snp_00000000000000000001-00000000000000000000000002";
@@ -222,16 +221,7 @@ impl Fixture {
     }
 
     async fn send(&self, request: Request<Body>) -> (StatusCode, Vec<u8>) {
-        let response = self
-            .router
-            .clone()
-            .oneshot(request)
-            .await
-            .expect("response");
-        let status = response.status();
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body");
+        let (status, _, body) = fixtures::send(&self.router, request).await;
         (status, body.to_vec())
     }
 }

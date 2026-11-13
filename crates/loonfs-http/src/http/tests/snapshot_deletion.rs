@@ -1,12 +1,12 @@
 //! Snapshot deletion and the snapshot inventory's read-only routes through
 //! the router.
 
+use super::fixtures;
 use super::*;
 use axum::http::Method;
 use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
 use loonfs_types::SnapshotId;
 use serde_json::{json, Value};
-use tower::ServiceExt;
 
 async fn request(
     router: &axum::Router,
@@ -14,23 +14,8 @@ async fn request(
     uri: &str,
     body: Value,
 ) -> (StatusCode, Value) {
-    let response = router
-        .clone()
-        .oneshot(
-            axum::http::Request::builder()
-                .method(method)
-                .uri(uri)
-                .header("authorization", "Bearer test-token")
-                .header("content-type", "application/json")
-                .body(axum::body::Body::from(body.to_string()))
-                .expect("request"),
-        )
-        .await
-        .expect("response");
-    let status = response.status();
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("response body");
+    let request = fixtures::request(method.as_str(), uri, Some(&body.to_string()), &[]);
+    let (status, _, bytes) = fixtures::send(router, request).await;
     (
         status,
         serde_json::from_slice(&bytes).expect("JSON response"),
