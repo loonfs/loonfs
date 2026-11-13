@@ -5,7 +5,7 @@
 use super::download_body::{streamed_download_response, RangeHeader};
 use super::error::ApiResponseError;
 use super::extractors::{ActorHeader, SubjectHeaders};
-use super::handlers_uploads::{content_preparation_for_puts, PutContentPreparation};
+use super::handlers_uploads::content_preparation_for_puts;
 use super::query_params::{effective_page_limit, live_consistency, read_at, required_query_param};
 use super::{acquire_download_permit, AppJson, AppQuery, HttpState, NamespaceIdPath, NoQuery};
 use axum::extract::State;
@@ -590,7 +590,7 @@ pub(super) async fn create_commit(
         Some(
             content_preparation_for_puts(
                 &namespace,
-                state.content_tokens(),
+                state.options.content_token_secret.expose(),
                 &put_content_refs,
                 &content_tokens,
             )
@@ -607,13 +607,10 @@ pub(super) async fn create_commit(
     };
     let response_result = if let Some(preparation) = put_content_preparation {
         let candidate = match preparation {
-            PutContentPreparation::Absent => {
-                CommitCandidate::with_inline_content(request, Vec::new(), inline_content)
-            }
-            PutContentPreparation::Ready(prepared_content) => {
+            Ok(prepared_content) => {
                 CommitCandidate::with_inline_content(request, prepared_content, inline_content)
             }
-            PutContentPreparation::Rejected(rejections) => {
+            Err(rejections) => {
                 let rejections = rejections
                     .into_iter()
                     .map(|rejected| (rejected.content_id, rejected.error))

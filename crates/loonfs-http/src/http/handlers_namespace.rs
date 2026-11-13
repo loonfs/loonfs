@@ -2,6 +2,7 @@
 
 use super::error::ApiResponseError;
 use super::extractors::{ActorHeader, SubjectHeaders};
+use super::handlers_uploads::{direct_multipart_issuer, direct_put_issuer};
 use super::query_params::required_query_param;
 
 use super::{AppJson, AppQuery, HttpState, NamespaceIdPath, NoQuery};
@@ -25,14 +26,11 @@ use loonfs_types::{
 };
 use std::sync::Arc;
 
-/// The JSON Pointers of the merge request fields that a rejection can name.
+/// The JSON Pointers of the merge and replay request fields that a rejection can name.
 const MERGE_BODY_FIELDS: &[&str] = &["/source_namespace_id", "/through_seq"];
 
 /// The JSON Pointers of the rebase request fields that a rejection can name.
 const REBASE_BODY_FIELDS: &[&str] = &["/source_namespace_id", "/new_namespace_id"];
-
-/// The JSON Pointers of the replay request fields that a rejection can name.
-const REPLAY_BODY_FIELDS: &[&str] = &["/source_namespace_id", "/through_seq"];
 
 /// Advertises a feature, or removes the key: an absent key and an
 /// advertised-false key both mean unsupported, and the document stays small.
@@ -100,10 +98,7 @@ pub(super) async fn get_capabilities(
     // says exactly that. The read is advertised for the bundle as a whole:
     // a deployment that lets a client create an object too large to proxy
     // back has to be able to hand it back.
-    let direct_put = state
-        .direct_transfers
-        .as_ref()
-        .and_then(|transfers| transfers.put.as_ref());
+    let direct_put = direct_put_issuer(&state);
     set_feature(
         &mut capabilities,
         FEATURE_UPLOADS_DIRECT_PUT,
@@ -112,10 +107,7 @@ pub(super) async fn get_capabilities(
     set_feature(
         &mut capabilities,
         FEATURE_UPLOADS_DIRECT_MULTIPART,
-        state
-            .direct_transfers
-            .as_ref()
-            .is_some_and(|transfers| transfers.multipart.is_some()),
+        direct_multipart_issuer(&state).is_some(),
     );
     set_feature(
         &mut capabilities,
@@ -164,9 +156,9 @@ pub(super) async fn get_capabilities(
     set_feature(
         &mut capabilities,
         FEATURE_MAINTENANCE_GREP_INDEX,
-        state.options.serves_maintenance && state.grep.maintains(),
+        state.options.serves_maintenance && state.grep_worker.is_some(),
     );
-    if state.grep.serves() {
+    if state.grep_service.is_some() {
         capabilities.api_groups.push(API_GROUP_QUERY_V0.to_owned());
         capabilities
             .features
@@ -640,7 +632,7 @@ pub(super) async fn replay_fork(
         .await
         .map_err(|error| {
             ApiResponseError::runtime(error)
-                .with_body_field_params(REPLAY_BODY_FIELDS)
+                .with_body_field_params(MERGE_BODY_FIELDS)
                 .with_commit_id(&commit_id)
         })?;
     Ok(Json(response))

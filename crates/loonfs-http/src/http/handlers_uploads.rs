@@ -15,7 +15,7 @@ use loonfs::content_tokens::{
 use loonfs::publish::PreparedContent;
 use loonfs::{Namespace, Writable};
 use loonfs_objectstore::{
-    presign::{DirectMultipartIssuer, PresignedPartRequest, PresignedPutRequest},
+    presign::{DirectMultipartIssuer, DirectPutIssuer, PresignedPartRequest, PresignedPutRequest},
     ObjectStoreError,
 };
 use loonfs_types::ErrorCode;
@@ -36,65 +36,11 @@ use std::time::{Duration, SystemTime};
 /// is not a standing write credential.
 const MULTIPART_PART_URL_TTL: Duration = Duration::from_secs(60 * 60);
 
-pub(super) enum PutContentPreparation {
-    Absent,
-    Ready(Vec<PreparedContent>),
-    /// Every supplied token was rejected. Never empty.
-    Rejected(Vec<RejectedToken>),
-}
-
 /// The content ID of a content token that preparation rejected, and the
 /// rejection.
 pub(super) struct RejectedToken {
     pub(super) content_id: ContentId,
     pub(super) error: ContentTokenError,
-}
-
-/// The deployment material allowed to verify and mint content tokens.
-/// Keeping it separate means upload helpers cannot reach unrelated server
-/// configuration while handling a proof.
-#[derive(Clone, Copy)]
-pub(super) struct ContentTokenVerifier<'a> {
-    secret: &'a str,
-}
-
-impl HttpState {
-    /// Returns the verifier of the content tokens that this deployment mints.
-    pub(super) fn content_tokens(&self) -> ContentTokenVerifier<'_> {
-        ContentTokenVerifier::new(self.options.content_token_secret.expose())
-    }
-}
-
-impl<'a> ContentTokenVerifier<'a> {
-    pub(super) fn new(secret: &'a str) -> Self {
-        Self { secret }
-    }
-
-    async fn prepare(
-        self,
-        namespace: &Namespace<Writable>,
-        token: &ContentToken,
-    ) -> Result<Result<PreparedContent, ContentTokenError>, ApiResponseError> {
-        namespace
-            .prepare_content_token(self.secret, token)
-            .await
-            .map_err(ApiResponseError::runtime)
-    }
-
-    fn mint_token(
-        self,
-        evidence: Option<&CompletedUploadEvidence>,
-        now_ms: u64,
-    ) -> Result<Option<ContentToken>, ApiResponseError> {
-        let Some(evidence) = evidence else {
-            return Ok(None);
-        };
-        match mint_content_token(self.secret, evidence, now_ms) {
-            Ok(token) => Ok(Some(token)),
-            Err(ContentTokenError::Expired) => Ok(None),
-            Err(error) => Err(content_token_error(error)),
-        }
-    }
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -159,11 +105,7 @@ async fn begin_direct_put_upload(
     namespace: &Namespace<Writable>,
     size_bytes: Option<u64>,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
-    let Some(issuer) = state
-        .direct_transfers
-        .as_ref()
-        .and_then(|transfers| transfers.put.as_ref())
-    else {
+    let Some(issuer) = direct_put_issuer(state) else {
         return Err(ApiResponseError::not_supported(
             FEATURE_UPLOADS_DIRECT_PUT,
             "direct_put requires an object store that can presign create-only uploads and \
@@ -190,12 +132,23 @@ async fn begin_direct_put_upload(
         .create_direct_put_upload_target()
         .await
         .map_err(ApiResponseError::runtime)?;
-    fill_direct_put_access(issuer.as_ref(), &prepared.object_key, &mut prepared.session).await?;
+    fill_direct_put_access(issuer, &prepared.object_key, &mut prepared.session).await?;
     Ok(Json(prepared.session))
 }
 
+/// Returns the issuer of direct PUT uploads, or `None` when this deployment can't presign them.
+pub(super) fn direct_put_issuer(state: &HttpState) -> Option<&dyn DirectPutIssuer> {
+    state.direct_transfers.as_ref()?.put.as_deref()
+}
+
+/// Returns the issuer of direct multipart uploads, or `None` when this deployment can't presign
+/// them.
+pub(super) fn direct_multipart_issuer(state: &HttpState) -> Option<&dyn DirectMultipartIssuer> {
+    state.direct_transfers.as_ref()?.multipart.as_deref()
+}
+
 async fn fill_direct_put_access(
-    issuer: &dyn loonfs_objectstore::presign::DirectPutIssuer,
+    issuer: &dyn DirectPutIssuer,
     object_key: &str,
     session: &mut UploadSession,
 ) -> Result<(), ApiResponseError> {
@@ -220,11 +173,7 @@ async fn begin_direct_multipart_upload(
     namespace: &Namespace<Writable>,
     part_size_bytes: Option<u64>,
 ) -> Result<Json<UploadSession>, ApiResponseError> {
-    if state
-        .direct_transfers
-        .as_ref()
-        .is_none_or(|transfers| transfers.multipart.is_none())
-    {
+    if direct_multipart_issuer(state).is_none() {
         return Err(ApiResponseError::not_supported(
             FEATURE_UPLOADS_DIRECT_MULTIPART,
             "direct_multipart requires an object store that can presign checksum-bound \
@@ -280,11 +229,7 @@ pub(super) async fn sign_upload_parts(
     AppQuery(_): AppQuery<NoQuery>,
     AppJson(request): AppJson<SignUploadPartsRequest, MAX_UPLOAD_CONTROL_BODY_BYTES>,
 ) -> Result<Json<SignUploadPartsResponse>, ApiResponseError> {
-    let Some(issuer) = state
-        .direct_transfers
-        .as_ref()
-        .and_then(|transfers| transfers.multipart.as_ref())
-    else {
+    let Some(issuer) = direct_multipart_issuer(&state) else {
         return Err(ApiResponseError::not_supported(
             FEATURE_UPLOADS_DIRECT_MULTIPART,
             "this deployment cannot presign multipart part uploads",
@@ -296,7 +241,7 @@ pub(super) async fn sign_upload_parts(
         .sign_upload_parts(&upload_id, &request.parts)
         .await
         .map_err(ApiResponseError::runtime)?;
-    let parts = sign_parts(issuer.as_ref(), &targets).await?;
+    let parts = sign_parts(issuer, &targets).await?;
 
     Ok(Json(SignUploadPartsResponse {
         namespace_id,
@@ -361,19 +306,25 @@ pub(super) fn presign_time() -> SystemTime {
 /// refused by the commit engine — but a token this deployment did not mint,
 /// or minted for another namespace, is worth saying out
 /// loud even when the request it arrived in went on to publish.
+///
+/// Returns the rejections when no token verified and at least one token was rejected.
 pub(super) async fn content_preparation_for_puts(
     namespace: &Namespace<Writable>,
-    verifier: ContentTokenVerifier<'_>,
+    secret: &str,
     content_refs: &[&ContentRef],
     tokens: &[ContentToken],
-) -> Result<PutContentPreparation, ApiResponseError> {
+) -> Result<Result<Vec<PreparedContent>, Vec<RejectedToken>>, ApiResponseError> {
     let mut prepared_content = Vec::new();
     let mut rejections = Vec::new();
     for token in tokens
         .iter()
         .filter(|token| content_refs.contains(&&token.content_ref))
     {
-        match verifier.prepare(namespace, token).await? {
+        match namespace
+            .prepare_content_token(secret, token)
+            .await
+            .map_err(ApiResponseError::runtime)?
+        {
             Ok(prepared) => prepared_content.push(prepared),
             Err(error) => {
                 let content_id = token.content_ref.content_id.clone();
@@ -397,12 +348,10 @@ pub(super) async fn content_preparation_for_puts(
         }
     }
 
-    if !prepared_content.is_empty() {
-        Ok(PutContentPreparation::Ready(prepared_content))
-    } else if rejections.is_empty() {
-        Ok(PutContentPreparation::Absent)
+    if prepared_content.is_empty() && !rejections.is_empty() {
+        Ok(Err(rejections))
     } else {
-        Ok(PutContentPreparation::Rejected(rejections))
+        Ok(Ok(prepared_content))
     }
 }
 
@@ -429,12 +378,17 @@ fn content_token_error(error: ContentTokenError) -> ApiResponseError {
 
 fn with_content_token(
     mut response: UploadSession,
-    verifier: ContentTokenVerifier<'_>,
+    secret: &str,
     evidence: Option<&CompletedUploadEvidence>,
     now_ms: u64,
 ) -> Result<UploadSession, ApiResponseError> {
     if let UploadSessionStatus::Completed { content_token, .. } = &mut response.status {
-        *content_token = verifier.mint_token(evidence, now_ms)?;
+        let minted = evidence.map(|evidence| mint_content_token(secret, evidence, now_ms));
+        *content_token = match minted {
+            None | Some(Err(ContentTokenError::Expired)) => None,
+            Some(Ok(token)) => Some(token),
+            Some(Err(error)) => return Err(content_token_error(error)),
+        };
     }
     Ok(response)
 }
@@ -533,7 +487,7 @@ pub(super) async fn complete_upload(
         .map_err(ApiResponseError::runtime)?;
     Ok(Json(with_content_token(
         completed.response,
-        state.content_tokens(),
+        state.options.content_token_secret.expose(),
         completed.evidence.as_ref(),
         state.runtime.now_ms(),
     )?))
@@ -576,21 +530,17 @@ pub(super) async fn get_upload(
         .await
         .map_err(ApiResponseError::runtime)?;
     if let Some(object_key) = &view.direct_put_object_key {
-        let issuer = state
-            .direct_transfers
-            .as_ref()
-            .and_then(|transfers| transfers.put.as_ref())
-            .ok_or_else(|| {
-                ApiResponseError::not_supported(
-                    FEATURE_UPLOADS_DIRECT_PUT,
-                    "this deployment cannot presign direct_put uploads",
-                )
-            })?;
-        fill_direct_put_access(issuer.as_ref(), object_key, &mut view.session).await?;
+        let issuer = direct_put_issuer(&state).ok_or_else(|| {
+            ApiResponseError::not_supported(
+                FEATURE_UPLOADS_DIRECT_PUT,
+                "this deployment cannot presign direct_put uploads",
+            )
+        })?;
+        fill_direct_put_access(issuer, object_key, &mut view.session).await?;
     }
     Ok(Json(with_content_token(
         view.session,
-        state.content_tokens(),
+        state.options.content_token_secret.expose(),
         view.evidence.as_ref(),
         state.runtime.now_ms(),
     )?))
@@ -686,14 +636,9 @@ mod completion_body_tests {
             .await
             .expect("eligible status");
         let evidence = evidence.expect("evidence eligible at status read");
-        let response = with_content_token(
-            status,
-            ContentTokenVerifier::new("secret"),
-            Some(&evidence),
-            u64::MAX,
-        )
-        .ok()
-        .expect("completed status must survive mint expiry");
+        let response = with_content_token(status, "secret", Some(&evidence), u64::MAX)
+            .ok()
+            .expect("completed status must survive mint expiry");
         assert_eq!(response, completed.response);
         let json = serde_json::to_value(response).expect("HTTP response");
         assert_eq!(json["status"], "completed");

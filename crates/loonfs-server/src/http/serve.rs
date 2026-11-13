@@ -3,7 +3,7 @@
 
 use super::host_routes::router;
 use super::tls::{self, TlsListener};
-use crate::config::{JobMode, MemorySizing, ServerConfig, TransportConfig, ValidatedServerConfig};
+use crate::config::{MemorySizing, ServerConfig, TransportConfig, ValidatedServerConfig};
 use crate::scheduler::{GrepIndexing, Scheduler, SchedulerState};
 use crate::{Result, ServerError};
 use axum::serve::ListenerExt as _;
@@ -11,9 +11,7 @@ use axum::Router;
 use loonfs::metrics::{JsonlObjectStoreMetricsRecorder, ObjectStoreMetricsRecorder};
 use loonfs::{LoonFs, Maintenance, SharedObjectStore, Writable, WriterId};
 use loonfs_grep::{GrepBlockCache, GrepService, GrepWorker};
-use loonfs_http::{
-    GrepMode, HttpConfig, HttpHandles, HttpMetrics, HttpState, Namespaces, RequestLimit,
-};
+use loonfs_http::{HttpConfig, HttpHandles, HttpMetrics, HttpState, Namespaces, RequestLimit};
 use loonfs_objectstore::presign::DirectTransferIssuers;
 use loonfs_objectstore::{run_store_contract_probe, StoreProbeReport};
 use loonfs_types::config::ConfigFieldError;
@@ -107,19 +105,8 @@ pub async fn app(config: ValidatedServerConfig, options: AppConfig) -> Result<(R
             loonfs::engine::DecodedBlockCacheConfig::new(memory.grep.bytes),
         ))))
     };
-    let grep = match config.grep.mode {
-        JobMode::Disabled => GrepMode::Disabled,
-        JobMode::ServeOnly => GrepMode::ServeOnly {
-            service: grep_service(),
-        },
-        JobMode::MaintainOnly => GrepMode::MaintainOnly {
-            worker: grep_worker(),
-        },
-        JobMode::ServeAndMaintain => GrepMode::ServeAndMaintain {
-            service: grep_service(),
-            worker: grep_worker(),
-        },
-    };
+    let grep_service = config.grep.mode.serves().then(grep_service);
+    let grep_worker = config.grep.mode.maintains().then(grep_worker);
     let namespaces = Arc::new(Namespaces::<SchedulerState>::new(runtime.clone()));
     let scheduler = config.maintenance.maintains().then(|| {
         Scheduler::new(
@@ -128,7 +115,8 @@ pub async fn app(config: ValidatedServerConfig, options: AppConfig) -> Result<(R
             maintenance.clone(),
             Arc::clone(&namespaces),
             runtime.monotonic_timer(),
-            grep.worker()
+            grep_worker
+                .as_ref()
                 .map(|worker| GrepIndexing::new(worker.clone(), grep_policy)),
             metrics.recorder().as_ref(),
         )
@@ -150,7 +138,8 @@ pub async fn app(config: ValidatedServerConfig, options: AppConfig) -> Result<(R
             namespaces,
             maintenance,
             direct_transfers,
-            grep,
+            grep_service,
+            grep_worker,
             metrics,
             usage_recorder: None,
         },

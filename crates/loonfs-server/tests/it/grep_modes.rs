@@ -813,7 +813,7 @@ async fn sweep(server: &loonfs_server::AppState) {
 
 /// Whether this deployment serves the index-maintenance routes.
 fn maintains_grep_index(server: &loonfs_server::AppState) -> bool {
-    server.http.grep.maintains()
+    server.http.grep_worker.is_some()
 }
 
 /// The sequence this namespace's index is built through.

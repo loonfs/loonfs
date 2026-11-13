@@ -1,8 +1,7 @@
 //! Runtime handles and options for HTTP API tests.
 
 use crate::{
-    AuthPolicy, GrepMode, HttpConfig, HttpHandles, HttpMetrics, HttpState, JobMode, Namespaces,
-    UsageRecorder,
+    AuthPolicy, HttpConfig, HttpHandles, HttpMetrics, HttpState, JobMode, Namespaces, UsageRecorder,
 };
 use loonfs::{InlineContentPolicy, LoonFs, SharedObjectStore, TraceMode};
 use loonfs_grep::{
@@ -134,19 +133,8 @@ pub(super) async fn test_app_with_sessions(
         ));
         Arc::new(GrepService::new(cache))
     };
-    let grep = match config.grep {
-        JobMode::Disabled => GrepMode::Disabled,
-        JobMode::ServeOnly => GrepMode::ServeOnly {
-            service: grep_service(),
-        },
-        JobMode::MaintainOnly => GrepMode::MaintainOnly {
-            worker: grep_worker(),
-        },
-        JobMode::ServeAndMaintain => GrepMode::ServeAndMaintain {
-            service: grep_service(),
-            worker: grep_worker(),
-        },
-    };
+    let grep_service = config.grep.serves().then(grep_service);
+    let grep_worker = config.grep.maintains().then(grep_worker);
     let namespaces = Arc::new(Namespaces::<()>::new(runtime.clone()));
     let state = HttpState::new(
         options,
@@ -155,7 +143,8 @@ pub(super) async fn test_app_with_sessions(
             runtime,
             maintenance,
             direct_transfers: inputs.direct_transfers,
-            grep,
+            grep_service,
+            grep_worker,
             metrics,
             usage_recorder: inputs.usage_recorder,
         },
