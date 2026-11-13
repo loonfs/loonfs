@@ -293,21 +293,29 @@ async fn content_only_a_snapshot_manifest_names_stays_until_the_snapshot_is_rele
     compact_below_the_floor(&store, &namespace_id).await;
     let kept_key = loonfs_objectstore::keys::content_blob(&pool_id, &kept.content_id);
 
-    let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
+    let aged_ms = now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await;
+    let aged = context(aged_ms);
     let report = collect_pool(&store, &pool_id, &aged).await;
     assert_eq!(report.deleted.content_objects, 0);
     assert!(store.head(&kept_key).await.expect("head").is_some());
 
-    crate::test_support::NamespaceFixture::new(
-        &store,
-        &namespace_id,
-        &crate::test_support::writer_at("test-writer", 0),
-    )
-    .engine()
-    .delete_snapshot(&snapshot.snapshot_id)
-    .await
-    .expect("release the snapshot");
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &aged)
+        .engine()
+        .delete_snapshot(&snapshot.snapshot_id)
+        .await
+        .expect("release the snapshot");
+    // The deleted snapshot keeps its manifest and content until the delete
+    // time plus the grace window.
+    let manifest_key = metadata_manifest_object(&namespace_id, &snapshot.manifest_no);
+    let report = collect(&store, &namespace_id, &aged).await;
+    assert_eq!(report.deleted_snapshots_by_owner.user, 0);
+    assert!(store.head(&manifest_key).await.expect("head").is_some());
     let report = collect_pool(&store, &pool_id, &aged).await;
+    assert_eq!(report.deleted.content_objects, 0);
+    let expired = context(aged_ms + GRACE_MS);
+    let report = collect(&store, &namespace_id, &expired).await;
+    assert_eq!(report.deleted_snapshots_by_owner.user, 1);
+    let report = collect_pool(&store, &pool_id, &expired).await;
     assert_eq!(report.deleted.content_objects, 1);
     assert!(store.head(&kept_key).await.expect("head").is_none());
 }

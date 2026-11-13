@@ -137,26 +137,55 @@ impl<S: ObjectStore> NamespaceEngine<S, Writable> {
         .await?
     }
 
-    /// Deletes a snapshot. Deleting a missing snapshot succeeds without a
-    /// write, so a retried delete returns the same response. A fork snapshot returns
-    /// `snapshot_not_found`, because only garbage collection deletes it.
+    /// Deletes a snapshot by moving its expiry to the current time, so the
+    /// snapshot is expired from then on and garbage collection deletes its
+    /// record after the grace window. A missing or already expired snapshot
+    /// succeeds without a write, so a retried delete returns the same response.
+    /// A fork snapshot returns `snapshot_not_found`, because only garbage
+    /// collection deletes it.
     pub async fn delete_snapshot(
         &self,
         snapshot_id: &SnapshotId,
     ) -> Result<DeleteSnapshotResponse> {
-        match self.namespace.load_snapshot_record(snapshot_id).await? {
-            None => {}
-            Some(loaded) => match loaded.state.owner {
-                SnapshotOwner::User { .. } => {
-                    self.namespace.delete_snapshot_record(snapshot_id).await?
+        let clock = self.namespace.start_clock();
+        let object_key = snapshot_record(&self.namespace.namespace_id, snapshot_id);
+        retry_while_contended(|| async {
+            let Some(loaded) = self.namespace.load_snapshot_record(snapshot_id).await? else {
+                return Ok(CasOutcome::Settled(()));
+            };
+            let mut next = loaded.state.clone();
+            let SnapshotOwner::User { expires_at_ms, .. } = &mut next.owner else {
+                return Err(CoreError::SnapshotNotFound {
+                    snapshot_id: snapshot_id.clone(),
+                });
+            };
+            // The clock is read after the load, as an extension reads it.
+            let now_ms = clock.now_ms();
+            if expires_at_ms.is_some_and(|expires_at_ms| expires_at_ms <= now_ms) {
+                return Ok(CasOutcome::Settled(()));
+            }
+            *expires_at_ms = Some(now_ms);
+            let encoded = encode_snapshot_record(&next);
+            match self
+                .namespace
+                .store
+                .compare_and_swap(&object_key, &loaded.etag, encoded)
+                .await
+            {
+                Ok(_) => Ok(CasOutcome::Settled(())),
+                Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(CasOutcome::Contended(
+                    CoreError::contention_exhausted(&object_key),
+                )),
+                // The next attempt loads the record again. If this write was
+                // applied, that attempt finds the expiry at or before its clock
+                // and writes nothing.
+                Err(error @ ObjectStoreError::Transport { .. }) => {
+                    Ok(CasOutcome::Contended(CoreError::store(&object_key, &error)))
                 }
-                SnapshotOwner::Fork { .. } => {
-                    return Err(CoreError::SnapshotNotFound {
-                        snapshot_id: snapshot_id.clone(),
-                    })
-                }
-            },
-        }
+                Err(error) => Err(CoreError::store(&object_key, &error)),
+            }
+        })
+        .await??;
         Ok(DeleteSnapshotResponse {
             namespace_id: self.namespace.namespace_id.clone(),
             snapshot_id: snapshot_id.clone(),

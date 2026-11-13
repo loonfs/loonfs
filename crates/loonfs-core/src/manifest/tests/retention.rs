@@ -1408,7 +1408,11 @@ async fn deleting_a_snapshot_never_reuses_its_id() {
         .load_snapshot_record(&first.snapshot_id)
         .await
         .expect("load snapshot")
-        .is_none());
+        .expect("the deleted snapshot stays until collection")
+        .state
+        .owner
+        .expires_at_ms()
+        .is_some());
     let error = read_snapshot_files(&store, &namespace_id, &first.snapshot_id)
         .await
         .expect_err("a deleted record serves no read");
@@ -3198,10 +3202,14 @@ async fn a_floor_past_a_snapshot_keeps_its_manifest_and_runs_readable_until_dele
     .delete_snapshot(&snapshot.snapshot_id)
     .await
     .expect("delete snapshot");
-    crate::test_support::namespace_store(&store, &namespace_id)
-        .gc(&crate::gc::GcOptions::default(), &aged.clock())
-        .await
-        .expect("collect deleted basis");
+    // The first collection deletes the expired snapshot, and the second
+    // deletes the manifest and segments that only the snapshot kept.
+    for _ in 0..2 {
+        crate::test_support::namespace_store(&store, &namespace_id)
+            .gc(&crate::gc::GcOptions::default(), &aged.clock())
+            .await
+            .expect("collect deleted basis");
+    }
     assert!(store
         .head(&manifest_key)
         .await

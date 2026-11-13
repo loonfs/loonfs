@@ -168,17 +168,18 @@ async fn snapshot_extension_recovers_a_record_write_with_an_ambiguous_outcome() 
     assert_eq!(store.attempts(), 1);
 }
 
-/// Checks that a delete whose acknowledgement is lost reports the error, and
-/// that the retry succeeds without recreating the snapshot.
+/// Checks that a delete whose write acknowledgement is lost succeeds without a
+/// second write, and that the deleted snapshot can't be read but stays listed
+/// as an expired snapshot.
 #[tokio::test]
-async fn a_retried_snapshot_delete_succeeds_after_an_uncertain_delete() {
+async fn a_snapshot_delete_succeeds_after_an_uncertain_write() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("snapshot-ambiguous-delete");
     let store = Arc::new(
         FailStore::new(
             LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
             KeyPredicate::prefix(snapshot_prefix(&namespace_id)),
-            OperationSelector::Delete,
+            OperationSelector::CompareAndSwap,
             InjectedError::Transport("lost snapshot delete acknowledgement".to_owned()),
         )
         .apply_then_fail(),
@@ -201,21 +202,29 @@ async fn a_retried_snapshot_delete_succeeds_after_an_uncertain_delete() {
         .expect("create snapshot");
     store.fail_next(1);
 
-    assert_core_error_kind(
-        namespace.delete_snapshot(&snapshot.snapshot_id).await,
-        ErrorCode::ServerError,
-    );
-    let retried = namespace
+    let deleted = namespace
         .delete_snapshot(&snapshot.snapshot_id)
         .await
-        .expect("a retried delete of a deleted snapshot succeeds");
-    assert_eq!(retried.snapshot_id, snapshot.snapshot_id);
-
+        .expect("a delete succeeds after an uncertain write");
+    assert_eq!(deleted.snapshot_id, snapshot.snapshot_id);
     assert_eq!(store.attempts(), 1);
+
+    let reader = fs.reader.namespace(&namespace_id);
+    assert_core_error_kind(
+        reader.read_view_at_snapshot(&snapshot.snapshot_id).await,
+        ErrorCode::SnapshotNotFound,
+    );
+    let retrieved = reader
+        .get_snapshot(&snapshot.snapshot_id)
+        .await
+        .expect("retrieve the deleted snapshot");
+    assert!(retrieved.expires_at_ms.is_some_and(|expires_at_ms| {
+        expires_at_ms <= loonfs_types::WallClock::now_ms(&loonfs_types::SystemWallClock)
+    }));
     let listed = list_snapshots(&fs.reader, &namespace_id)
         .await
         .expect("list snapshots");
-    assert!(listed.snapshots.is_empty());
+    assert_eq!(listed.snapshots, vec![retrieved]);
 }
 
 /// Checks that after a namespace is deleted, the snapshot inventory still

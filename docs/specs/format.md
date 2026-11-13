@@ -1237,7 +1237,7 @@ Extension segments aren't metadata segments, so neither footprint value counts t
 
 ## 8. Snapshots
 
-A "snapshot" is a durable record that keeps one manifest, and the segments it lists, after newer manifests are published. Without a snapshot, garbage collection can delete a manifest, and the segments that only that manifest lists, once a newer manifest replaces it (see [Candidate and age rules](#113-candidate-and-age-rules)). Ordinary folds don't create snapshots. Every snapshot has one of two owners. A caller creates a "user snapshot" (owner `user`) when it needs a stable view of the namespace. A caller can delete a user snapshot, and a user snapshot may expire. A fork creates a "fork snapshot" (owner `fork`) on its source, and the fork snapshot keeps the source manifest that the fork reads through until the fork is retired.
+A "snapshot" is a durable record that keeps one manifest, and the segments it lists, after newer manifests are published. Without a snapshot, garbage collection can delete a manifest, and the segments that only that manifest lists, once a newer manifest replaces it (see [Candidate and age rules](#113-candidate-and-age-rules)). Ordinary folds don't create snapshots. Every snapshot has one of two owners. A caller creates a "user snapshot" (owner `user`) when it needs a stable view of the namespace. A user snapshot may expire, and deleting a user snapshot moves its expiry to the current time. A fork creates a "fork snapshot" (owner `fork`) on its source, and the fork snapshot keeps the source manifest that the fork reads through until the fork is retired.
 
 ### 8.1 Records and owners
 
@@ -1245,7 +1245,7 @@ Each snapshot is stored at `snapshots/{snapshot_id}.json`. Its ID includes the n
 
 | Owner | Stored owner fields | Reads | Removal |
 | --- | --- | --- | --- |
-| `user` | optional `name`, optional `expires_at_ms` | Readable before its expiry time. A snapshot without an expiry stays readable while the record exists. | Explicit deletion, or garbage collection after expiry plus the grace window. Without an expiry, only explicit deletion removes it from an active namespace. |
+| `user` | optional `name`, optional `expires_at_ms` | Readable before its expiry time. A snapshot without an expiry stays readable while the record exists. | Garbage collection after expiry plus the grace window. Explicit deletion moves the expiry to the time of the deletion. Without an expiry, the snapshot stays in an active namespace until it's explicitly deleted. |
 | `fork` | `target_namespace_id` | Readable while the record exists. It keeps the runs that the target's manifest lists. | Garbage collection, after the target stops depending on it (see [Snapshot cleanup](#117-snapshot-cleanup)). |
 
 The record also stores the namespace, head sequence, payload checksum, and creation time. The manifest number comes from the snapshot ID. A snapshot has no lifecycle status. Creating the record creates the snapshot, and deleting the record ends it. Fork snapshots have no expiry and no renewal protocol.
@@ -1263,7 +1263,7 @@ To create a snapshot from the current head, LoonFS:
 
 If another manifest became current in the meantime, LoonFS deletes the candidate snapshot and retries from a fresh basis. A deletion, a store failure, or running out of contention retries prevents acknowledgement. The creator deletes a snapshot whose write or verification fails. That deletion is best effort. If it fails, the creator still returns the error that failed the creation, and garbage collection applies the rules in [Snapshot cleanup](#117-snapshot-cleanup) to the snapshot. Verification has no time limit of its own. The number and checksum checks apply even when the new manifest has the same sequence.
 
-A put whose outcome is unknown can succeed after its creator stopped waiting (see [Required operations](#31-required-operations)), even after the creator's delete. A snapshot created that way was never returned to a caller. It appears in the snapshot listing and is collected like any other snapshot, so a user snapshot without an expiry stays until someone deletes it.
+A put whose outcome is unknown can succeed after its creator stopped waiting (see [Required operations](#31-required-operations)), even after the creator's delete. A snapshot created that way was never returned to a caller. It appears in the snapshot listing and is collected like any other snapshot, so a user snapshot without an expiry stays until someone deletes it and garbage collection collects it.
 
 Once a snapshot is acknowledged, it keeps its manifest's files, even if the retention floor later moves past its sequence.
 
@@ -1283,13 +1283,13 @@ A read through a snapshot ID serves a user snapshot or a fork snapshot of the na
 
 A read through a snapshot takes the manifest number from the ID, confirms that the snapshot exists and, for a user snapshot, that it hasn't expired, and verifies its manifest reference. The read uses that manifest directly, without replaying later namespace history. The expiry check uses the reader's own clock. A fork snapshot has no expiry, so a read through it works until garbage collection deletes the snapshot after the fork is retired.
 
-Explicit deletion looks up the snapshot and deletes a user snapshot. Deleting an ID with no snapshot succeeds without a write, so a retried deletion returns the same result as the first one. Fork snapshots can't be deleted explicitly, and their IDs return `snapshot_not_found`. [Reference roots](#112-reference-roots) defines which snapshots protect manifests from garbage collection, and [Retirement](#95-retirement) defines when a deleted namespace can be retired.
+Explicit deletion looks up the snapshot and, for a user snapshot, moves its expiry to the current time by compare-and-swap, reading the clock after the load as an extension does. From then on, the snapshot is an expired user snapshot, and garbage collection deletes its record after the grace window (see [Snapshot cleanup](#117-snapshot-cleanup)). Deleting an ID with no snapshot, or a user snapshot that has already expired, succeeds without a write, so a retried deletion returns the same result as the first one. Fork snapshots can't be deleted explicitly, and their IDs return `snapshot_not_found`. [Reference roots](#112-reference-roots) defines which snapshots protect manifests from garbage collection, and [Retirement](#95-retirement) defines when a deleted namespace can be retired.
 
 Why can a read use a fork snapshot? A fork snapshot keeps the source's manifest at the fork point for as long as the fork exists, even after the source's retention floor passes the fork point, so a read through it sees the state that the fork started from. A [rebase](glossary.md#rebase) reads the source through the fork snapshot of its new fork. So does the program that resolves the rebase's conflicts, to read the version of each conflicting file that the replayed fork started from, and so does grep, to read the source's commits that a fork's inherited index doesn't cover (see [Index lifecycle](#d2-index-lifecycle)). A fork snapshot can't be forked or extended, because only a user snapshot has a lifetime that a caller controls.
 
 ### 8.4 Extending a snapshot
 
-An unexpired user snapshot's expiry time can be moved later by compare-and-swap. The manifest reference, the identity, and the owner don't change. An extension never moves the expiry earlier, so extending a user snapshot without an expiry leaves it unchanged. An extension can't recreate a deleted snapshot, or make an expired snapshot readable again.
+An unexpired user snapshot's expiry time can be moved later by compare-and-swap. The manifest reference, the identity, and the owner don't change. An extension never moves the expiry earlier, so extending a user snapshot without an expiry leaves it unchanged. A deletion is the one write that moves an expiry earlier, to the current time (see [Reads, deletion, and expiry](#83-reads-deletion-and-expiry)). An extension can't recreate a deleted snapshot, or make an expired snapshot readable again.
 
 Each extension attempt checks the expiry after it loads the snapshot, using the request clock plus the monotonic time elapsed across the whole extension call. If the snapshot expires while a compare-and-swap that already started is in progress, a successful extension still stands.
 
@@ -1747,7 +1747,7 @@ Why is the session record deleted first? A session record left without its outco
 
 ### 11.7 Snapshot cleanup
 
-User snapshots become collectable after their expiry plus `T`, or after their creation plus `T` in a deleted namespace. A user snapshot with no expiry stays in an active namespace until it's explicitly deleted. A retained user snapshot reports the earlier of those times in `next_reclamation_at_ms`. Snapshots are deleted directly, and snapshot IDs are never reused.
+User snapshots become collectable after their expiry plus `T`, or after their creation plus `T` in a deleted namespace. A user snapshot with no expiry stays in an active namespace until it's explicitly deleted, and the deletion sets its expiry to the time of the deletion, so the snapshot becomes collectable at that time plus `T`. A retained user snapshot reports the earlier of those times in `next_reclamation_at_ms`. Snapshots are deleted directly, and snapshot IDs are never reused.
 
 A fork snapshot is cleaned up based on its target namespace:
 

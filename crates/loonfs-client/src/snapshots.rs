@@ -98,7 +98,7 @@ impl Client {
         .await
     }
 
-    /// Deletes the snapshot record.
+    /// Deletes the snapshot by moving its expiry to the server's current time.
     ///
     /// Deleting a missing snapshot succeeds, so repeating the request is
     /// safe.

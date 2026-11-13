@@ -98,8 +98,7 @@ async fn two_snapshots_under_one_label_list_as_two_records() {
         assert_eq!(snapshot.expires_at_ms, None, "no ttl was asked for");
     }
 
-    // Delete is what takes a record out of the answer, and it takes out
-    // exactly the one named.
+    // A delete expires exactly the one snapshot it names, and both stay listed.
     crate::test_support::NamespaceFixture::new(
         &store,
         &namespace_id,
@@ -112,8 +111,13 @@ async fn two_snapshots_under_one_label_list_as_two_records() {
     let after_delete = list_all_snapshot_records(&store, &namespace_id)
         .await
         .expect("list snapshots");
-    assert_eq!(after_delete.snapshots.len(), 1);
-    assert_ne!(after_delete.snapshots[0].snapshot_id, first);
+    assert_eq!(after_delete.snapshots.len(), 2);
+    for snapshot in &after_delete.snapshots {
+        assert_eq!(
+            snapshot.expires_at_ms.is_some(),
+            snapshot.snapshot_id == first
+        );
+    }
 }
 
 #[tokio::test]
@@ -205,81 +209,6 @@ async fn pages_concatenate_to_every_snapshot_once_in_id_order() {
 
     assert!(page_count > 1);
     assert_eq!(actual, expected);
-}
-
-#[tokio::test]
-async fn deleted_snapshots_are_absent_from_later_pages() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let context = test_context();
-    bootstrap_namespace(&store, &namespace_id, &context)
-        .await
-        .expect("bootstrap namespace");
-
-    let mut ids = Vec::new();
-    for index in 0..8 {
-        ids.push(
-            snapshot_named(
-                &store,
-                &namespace_id,
-                &format!("snapshot-{index}"),
-                None,
-                &context,
-            )
-            .await,
-        );
-    }
-    ids.sort();
-    for snapshot_id in &ids[1..6] {
-        crate::test_support::NamespaceFixture::new(
-            &store,
-            &namespace_id,
-            &crate::test_support::writer_at("test-writer", 0),
-        )
-        .engine()
-        .delete_snapshot(snapshot_id)
-        .await
-        .expect("delete snapshot in filtered run");
-    }
-
-    let first =
-        crate::NamespaceEngine::reader(crate::test_support::namespace_store(&store, &namespace_id))
-            .list_snapshot_records_page(PageRequest {
-                limit: page_limit(1),
-                cursor: None,
-            })
-            .await
-            .expect("first page");
-    assert_eq!(first.items[0].snapshot_id, ids[0]);
-
-    let second =
-        crate::NamespaceEngine::reader(crate::test_support::namespace_store(&store, &namespace_id))
-            .list_snapshot_records_page(PageRequest {
-                limit: page_limit(1),
-                cursor: first.next_cursor,
-            })
-            .await
-            .expect("second page across deleted run");
-    assert_eq!(second.items[0].snapshot_id, ids[6]);
-    assert_eq!(
-        second
-            .next_cursor
-            .as_ref()
-            .map(|cursor| cursor.last_key.as_str()),
-        Some(loonfs_objectstore::keys::snapshot_record(&namespace_id, &ids[6]).as_str())
-    );
-
-    let third =
-        crate::NamespaceEngine::reader(crate::test_support::namespace_store(&store, &namespace_id))
-            .list_snapshot_records_page(PageRequest {
-                limit: page_limit(1),
-                cursor: second.next_cursor,
-            })
-            .await
-            .expect("third page");
-    assert_eq!(third.items[0].snapshot_id, ids[7]);
-    assert!(third.next_cursor.is_none());
 }
 
 #[derive(Debug)]
@@ -692,10 +621,10 @@ async fn a_snapshot_read_by_id_matches_its_listed_row_and_a_read_through_it_chec
     );
 }
 
-/// Checks that deleting a missing snapshot succeeds without a write, and
+/// Checks that deleting an expired snapshot succeeds without a write, and
 /// that deleting a fork snapshot returns `snapshot_not_found` and keeps it.
 #[tokio::test]
-async fn deleting_a_missing_snapshot_succeeds_and_a_fork_snapshot_is_not_a_user_snapshot() {
+async fn a_repeated_delete_writes_nothing_and_a_fork_snapshot_is_not_a_user_snapshot() {
     let temp_dir = tempdir().expect("tempdir");
     let store = RecordingStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
@@ -722,20 +651,22 @@ async fn deleting_a_missing_snapshot_succeeds_and_a_fork_snapshot_is_not_a_user_
         .expect("create fork snapshot")
         .snapshot_id;
 
+    // The second delete runs a second later, so its clock is past the expiry
+    // that the first delete wrote.
     for attempt in 0..2 {
         store.reset();
         let deleted = crate::test_support::NamespaceFixture::new(
             &store,
             &namespace_id,
-            &crate::test_support::writer_at("test-writer", 0),
+            &crate::test_support::writer_at("test-writer", attempt * 1_000),
         )
         .engine()
         .delete_snapshot(&snapshot)
         .await
-        .expect("delete succeeds whether or not the snapshot exists");
+        .expect("delete succeeds whether or not the snapshot is expired");
         assert_eq!(deleted.snapshot_id, snapshot);
         assert_eq!(
-            store.counts().deletes,
+            store.counts().compare_and_swaps,
             usize::from(attempt == 0),
             "attempt {attempt}"
         );
@@ -751,7 +682,7 @@ async fn deleting_a_missing_snapshot_succeeds_and_a_fork_snapshot_is_not_a_user_
     .await
     .expect_err("a fork snapshot isn't a user snapshot");
     assert_eq!(error.code(), ErrorCode::SnapshotNotFound);
-    assert_eq!(store.counts().deletes, 0);
+    assert_eq!(store.counts().compare_and_swaps, 0);
     assert!(crate::test_support::namespace_store(&store, &namespace_id)
         .load_snapshot_record(&fork)
         .await

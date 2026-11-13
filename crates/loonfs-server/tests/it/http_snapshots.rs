@@ -184,10 +184,13 @@ async fn http_snapshots_are_listed_extended_and_deleted_idempotently() {
             }
         );
     }
-    assert!(list_snapshots(&harness.server_url, namespace.as_str())
+    let after_delete = list_snapshots(&harness.server_url, namespace.as_str())
         .expect("list after delete")
-        .snapshots
-        .is_empty());
+        .snapshots;
+    assert_eq!(after_delete.len(), 1);
+    assert!(after_delete[0]
+        .expires_at_ms
+        .is_some_and(|expires_at_ms| expires_at_ms <= loonfs_core::time::current_time_ms()));
     let diagnostics = harness
         .client
         .get_namespace_diagnostics(&namespace)
@@ -427,14 +430,17 @@ async fn snapshot_lifecycle_round_trips_through_the_client() {
         .delete_snapshot(&namespace, &created.snapshot_id)
         .await
         .expect("delete snapshot");
-    assert!(harness
-        .client
-        .list_snapshots(&namespace)
-        .page()
-        .await
-        .expect("list deleted snapshots")
-        .snapshots
-        .is_empty());
+    assert_eq!(
+        harness
+            .client
+            .list_snapshots(&namespace)
+            .page()
+            .await
+            .expect("list deleted snapshots")
+            .snapshots
+            .len(),
+        1
+    );
     harness.server.abort();
 }
 
@@ -531,8 +537,6 @@ async fn user_and_maintenance_snapshot_listings_reject_each_others_cursors() {
 
 #[tokio::test]
 async fn user_and_maintenance_snapshot_retrieves_return_their_listed_rows() {
-    use loonfs_client::ClientError;
-
     let temp_dir = tempdir().expect("tempdir");
     let config = test_config(
         temp_dir.path().join("store"),
@@ -588,31 +592,19 @@ async fn user_and_maintenance_snapshot_retrieves_return_their_listed_rows() {
         .delete_snapshot(&namespace, &created.snapshot_id)
         .await
         .expect("delete snapshot");
-    let code = |error: ClientError| match error {
-        ClientError::Api {
-            status, response, ..
-        } => (status, response.code),
-        other => panic!("expected an API error, got {other:?}"),
-    };
-    assert_eq!(
-        code(
-            harness
-                .client
-                .get_snapshot(&namespace, &created.snapshot_id)
-                .await
-                .expect_err("a deleted snapshot is not found")
-        ),
-        (404, "snapshot_not_found".to_owned())
-    );
-    assert_eq!(
-        code(
-            harness
-                .client
-                .get_snapshot_record(&namespace, &created.snapshot_id)
-                .await
-                .expect_err("a deleted snapshot is not found")
-        ),
-        (404, "snapshot_not_found".to_owned())
-    );
+    let deleted = harness
+        .client
+        .get_snapshot(&namespace, &created.snapshot_id)
+        .await
+        .expect("a deleted snapshot stays until collection");
+    let record = harness
+        .client
+        .get_snapshot_record(&namespace, &created.snapshot_id)
+        .await
+        .expect("a deleted snapshot record stays until collection");
+    assert_eq!(record.expires_at_ms, deleted.expires_at_ms);
+    assert!(deleted
+        .expires_at_ms
+        .is_some_and(|expires_at_ms| expires_at_ms <= loonfs_core::time::current_time_ms()));
     harness.server.abort();
 }

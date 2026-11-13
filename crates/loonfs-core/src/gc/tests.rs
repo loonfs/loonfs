@@ -1127,7 +1127,10 @@ async fn gc_keeps_a_basis_kept_by_another_owner_after_one_release() {
         .expect("first collection");
     assert_eq!(
         first_collection.deleted_snapshots_by_owner,
-        loonfs_types::DeletedSnapshotsByOwner::default()
+        loonfs_types::DeletedSnapshotsByOwner {
+            user: 1,
+            ..Default::default()
+        }
     );
 
     let second_collection = crate::test_support::namespace_store(&store, &namespace_id)
