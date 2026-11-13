@@ -2739,7 +2739,7 @@
         "type": "object"
       },
       "GrepIndexStatusBackfilling": {
-        "description": "An index that is running its initial scan of a snapshot and can't be searched yet.",
+        "description": "An index that is running its initial scan of the files at one sequence and can't be\nsearched yet.",
         "properties": {
           "captured_seq": {
             "$ref": "#/components/schemas/CommitSeq",
@@ -2757,10 +2757,6 @@
             "description": "Whether a partitioned segment reorganization is in progress.",
             "type": "boolean"
           },
-          "snapshot_id": {
-            "$ref": "#/components/schemas/SnapshotId",
-            "description": "The snapshot that keeps the state being scanned."
-          },
           "status": {
             "enum": [
               "backfilling"
@@ -2770,7 +2766,6 @@
         },
         "required": [
           "captured_seq",
-          "snapshot_id",
           "status",
           "namespace_id",
           "reorganize_pending"
@@ -5635,7 +5630,7 @@
     },
     "/v0/maintenance/namespaces/{namespace_id}/grep/index/enable": {
       "post": {
-        "description": "Enables the namespace's grep index. A deployment that runs maintenance starts the backfill at the next maintenance interval and continues until the index is active. The response reports the index state read after the change. A new enable reports `backfilling`, with the sequence that its snapshot captured, and an index that was already enabled reports its current status. Repeating the request has the same result. A deployment that doesn't maintain the grep index returns `not_supported`.",
+        "description": "Enables the namespace's grep index. A deployment that runs maintenance starts the backfill at the next maintenance interval and continues until the index is active. The response reports the index state read after the change. A new enable reports `backfilling`, with the sequence whose files the backfill reads, and an index that was already enabled reports its current status. Repeating the request has the same result. A deployment that doesn't maintain the grep index returns `not_supported`.",
         "operationId": "enable_grep_index",
         "parameters": [
           {

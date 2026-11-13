@@ -8,7 +8,7 @@ use crate::entry::{grep_extension_name, GrepEntry, GrepEntryError, GrepIndexStat
 use crate::{GrepError, Result};
 use loonfs::engine::{ExtensionBasis, ExtensionPublication};
 use loonfs_objectstore::ObjectStore;
-use loonfs_types::{NamespaceId, SnapshotId};
+use loonfs_types::NamespaceId;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// How long a run of steps in a host without a maintenance interval of its
@@ -86,12 +86,6 @@ pub(super) struct PendingEntry {
     /// from. A run that a step writes is assigned its number from this entry
     /// (see [`GrepEntry::next_run_no`]).
     pub(super) entry: Option<GrepEntry>,
-    /// The backfill snapshots that the change stops referring to, which are
-    /// deleted once it publishes.
-    released_snapshots: Vec<SnapshotId>,
-    /// The backfill snapshots that the change created, which are deleted if it
-    /// doesn't publish.
-    created_snapshots: Vec<SnapshotId>,
 }
 
 impl PendingEntry {
@@ -147,8 +141,6 @@ impl PendingEntry {
             basis,
             entry,
             published,
-            released_snapshots: Vec::new(),
-            created_snapshots: Vec::new(),
         }
     }
 
@@ -170,8 +162,8 @@ impl PendingEntry {
     /// # Panics
     ///
     /// Panics if `entry` doesn't follow the pending entry: each step keeps
-    /// the build that it follows, or starts a later one from a new snapshot, and
-    /// doesn't move the indexing position back within a build. A change can
+    /// the build that it follows, or starts a later one, and doesn't move
+    /// the indexing position back within a build. A change can
     /// hold more than one build, such as a backfill's restart and its
     /// completion, so each step's entry is checked against the one before it.
     pub(super) fn set_entry(&mut self, entry: GrepEntry) {
@@ -182,18 +174,6 @@ impl PendingEntry {
             );
         }
         self.entry = Some(entry);
-    }
-
-    /// Records a backfill snapshot that the change created, which is deleted if
-    /// the change doesn't publish.
-    pub(super) fn record_created_snapshot(&mut self, snapshot_id: SnapshotId) {
-        self.created_snapshots.push(snapshot_id);
-    }
-
-    /// Records a backfill snapshot that the change no longer refers to, which is
-    /// deleted once the change publishes.
-    pub(super) fn record_released_snapshot(&mut self, snapshot_id: SnapshotId) {
-        self.released_snapshots.push(snapshot_id);
     }
 
     /// Returns whether the steps changed the entry.
@@ -287,20 +267,6 @@ impl<'w, S: ObjectStore + Clone> GrepSteps<'w, S> {
         self.pending.as_ref()?.entry.as_ref().map(GrepEntry::status)
     }
 
-    /// Returns whether the run's steps changed the entry since the last
-    /// publication.
-    pub(super) fn is_changed(&self) -> bool {
-        self.pending.as_ref().is_some_and(PendingEntry::is_changed)
-    }
-
-    /// Drops a pending change that changes nothing, so the next step starts
-    /// from the current manifest.
-    pub(super) fn reload_unless_changed(&mut self) {
-        if !self.is_changed() {
-            self.pending = None;
-        }
-    }
-
     /// Returns the pending change, which starts from the current manifest
     /// when nothing is pending.
     pub(super) async fn pending(&mut self) -> Result<&mut PendingEntry> {
@@ -353,11 +319,9 @@ impl<'w, S: ObjectStore + Clone> GrepSteps<'w, S> {
     /// last publication.
     ///
     /// After a publication, the next step starts from the published manifest.
-    /// After another process
-    /// changed the entry, the change's new backfill snapshots are deleted, and the
-    /// next step loads the current manifest. An error drops the change and
-    /// keeps its snapshots, because a put whose outcome is unknown can still list
-    /// them. A change that's published or superseded is recorded in
+    /// After another process changed the entry, or after an error, the next
+    /// step loads the current manifest. A change that's published or
+    /// superseded is recorded in
     /// [`GrepWorker::publication_stats`].
     pub async fn publish(&mut self) -> Result<GrepPublishOutcome> {
         let Some(pending) = self.pending.take() else {
@@ -387,62 +351,18 @@ impl<'w, S: ObjectStore + Clone> GrepSteps<'w, S> {
                     &counts.rebuilt
                 };
                 outcome.fetch_add(1, Ordering::Relaxed);
-                self.delete_snapshots(&pending.released_snapshots).await;
                 self.pending = Some(PendingEntry::new(basis)?);
                 Ok(GrepPublishOutcome::Published)
             }
             ExtensionPublication::Superseded => {
-                // A put whose response was lost can find its own manifest at
-                // its number, which core counts as superseded unless the
-                // manifest lists a new segment. So the change is published
-                // when the current entry still refers to a snapshot that the change
-                // created, which no other publisher can create, even after
-                // another process's change over it, or when the current
-                // entry is the change's own, and then the snapshots that it
-                // released are deleted.
-                let entry = pending
-                    .entry
-                    .clone()
-                    .expect("a changed pending change should have an entry");
-                if !pending.created_snapshots.is_empty() || !pending.released_snapshots.is_empty() {
-                    let current = PendingEntry::new(
-                        self.worker
-                            .maintenance
-                            .load_extension_basis(&self.namespace_id)
-                            .await?,
-                    )?;
-                    let published =
-                        current.published.as_ref().is_some_and(|current| {
-                            *current == entry
-                                || current.status().backfill_snapshot_id().is_some_and(
-                                    |snapshot_id| pending.created_snapshots.contains(snapshot_id),
-                                )
-                        });
-                    if published {
-                        counts.published.fetch_add(1, Ordering::Relaxed);
-                        self.delete_snapshots(&pending.released_snapshots).await;
-                        self.pending = Some(current);
-                        return Ok(GrepPublishOutcome::Published);
-                    }
-                }
                 counts.superseded.fetch_add(1, Ordering::Relaxed);
                 tracing::debug!(
                     namespace_id = %self.namespace_id,
                     "another process changed the grep entry; the next step plans from the current \
                      manifest"
                 );
-                self.delete_snapshots(&pending.created_snapshots).await;
                 Ok(GrepPublishOutcome::Superseded)
             }
-        }
-    }
-
-    /// Deletes each of `snapshot_ids`, and logs a failed delete.
-    async fn delete_snapshots(&self, snapshot_ids: &[SnapshotId]) {
-        for snapshot_id in snapshot_ids {
-            self.worker
-                .delete_snapshot_if_present(&self.namespace_id, snapshot_id)
-                .await;
         }
     }
 }

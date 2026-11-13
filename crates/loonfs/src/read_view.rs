@@ -4,15 +4,15 @@
 use crate::downloads::{DirectDownloadByInodeTarget, DirectDownloadTarget};
 use crate::pagers::{
     decode_list_page_request, ChangesPager, InodeChildrenPager, PathEntriesPager,
-    RetainedRevisionsPager,
+    RetainedRevisionsPager, SnapshotFilesPager,
 };
 use crate::pinned_read::PinnedRead;
 use crate::runtime_core::{classify_read_result, RuntimeCore};
 use crate::{
     CommitSeq, ContentRef, CoreError, CurrentFileState, DownloadOptions, Error, FileBytes,
     FileContentStream, InodeId, ListInodeChildrenResponse, ListOptions, ListPathEntriesResponse,
-    NamespaceId, PathEntry, ReadAt, ReadFileStreamOptions, Result, RevisionNo, SharedObjectStore,
-    SnapshotId, StatOptions,
+    ListSnapshotFilesOptions, NamespaceId, PathEntry, ReadAt, ReadFileStreamOptions, Result,
+    RevisionNo, SharedObjectStore, SnapshotId, StatOptions,
 };
 use loonfs_core::RuntimeReadContext;
 use loonfs_types::format::manifest::ExtensionEntry;
@@ -245,6 +245,35 @@ impl ReadView {
             view.read(view.pinned.retained_revisions_page(request))
                 .await
         })
+    }
+
+    /// Lists the files visible at this view's sequence in ascending inode-ID
+    /// order, as [`Namespace::list_snapshot_files`](crate::Namespace::list_snapshot_files)
+    /// lists a snapshot's files. The listing requires namespace administrator
+    /// access, as the change feed does.
+    pub fn list_files(&self) -> SnapshotFilesPager {
+        self.list_files_with_options(&ListSnapshotFilesOptions::default())
+    }
+
+    /// Lists the files at this view's sequence as `options` asks.
+    pub fn list_files_with_options(
+        &self,
+        options: &ListSnapshotFilesOptions,
+    ) -> SnapshotFilesPager {
+        loonfs_types::Pager::with_state(
+            (self.clone(), *options),
+            |(view, options), request| async move {
+                let _permit = view.core.read_permit().await;
+                view.read(async {
+                    Ok(view
+                        .pinned
+                        .engine
+                        .list_files_page(request, options, &view.pinned.context)
+                        .await?)
+                })
+                .await
+            },
+        )
     }
 
     /// Returns the entry of extension `name` in the manifest this view reads

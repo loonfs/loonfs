@@ -13,7 +13,7 @@ use loonfs::{
 };
 use loonfs_types::{
     AbsolutePath, CommitSeq, ContentRef, EffectiveLimit, InodeId, LimitError, NamespaceId, Page,
-    PathEntry, RevisionNo, SnapshotId, Subject, MAX_PAGE_LIMIT,
+    PathEntry, RevisionNo, Subject, MAX_PAGE_LIMIT,
 };
 use loonfs_types::{FilesystemEvent, ListChangesResponse};
 
@@ -90,20 +90,18 @@ impl NamespaceReads {
         Ok(self.namespace.metadata().await?)
     }
 
-    /// Lists the files a snapshot keeps, in ascending inode-id order.
-    /// Deleted files are included so a restore needs no new postings;
-    /// queries determine visibility.
+    /// Lists the files at `seq`, in ascending inode-id order, through a
+    /// view of the head at `seq`. Deleted files are included so a restore
+    /// needs no new postings, and queries check visibility.
     ///
-    /// A page returns `snapshot_not_found` if the snapshot was deleted,
-    /// expired, or collected, and `snapshot_unavailable` if its manifest is
-    /// gone. The caller must then restart the backfill from a new snapshot.
-    pub fn list_snapshot_files(&self, snapshot_id: &SnapshotId) -> SnapshotFilesPager {
-        self.namespace.list_snapshot_files_with_options(
-            snapshot_id,
-            &ListSnapshotFilesOptions {
-                include_deleted: true,
-            },
-        )
+    /// The view, and each page, returns `below_retention_floor` once the
+    /// retention floor is above `seq`. The caller must then restart the
+    /// backfill.
+    pub async fn list_files_at(&self, seq: CommitSeq) -> Result<SnapshotFilesPager> {
+        let view = self.namespace.read_view().await?.at_seq(seq).await?;
+        Ok(view.list_files_with_options(&ListSnapshotFilesOptions {
+            include_deleted: true,
+        }))
     }
 
     /// Reads committed changes after `after_seq` as semantic events.

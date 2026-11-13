@@ -356,19 +356,14 @@ async fn a_step_that_loses_its_put_to_another_change_of_its_entry_publishes_noth
 }
 
 /// Checks that an enable whose publication loses its put to another
-/// process's enable deletes the backfill snapshot it created, because no
-/// manifest lists it.
+/// process's enable returns `Superseded`, and that the other enable is
+/// published.
 #[tokio::test]
-async fn an_enable_that_loses_to_another_enable_deletes_its_snapshot() {
+async fn an_enable_that_loses_to_another_enable_is_superseded() {
     let directory = tempfile::tempdir().expect("directory");
     let base: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
     let namespace_id = namespace_id("lost-enable");
-    let writer = seed(&base, &namespace_id, &["/a"]).await;
-    writer
-        .maintenance(loonfs_test_support::ids::writer_id("publication-seed"))
-        .fold_wal(&namespace_id)
-        .await
-        .expect("fold, so the snapshot publishes no manifest");
+    let _writer = seed(&base, &namespace_id, &["/a"]).await;
     let gate = Arc::new(BlockingStore::new(
         base.clone(),
         KeyPredicate::prefix(metadata_manifest_prefix(&namespace_id)),
@@ -388,35 +383,17 @@ async fn an_enable_that_loses_to_another_enable_deletes_its_snapshot() {
         gate.release();
     });
     assert_matches!(lost, Ok(GrepEnableOutcome::Superseded));
-    let Ok(GrepIndexStatus::Backfilling {
-        snapshot_id: rival_snapshot_id,
-        ..
-    }) = host.worker.lifecycle(&namespace_id).await
-    else {
-        panic!("the rival's enable is published");
-    };
-    let snapshots = host
-        .maintenance
-        .list_snapshot_records(&namespace_id)
-        .page()
-        .await
-        .expect("list snapshots")
-        .snapshots;
-    assert_eq!(
-        snapshots
-            .iter()
-            .map(|snapshot| &snapshot.snapshot_id)
-            .collect::<Vec<_>>(),
-        [&rival_snapshot_id],
-        "the lost enable deleted its own snapshot"
+    assert_matches!(
+        host.worker.lifecycle(&namespace_id).await,
+        Ok(GrepIndexStatus::Backfilling { .. }),
+        "the rival's enable is published"
     );
 }
 
 /// Checks that an enable whose put has an unknown outcome returns
-/// `outcome_unknown` and keeps the backfill snapshot, which the put may
-/// have listed.
+/// `outcome_unknown`.
 #[tokio::test]
-async fn an_enable_whose_put_has_an_unknown_outcome_fails_and_keeps_its_snapshot() {
+async fn an_enable_whose_put_has_an_unknown_outcome_fails() {
     let directory = tempfile::tempdir().expect("directory");
     let base: SharedObjectStore = Arc::new(LocalFsStore::new(directory.path()).expect("store"));
     let namespace_id = namespace_id("unknown-enable");
@@ -436,16 +413,4 @@ async fn an_enable_whose_put_has_an_unknown_outcome_fails_and_keeps_its_snapshot
 
     assert_matches!(outcome, Err(error) if error.code() == ErrorCode::OutcomeUnknown);
     assert_matches!(host.worker.entry(&namespace_id).await, Ok(None));
-    let snapshots = host
-        .maintenance
-        .list_snapshot_records(&namespace_id)
-        .page()
-        .await
-        .expect("list snapshots")
-        .snapshots;
-    assert_eq!(
-        snapshots.len(),
-        1,
-        "an unknown outcome must keep the backfill snapshot the put may list"
-    );
 }

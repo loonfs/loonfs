@@ -1,14 +1,14 @@
 //! LoonFS full-text grep subsystem and reference derived projection.
 //!
-//! Grep uses only public runtime APIs. Enabling it creates a snapshot and
-//! backfills files in bounded pages. Once active, it consumes the semantic
-//! change feed from the snapshot's sequence.
+//! Grep uses only public runtime APIs. Enabling it records the namespace's
+//! head sequence and backfills the files at that sequence in bounded pages.
+//! Once active, it consumes the semantic change feed from that sequence.
 //!
 //! Grep's state is its entry in the namespace manifest, which lists the
 //! index's segments. A run of steps changes the entry in memory and
 //! publishes the change in a manifest of its own, and core garbage
 //! collection collects the segments that no kept manifest lists. A retention
-//! gap causes a new snapshot and backfill.
+//! gap causes a new backfill.
 //!
 //! Queries combine indexed postings with the unindexed tail, then verify each
 //! candidate against current file contents. Grep segments are stored under

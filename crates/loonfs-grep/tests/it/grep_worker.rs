@@ -3,7 +3,6 @@
 use crate::common::{
     control, default_block_cache, fold_wal_and_advance_retention, grep_with, page_request, GrepHost,
 };
-use bytes::Bytes;
 use loonfs::{
     CreateNamespaceOptions, ErrorCode, LoonFs, NamespaceId, PutFileOptions,
     RestoreDeletedDestination, RestoreDeletedOptions, SharedObjectStore,
@@ -14,17 +13,11 @@ use loonfs_grep::{
     GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepReorganizeOutcome, GrepService,
     GrepWorker,
 };
-use loonfs_objectstore::keys::{
-    extension_segment_prefix, metadata_manifest_prefix, snapshot_record,
-};
+use loonfs_objectstore::keys::{extension_segment_prefix, metadata_manifest_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStoreExtension;
 use loonfs_test_support::ids::{first_page, nonzero_usize};
-use loonfs_test_support::stores::{
-    replace_object, FailStore, InjectedError, KeyPredicate, OperationContext, OperationSelector,
-    RecordingStore,
-};
-use loonfs_types::format::control::SnapshotOwner;
+use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
 use loonfs_types::format::manifest::ExtensionEntry;
 use loonfs_types::{
     AbsolutePath, CommitSeq, GrepRequest, GrepResponse, GrepScope, IndexSegmentId, PageRequest,
@@ -33,7 +26,6 @@ use loonfs_types::{
 use std::assert_matches;
 use std::collections::BTreeSet;
 use std::num::{NonZeroU32, NonZeroUsize};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -123,7 +115,7 @@ fn normalize_namespace(mut response: GrepResponse) -> GrepResponse {
 }
 
 #[tokio::test]
-async fn grep_worker_lifecycle_uses_and_releases_its_backfill_snapshot() {
+async fn grep_worker_lifecycle_backfills_queries_and_disables() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
@@ -166,13 +158,7 @@ async fn grep_worker_lifecycle_uses_and_releases_its_backfill_snapshot() {
     let manifest = crate::common::control::grep_entry(&store, &namespace_id)
         .await
         .expect("manifest exists");
-    let GrepIndexStatus::Backfilling { snapshot_id, .. } = manifest.status() else {
-        panic!(
-            "enable must publish a backfill over a snapshot: {:?}",
-            manifest
-        );
-    };
-    let snapshot_id = snapshot_id.clone();
+    assert_matches!(manifest.status(), GrepIndexStatus::Backfilling { .. });
 
     let policy = GramIndexBuildPolicy {
         max_files_per_step: NonZeroUsize::MIN,
@@ -190,11 +176,6 @@ async fn grep_worker_lifecycle_uses_and_releases_its_backfill_snapshot() {
     assert_eq!(error.code(), ErrorCode::NotSupported);
 
     drive_worker_to_current(&worker, &namespace_id, policy).await;
-    assert!(
-        control::snapshot_record(&store, &namespace_id, &snapshot_id)
-            .await
-            .is_none()
-    );
     let response = new_query(&store, &namespace_id, &request("needle"))
         .await
         .expect("materialized query");
@@ -338,172 +319,7 @@ async fn exhausted_run_numbers_fail_as_index_corruption_without_writing_the_mani
 }
 
 #[tokio::test]
-async fn enable_creates_no_snapshot_when_the_manifest_load_fails() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store: SharedObjectStore =
-        Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
-    let namespace_id = NamespaceId::parse("enable-manifest-failure").expect("namespace id");
-    let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id(
-            "enable-manifest-failure-writer",
-        ))
-        .config(loonfs::RuntimeConfig {
-            min_publish_interval_ms: 0,
-            ..loonfs::RuntimeConfig::default()
-        })
-        .build()
-        .await
-        .expect("writer");
-    writer
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    let hint_key = loonfs_objectstore::keys::hint(&namespace_id);
-    let manifest_loads = Arc::new(AtomicUsize::new(0));
-    let observed_manifest_loads = Arc::clone(&manifest_loads);
-    let failing_store = Arc::new(FailStore::matching(
-        store.clone(),
-        move |context: &OperationContext<'_>| {
-            context.key() == hint_key
-                && OperationSelector::Read.matches(context.kind())
-                && observed_manifest_loads.fetch_add(1, Ordering::SeqCst) == 0
-        },
-        InjectedError::Transport("injected manifest load failure".to_owned()),
-    ));
-    failing_store.fail_all();
-    let failing: SharedObjectStore = failing_store.clone();
-    let host = GrepHost::new(&failing, "enable-manifest-failure-maintenance").await;
-
-    let error = host
-        .worker
-        .enable(&namespace_id)
-        .await
-        .expect_err("the manifest load fails before snapshot creation");
-    assert_eq!(error.code(), ErrorCode::ServerError, "{error:?}");
-    assert_eq!(manifest_loads.load(Ordering::SeqCst), 1);
-
-    let mut pager = host.maintenance.list_snapshot_records(&namespace_id);
-    let snapshots = pager
-        .next()
-        .await
-        .expect("a fresh pager has one page")
-        .expect("list snapshots after failed enable");
-    assert!(
-        snapshots.snapshots.is_empty(),
-        "a failure before manifest publication must not leave an active snapshot"
-    );
-    writer.shutdown().await.expect("shutdown");
-}
-
-#[tokio::test]
-async fn enable_confirms_its_snapshot_after_an_ambiguous_manifest_write() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store: SharedObjectStore =
-        Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
-    let namespace_id = NamespaceId::parse("ambiguous-enable").expect("namespace id");
-    let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id(
-            "ambiguous-enable-writer",
-        ))
-        .config(loonfs::RuntimeConfig {
-            min_publish_interval_ms: 0,
-            ..loonfs::RuntimeConfig::default()
-        })
-        .build()
-        .await
-        .expect("writer");
-    writer
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    let failing_store = Arc::new(
-        FailStore::new(
-            store.clone(),
-            KeyPredicate::prefix(metadata_manifest_prefix(&namespace_id)),
-            OperationSelector::PutCreateIfAbsent,
-            InjectedError::Transport("injected failure after manifest publication".to_owned()),
-        )
-        .apply_then_fail(),
-    );
-    failing_store.fail_next(1);
-    let failing: SharedObjectStore = failing_store.clone();
-    let host = GrepHost::new(&failing, "ambiguous-enable-maintenance").await;
-    let worker = &host.worker;
-
-    let outcome = worker
-        .enable(&namespace_id)
-        .await
-        .expect("confirm written manifest");
-    assert_matches!(outcome, loonfs_grep::GrepEnableOutcome::Enabled { .. });
-    assert_eq!(failing_store.attempts(), 1);
-
-    assert_fresh_backfill_attempt(&store, &namespace_id).await;
-    writer.shutdown().await.expect("shutdown");
-}
-
-#[tokio::test]
-async fn restart_confirms_its_snapshot_after_an_ambiguous_manifest_write() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store: SharedObjectStore =
-        Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
-    let namespace_id = NamespaceId::parse("ambiguous-restart").expect("namespace id");
-    let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id(
-            "ambiguous-restart-writer",
-        ))
-        .config(loonfs::RuntimeConfig {
-            min_publish_interval_ms: 0,
-            ..loonfs::RuntimeConfig::default()
-        })
-        .build()
-        .await
-        .expect("writer");
-    writer
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    let host = GrepHost::new(&store, "ambiguous-restart-maintenance").await;
-    host.worker
-        .enable(&namespace_id)
-        .await
-        .expect("enable grep");
-    let previous_snapshot_id = assert_fresh_backfill_attempt(&store, &namespace_id).await;
-    host.writer
-        .open_namespace(&namespace_id)
-        .expect("open namespace")
-        .delete_snapshot(&previous_snapshot_id)
-        .await
-        .expect("make the current backfill restart");
-
-    let failing_store = Arc::new(
-        FailStore::new(
-            store.clone(),
-            KeyPredicate::prefix(metadata_manifest_prefix(&namespace_id)),
-            OperationSelector::PutCreateIfAbsent,
-            InjectedError::Transport("injected failure after manifest publication".to_owned()),
-        )
-        .apply_then_fail(),
-    );
-    failing_store.fail_next(1);
-    let failing: SharedObjectStore = failing_store.clone();
-    let restart_host = GrepHost::new(&failing, "ambiguous-restart-steps").await;
-    let worker = &restart_host.worker;
-
-    let outcome = worker
-        .steps(&namespace_id, 0)
-        .build_step(GramIndexBuildPolicy::default())
-        .await
-        .expect("confirm written restart");
-    assert_matches!(outcome, GrepBuildOutcome::BackfillRestarted { .. });
-    assert_eq!(failing_store.attempts(), 1);
-
-    let snapshot_id = assert_fresh_backfill_attempt(&store, &namespace_id).await;
-    assert_ne!(snapshot_id, previous_snapshot_id);
-    writer.shutdown().await.expect("shutdown");
-}
-
-#[tokio::test]
-async fn retention_gap_and_vanished_snapshot_restart_fresh_backfill() {
+async fn a_retention_gap_restarts_a_fresh_backfill() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
@@ -559,7 +375,7 @@ async fn retention_gap_and_vanished_snapshot_restart_fresh_backfill() {
         .await
         .expect("gap restart");
     assert_matches!(restart, GrepBuildOutcome::BackfillRestarted { .. });
-    let gap_snapshot_id = assert_fresh_backfill_attempt(&store, &namespace_id).await;
+    assert_fresh_backfill_attempt(&store, &namespace_id).await;
     assert_eq!(
         crate::common::control::grep_entry(&store, &namespace_id)
             .await
@@ -568,25 +384,6 @@ async fn retention_gap_and_vanished_snapshot_restart_fresh_backfill() {
         indexed.as_slice(),
         "a rebootstrap keeps the index's segments, whose postings stay valid"
     );
-
-    // The second trigger: the snapshot stops keeping its basis
-    // mid-backfill. The enumeration says so out loud instead of quietly
-    // answering current state, and the worker starts over again.
-    namespace
-        .delete_snapshot(&gap_snapshot_id)
-        .await
-        .expect("remove snapshot mid-backfill");
-    let vanished = worker
-        .steps(&namespace_id, 0)
-        .build_step(GramIndexBuildPolicy::default())
-        .await
-        .expect("vanished snapshot restart");
-    assert_matches!(vanished, GrepBuildOutcome::BackfillRestarted { .. });
-    // A deleted record is finished for good, so the new attempt takes a
-    // snapshot of its own: a new id, keeping its basis, with the walk starting
-    // from nothing.
-    let fresh_snapshot_id = assert_fresh_backfill_attempt(&store, &namespace_id).await;
-    assert_ne!(fresh_snapshot_id, gap_snapshot_id);
 
     drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
     let response = new_query(&store, &namespace_id, &request("needle"))
@@ -597,7 +394,7 @@ async fn retention_gap_and_vanished_snapshot_restart_fresh_backfill() {
 }
 
 #[tokio::test]
-async fn retention_passing_a_backfill_snapshot_never_serves_a_partial_query() {
+async fn retention_passing_a_backfill_sequence_restarts_the_backfill() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
@@ -636,11 +433,11 @@ async fn retention_passing_a_backfill_snapshot_never_serves_a_partial_query() {
                 &loonfs_test_support::test_actor(),
             )
             .await
-            .expect("write a file the snapshot captures");
+            .expect("write a file at the backfill sequence");
     }
 
-    // The maintenance handle is a separate runtime. The feed reads the
-    // retention floor from the manifest of the reader's snapshot, so the worker must
+    // The maintenance handle is a separate runtime. The worker reads the
+    // retention floor from the manifest of its reader, so the worker must
     // revalidate on every read to observe the advance within this test.
     let worker = GrepHost::with_reader(&store, "grep-worker-tests", |builder| {
         builder.config(loonfs::RuntimeConfig {
@@ -688,33 +485,23 @@ async fn retention_passing_a_backfill_snapshot_never_serves_a_partial_query() {
         fold_wal_and_advance_retention(&store, &maintenance, &namespace_id).await;
     assert!(retention_floor_seq > captured_seq);
 
-    // Snapshot pages remain readable after retention passes their basis,
-    // so the final page may still publish the snapshot watermark as active.
-    // The change-feed boundary is authoritative: a query at that watermark
-    // must fail explicitly instead of treating the missing tail as empty.
-    let completed = worker
-        .steps(&namespace_id, 0)
-        .build_step(policy)
-        .await
-        .expect("final backfill page");
-    assert_matches!(
-        completed,
-        GrepBuildOutcome::Indexed {
-            built_through_seq,
-            ..
-        } if built_through_seq == captured_seq
-    );
-    let error = new_query(&store, &namespace_id, &request("handoff needle"))
-        .await
-        .expect_err("an expired handoff cursor cannot answer a query");
-    assert_eq!(error.code(), ErrorCode::BelowRetentionFloor);
-
+    // The files at the backfill's sequence can no longer be read, so the
+    // next step starts a new backfill at a later sequence instead of
+    // finishing the walk.
     let restarted = worker
         .steps(&namespace_id, 0)
         .build_step(policy)
         .await
-        .expect("restart expired handoff");
-    assert_matches!(restarted, GrepBuildOutcome::BackfillRestarted { .. });
+        .expect("restart the backfill");
+    assert_matches!(
+        restarted,
+        GrepBuildOutcome::BackfillRestarted { captured_seq: restarted_seq }
+            if restarted_seq >= retention_floor_seq
+    );
+    let error = new_query(&store, &namespace_id, &request("handoff needle"))
+        .await
+        .expect_err("a backfill cannot answer a query");
+    assert_eq!(error.code(), ErrorCode::NotSupported);
     drive_worker_to_current(&worker, &namespace_id, policy).await;
 
     let response = new_query(&store, &namespace_id, &request("handoff needle"))
@@ -733,110 +520,22 @@ async fn retention_passing_a_backfill_snapshot_never_serves_a_partial_query() {
     writer.shutdown().await.expect("shutdown");
 }
 
-/// Checks that a backfill whose snapshot expired restarts from a fresh
-/// snapshot, deletes the expired one, and builds an index that serves the
-/// namespace's files.
-#[tokio::test]
-async fn an_expired_backfill_snapshot_restarts_the_backfill_from_a_fresh_snapshot() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store: SharedObjectStore =
-        Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
-    let namespace_id = NamespaceId::parse("worker-expiry").expect("namespace id");
-    let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id("expiry-writer"))
-        .config(loonfs::RuntimeConfig {
-            min_publish_interval_ms: 0,
-            ..loonfs::RuntimeConfig::default()
-        })
-        .build()
-        .await
-        .expect("writer");
-    writer
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    let namespace = writer
-        .open_namespace(&namespace_id)
-        .expect("open namespace");
-    namespace
-        .put_file(
-            "/expiring.txt",
-            b"expiring needle\n",
-            &loonfs_test_support::test_actor(),
-        )
-        .await
-        .expect("write");
-    let worker = worker(&store).await;
-    worker.enable(&namespace_id).await.expect("enable");
-    let snapshot_id = assert_fresh_backfill_attempt(&store, &namespace_id).await;
-
-    // Expire the snapshot under the backfill without deleting it.
-    let key = snapshot_record(&namespace_id, &snapshot_id);
-    let mut record = control::snapshot_record(&store, &namespace_id, &snapshot_id)
-        .await
-        .expect("backfill snapshot");
-    assert!(
-        record.owner.expires_at_ms().is_some(),
-        "the backfill snapshot carries a ttl"
-    );
-    let SnapshotOwner::User { expires_at_ms, .. } = &mut record.owner else {
-        panic!("the backfill snapshot is user-owned");
-    };
-    *expires_at_ms = Some(record.created_at_ms);
-    let expired = record;
-    replace_object(
-        &store,
-        &key,
-        Bytes::from(
-            loonfs_types::format::control::encode_control_state(
-                loonfs_types::format::control::ControlObjectKind::Snapshot,
-                &expired,
-            )
-            .expect("encode record"),
-        ),
-    )
-    .await
-    .expect("write the expired record");
-
-    drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
-    assert!(
-        control::snapshot_record(&store, &namespace_id, &snapshot_id)
-            .await
-            .is_none()
-    );
-    let response = new_query(&store, &namespace_id, &request("needle"))
-        .await
-        .expect("query after a backfill on an expired snapshot");
-    assert_eq!(response.matches.len(), 1);
-    writer.shutdown().await.expect("shutdown");
-}
-
-/// Asserts the namespace's grep entry is at the start of a backfill attempt
-/// — nothing walked, an active snapshot keeping its basis — and returns
-/// the snapshot that attempt holds.
-async fn assert_fresh_backfill_attempt(
-    store: &SharedObjectStore,
-    namespace_id: &NamespaceId,
-) -> loonfs_types::SnapshotId {
+/// Asserts the namespace's grep entry is at the start of a backfill attempt,
+/// with nothing walked.
+async fn assert_fresh_backfill_attempt(store: &SharedObjectStore, namespace_id: &NamespaceId) {
     let manifest = crate::common::control::grep_entry(store, namespace_id)
         .await
         .expect("grep entry exists");
     let GrepIndexStatus::Backfilling {
-        cursor_inode_id,
-        snapshot_id,
-        ..
+        cursor_inode_id, ..
     } = manifest.status()
     else {
-        panic!("expected a backfill over a snapshot: {:?}", manifest);
+        panic!("expected a backfill: {:?}", manifest);
     };
     assert_eq!(
         *cursor_inode_id, None,
         "a fresh backfill starts the walk from the beginning"
     );
-    assert!(control::snapshot_record(store, namespace_id, snapshot_id)
-        .await
-        .is_some());
-    snapshot_id.clone()
 }
 
 /// Every grep segment the namespace's manifest names, for asserting that an
@@ -1370,83 +1069,6 @@ async fn grep_entry_lifecycle_pins_not_materialized_error_surface() {
     writer.shutdown().await.expect("shutdown");
 }
 
-#[tokio::test]
-async fn a_backfill_snapshot_mismatch_is_corruption_without_writes() {
-    let directory = tempdir().expect("directory");
-    let namespace_id = NamespaceId::parse("snapshot-mismatch").expect("namespace");
-    let recording = Arc::new(RecordingStore::new(
-        LocalFsStore::new(directory.path()).expect("store"),
-        KeyPredicate::any(),
-    ));
-    let store: SharedObjectStore = recording.clone();
-    let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id(
-            "snapshot-mismatch-writer",
-        ))
-        .build()
-        .await
-        .expect("writer");
-    writer
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("create");
-    let host = GrepHost::new(&store, "snapshot-mismatch").await;
-    let worker = &host.worker;
-    worker.enable(&namespace_id).await.expect("enable");
-    publish_edited_entry(&host, &namespace_id, |entry| {
-        entry["status"]["captured_seq"] = serde_json::Value::from(1);
-    })
-    .await;
-    recording.reset();
-    let error = worker
-        .steps(&namespace_id, 0)
-        .build_step(GramIndexBuildPolicy::default())
-        .await
-        .expect_err("mismatch");
-    assert_matches!(error, GrepError::IndexCorrupt { .. });
-    assert_eq!(recording.counts().puts, 0);
-    assert_eq!(recording.counts().deletes, 0);
-    writer.shutdown().await.expect("shutdown");
-}
-
-#[tokio::test]
-async fn a_backfilling_entry_without_a_snapshot_id_is_index_corrupt() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store: SharedObjectStore =
-        Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
-    let namespace_id = NamespaceId::parse("missing-backfill-snapshot").expect("namespace id");
-    let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id(
-            "missing-snapshot-writer",
-        ))
-        .build()
-        .await
-        .expect("writer");
-    writer
-        .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
-        .await
-        .expect("create namespace");
-    let host = GrepHost::new(&store, "missing-snapshot").await;
-    host.worker
-        .enable(&namespace_id)
-        .await
-        .expect("enable grep");
-    publish_edited_entry(&host, &namespace_id, |entry| {
-        entry["status"]
-            .as_object_mut()
-            .expect("backfilling status is an object")
-            .remove("snapshot_id")
-            .expect("a backfilling entry has a snapshot id");
-    })
-    .await;
-
-    assert_corrupt_index_error(
-        "backfilling entry missing snapshot id",
-        new_query(&store, &namespace_id, &request("needle")).await,
-    );
-    writer.shutdown().await.expect("shutdown");
-}
-
 /// Checks that disabling grep replaces an invalid entry of grep's version,
 /// which enabling grep refuses, so a query then reports grep as not enabled
 /// and enabling grep starts a new backfill.
@@ -1492,9 +1114,6 @@ async fn disable_resets_an_invalid_entry_and_enable_starts_a_new_backfill() {
         }),
     ];
     for (case, edit) in cases {
-        let before = control::grep_entry(&store, &namespace_id)
-            .await
-            .expect("grep's entry");
         publish_edited_entry(&host, &namespace_id, edit).await;
         let refused = worker.enable(&namespace_id).await.expect_err(case);
         assert_matches!(refused, GrepError::IndexCorrupt { .. }, "{case}");
@@ -1513,14 +1132,6 @@ async fn disable_resets_an_invalid_entry_and_enable_starts_a_new_backfill() {
             .expect("grep's entry");
         assert_matches!(disabled.status(), GrepIndexStatus::Disabled {}, "{case}");
         assert!(disabled.runs().is_empty(), "{case}");
-        if let GrepIndexStatus::Backfilling { snapshot_id, .. } = before.status() {
-            assert!(
-                control::snapshot_record(&store, &namespace_id, snapshot_id)
-                    .await
-                    .is_some(),
-                "the invalid entry's backfill snapshot is left to expire"
-            );
-        }
         assert_not_enabled_error(
             case,
             new_query(&store, &namespace_id, &request("needle")).await,
@@ -2146,10 +1757,6 @@ async fn a_backfilling_manifest_never_reports_a_built_through_sequence() {
         loonfs_types::GrepIndexStatus::Backfilling {
             captured_seq: CommitSeq(1),
             cursor_inode_id: None,
-            snapshot_id: match &state {
-                GrepIndexStatus::Backfilling { snapshot_id, .. } => snapshot_id.clone(),
-                other => panic!("expected a backfill: {other:?}"),
-            },
         }
     );
     let rendered = serde_json::to_string(&backfilling).expect("serialize the reported lifecycle");

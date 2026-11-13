@@ -124,7 +124,6 @@ pub(super) async fn test_app_with_sessions(
         GrepWorker::new(
             runtime.object_store(),
             runtime.read_only(),
-            runtime.clone(),
             maintenance.clone(),
             loonfs_grep::GrepStepBudget::default(),
         )

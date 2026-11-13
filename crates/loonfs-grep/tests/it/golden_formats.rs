@@ -27,7 +27,7 @@ use loonfs_types::format::segment_blocks::{
     decode_data_block_rows, decode_index_block, BlockHandle, BuiltSegmentBlocks, DecodedDataBlock,
     SegmentBlocksBuilder, SegmentFilter, SegmentFilterBuilder,
 };
-use loonfs_types::{CommitSeq, ContentId, IndexSegmentId, InodeId, RevisionNo, RunNo, SnapshotId};
+use loonfs_types::{CommitSeq, ContentId, IndexSegmentId, InodeId, RevisionNo, RunNo};
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
@@ -127,7 +127,7 @@ pub(crate) fn sample_active_entry(
     .expect("valid active entry")
 }
 
-/// A backfill walking a snapshot. It lists the run the walk has
+/// A backfill walking the files at a sequence. It lists the run the walk has
 /// written so far and no reorganization, which is the index shape the active
 /// fixture above does not pin.
 pub(crate) fn sample_backfilling_entry() -> GrepEntry {
@@ -135,8 +135,6 @@ pub(crate) fn sample_backfilling_entry() -> GrepEntry {
         GrepIndexStatus::Backfilling {
             captured_seq: CommitSeq(7),
             cursor_inode_id: Some(InodeId(7)),
-            snapshot_id: SnapshotId::parse("snp_00000000000000000001-00000000000000000000000009")
-                .expect("valid snapshot id"),
         },
         None,
         vec![run_ref(1, 0, &[1])],

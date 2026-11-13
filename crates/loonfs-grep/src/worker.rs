@@ -1,5 +1,5 @@
-//! The grep worker: its lifecycle, its backfill snapshots, and the bounded steps
-//! that build and reorganize one namespace's grep index.
+//! The grep worker: its lifecycle, and the bounded steps that build and
+//! reorganize one namespace's grep index.
 
 mod build;
 mod index_rows;
@@ -18,25 +18,16 @@ use crate::entry::{GrepEntry, GrepIndexStatus};
 use crate::reads::NamespaceReads;
 use crate::{GrepError, GrepStepBudget, Result};
 use loonfs::engine::{DecodedBlockCacheConfig, DecodedBlockCacheStats};
-use loonfs::{CoreError, CreateSnapshotOptions, LoonFs, Maintenance, ReadOnly, Writable};
+use loonfs::{CoreError, LoonFs, Maintenance, ReadOnly};
 use loonfs_objectstore::ObjectStore;
 use loonfs_types::format::segment_blocks::{
     DEFAULT_MAX_DELTA_RUNS, DEFAULT_MAX_ROWS_PER_SEGMENT, DEFAULT_TARGET_BLOCK_BYTES,
 };
 use loonfs_types::GrepIndex;
-use loonfs_types::{CommitSeq, NamespaceId, SnapshotId};
+use loonfs_types::{CommitSeq, NamespaceId};
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
 
-/// Lifetime of the snapshot used by one grep backfill attempt.
-///
-/// If the snapshot expires before backfill finishes, reads through it
-/// return `snapshot_not_found` and the worker restarts from a fresh
-/// snapshot. The worker does not extend an old snapshot.
-pub(crate) const GREP_BACKFILL_SNAPSHOT_TTL_MS: NonZeroU64 =
-    NonZeroU64::new(24 * 60 * 60 * 1000).expect("a day is a nonzero lifetime");
-
-const GREP_BACKFILL_SNAPSHOT_NAME: &str = "loonfs-grep-backfill";
 /// Content bytes one backfill step ingests before it records its cursor.
 /// This budgets ingestion, not index reorganization — it happens to share a value
 /// with the metadata compaction input limit, and must stay independent
@@ -167,8 +158,7 @@ pub enum GrepReorganizeOutcome {
 ///
 /// The worker writes grep segments into one store, and it publishes grep's
 /// entry in the namespace's manifests through a [`Maintenance`]. It reads
-/// namespace state through a read-only `LoonFs`, and creates or deletes
-/// backfill snapshots through a writable `LoonFs`. Scheduling is external to
+/// namespace state through a read-only `LoonFs`. Scheduling is external to
 /// this type. A build or reorganize step that finds work waits for a permit
 /// of the worker's [`GrepStepBudget`] before it reads file content or index
 /// segments.
@@ -176,7 +166,6 @@ pub enum GrepReorganizeOutcome {
 pub struct GrepWorker<S> {
     store: S,
     reader: LoonFs<ReadOnly>,
-    writer: LoonFs<Writable>,
     maintenance: Maintenance,
     step_budget: GrepStepBudget,
     /// The index blocks that build and reorganize steps read, which keeps
@@ -201,20 +190,17 @@ impl<S: std::fmt::Debug> std::fmt::Debug for GrepWorker<S> {
 
 impl<S: ObjectStore + Clone> GrepWorker<S> {
     /// Creates a worker that writes grep segments into `store`, reads through
-    /// `reader`, creates snapshots through `writer`, and publishes grep's
-    /// entry through `maintenance`. Its steps share `step_budget` with every
-    /// other worker given a clone of it.
+    /// `reader`, and publishes grep's entry through `maintenance`. Its steps
+    /// share `step_budget` with every other worker given a clone of it.
     pub fn new(
         store: S,
         reader: LoonFs<ReadOnly>,
-        writer: LoonFs<Writable>,
         maintenance: Maintenance,
         step_budget: GrepStepBudget,
     ) -> Self {
         Self {
             store,
             reader,
-            writer,
             maintenance,
             step_budget,
             blocks: Arc::new(GrepBlockCache::new(DecodedBlockCacheConfig::new(
@@ -253,8 +239,8 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         GrepSteps::new(self, namespace_id, publish_interval_ms)
     }
 
-    /// Enables grep by taking a snapshot and publishing a backfilling entry.
-    /// Enabling an enabled index changes nothing.
+    /// Enables grep by publishing a backfilling entry at the namespace's
+    /// head. Enabling an enabled index changes nothing.
     ///
     /// If grep's entry is invalid, enabling returns
     /// [`GrepError::IndexCorrupt`], whose message says to disable grep first
@@ -268,22 +254,12 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 state: entry.status().clone(),
             });
         }
-        let expected = pending.entry.clone();
-        let Some(snapshot) = steps.start_backfill(expected.as_ref()).await? else {
-            // Another process changed the entry while the snapshot was
-            // created.
-            return Ok(match steps.pending().await?.enabled_entry() {
-                Some(entry) => GrepEnableOutcome::AlreadyEnabled {
-                    state: entry.status().clone(),
-                },
-                None => GrepEnableOutcome::Superseded,
-            });
-        };
+        let captured_seq = steps.start_backfill().await?;
         Ok(match steps.publish().await? {
             GrepPublishOutcome::Superseded => GrepEnableOutcome::Superseded,
             GrepPublishOutcome::Published | GrepPublishOutcome::NothingPending => {
                 GrepEnableOutcome::Enabled {
-                    state: backfill_status(&snapshot),
+                    state: backfill_status(captured_seq),
                 }
             }
         })
@@ -295,18 +271,13 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     ///
     /// An invalid entry of this build's version (one that doesn't decode or
     /// fails validation) is replaced the same way, so grep can be enabled
-    /// again. Disabling can't read which backfill snapshot such an entry refers
-    /// to, so it doesn't delete the snapshot, and garbage collection removes the
-    /// snapshot after the snapshot expires. If the entry has another version, disabling
-    /// returns [`GrepError::UnsupportedVersion`] and leaves the entry in
-    /// place, so a build never discards an index that it can't read.
+    /// again. If the entry has another version, disabling returns
+    /// [`GrepError::UnsupportedVersion`] and leaves the entry in place, so a
+    /// build never discards an index that it can't read.
     pub async fn disable(&self, namespace_id: &NamespaceId) -> Result<GrepDisableOutcome> {
         let mut steps = self.steps(namespace_id, 0);
         let pending = steps.pending_for_disable().await?;
-        if let Some(entry) = pending.enabled_entry() {
-            if let Some(snapshot_id) = entry.status().backfill_snapshot_id().cloned() {
-                pending.record_released_snapshot(snapshot_id);
-            }
+        if pending.enabled_entry().is_some() {
             pending.set_entry(GrepEntry::disabled());
         }
         // Nothing is pending when grep is disabled or was never enabled.
@@ -346,53 +317,11 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             reorganize_pending: entry.is_some_and(|entry| entry.reorganize().is_some()),
         })
     }
-
-    async fn create_backfill_snapshot(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<loonfs_types::Snapshot> {
-        Ok(self
-            .writer
-            .open_namespace(namespace_id)?
-            .create_snapshot_with_options(
-                GREP_BACKFILL_SNAPSHOT_NAME,
-                &CreateSnapshotOptions {
-                    ttl_ms: Some(GREP_BACKFILL_SNAPSHOT_TTL_MS),
-                },
-            )
-            .await?)
-    }
-
-    /// Deletes a backfill snapshot. Deleting a missing snapshot succeeds. A failed
-    /// delete is only logged, and collection removes the snapshot after it
-    /// expires.
-    async fn delete_snapshot_if_present(
-        &self,
-        namespace_id: &NamespaceId,
-        snapshot_id: &SnapshotId,
-    ) {
-        let deleted = match self.writer.open_namespace(namespace_id) {
-            Ok(namespace) => namespace.delete_snapshot(snapshot_id).await.map(drop),
-            Err(error) => Err(error),
-        };
-        match deleted {
-            Ok(()) => {}
-            Err(error) => tracing::warn!(
-                %namespace_id,
-                %snapshot_id,
-                %error,
-                "failed to delete a grep backfill snapshot"
-            ),
-        }
-    }
 }
 
 impl<S: ObjectStore + Clone> GrepSteps<'_, S> {
-    /// Takes a snapshot and, if the pending entry is still `expected`, makes
-    /// the pending entry a backfill from the snapshot's beginning.
-    ///
-    /// Returns the snapshot, or `None` after deleting it when the entry
-    /// changed.
+    /// Makes the pending entry a backfill of the files at the namespace's
+    /// head, from the first file, and returns the head's sequence.
     ///
     /// The backfill keeps the entry's segments and reorganization, because
     /// the index's postings refer to content values, which stay valid, and
@@ -400,73 +329,38 @@ impl<S: ObjectStore + Clone> GrepSteps<'_, S> {
     /// So a rebootstrap, and a fork's restart of a backfill that it
     /// inherited, cost a `texts` lookup for each value that the index has.
     ///
-    /// Creating a snapshot of a head with an unfolded WAL tail publishes the
-    /// manifest that folds the tail, and a change pending over the manifest
-    /// before it would then lose its put. So the run first publishes a change
-    /// that's pending, and returns `None` if that publication is superseded.
-    /// Once the snapshot exists, the change starts again from the current
-    /// manifest. The entry there can differ from the one the step planned
-    /// from, such as when another process disabled the index, and the
-    /// backfill doesn't replace it.
-    async fn start_backfill(
-        &mut self,
-        expected: Option<&GrepEntry>,
-    ) -> Result<Option<loonfs_types::Snapshot>> {
-        if self.is_changed() && self.publish().await? == GrepPublishOutcome::Superseded {
-            return Ok(None);
-        }
-        let snapshot = self
-            .worker
-            .create_backfill_snapshot(&self.namespace_id)
-            .await?;
-        self.reload_unless_changed();
+    /// The head is at or above the retention floor when it's read, so the
+    /// backfill's first step can read the files at its sequence.
+    async fn start_backfill(&mut self) -> Result<CommitSeq> {
+        let captured_seq = self.worker.reads(&self.namespace_id).head().await?.head_seq;
         let pending = self.pending().await?;
-        if pending.entry.as_ref() != expected {
-            self.worker
-                .delete_snapshot_if_present(&self.namespace_id, &snapshot.snapshot_id)
-                .await;
-            return Ok(None);
-        }
-        pending.record_created_snapshot(snapshot.snapshot_id.clone());
-        let previous_snapshot_id = pending
-            .entry
-            .as_ref()
-            .and_then(|entry| entry.status().backfill_snapshot_id().cloned());
-        if let Some(snapshot_id) = previous_snapshot_id {
-            pending.record_released_snapshot(snapshot_id);
-        }
         let (reorganize, runs) = pending.entry.as_ref().map_or_else(
             || (None, Vec::new()),
             |entry| (entry.reorganize().cloned(), entry.runs().to_vec()),
         );
         pending.set_entry(
-            GrepEntry::new(backfill_status(&snapshot), reorganize, runs)
+            GrepEntry::new(backfill_status(captured_seq), reorganize, runs)
                 .expect("a backfill should keep a valid entry's segments"),
         );
-        Ok(Some(snapshot))
+        Ok(captured_seq)
     }
 }
 
-/// The status of a backfill that starts at the beginning of `snapshot`.
-fn backfill_status(snapshot: &loonfs_types::Snapshot) -> GrepIndexStatus {
+/// The status of a backfill of the files at `captured_seq`, from the first
+/// file.
+fn backfill_status(captured_seq: CommitSeq) -> GrepIndexStatus {
     GrepIndexStatus::Backfilling {
-        captured_seq: snapshot.captured_seq,
+        captured_seq,
         cursor_inode_id: None,
-        snapshot_id: snapshot.snapshot_id.clone(),
     }
 }
 
-/// The errors that mean "the state this projection was built from is
-/// gone": the change feed's cursor fell below the retention floor, the
-/// backfill snapshot was deleted or expired, or it no longer keeps its
-/// manifest. Every other failure is a failure.
+/// The error that means "the state this projection was built from is
+/// gone": the backfill's sequence or the change feed's cursor fell below the
+/// retention floor. Every other failure is a failure.
 fn below_retention_floor(error: &GrepError) -> bool {
     matches!(
         error,
-        GrepError::Runtime(loonfs::Error::Core(
-            CoreError::BelowRetentionFloor { .. }
-                | CoreError::SnapshotNotFound { .. }
-                | CoreError::SnapshotUnavailable(_)
-        ))
+        GrepError::Runtime(loonfs::Error::Core(CoreError::BelowRetentionFloor { .. }))
     )
 }

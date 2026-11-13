@@ -23,7 +23,7 @@ use std::sync::Arc;
 pub(crate) struct GrepHost {
     pub(crate) store: SharedObjectStore,
     pub(crate) reader: LoonFs<ReadOnly>,
-    /// The runtime that creates and deletes the worker's backfill snapshots.
+    /// The writable runtime that the maintenance handle comes from.
     pub(crate) writer: LoonFs<Writable>,
     pub(crate) maintenance: Maintenance,
     pub(crate) service: GrepService,
@@ -72,7 +72,6 @@ impl GrepHost {
             worker: GrepWorker::new(
                 store.clone(),
                 reader,
-                writer.clone(),
                 maintenance.clone(),
                 GrepStepBudget::default(),
             ),
@@ -202,19 +201,7 @@ impl GrepHost {
 pub(crate) mod control {
     use loonfs::control::NamespaceReadState;
     use loonfs::SharedObjectStore;
-    use loonfs_objectstore::keys;
-    use loonfs_types::format::control::{
-        decode_control_object, ControlObjectKind, SnapshotPayload,
-    };
-    use loonfs_types::{NamespaceId, SnapshotId};
-
-    async fn control_bytes(store: &SharedObjectStore, object_key: &str) -> Option<Vec<u8>> {
-        store
-            .get(object_key, None)
-            .await
-            .expect("read control object")
-            .map(|body| body.to_vec())
-    }
+    use loonfs_types::NamespaceId;
 
     pub(crate) async fn head(
         store: &SharedObjectStore,
@@ -248,19 +235,6 @@ pub(crate) mod control {
             .extensions
             .get(&loonfs_grep::entry::grep_extension_name())
             .map(|entry| loonfs_grep::entry::GrepEntry::decode(entry).expect("decode grep's entry"))
-    }
-
-    pub(crate) async fn snapshot_record(
-        store: &SharedObjectStore,
-        namespace_id: &NamespaceId,
-        snapshot_id: &SnapshotId,
-    ) -> Option<SnapshotPayload> {
-        let bytes = control_bytes(store, &keys::snapshot_record(namespace_id, snapshot_id)).await?;
-        Some(
-            decode_control_object::<SnapshotPayload>(&bytes, ControlObjectKind::Snapshot)
-                .expect("decode snapshot")
-                .into_payload(),
-        )
     }
 }
 

@@ -725,3 +725,75 @@ async fn read_working_memory_counts_large_indexes_and_filters() {
     assert_eq!(index.len(), 2048);
     assert!(filter.may_contain(&expected[0].filter_key_for_family(FAMILY)));
 }
+
+/// Checks that the pages of a view's inode rows, read one after another,
+/// list each of the view's inodes once in ID order, when the manifest and
+/// the WAL tail both have rows and the tail has more rows than a page.
+#[tokio::test]
+async fn inode_pages_list_each_inode_once_when_the_tail_has_more_rows_than_a_page() {
+    let temp = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp.path()).expect("store");
+    let namespace_id = NamespaceId::parse("inode-pages").expect("namespace");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context)
+        .await
+        .expect("bootstrap");
+    let fixture = crate::test_support::NamespaceFixture::new(&store, &namespace_id, &context);
+    let paths = |name: &str| -> Vec<String> {
+        (0..4).map(|index| format!("/{name}-{index}.txt")).collect()
+    };
+    let folded = paths("folded");
+    fixture
+        .write_files_bytes(&folded, b"folded\n")
+        .await
+        .expect("write the files that the fold moves into the manifest");
+    crate::test_support::namespace_store(&store, &namespace_id)
+        .fold_wal()
+        .await
+        .expect("fold");
+    let unfolded = [paths("first"), paths("second")].concat();
+    for commit in unfolded.chunks(4) {
+        fixture
+            .write_files_bytes(commit, b"unfolded\n")
+            .await
+            .expect("write the files that stay in the tail");
+    }
+
+    let mut expected = vec![ROOT_INODE_ID];
+    for path in folded.iter().chain(&unfolded) {
+        expected.push(crate::test_support::visible_inode_id(&store, &namespace_id, path).await);
+    }
+    expected.sort();
+
+    let namespace = crate::test_support::namespace_store(&store, &namespace_id);
+    let loaded = namespace
+        .load_current_metadata_view()
+        .await
+        .expect("load the current view");
+    let tail_inodes: usize = loaded
+        .wal_tail
+        .row_states(loaded.visible_seq())
+        .map(|state| state.inodes().len())
+        .sum();
+    assert_eq!(
+        tail_inodes,
+        unfolded.len(),
+        "the tail has the inodes of the files written after the fold"
+    );
+    let view = loaded.metadata_view();
+    for limit in [1, 3, 100] {
+        let mut listed = Vec::new();
+        loop {
+            let page = view
+                .inodes_page(listed.last().copied(), limit)
+                .await
+                .expect("inode page");
+            assert!(page.len() <= limit, "limit {limit}");
+            listed.extend(page.iter().map(|inode| inode.inode_id));
+            if page.len() < limit {
+                break;
+            }
+        }
+        assert_eq!(listed, expected, "limit {limit}");
+    }
+}
