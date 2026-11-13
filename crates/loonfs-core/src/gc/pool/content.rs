@@ -47,7 +47,7 @@ impl ContentFilters {
         match roots.walk.outcome {
             MemberWalkOutcome::Complete => {}
             MemberWalkOutcome::BudgetExceeded => {
-                tracing::info!(pool_id = %pool_id, members, members_read,
+                tracing::error!(pool_id = %pool_id, members, members_read,
                     "the pool's roots weren't all read within the budget; skipped content sweep");
                 report
                     .skipped
@@ -55,7 +55,7 @@ impl ContentFilters {
                 return Ok(None);
             }
             MemberWalkOutcome::UnreadableMember => {
-                tracing::info!(pool_id = %pool_id, members, members_read,
+                tracing::error!(pool_id = %pool_id, members, members_read,
                     "a pool member's roots couldn't be read; skipped content sweep");
                 report
                     .skipped
