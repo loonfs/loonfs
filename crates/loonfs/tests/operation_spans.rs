@@ -6,40 +6,14 @@
 
 #![allow(clippy::panic, reason = "an integration test binary is test code")]
 
-use loonfs::{LoonFs, StoreConfig};
-use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
+mod capture;
+
+use capture::take_log;
+use loonfs::LoonFs;
 use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_types::{ErrorCode, PrincipalId};
-use std::path::Path;
-use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
-use tracing_subscriber::fmt::format::FmtSpan;
-
-fn store_config(root: &Path) -> StoreConfig {
-    StoreConfig::LocalFs(LocalFsStoreConfig {
-        root: root.to_string_lossy().into_owned(),
-        key_prefix: None,
-    })
-}
-
-struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
-
-impl std::io::Write for CaptureWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().expect("capture lock").extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-fn take_captured_log(captured: &Arc<Mutex<Vec<u8>>>) -> String {
-    let bytes = std::mem::take(&mut *captured.lock().expect("capture lock"));
-    String::from_utf8(bytes).expect("captured log is utf8")
-}
 
 fn closed_spans(log: &str, span_name: &str) -> Vec<serde_json::Value> {
     log.lines()
@@ -54,23 +28,10 @@ fn closed_spans(log: &str, span_name: &str) -> Vec<serde_json::Value> {
 fn every_handle_emits_an_operation_span_with_its_namespace() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("operation-spans");
-    let captured: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
-    let sink = Arc::clone(&captured);
-    let subscriber = tracing_subscriber::fmt()
-        .json()
-        .with_max_level(tracing::Level::DEBUG)
-        .with_ansi(false)
-        .with_span_events(FmtSpan::CLOSE)
-        .with_writer(move || CaptureWriter(Arc::clone(&sink)))
-        .finish();
-    let _guard = tracing::subscriber::set_default(subscriber);
+    let (captured, _guard) = capture::capture(true);
 
     block_on(async {
-        let writer = LoonFs::builder(store_config(temp_dir.path()))
-            .writer_id(loonfs_test_support::ids::writer_id("operation-span-writer"))
-            .build()
-            .await
-            .expect("build writer");
+        let writer = capture::writer(temp_dir.path(), "operation-span-writer").await;
         writer
             .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
             .await
@@ -111,8 +72,7 @@ fn every_handle_emits_an_operation_span_with_its_namespace() {
             .expect("maintain metadata");
     });
 
-    let log = String::from_utf8(captured.lock().expect("capture lock").clone())
-        .expect("captured log is utf8");
+    let log = take_log(&captured);
     for span_name in [
         "loonfs.create_namespace",
         "loonfs.recover_administrator",
@@ -136,25 +96,10 @@ fn every_handle_emits_an_operation_span_with_its_namespace() {
 fn delegated_writer_calls_close_one_operation_span() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("operation-span-counts");
-    let captured: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
-    let sink = Arc::clone(&captured);
-    let subscriber = tracing_subscriber::fmt()
-        .json()
-        .with_max_level(tracing::Level::DEBUG)
-        .with_ansi(false)
-        .with_span_events(FmtSpan::CLOSE)
-        .with_writer(move || CaptureWriter(Arc::clone(&sink)))
-        .finish();
-    let _guard = tracing::subscriber::set_default(subscriber);
+    let (captured, _guard) = capture::capture(true);
 
     let (create_log, put_log) = block_on(async {
-        let writer = LoonFs::builder(store_config(temp_dir.path()))
-            .writer_id(loonfs_test_support::ids::writer_id(
-                "operation-span-count-writer",
-            ))
-            .build()
-            .await
-            .expect("build writer");
+        let writer = capture::writer(temp_dir.path(), "operation-span-count-writer").await;
         writer
             .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
             .await
@@ -162,12 +107,12 @@ fn delegated_writer_calls_close_one_operation_span() {
         let namespace = writer
             .open_namespace(&namespace_id)
             .expect("open namespace");
-        let _setup_log = take_captured_log(&captured);
+        let _setup_log = take_log(&captured);
         namespace
             .create_directory("/docs", &loonfs_test_support::test_actor())
             .await
             .expect("create directory");
-        let create_log = take_captured_log(&captured);
+        let create_log = take_log(&captured);
         namespace
             .put_file(
                 "/docs/file.txt",
@@ -176,7 +121,7 @@ fn delegated_writer_calls_close_one_operation_span() {
             )
             .await
             .expect("put file");
-        let put_log = take_captured_log(&captured);
+        let put_log = take_log(&captured);
         (create_log, put_log)
     });
 

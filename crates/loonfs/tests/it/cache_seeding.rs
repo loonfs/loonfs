@@ -1,7 +1,8 @@
 //! Runtime cache reuse, eviction, and cross-handle sharing.
 
 use crate::common::*;
-use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
+use loonfs::metrics::DefaultMetricsRecorder;
+use loonfs::test_support::counter_total;
 use loonfs::{CommitSeq, EntryInodeKind, ErrorCode, MetadataCache, NamespaceId, SharedObjectStore};
 use loonfs_core::limits::FOLD_AT_WAL_OBJECTS;
 use loonfs_objectstore::layout::DurableObjectFamily;
@@ -597,14 +598,7 @@ fn wal_publication_conflict_recovers_and_moves_the_writer_position() {
 /// Returns how many reads took the head they started from, summed over
 /// every source of the head. Each read takes one head.
 fn read_heads(recorder: &DefaultMetricsRecorder) -> u64 {
-    recorder
-        .snapshot()
-        .by_name("loonfs.read_head.source")
-        .map(|entry| match entry.value {
-            MetricValue::Counter(value) => value,
-            ref other => panic!("expected a counter, found {other:?}"),
-        })
-        .sum()
+    counter_total(&recorder.snapshot(), "loonfs.read_head.source")
 }
 
 #[test]

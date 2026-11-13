@@ -1,5 +1,6 @@
 //! Authorization for embedded content reference reads.
 
+use loonfs::test_support::writer;
 use loonfs::{CreateNamespaceOptions, LoonFs, PutFileOptions, SharedObjectStore, Writable};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::namespace_id;
@@ -50,17 +51,7 @@ async fn open_writer() -> (
         KeyPredicate::any().except_hints(),
     ));
     let store: SharedObjectStore = recording.clone();
-    let writer = LoonFs::builder_with_store(store)
-        .writer_id(loonfs_test_support::ids::writer_id(
-            "content-ref-read-access",
-        ))
-        .config(loonfs::RuntimeConfig {
-            min_publish_interval_ms: 0,
-            ..loonfs::RuntimeConfig::default()
-        })
-        .build()
-        .await
-        .expect("writer");
+    let writer = writer(store, "content-ref-read-access").await;
     (directory, recording, writer)
 }
 

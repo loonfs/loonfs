@@ -1,5 +1,6 @@
 //! Store reads and entry metadata for a directory page across folded batches.
 
+use loonfs::test_support::writer;
 use loonfs::{
     DestinationBehavior, LoonFs, PathEntryKind, PutFileOptions, SharedObjectStore, StatOptions,
 };
@@ -41,15 +42,7 @@ async fn directory_pages_read_no_child_inode_or_revision_rows() {
         Arc::new(LocalFsStore::new(temporary.path()).expect("local store"));
     let namespace_id = namespace_id("directory-page-reads");
     let actor = loonfs_test_support::test_actor();
-    let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id("directory-page-writer"))
-        .config(loonfs::RuntimeConfig {
-            min_publish_interval_ms: 0,
-            ..loonfs::RuntimeConfig::default()
-        })
-        .build()
-        .await
-        .expect("writer");
+    let writer = writer(store.clone(), "directory-page-writer").await;
     let maintenance = writer.maintenance(loonfs_test_support::ids::writer_id(
         "directory-page-maintenance",
     ));

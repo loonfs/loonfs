@@ -3,7 +3,7 @@
 //! metrics, and the object reads the cache saves.
 
 use super::MetadataCache;
-use crate::metrics::{DefaultMetricsRecorder, MetricValue, MetricsSnapshot};
+use crate::metrics::{DefaultMetricsRecorder, MetricsSnapshot};
 use crate::{LoonFs, NamespaceId, ReadOnly, SharedObjectStore, Writable};
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -668,10 +668,7 @@ fn registered(snapshot: &MetricsSnapshot, name: &str) -> bool {
 }
 
 fn gauge(snapshot: &MetricsSnapshot, name: &str) -> i64 {
-    match snapshot.by_name(name).next().map(|entry| &entry.value) {
-        Some(MetricValue::Gauge(value)) => *value,
-        other => panic!("expected a `{name}` gauge, found {other:?}"),
-    }
+    crate::test_support::gauge(snapshot, name, &[])
 }
 
 /// Checks that a runtime registers no cache metric with its recorder,

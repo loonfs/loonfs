@@ -7,6 +7,7 @@
 //! Run with:
 //!   cargo test -p loonfs --test it request_accounting -- --ignored --nocapture
 
+use loonfs::test_support::writer;
 use loonfs::{
     LoonFs, MaintainMetadataOptions, Namespace, NamespaceId, PutFileOptions, SharedObjectStore,
     Writable,
@@ -132,15 +133,7 @@ async fn warm_phase_request_accounting() {
     // Build phase: bench-like shape — one wide hot directory, maintenance
     // steps a few times so the manifest ends with a seed base plus a few delta
     // runs and a WAL tail, like the 10k benchmark build.
-    let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id("acct-writer"))
-        .config(loonfs::RuntimeConfig {
-            min_publish_interval_ms: 0,
-            ..loonfs::RuntimeConfig::default()
-        })
-        .build()
-        .await
-        .expect("build writer");
+    let writer = writer(store.clone(), "acct-writer").await;
     let maintenance = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("acct-maintenance"))
         .build()
@@ -258,15 +251,7 @@ async fn warm_phase_request_accounting() {
         .expect("read");
     report("warm read", &log.take_gets(), &segments);
 
-    let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id("acct-writer-2"))
-        .config(loonfs::RuntimeConfig {
-            min_publish_interval_ms: 0,
-            ..loonfs::RuntimeConfig::default()
-        })
-        .build()
-        .await
-        .expect("build second writer");
+    let writer = loonfs::test_support::writer(store.clone(), "acct-writer-2").await;
     let namespace_writer = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");

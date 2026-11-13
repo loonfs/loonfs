@@ -2,6 +2,7 @@
 //! batch hides each inode that the subject can't read.
 
 use loonfs::publish::{CommitIntent, FilesystemOperation};
+use loonfs::test_support::writer;
 use loonfs::{
     Consistency, CreateNamespaceOptions, CurrentFile, CurrentFileState, DestinationBehavior,
     InodeId, LoonFs, NamespaceId, ReadAt, ReadFileOptions, RevisionNo, Writable,
@@ -45,15 +46,7 @@ async fn a_warmed_reader_sees_a_revocation_on_its_next_read() {
 async fn check_buffered_read_access(content_size: usize) {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
-    let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id("access-reads"))
-        .config(loonfs::RuntimeConfig {
-            min_publish_interval_ms: 0,
-            ..loonfs::RuntimeConfig::default()
-        })
-        .build()
-        .await
-        .expect("writer");
+    let writer = writer(store.clone(), "access-reads").await;
     let namespace_id = namespace_id("access-reads");
     writer
         .create_namespace_with_options(
@@ -218,15 +211,7 @@ async fn a_warmed_reader_sees_a_revocation_on_its_first_eventual_read_after_its_
 async fn check_eventual_read_access(content_size: usize) {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
-    let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id("eventual-access"))
-        .config(loonfs::RuntimeConfig {
-            min_publish_interval_ms: 0,
-            ..loonfs::RuntimeConfig::default()
-        })
-        .build()
-        .await
-        .expect("writer");
+    let writer = writer(store.clone(), "eventual-access").await;
     let namespace_id = namespace_id("eventual-access");
     writer
         .create_namespace_with_options(
@@ -421,15 +406,7 @@ async fn check_former_writer_read(warm_before_handoff: bool, consistency: Consis
             b"private payload"
         );
     }
-    let peer = LoonFs::builder_with_store(store)
-        .writer_id(loonfs_test_support::ids::writer_id("peer"))
-        .config(loonfs::RuntimeConfig {
-            min_publish_interval_ms: 0,
-            ..loonfs::RuntimeConfig::default()
-        })
-        .build()
-        .await
-        .expect("peer");
+    let peer = writer(store, "peer").await;
     let peer_namespace_writer = peer.open_namespace(&namespace_id).expect("open namespace");
     peer_namespace_writer
         .commit(

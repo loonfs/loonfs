@@ -111,15 +111,11 @@ fn delta_runs(manifest: &LoadedManifest) -> usize {
 }
 
 fn compactions(recorder: &DefaultMetricsRecorder, outcome: &str) -> u64 {
-    let snapshot = recorder.snapshot();
-    let entry = snapshot
-        .by_name("loonfs.maintenance.compactions")
-        .find(|entry| entry.labels == [("outcome", outcome)])
-        .unwrap_or_else(|| panic!("no compactions counter for `{outcome}`"));
-    match entry.value {
-        MetricValue::Counter(value) => value,
-        ref other => panic!("expected a counter, found {other:?}"),
-    }
+    crate::test_support::counter(
+        &recorder.snapshot(),
+        "loonfs.maintenance.compactions",
+        &[("outcome", outcome)],
+    )
 }
 
 #[tokio::test]

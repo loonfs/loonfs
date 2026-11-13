@@ -13,23 +13,15 @@
 
 #![allow(clippy::panic, reason = "an integration test binary is test code")]
 
-use loonfs::{LoonFs, MaintainMetadataOptions, NamespaceId, StoreConfig, Writable};
+mod capture;
+
+use loonfs::{MaintainMetadataOptions, NamespaceId};
 use loonfs_core::test_support::WriterAt;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_objectstore::local_fs_store::LocalFsStoreConfig;
 use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::ids::namespace_id;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
-use tracing_subscriber::fmt::format::FmtSpan;
-
-fn store_config(root: &Path) -> StoreConfig {
-    StoreConfig::LocalFs(LocalFsStoreConfig {
-        root: root.to_string_lossy().into_owned(),
-        key_prefix: None,
-    })
-}
 
 fn writes_past_wal_tail_threshold() -> u32 {
     u32::try_from(
@@ -39,16 +31,6 @@ fn writes_past_wal_tail_threshold() -> u32 {
             + 1,
     )
     .expect("WAL tail threshold plus one should fit in u32")
-}
-
-async fn writer(root: &Path) -> LoonFs<Writable> {
-    LoonFs::builder(store_config(root))
-        .writer_id(loonfs_test_support::ids::writer_id(
-            "tracing-capture-writer",
-        ))
-        .build()
-        .await
-        .expect("build writer")
 }
 
 async fn fill_wal_tail_past_threshold(root: &Path, namespace_id: &NamespaceId) {
@@ -66,38 +48,14 @@ async fn fill_wal_tail_past_threshold(root: &Path, namespace_id: &NamespaceId) {
     .expect("fill WAL tail past threshold");
 }
 
-struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
-
-impl std::io::Write for CaptureWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().expect("capture lock").extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
 #[test]
 fn a_metadata_maintenance_step_emits_debug_events() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
-    let captured: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
-    let sink = Arc::clone(&captured);
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
-        .with_ansi(false)
-        // Closing spans are recorded so the maintenance spans name
-        // themselves in the capture whether or not they emitted an event.
-        .with_span_events(FmtSpan::CLOSE)
-        .with_writer(move || CaptureWriter(Arc::clone(&sink)))
-        .finish();
-    // Thread-local so the capture cannot leak into other tests.
-    let _guard = tracing::subscriber::set_default(subscriber);
+    let (captured, _guard) = capture::capture(false);
 
     block_on(async {
-        let writer = writer(temp_dir.path()).await;
+        let writer = capture::writer(temp_dir.path(), "tracing-capture-writer").await;
         writer
             .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
             .await
@@ -113,11 +71,10 @@ fn a_metadata_maintenance_step_emits_debug_events() {
         writer.shutdown().await.expect("shut down writer");
     });
 
-    let log = String::from_utf8(captured.lock().expect("capture lock").clone())
-        .expect("captured log is utf8");
+    let log = capture::take_log(&captured);
     // Fields are matched with their `=` so a span carrying the same word
     // cannot satisfy the assertion.
-    let step = find_event(&log, "metadata maintenance step concluded");
+    let step = capture::find_line(&log, "metadata maintenance step concluded");
     for field in ["wal_fold=", "compaction="] {
         assert!(step.contains(field), "missing `{field}` in: {step}");
     }
@@ -131,10 +88,4 @@ fn a_metadata_maintenance_step_emits_debug_events() {
         !log.contains("loonfs.compaction"),
         "maintenance still traces as compaction:\n{log}"
     );
-}
-
-fn find_event<'log>(log: &'log str, message: &str) -> &'log str {
-    log.lines()
-        .find(|line| line.contains(message))
-        .unwrap_or_else(|| panic!("`{message}` missing from captured tracing:\n{log}"))
 }

@@ -3,45 +3,13 @@
 //! take their namespace heads from.
 
 use crate::common::*;
-use loonfs::metrics::{DefaultMetricsRecorder, MetricValue, MetricsSnapshot};
-use loonfs::test_support::writer;
+use loonfs::metrics::DefaultMetricsRecorder;
+use loonfs::test_support::{counter, gauge, histogram_count, writer};
 use loonfs::{LoonFs, MaintainMetadataOptions};
 use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::ids::namespace_id;
 use std::sync::Arc;
 use tempfile::tempdir;
-
-fn counter(snapshot: &MetricsSnapshot, name: &str, labels: &[(&str, &str)]) -> u64 {
-    let entry = snapshot
-        .by_name(name)
-        .find(|entry| entry.labels == labels)
-        .unwrap_or_else(|| panic!("no `{name}` registered with labels {labels:?}"));
-    match entry.value {
-        MetricValue::Counter(value) => value,
-        ref other => panic!("expected a counter, found {other:?}"),
-    }
-}
-
-fn gauge(snapshot: &MetricsSnapshot, name: &str, labels: &[(&str, &str)]) -> i64 {
-    let entry = snapshot
-        .by_name(name)
-        .find(|entry| entry.labels == labels)
-        .unwrap_or_else(|| panic!("no `{name}` registered with labels {labels:?}"));
-    match entry.value {
-        MetricValue::Gauge(value) => value,
-        ref other => panic!("expected a gauge, found {other:?}"),
-    }
-}
-
-fn histogram_count(snapshot: &MetricsSnapshot, name: &str) -> u64 {
-    snapshot
-        .by_name(name)
-        .map(|entry| match entry.value {
-            MetricValue::Histogram { count, .. } => count,
-            ref other => panic!("expected a histogram, found {other:?}"),
-        })
-        .sum()
-}
 
 #[test]
 fn a_writer_with_a_recorder_reports_stores_and_publications() {

@@ -4,7 +4,8 @@
 //! slower.
 
 use futures::stream::{self, StreamExt};
-use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
+use loonfs::metrics::DefaultMetricsRecorder;
+use loonfs::test_support::counter_total;
 use loonfs::{
     DestinationBehavior, ErrorCode, LoonFs, Namespace, PutFileOptions, SharedObjectStore, Writable,
 };
@@ -194,14 +195,7 @@ async fn folds_for(shape: Shape) -> Folds {
         .wait_for_fold()
         .await
         .expect("wait for the last fold");
-    let folds = recorder
-        .snapshot()
-        .by_name("loonfs.publisher.wal_folds")
-        .map(|entry| match entry.value {
-            MetricValue::Counter(count) => count,
-            ref other => panic!("expected a counter, found {other:?}"),
-        })
-        .sum();
+    let folds = counter_total(&recorder.snapshot(), "loonfs.publisher.wal_folds");
     let wal_bytes = intercepted.interceptor().wal_bytes.load(Ordering::Relaxed);
     Folds {
         folds,

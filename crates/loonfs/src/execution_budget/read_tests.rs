@@ -172,16 +172,18 @@ impl Fixture {
             (running, waiting)
         );
         assert_eq!(
-            super::tests::gauge(
-                &self.recorder.inner,
-                "loonfs.execution_budget.reads_running"
+            crate::test_support::gauge(
+                &self.recorder.inner.snapshot(),
+                "loonfs.execution_budget.reads_running",
+                &[]
             ),
             i64::try_from(running).expect("small count")
         );
         assert_eq!(
-            super::tests::gauge(
-                &self.recorder.inner,
-                "loonfs.execution_budget.reads_waiting"
+            crate::test_support::gauge(
+                &self.recorder.inner.snapshot(),
+                "loonfs.execution_budget.reads_waiting",
+                &[]
             ),
             i64::try_from(waiting).expect("small count")
         );

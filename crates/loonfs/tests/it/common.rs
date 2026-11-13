@@ -54,14 +54,6 @@ pub(crate) fn is_manifest_head(
     )
 }
 
-pub(crate) fn assert_wal_probe(
-    operations: Vec<loonfs_test_support::stores::RecordedOperation>,
-    namespace_id: &NamespaceId,
-    wal_no: loonfs_types::WalNo,
-) {
-    assert_eq!(operations, vec![wal_probe(namespace_id, wal_no)]);
-}
-
 pub(crate) fn data_wal_put_for(
     namespace_id: &NamespaceId,
 ) -> impl Fn(&loonfs_test_support::stores::OperationContext<'_>) -> bool + Send + Sync + 'static {

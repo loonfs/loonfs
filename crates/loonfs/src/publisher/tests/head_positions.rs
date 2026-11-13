@@ -43,16 +43,11 @@ async fn test_writer_with_recorder(
 /// Returns how many reads started from `source`: `position`, `refreshed`,
 /// `loaded`, or `eventual`.
 fn reads_from(recorder: &DefaultMetricsRecorder, source: &str) -> u64 {
-    let labels: &[(&str, &str)] = &[("source", source)];
-    let snapshot = recorder.snapshot();
-    let entry = snapshot
-        .by_name("loonfs.read_head.source")
-        .find(|entry| entry.labels == labels)
-        .unwrap_or_else(|| panic!("no read-head counter for `{source}`"));
-    match entry.value {
-        MetricValue::Counter(value) => value,
-        ref other => panic!("expected a counter, found {other:?}"),
-    }
+    crate::test_support::counter(
+        &recorder.snapshot(),
+        "loonfs.read_head.source",
+        &[("source", source)],
+    )
 }
 
 /// Checks that the position moves to each commit before the commit's caller

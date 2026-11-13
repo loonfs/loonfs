@@ -3,10 +3,11 @@
 use super::*;
 use crate::metrics::object_store::fan_out_object_store_recorder;
 use crate::metrics::{
-    DefaultMetricsRecorder, MetricValue, MetricsSnapshot, ObjectKeyKind, ObjectStoreMetricSample,
+    DefaultMetricsRecorder, MetricValue, ObjectKeyKind, ObjectStoreMetricSample,
     ObjectStoreOperation, ObjectStoreOutcomeKind, PutModeKind, VecObjectStoreMetricsRecorder,
 };
 use crate::publisher::metrics::PublishOutcome;
+use crate::test_support::counter;
 use crate::GcResponse;
 use loonfs_core::CompactionUnitOutcome;
 use std::assert_matches;
@@ -37,17 +38,6 @@ fn classified_sample(
         range_class: None,
         put_mode: Some(PutModeKind::CreateIfAbsent),
         store_kind: None,
-    }
-}
-
-fn counter(snapshot: &MetricsSnapshot, name: &str, labels: &[(&str, &str)]) -> u64 {
-    let entry = snapshot
-        .by_name(name)
-        .find(|entry| entry.labels == labels)
-        .unwrap_or_else(|| panic!("no `{name}` registered with labels {labels:?}"));
-    match entry.value {
-        MetricValue::Counter(value) => value,
-        ref other => panic!("expected a counter, found {other:?}"),
     }
 }
 

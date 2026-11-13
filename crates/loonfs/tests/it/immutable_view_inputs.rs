@@ -1,5 +1,6 @@
 //! Cached reads and current retention-floor reads use different manifest requests.
 
+use loonfs::test_support::writer;
 use loonfs::{LoonFs, MaintainMetadataOptions, NamespaceId, SharedObjectStore};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{KeyPredicate, RecordingStore};
@@ -14,15 +15,7 @@ fn manifest_gets(gets: &[String]) -> Vec<String> {
 }
 
 async fn build_namespace(store: &SharedObjectStore, namespace_id: &NamespaceId) {
-    let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id("seed-writer"))
-        .config(loonfs::RuntimeConfig {
-            min_publish_interval_ms: 0,
-            ..loonfs::RuntimeConfig::default()
-        })
-        .build()
-        .await
-        .expect("build writer");
+    let writer = writer(store.clone(), "seed-writer").await;
     let maintenance = LoonFs::builder_with_store(store.clone())
         .writer_id(loonfs_test_support::ids::writer_id("seed-maintenance"))
         .build()
@@ -90,15 +83,7 @@ async fn warm_reads_and_writes_reuse_their_manifest() {
         "a warm reader reuses its manifest"
     );
 
-    let writer = LoonFs::builder_with_store(store.clone())
-        .writer_id(loonfs_test_support::ids::writer_id("warm-writer"))
-        .config(loonfs::RuntimeConfig {
-            min_publish_interval_ms: 0,
-            ..loonfs::RuntimeConfig::default()
-        })
-        .build()
-        .await
-        .expect("build writer");
+    let writer = writer(store.clone(), "warm-writer").await;
     let namespace_writer = writer
         .open_namespace(&namespace_id)
         .expect("open namespace");

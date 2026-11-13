@@ -235,43 +235,6 @@ async fn reuploading_identical_bytes_above_the_inline_threshold_conflicts() {
 }
 
 #[tokio::test]
-async fn different_bytes_under_a_used_commit_id_still_conflict() {
-    let temp_dir = tempdir().expect("tempdir");
-    let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
-    let namespace_id = namespace(&runtime).await;
-    let namespace = runtime.reader.namespace(&namespace_id);
-    let commit_id = CommitId::parse("pinned-put").expect("valid commit id");
-
-    runtime
-        .put_file_with_options(
-            &namespace_id,
-            PATH,
-            b"stable bytes\n",
-            &loonfs_test_support::test_actor(),
-            &options(&commit_id),
-        )
-        .await
-        .expect("first put");
-    let error = runtime
-        .put_file_with_options(
-            &namespace_id,
-            PATH,
-            b"different bytes\n",
-            &loonfs_test_support::test_actor(),
-            &options(&commit_id),
-        )
-        .await
-        .expect_err("different bytes are a different commit");
-
-    assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
-    assert_eq!(
-        namespace.read_file(PATH).await.expect("read file").bytes,
-        b"stable bytes\n",
-        "the refused rerun changed nothing"
-    );
-}
-
-#[tokio::test]
 async fn the_same_bytes_at_a_different_path_still_conflict() {
     let temp_dir = tempdir().expect("tempdir");
     let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
@@ -465,6 +428,7 @@ async fn same_length_different_bytes_conflict() {
     let temp_dir = tempdir().expect("tempdir");
     let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
     let namespace_id = namespace(&runtime).await;
+    let namespace = runtime.reader.namespace(&namespace_id);
     let commit_id = CommitId::parse("pinned-put").expect("valid commit id");
 
     runtime
@@ -489,6 +453,11 @@ async fn same_length_different_bytes_conflict() {
         .expect_err("same length is not the same content");
 
     assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
+    assert_eq!(
+        namespace.read_file(PATH).await.expect("read file").bytes,
+        b"aaaaaaaaaaaa\n",
+        "the refused rerun changed nothing"
+    );
 }
 
 #[tokio::test]

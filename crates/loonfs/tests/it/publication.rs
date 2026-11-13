@@ -5,6 +5,7 @@
 
 use futures::future::BoxFuture;
 use loonfs::publish::{parse_mutation_path, CommitCandidate, CommitIntent, FilesystemOperation};
+use loonfs::test_support::writer;
 use loonfs::{
     Commit, CommitId, DestinationBehavior, LoonFs, NamespaceId, SharedObjectStore, Writable,
 };
@@ -46,17 +47,7 @@ async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
         crate::common::data_wal_put_for(&namespace_id),
     ));
     let store: SharedObjectStore = store_impl.clone();
-    let writer = Arc::new(
-        LoonFs::builder_with_store(store.clone())
-            .writer_id(loonfs_test_support::ids::writer_id("parked-writer"))
-            .config(loonfs::RuntimeConfig {
-                min_publish_interval_ms: 0,
-                ..loonfs::RuntimeConfig::default()
-            })
-            .build()
-            .await
-            .expect("build writer"),
-    );
+    let writer = Arc::new(writer(store.clone(), "parked-writer").await);
     writer
         .create_namespace(&namespace_id, &loonfs_test_support::test_actor())
         .await

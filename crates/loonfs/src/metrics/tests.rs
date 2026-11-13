@@ -2,18 +2,7 @@
 //! atomic-backed values, and histogram bucket arithmetic.
 
 use super::*;
-
-fn counter_value(snapshot: &MetricsSnapshot, name: &str) -> u64 {
-    match snapshot
-        .by_name(name)
-        .next()
-        .expect("registered counter")
-        .value
-    {
-        MetricValue::Counter(value) => value,
-        ref other => panic!("expected a counter, found {other:?}"),
-    }
-}
+use crate::test_support::counter_total;
 
 #[test]
 fn a_counter_reports_what_was_added_to_it() {
@@ -93,7 +82,7 @@ fn registering_one_name_and_label_set_twice_shares_one_value() {
 
     let snapshot = recorder.snapshot();
     assert_eq!(snapshot.by_name("loonfs.test.calls").count(), 1);
-    assert_eq!(counter_value(&snapshot, "loonfs.test.calls"), 2);
+    assert_eq!(counter_total(&snapshot, "loonfs.test.calls"), 2);
 }
 
 #[test]
@@ -116,7 +105,7 @@ fn label_order_does_not_split_an_instrument_in_two() {
 
     let snapshot = recorder.snapshot();
     assert_eq!(snapshot.by_name("loonfs.test.calls").count(), 1);
-    assert_eq!(counter_value(&snapshot, "loonfs.test.calls"), 2);
+    assert_eq!(counter_total(&snapshot, "loonfs.test.calls"), 2);
 }
 
 #[test]
