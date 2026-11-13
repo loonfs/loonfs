@@ -911,7 +911,7 @@ mod tests {
     use super::LocalFsStore;
     use super::{ByteRange, ObjectStore, ObjectStoreError, PutMode};
     use crate::keys::{hint, upload_session};
-    use crate::ObjectStoreExtension;
+    use crate::{GetIfChangedOutcome, ObjectStoreExtension};
     use bytes::Bytes;
     use futures::{stream, StreamExt};
     use std::assert_matches;
@@ -937,6 +937,39 @@ mod tests {
                 .load(std::sync::atomic::Ordering::SeqCst),
             crate::assembly::READ_BYTES
         );
+    }
+
+    #[tokio::test]
+    async fn a_read_with_an_etag_returns_the_body_only_after_the_object_changes() {
+        let temp_dir = test_dir("get-if-changed");
+        let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
+        let key = "control/object";
+        assert_eq!(
+            store.get_if_changed(key, "absent").await.expect("read"),
+            None
+        );
+
+        let first = store
+            .put_if_absent(key, Bytes::from_static(b"one"))
+            .await
+            .expect("create");
+        let first_etag = first.etag.expect("etag");
+        assert_eq!(
+            store.get_if_changed(key, &first_etag).await.expect("read"),
+            Some(GetIfChangedOutcome::Unchanged)
+        );
+
+        let second = store
+            .compare_and_swap(key, &first_etag, Bytes::from_static(b"two"))
+            .await
+            .expect("replace");
+        let Some(GetIfChangedOutcome::Changed(body)) =
+            store.get_if_changed(key, &first_etag).await.expect("read")
+        else {
+            panic!("a replaced object returns its body");
+        };
+        assert_eq!(body.bytes, Bytes::from_static(b"two"));
+        assert_eq!(body.metadata.etag, second.etag);
     }
 
     #[tokio::test]
