@@ -106,8 +106,8 @@ pub struct ManifestRef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SnapshotOwner {
-    /// A snapshot that a caller created through the snapshot API. It's
-    /// deleted by its ID, or by garbage collection after its expiry. The name
+    /// A snapshot that a caller created through the snapshot API. Garbage
+    /// collection deletes the record after its expiry or its deletion. The name
     /// is a label, not a key, so several records can have the same name.
     User {
         /// The label that the creator recorded, if any. Labels don't need to be
@@ -117,6 +117,10 @@ pub enum SnapshotOwner {
         /// When the snapshot expires. A snapshot without an expiry doesn't expire.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expires_at_ms: Option<u64>,
+        /// When a caller deleted the snapshot. A deleted snapshot can't be used,
+        /// whatever its expiry.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        deleted_at_ms: Option<u64>,
     },
     /// Keeps the source manifest and its runs readable by the target.
     Fork {
@@ -131,6 +135,15 @@ impl SnapshotOwner {
     pub fn expires_at_ms(&self) -> Option<u64> {
         match self {
             Self::User { expires_at_ms, .. } => *expires_at_ms,
+            Self::Fork { .. } => None,
+        }
+    }
+
+    /// Returns when a caller deleted this record. A fork snapshot and a user
+    /// snapshot that isn't deleted return `None`.
+    pub fn deleted_at_ms(&self) -> Option<u64> {
+        match self {
+            Self::User { deleted_at_ms, .. } => *deleted_at_ms,
             Self::Fork { .. } => None,
         }
     }

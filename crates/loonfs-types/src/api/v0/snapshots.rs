@@ -76,6 +76,11 @@ pub struct SnapshotRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub expires_at_ms: Option<u64>,
+    /// The time a caller deleted the snapshot, in Unix milliseconds. Garbage collection waits
+    /// one more grace window before it deletes the record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub deleted_at_ms: Option<u64>,
     /// The namespace sequence that the snapshot captured.
     pub captured_seq: CommitSeq,
     /// The manifest that the snapshot keeps.
@@ -168,6 +173,7 @@ mod tests {
             },
             created_at_ms: 1_752_623_000_000,
             expires_at_ms: Some(1_752_626_600_000),
+            deleted_at_ms: None,
             captured_seq: CommitSeq(12),
             manifest_no: ManifestNo(9),
         };
@@ -209,6 +215,7 @@ mod tests {
             },
             created_at_ms: 1_752_623_000_000,
             expires_at_ms: None,
+            deleted_at_ms: None,
             captured_seq: CommitSeq(3),
             manifest_no: ManifestNo(3),
         })

@@ -242,8 +242,8 @@ Snapshot management
     moves earlier
 
   loonfs snapshot delete <namespace> <snapshot-id>
-    Delete the snapshot record. Deleting a missing snapshot succeeds, so
-    the command can be repeated
+    Delete the snapshot. Deleting a missing snapshot succeeds, so the
+    command can be repeated
 
 Pagination
   ls, grep, revisions, trash, changes, snapshot list, and maintenance

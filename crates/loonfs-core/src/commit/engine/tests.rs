@@ -1496,6 +1496,7 @@ async fn publish_views_reuse_cached_segment_blocks_across_publishes() {
             loonfs_types::format::control::SnapshotOwner::User {
                 name: Some("test-snapshot".to_owned()),
                 expires_at_ms: None,
+                deleted_at_ms: None,
             },
             crate::test_support::folded_manifest(&namespace)
                 .await

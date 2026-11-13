@@ -18,6 +18,10 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 /// One key that a listing of a namespace's snapshots returned.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "almost every listed key is a snapshot, moved once: indirection would buy an allocation and save nothing"
+)]
 pub(super) enum ListedSnapshotKey {
     /// A key under the snapshots prefix that isn't a snapshot record, with the
     /// object's size as the listing reported it.

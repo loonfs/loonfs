@@ -149,6 +149,7 @@ pub(crate) async fn create_snapshot<S: ObjectStore + ?Sized>(
             loonfs_types::format::control::SnapshotOwner::User {
                 name: Some("test-snapshot".to_owned()),
                 expires_at_ms: None,
+                deleted_at_ms: None,
             },
             manifest,
             &context.clock(),

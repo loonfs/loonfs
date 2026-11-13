@@ -286,7 +286,13 @@ async fn snapshot_deletion_during_fork_deletes_the_attempt_without_installing_a_
         .list_prefix(&format!("namespaces/{source}/snapshots/"))
         .await
         .expect("list records");
-    assert!(records.is_empty());
+    assert_eq!(
+        records,
+        [loonfs_objectstore::keys::snapshot_record(
+            &source,
+            &snapshot.snapshot_id
+        )]
+    );
 }
 
 async fn seed_source_namespace_for_fork<S: ObjectStore + ?Sized>(

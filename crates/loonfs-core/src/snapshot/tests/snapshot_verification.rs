@@ -167,7 +167,8 @@ async fn namespace_deletion_during_snapshot_verification_deletes_the_snapshot() 
         namespace.create_snapshot_record(
             SnapshotOwner::User {
                 name: Some("racing".to_owned()),
-                expires_at_ms: None
+                expires_at_ms: None,
+                deleted_at_ms: None,
             },
             current.manifest(),
             &clock
@@ -302,10 +303,12 @@ async fn a_fork_snapshot_id_is_read_like_a_user_snapshot_and_refused_by_every_ot
         SnapshotOwner::User {
             name: Some("user".to_owned()),
             expires_at_ms: None,
+            deleted_at_ms: None,
         },
         SnapshotOwner::User {
             name: Some("snapshot".to_owned()),
             expires_at_ms: Some(u64::MAX),
+            deleted_at_ms: None,
         },
         SnapshotOwner::Fork {
             target_namespace_id: NamespaceId::parse("clone").expect("namespace id"),

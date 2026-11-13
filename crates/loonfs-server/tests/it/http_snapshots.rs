@@ -604,15 +604,11 @@ async fn user_and_maintenance_snapshot_retrieves_return_their_listed_rows() {
         ),
         (404, "snapshot_not_found".to_owned())
     );
-    assert_eq!(
-        code(
-            harness
-                .client
-                .get_snapshot_record(&namespace, &created.snapshot_id)
-                .await
-                .expect_err("a deleted snapshot is not found")
-        ),
-        (404, "snapshot_not_found".to_owned())
-    );
+    let record = harness
+        .client
+        .get_snapshot_record(&namespace, &created.snapshot_id)
+        .await
+        .expect("a deleted snapshot's record stays until collection");
+    assert!(record.deleted_at_ms.is_some());
     harness.server.abort();
 }

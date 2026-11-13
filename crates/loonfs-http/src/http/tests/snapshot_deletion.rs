@@ -22,9 +22,10 @@ async fn request(
     )
 }
 
-/// Checks that deleting a snapshot deletes its record once and that repeating
-/// the delete succeeds without a write, that the snapshot inventory has
-/// no create or delete route, and that a deleted snapshot can't be extended.
+/// Checks that deleting a snapshot writes its delete time once and that
+/// repeating the delete succeeds without a write, that the snapshot inventory
+/// has no create or delete route, and that a deleted snapshot can't be
+/// extended.
 #[tokio::test]
 async fn snapshot_deletes_are_idempotent_and_the_snapshot_inventory_is_read_only() {
     let directory = tempdir().expect("tempdir");
@@ -70,7 +71,7 @@ async fn snapshot_deletes_are_idempotent_and_the_snapshot_inventory_is_read_only
         assert_eq!(store.counts().deletes, 0);
     }
 
-    for expected_deletes in [1, 0] {
+    for expected_writes in [1, 0] {
         store.reset();
         let (status, body) = request(&router, Method::DELETE, &uri, json!({})).await;
         assert_eq!(status, StatusCode::OK, "{uri}: {body}");
@@ -78,8 +79,8 @@ async fn snapshot_deletes_are_idempotent_and_the_snapshot_inventory_is_read_only
             body,
             json!({"namespace_id": namespace_id, "snapshot_id": snapshot_id})
         );
-        assert_eq!(store.counts().deletes, expected_deletes);
-        assert_eq!(store.counts().puts, 0);
+        assert_eq!(store.counts().compare_and_swaps, expected_writes);
+        assert_eq!(store.counts().deletes, 0);
     }
 
     store.reset();
@@ -182,7 +183,8 @@ async fn a_snapshot_on_a_deleted_namespace_stays_deletable() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(store.counts().deletes, 1);
+    assert_eq!(store.counts().compare_and_swaps, 1);
+    assert_eq!(store.counts().deletes, 0);
     let (status, body) = request(
         &router,
         Method::DELETE,

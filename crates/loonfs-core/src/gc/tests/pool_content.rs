@@ -298,16 +298,30 @@ async fn content_only_a_snapshot_manifest_names_stays_until_the_snapshot_is_rele
     assert_eq!(report.deleted.content_objects, 0);
     assert!(store.head(&kept_key).await.expect("head").is_some());
 
-    crate::test_support::NamespaceFixture::new(
-        &store,
-        &namespace_id,
-        &crate::test_support::writer_at("test-writer", 0),
-    )
-    .engine()
-    .delete_snapshot(&snapshot.snapshot_id)
-    .await
-    .expect("release the snapshot");
-    let report = collect_pool(&store, &pool_id, &aged).await;
+    crate::test_support::NamespaceFixture::new(&store, &namespace_id, &aged)
+        .engine()
+        .delete_snapshot(&snapshot.snapshot_id)
+        .await
+        .expect("release the snapshot");
+    // The deleted snapshot keeps its manifest and content until the delete
+    // time plus the grace window.
+    let deleted_at_ms = crate::test_support::namespace_store(&store, &namespace_id)
+        .load_snapshot_record(&snapshot.snapshot_id)
+        .await
+        .expect("load snapshot")
+        .and_then(|loaded| loaded.state.owner.deleted_at_ms())
+        .expect("the deleted snapshot stays, with its delete time");
+    let manifest_key = metadata_manifest_object(&namespace_id, &snapshot.manifest_no);
+    let kept = context(deleted_at_ms + GRACE_MS - 1);
+    let report = collect(&store, &namespace_id, &kept).await;
+    assert_eq!(report.deleted_snapshots_by_owner.user, 0);
+    assert!(store.head(&manifest_key).await.expect("head").is_some());
+    let report = collect_pool(&store, &pool_id, &kept).await;
+    assert_eq!(report.deleted.content_objects, 0);
+    let expired = context(deleted_at_ms + GRACE_MS);
+    let report = collect(&store, &namespace_id, &expired).await;
+    assert_eq!(report.deleted_snapshots_by_owner.user, 1);
+    let report = collect_pool(&store, &pool_id, &expired).await;
     assert_eq!(report.deleted.content_objects, 1);
     assert!(store.head(&kept_key).await.expect("head").is_none());
 }
