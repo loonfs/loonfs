@@ -57,7 +57,7 @@ async fn compact_and_check_pair(
             .load_current_metadata_view()
             .await
             .expect("read each published manifest");
-        let metadata = view.projected_metadata_view();
+        let metadata = view.metadata_view();
         let receipt = metadata
             .find_commit_receipt(commit_id)
             .await
@@ -179,20 +179,20 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
         .await
         .expect("compacted view");
     assert!(current
-        .projected_metadata_view()
+        .metadata_view()
         .find_commit_receipt(&original.commit_id)
         .await
         .expect("pruned receipt")
         .is_none());
     assert!(current
-        .projected_metadata_view()
+        .metadata_view()
         .commit_at_seq(original.committed_seq)
         .await
         .expect("pruned record")
         .is_none());
     assert_eq!(
         current
-            .projected_metadata_view()
+            .metadata_view()
             .content_layout(&old_reference.content_id)
             .await
             .expect("retained layout")
@@ -267,14 +267,14 @@ async fn inline_receipt_retention_keeps_the_boundary_and_reuses_only_pruned_ids(
         .await
         .expect("fresh snapshot view");
     let old_receipt = old
-        .projected_metadata_view()
+        .metadata_view()
         .find_commit_receipt(&original.commit_id)
         .await
         .expect("old receipt")
         .expect("retained by snapshot");
     assert_eq!(old_receipt.committed_seq, original.committed_seq);
     let old_record = old
-        .projected_metadata_view()
+        .metadata_view()
         .commit_at_seq(original.committed_seq)
         .await
         .expect("old record")

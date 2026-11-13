@@ -447,7 +447,7 @@ mod tests {
         let session = PublishPlanningSession::new(
             view.head(),
             view.wal_tail(),
-            view.projected_metadata_view(),
+            view.metadata_view(),
             ContentWrites::new(&namespace.store, &content_writes, view.head()),
             1,
         );
@@ -503,7 +503,7 @@ mod tests {
             .await
             .expect("metadata view");
         let resolved = view
-            .projected_metadata_view()
+            .metadata_view()
             .resolve_visible_path(&AbsolutePath::parse("/docs/nested/a.txt").expect("path"))
             .await
             .expect("resolve created file");

@@ -104,7 +104,7 @@ impl<S: ObjectStore> NamespaceStore<S> {
                         surviving,
                         ReplacementOutput {
                             segments: output_segments.clone(),
-                            placement: spec.placement,
+                            placement: spec.placement(),
                         },
                         spec.frozen_floor_seq(),
                     )?;

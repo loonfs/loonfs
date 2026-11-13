@@ -85,7 +85,7 @@ pub struct FileContentStream<S> {
     next_offset: u64,
     check: StreamCheck,
     /// Where ranged reads look for content objects before the store.
-    object_cache: Option<Arc<ObjectCache>>,
+    object_cache: Arc<ObjectCache>,
     /// A whole reference read in one chunk, kept until the stream verifies
     /// it so that `object_cache` can keep the verified bytes.
     unverified_object: Option<Bytes>,
@@ -94,13 +94,14 @@ pub struct FileContentStream<S> {
 impl<S: ObjectStore> FileContentStream<S> {
     /// Opens a stream over `range` of the content, which the caller has
     /// checked with [`StreamRange::ensure_within`].
-    pub(crate) async fn open_inner(
+    pub(crate) async fn open(
         store: S,
         location: ContentLocation,
         entry: Option<PathEntry>,
         content_ref: ContentRef,
         chunk_bytes: NonZeroU64,
         range: StreamRange,
+        object_cache: Arc<ObjectCache>,
     ) -> std::result::Result<Self, DurableContentValidationError> {
         let (start_offset, check) = match range {
             StreamRange::Whole { start_offset } => {
@@ -135,16 +136,9 @@ impl<S: ObjectStore> FileContentStream<S> {
             start_offset,
             next_offset: start_offset,
             check,
-            object_cache: None,
+            object_cache,
             unverified_object: None,
         })
-    }
-
-    /// Reads content objects from `object_cache` before the store, and keeps
-    /// a small object there once the stream verifies all of its bytes.
-    pub(crate) fn with_object_cache(mut self, object_cache: Arc<ObjectCache>) -> Self {
-        self.object_cache = Some(object_cache);
-        self
     }
 
     /// Adds already-downloaded prefix bytes to a resumed read's checksum.
@@ -222,13 +216,12 @@ impl<S: ObjectStore> FileContentStream<S> {
                 return Ok(None);
             }
             self.completion()?;
-            if let Some(((object_cache, object_key), bytes)) = self
-                .object_cache
-                .as_deref()
-                .zip(self.location.single_object_key())
+            if let Some((object_key, bytes)) = self
+                .location
+                .single_object_key()
                 .zip(self.unverified_object.take())
             {
-                object_cache.insert_content(object_key, &bytes);
+                self.object_cache.insert_content(object_key, &bytes);
             }
             return Ok(None);
         }
@@ -240,7 +233,7 @@ impl<S: ObjectStore> FileContentStream<S> {
             .location
             .read_range(
                 &self.store,
-                self.object_cache.as_deref(),
+                Some(&self.object_cache),
                 self.next_offset,
                 end_exclusive,
             )
@@ -259,7 +252,7 @@ impl<S: ObjectStore> FileContentStream<S> {
                 "a chunk below the content size arrives before `completion` finishes the verifier",
             );
             if self.next_offset == 0 && end_exclusive == self.content_ref.size_bytes {
-                self.unverified_object = self.object_cache.as_ref().map(|_| bytes.clone());
+                self.unverified_object = Some(bytes.clone());
             }
         }
         self.next_offset += bytes.len() as u64;
@@ -376,13 +369,14 @@ mod tests {
         range
             .ensure_within(content_ref.size_bytes)
             .expect("the test opens a range inside the content");
-        FileContentStream::open_inner(
+        FileContentStream::open(
             store,
             super::ContentLocation::whole(&pool_id(), content_ref),
             Some(test_entry()),
             content_ref.clone(),
             test_chunk_bytes(),
             range,
+            Arc::new(ObjectCache::unshared(0, 0)),
         )
         .await
     }

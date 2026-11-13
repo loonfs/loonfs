@@ -269,7 +269,7 @@ async fn an_append_to_a_restored_revision_starts_a_new_chain_from_it() {
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let view = namespace.load_current_metadata_view().await.expect("view");
     let carried = view
-        .projected_metadata_view()
+        .metadata_view()
         .content_layout(&piece.content_id)
         .await
         .expect("layout")
@@ -707,7 +707,7 @@ async fn a_fresh_chain_shares_folded_and_materialized_extents_without_copying_by
             let namespace = crate::test_support::namespace_store(&store, &namespace_id);
             let view = namespace.load_current_metadata_view().await.expect("view");
             let carried = view
-                .projected_metadata_view()
+                .metadata_view()
                 .content_layout(&fresh.content_id)
                 .await
                 .expect("layout");
@@ -742,7 +742,7 @@ async fn a_fresh_chain_shares_folded_and_materialized_extents_without_copying_by
                 .await
                 .expect("folded view");
             let row = view
-                .projected_metadata_view()
+                .metadata_view()
                 .content_layout(&fresh.content_id)
                 .await
                 .expect("layout")

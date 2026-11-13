@@ -396,29 +396,15 @@ pub(super) async fn content_layout<S: ObjectStore + ?Sized>(
     segments: &VerifiedMetadataSegments<'_, S>,
     content_id: &loonfs_types::ContentId,
 ) -> Result<Option<ContentLayoutRecord>> {
-    first_content_layout(
-        segments,
-        &lookup_keys::content_layout_prefix(content_id),
-        &lookup_keys::content_layout_probe(content_id),
-    )
-    .await
-}
-
-const CONTENT_LAYOUT_PAGE_ROWS: usize = 8;
-
-async fn first_content_layout<S: ObjectStore + ?Sized>(
-    segments: &VerifiedMetadataSegments<'_, S>,
-    prefix: &str,
-    probe: &str,
-) -> Result<Option<ContentLayoutRecord>> {
-    let upper_bound = string_prefix_upper_bound(prefix);
+    let prefix = lookup_keys::content_layout_prefix(content_id);
+    let upper_bound = string_prefix_upper_bound(&prefix);
     let rows = segments
         .scan_range(
             MetadataRowFamily::ContentLayouts,
-            prefix,
+            &prefix,
             upper_bound.as_deref(),
-            CONTENT_LAYOUT_PAGE_ROWS,
-            Some(probe),
+            1,
+            Some(&lookup_keys::content_layout_probe(content_id)),
             BlocksPerRefill::One,
         )
         .await?;

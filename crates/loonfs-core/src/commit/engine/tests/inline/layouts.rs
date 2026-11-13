@@ -20,7 +20,7 @@ async fn layout(
         .load_current_metadata_view()
         .await
         .expect("view")
-        .projected_metadata_view()
+        .metadata_view()
         .content_layout(&reference.content_id)
         .await
         .expect("layout lookup")
@@ -319,7 +319,7 @@ async fn a_retry_accepts_a_span_with_a_matching_stored_checksum_without_changing
     let content = tail.content(&reference).expect("pieces");
     let first = write_tail_content(
         ContentWrites::new(&store, &crate::test_support::content_writes(), view.head()),
-        &view.projected_metadata_view(),
+        &view.metadata_view(),
         &content,
         assemble_tail_content(&pool_id(&store).await, &content).expect("pieces"),
     )
@@ -363,7 +363,7 @@ async fn a_retry_after_an_append_keeps_the_first_span_object_immutable() {
     let content = tail.content(original.content_ref()).expect("content");
     write_tail_content(
         ContentWrites::new(&store, &crate::test_support::content_writes(), view.head()),
-        &view.projected_metadata_view(),
+        &view.metadata_view(),
         &content,
         assemble_tail_content(&pool_id(&store).await, &content).expect("pieces"),
     )
@@ -539,7 +539,7 @@ async fn a_fresh_chain_shares_its_bases_extents_without_copying() {
     let namespace = crate::test_support::namespace_store(&store, &namespace_id);
     let view = namespace.load_current_metadata_view().await.expect("view");
     let revision = view
-        .projected_metadata_view()
+        .metadata_view()
         .latest_revision_head(inode_id)
         .await
         .expect("revision")
@@ -1045,7 +1045,7 @@ async fn collection_keeps_shared_objects_that_a_restore_names_across_a_floor_adv
         .await
         .expect("compacted view");
     assert_eq!(
-        view.projected_metadata_view()
+        view.metadata_view()
             .content_layout(&shared.content_id)
             .await
             .expect("layout")
@@ -1258,7 +1258,7 @@ async fn a_copy_carries_its_layout_without_shadowing_a_longer_fold() {
     let session = PublishPlanningSession::new(
         view.head(),
         view.wal_tail(),
-        view.projected_metadata_view(),
+        view.metadata_view(),
         ContentWrites::new(&namespace.store, &content_writes, view.head()),
         context.now_ms,
     );
@@ -1456,7 +1456,7 @@ async fn a_pending_reference_keeps_its_chain_through_a_floor_advance() {
         let session = PublishPlanningSession::new(
             view.head(),
             view.wal_tail(),
-            view.projected_metadata_view(),
+            view.metadata_view(),
             ContentWrites::new(&namespace.store, &content_writes, view.head()),
             context.now_ms,
         );

@@ -166,11 +166,6 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         &self.wal_tail
     }
 
-    #[cfg(test)]
-    pub(crate) fn projected_metadata_view(&self) -> MetadataView<'_, '_, S> {
-        self.metadata_view()
-    }
-
     #[tracing::instrument(
         level = "debug",
         name = "loonfs.phase",

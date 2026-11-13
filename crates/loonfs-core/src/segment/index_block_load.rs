@@ -366,62 +366,18 @@ pub(crate) async fn load_segment_index<S: ObjectStore + ?Sized>(
     memo: &SessionBlockMemo,
     descriptor: &MetadataSegmentRef,
 ) -> Result<Arc<Vec<SegmentIndexEntry>>, ManifestLoadError> {
-    load_segment_index_inner(store, segment_cache, Some(memo), descriptor, true).await
-}
-
-/// Loads only the index section even for a small segment. Compaction
-/// uses this to account data-block decoded bytes before any row payload is
-/// decoded; the normal lookup path keeps its whole-small-segment shortcut.
-pub(crate) async fn load_segment_index_for_compaction<S: ObjectStore + ?Sized>(
-    store: &S,
-    segment_cache: Option<&MetadataSegmentCache>,
-    memo: Option<&SessionBlockMemo>,
-    descriptor: &MetadataSegmentRef,
-) -> Result<Arc<Vec<SegmentIndexEntry>>, ManifestLoadError> {
-    load_segment_index_inner(store, segment_cache, memo, descriptor, false).await
-}
-
-async fn load_segment_index_inner<S: ObjectStore + ?Sized>(
-    store: &S,
-    segment_cache: Option<&MetadataSegmentCache>,
-    memo: Option<&SessionBlockMemo>,
-    descriptor: &MetadataSegmentRef,
-    load_small_segment_whole: bool,
-) -> Result<Arc<Vec<SegmentIndexEntry>>, ManifestLoadError> {
     let handle = descriptor.index_block;
     let cache_key = segment_block_cache_key(descriptor, SegmentBlockKind::Index, handle.offset);
-    if let Some(DecodedMetadataSegmentBlock::Index { entries, .. }) =
-        memo.and_then(|memo| memo.get(&cache_key))
-    {
+    if let Some(DecodedMetadataSegmentBlock::Index { entries, .. }) = memo.get(&cache_key) {
         return Ok(entries);
     }
-    let fetch = async {
-        if load_small_segment_whole {
-            load_and_publish_segment_sections(
-                store,
-                segment_cache,
-                memo,
-                descriptor,
-                SegmentBlockKind::Index,
-            )
-            .await
-        } else {
-            let object_key = metadata_segment_object_key(descriptor);
-            let stored = Bytes::from(
-                load_section_bytes(
-                    store,
-                    &object_key,
-                    handle.offset,
-                    u64::from(handle.stored_bytes),
-                )
-                .await?,
-            );
-            Ok(LoadedSegmentBlock {
-                block: decode_stored_block(&object_key, SegmentBlockKind::Index, &handle, &stored)?,
-                stored,
-            })
-        }
-    };
+    let fetch = load_and_publish_segment_sections(
+        store,
+        segment_cache,
+        Some(memo),
+        descriptor,
+        SegmentBlockKind::Index,
+    );
     let block = match segment_cache {
         Some(cache) => {
             cache
@@ -431,10 +387,28 @@ async fn load_segment_index_inner<S: ObjectStore + ?Sized>(
         }
         None => fetch.await?.block,
     };
-    if let Some(memo) = memo {
-        memo.record(&cache_key, &block);
-    }
+    memo.record(&cache_key, &block);
     block.into_index(&metadata_segment_object_key(descriptor))
+}
+
+/// Loads only the index section even for a small segment. Compaction
+/// uses this to account data-block decoded bytes before any row payload is
+/// decoded; the normal lookup path keeps its whole-small-segment shortcut.
+pub(crate) async fn load_segment_index_for_compaction<S: ObjectStore + ?Sized>(
+    store: &S,
+    descriptor: &MetadataSegmentRef,
+) -> Result<Arc<Vec<SegmentIndexEntry>>, ManifestLoadError> {
+    let handle = descriptor.index_block;
+    let object_key = metadata_segment_object_key(descriptor);
+    let stored = load_section_bytes(
+        store,
+        &object_key,
+        handle.offset,
+        u64::from(handle.stored_bytes),
+    )
+    .await?;
+    decode_stored_block(&object_key, SegmentBlockKind::Index, &handle, &stored)?
+        .into_index(&object_key)
 }
 
 /// Loads a segment's bloom filter block: the cheap pre-index check a lookup

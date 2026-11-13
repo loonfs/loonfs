@@ -1611,10 +1611,9 @@ async fn a_compaction_reads_byte_sized_spans_concurrently_within_its_configured_
         .iter()
         .flat_map(|run| group_run_descriptors(run, group))
     {
-        let index =
-            index_block_load::load_segment_index_for_compaction(&local, None, None, descriptor)
-                .await
-                .expect("index");
+        let index = index_block_load::load_segment_index_for_compaction(&local, descriptor)
+            .await
+            .expect("index");
         input_bytes += index
             .iter()
             .map(|entry| entry.block.stored_bytes as usize)
@@ -1671,10 +1670,9 @@ async fn a_compaction_reads_byte_sized_spans_concurrently_within_its_configured_
     let local = store.inner().inner();
     let mut actual = Vec::new();
     for descriptor in &result.output_segments {
-        let index =
-            index_block_load::load_segment_index_for_compaction(local, None, None, descriptor)
-                .await
-                .expect("output index");
+        let index = index_block_load::load_segment_index_for_compaction(local, descriptor)
+            .await
+            .expect("output index");
         let blocks =
             data_block_load::load_segment_data_block_span(local, None, None, descriptor, &index)
                 .await
@@ -1700,7 +1698,7 @@ async fn a_compaction_reads_byte_sized_spans_concurrently_within_its_configured_
         .collect();
     let max_decoded_input_bytes = 32 * 1024 * 1024;
     refill_iterators(
-        &MetadataSegmentBlockLoader::new(&store, None),
+        &MetadataSegmentBlockLoader::new(&store),
         &mut iterators,
         max_decoded_input_bytes,
     )
@@ -3329,11 +3327,9 @@ async fn layout_compactions_prune_absent_chains_only_at_the_base_even_past_the_f
             assert_eq!(result.rows_written, expected);
             let mut layouts = Vec::new();
             for descriptor in &result.output_segments {
-                let index = index_block_load::load_segment_index_for_compaction(
-                    &store, None, None, descriptor,
-                )
-                .await
-                .expect("index");
+                let index = index_block_load::load_segment_index_for_compaction(&store, descriptor)
+                    .await
+                    .expect("index");
                 let blocks = data_block_load::load_segment_data_block_span(
                     &store, None, None, descriptor, &index,
                 )

@@ -32,12 +32,12 @@ pub(crate) struct MetadataCompactionSpec {
     group: MetadataFamilyGroup,
     /// A contiguous window of at most the run policy's
     /// `max_input_runs_per_step` runs, in oldest-first order.
-    pub(crate) inputs: Vec<RunNo>,
+    inputs: Vec<RunNo>,
     /// Rows those runs list for the group, from their descriptors. What the
     /// unit reports it is about to read. The rows it writes are fewer by
     /// whatever the floor lets go.
     input_rows: u64,
-    pub(crate) placement: CompactionPlacement,
+    placement: CompactionPlacement,
     frozen_floor_seq: CommitSeq,
 }
 
