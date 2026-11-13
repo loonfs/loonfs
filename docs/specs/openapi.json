@@ -861,7 +861,7 @@
             "description": "The durable ID of the new namespace. Without this field, LoonFS generates an ID. The\nresponse's `namespace_id` is the new namespace's ID."
           },
           "retention_window_ms": {
-            "description": "The namespace's retention window, in milliseconds, which must be positive. The reference\nserver's maintenance sweep uses this window for the namespace. Without this field, the\nnamespace's window is the server's `retention_window_ms` setting, if the server has that\nsetting. A `retention_window` maintenance job can change or clear the window later.",
+            "description": "The namespace's retention window, in milliseconds, which must be at least the grace window\n(86400000, which is 24 hours). The reference server's maintenance sweep uses this window\nfor the namespace. Without this field, the namespace's window is the server's\n`retention_window_ms` setting, if the server has that setting. A `retention_window`\nmaintenance job can change or clear the window later.",
             "format": "int64",
             "minimum": 1,
             "type": "integer"
@@ -4262,7 +4262,7 @@
             "type": "string"
           },
           "retention_window_ms": {
-            "description": "The namespace's new retention window, in milliseconds, which must be positive. Without it,\nthe job clears the namespace's window, and the reference server's maintenance sweep no\nlonger advances the namespace's floor.",
+            "description": "The namespace's new retention window, in milliseconds, which must be at least the grace\nwindow (86400000, which is 24 hours). Without it, the job clears the namespace's window,\nand the reference server's maintenance sweep no longer advances the namespace's floor.",
             "format": "int64",
             "minimum": 1,
             "type": "integer"

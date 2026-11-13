@@ -108,8 +108,9 @@ memory_limit_bytes = 4294967296
 # namespace that it creates without a window of its own. Each sweep advances
 # every namespace's floor to the last commit at or before the current time
 # minus the namespace's window, and leaves the floor of a namespace without
-# a window where it is. Must be positive. Omit it to create such namespaces
-# without a window, which is the default. 2592000000 is 30 days.
+# a window where it is. Must be at least 86400000 (24 hours), the grace
+# window. Omit it to create such namespaces without a window, which is the
+# default. 2592000000 is 30 days.
 #retention_window_ms = 2592000000
 
 # Close a caught-up session when its last open is older than this many

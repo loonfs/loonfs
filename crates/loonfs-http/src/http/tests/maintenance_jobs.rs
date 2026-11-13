@@ -264,7 +264,8 @@ async fn a_pool_run_collects_the_pool_and_rejects_a_missing_or_invalid_pool() {
 
 /// Checks that a namespace's retention window is set at creation, changed
 /// and cleared by `retention_window` runs, included in the namespace's
-/// metadata, and copied by a fork, and that a window of zero is rejected.
+/// metadata, and copied by a fork, and that a window of zero, or one shorter
+/// than the grace window, is rejected.
 #[tokio::test]
 async fn a_retention_window_is_set_at_creation_changed_by_runs_and_copied_by_a_fork() {
     let directory = tempdir().expect("tempdir");
@@ -275,6 +276,8 @@ async fn a_retention_window_is_set_at_creation_changed_by_runs_and_copied_by_a_f
     .await
     .expect("app");
     let window = |body: &serde_json::Value| body.get("retention_window_ms").cloned();
+    let short_ms = loonfs::GC_GRACE_WINDOW_MS - 1;
+    let changed_ms = 2 * loonfs::GC_GRACE_WINDOW_MS;
     let rejected = |(status, body): (StatusCode, serde_json::Value)| {
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
         assert_eq!(
@@ -286,15 +289,17 @@ async fn a_retention_window_is_set_at_creation_changed_by_runs_and_copied_by_a_f
         );
     };
 
-    rejected(
-        send(
-            &router,
-            "POST",
-            "/v0/namespaces",
-            r#"{"namespace_id":"zero","retention_window_ms":0}"#,
-        )
-        .await,
-    );
+    for window_ms in [0, short_ms] {
+        rejected(
+            send(
+                &router,
+                "POST",
+                "/v0/namespaces",
+                &format!(r#"{{"namespace_id":"short","retention_window_ms":{window_ms}}}"#),
+            )
+            .await,
+        );
+    }
     let (status, created) = send(
         &router,
         "POST",
@@ -307,27 +312,29 @@ async fn a_retention_window_is_set_at_creation_changed_by_runs_and_copied_by_a_f
         .expect("the generated namespace ID is valid");
     assert_eq!(window(&created), Some(serde_json::json!(86_400_000)));
 
-    rejected(
-        run(
-            &router,
-            &windowed,
-            r#"{"kind":"retention_window","retention_window_ms":0}"#,
-        )
-        .await,
-    );
+    for window_ms in [0, short_ms] {
+        rejected(
+            run(
+                &router,
+                &windowed,
+                &format!(r#"{{"kind":"retention_window","retention_window_ms":{window_ms}}}"#),
+            )
+            .await,
+        );
+    }
     let (status, changed) = run(
         &router,
         &windowed,
-        r#"{"kind":"retention_window","retention_window_ms":3600000}"#,
+        &format!(r#"{{"kind":"retention_window","retention_window_ms":{changed_ms}}}"#),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{changed}");
     assert_eq!(
         changed,
-        serde_json::json!({"kind": "retention_window", "namespace_id": windowed.as_str(), "retention_window_ms": 3_600_000})
+        serde_json::json!({"kind": "retention_window", "namespace_id": windowed.as_str(), "retention_window_ms": changed_ms})
     );
     let (_, shown) = send(&router, "GET", &format!("/v0/namespaces/{windowed}"), "").await;
-    assert_eq!(window(&shown), Some(serde_json::json!(3_600_000)));
+    assert_eq!(window(&shown), Some(serde_json::json!(changed_ms)));
     let (status, forked) = send(
         &router,
         "POST",
@@ -338,7 +345,7 @@ async fn a_retention_window_is_set_at_creation_changed_by_runs_and_copied_by_a_f
     assert_eq!(status, StatusCode::OK, "{forked}");
     assert_eq!(
         window(&forked),
-        Some(serde_json::json!(3_600_000)),
+        Some(serde_json::json!(changed_ms)),
         "a fork copies its source's window"
     );
 
@@ -373,7 +380,7 @@ async fn a_retention_window_is_set_at_creation_changed_by_runs_and_copied_by_a_f
     let (_, shown) = send(&router, "GET", &forked_uri, "").await;
     assert_eq!(
         window(&shown),
-        Some(serde_json::json!(3_600_000)),
+        Some(serde_json::json!(changed_ms)),
         "the fork keeps its own copy"
     );
     state.runtime.shutdown().await.expect("shutdown writer");

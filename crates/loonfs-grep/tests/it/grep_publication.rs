@@ -232,7 +232,7 @@ async fn a_step_that_loses_its_put_to_a_copy_of_its_entry_is_published_over_it()
         },
         async {
             gate.wait_until_blocked().await;
-            publish_rival(&base, &namespace_id, 60_000).await;
+            publish_rival(&base, &namespace_id, loonfs::GC_GRACE_WINDOW_MS).await;
             let winner = manifest_no(&base, &namespace_id).await;
             gate.release();
             winner
@@ -253,7 +253,7 @@ async fn a_step_that_loses_its_put_to_a_copy_of_its_entry_is_published_over_it()
     );
     assert_eq!(
         current.payload().retention_window_ms,
-        NonZeroU64::new(60_000),
+        NonZeroU64::new(loonfs::GC_GRACE_WINDOW_MS),
         "grep's publications copy the winner's other fields"
     );
     assert_eq!(

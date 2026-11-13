@@ -376,13 +376,17 @@ impl LoonFs<Writable> {
     /// treated as success. Without `options.retention_window_ms`, the
     /// namespace has the runtime's
     /// [`default_retention_window_ms`](crate::RuntimeConfig::default_retention_window_ms).
-    /// Returns the namespace's post-operation status.
+    /// A window shorter than the grace window
+    /// ([`GC_GRACE_WINDOW_MS`](crate::GC_GRACE_WINDOW_MS)) returns
+    /// [`Error::InvalidRequest`]. Returns the namespace's post-operation
+    /// status.
     pub async fn create_namespace_with_options(
         &self,
         namespace_id: &NamespaceId,
         actor: &ActorId,
         options: &CreateNamespaceOptions,
     ) -> Result<crate::NamespaceMetadata> {
+        crate::config::check_retention_window(options.retention_window_ms)?;
         let options = CreateNamespaceOptions {
             retention_window_ms: options
                 .retention_window_ms

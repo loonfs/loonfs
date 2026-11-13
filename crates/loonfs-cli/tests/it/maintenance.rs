@@ -247,20 +247,21 @@ fn retention_window_sets_and_clears_the_window_that_namespace_show_reports() {
     assert_eq!(json_data(&created)["retention_window_ms"], 86_400_000);
     assert_success(&harness.run(&["use", "demo"]));
 
+    let window_ms = (2 * loonfs::GC_GRACE_WINDOW_MS).to_string();
     let set = harness.run(&[
         "maintenance",
         "retention",
         "window",
         "--retention-window-ms",
-        "3600000",
+        window_ms.as_str(),
     ]);
     assert_success(&set);
     assert_eq!(
         stdout_string(&set).trim_end(),
-        "retention window for demo: 3600000 ms"
+        format!("retention window for demo: {window_ms} ms")
     );
     assert!(stdout_string(&harness.run(&["namespace", "show"]))
-        .contains("retention_window_ms: 3600000"));
+        .contains(&format!("retention_window_ms: {window_ms}")));
 
     let cleared = harness.run(&["--json", "maintenance", "retention", "window", "--clear"]);
     assert_success(&cleared);

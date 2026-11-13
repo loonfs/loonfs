@@ -45,9 +45,9 @@ pub struct AdvanceRetentionResponse {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct SetRetentionWindowRequest {
-    /// The namespace's new retention window, in milliseconds, which must be positive. Without it,
-    /// the job clears the namespace's window, and the reference server's maintenance sweep no
-    /// longer advances the namespace's floor.
+    /// The namespace's new retention window, in milliseconds, which must be at least the grace
+    /// window (86400000, which is 24 hours). Without it, the job clears the namespace's window,
+    /// and the reference server's maintenance sweep no longer advances the namespace's floor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(
         feature = "openapi",

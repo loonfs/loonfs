@@ -21,10 +21,11 @@ pub struct CreateNamespaceRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(nullable = false))]
     pub namespace_id: Option<NamespaceId>,
-    /// The namespace's retention window, in milliseconds, which must be positive. The reference
-    /// server's maintenance sweep uses this window for the namespace. Without this field, the
-    /// namespace's window is the server's `retention_window_ms` setting, if the server has that
-    /// setting. A `retention_window` maintenance job can change or clear the window later.
+    /// The namespace's retention window, in milliseconds, which must be at least the grace window
+    /// (86400000, which is 24 hours). The reference server's maintenance sweep uses this window
+    /// for the namespace. Without this field, the namespace's window is the server's
+    /// `retention_window_ms` setting, if the server has that setting. A `retention_window`
+    /// maintenance job can change or clear the window later.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(
         feature = "openapi",

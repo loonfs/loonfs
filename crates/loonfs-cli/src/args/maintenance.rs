@@ -141,7 +141,8 @@ pub(crate) struct MaintenanceRetentionAdvanceArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct MaintenanceRetentionWindowArgs {
-    /// The namespace's new retention window, in milliseconds.
+    /// The namespace's new retention window, in milliseconds, at least
+    /// 86400000 (24 hours).
     #[arg(long, required_unless_present = "clear", conflicts_with = "clear")]
     pub retention_window_ms: Option<NonZeroU64>,
     /// Clear the namespace's window, so that the sweep doesn't advance the
